@@ -336,6 +336,14 @@ final class LoupeQueueTests: XCTestCase {
 
     /// ④ `fit ↔ 1:1` still develops each rung exactly once. The count comes from the decoder, not from
     /// a timing: a second development of the same rung is cheap to hide inside a slow frame.
+    ///
+    /// The count is `loupe.developedRungs` — **this** ladder's ledger — not
+    /// `RAWDecoder.decodeCounts()`. The latter is process-global and keyed by scale only, so in a gate
+    /// that runs every class in one process it also counts a controller from the class that ran
+    /// before, which is still developing the same fixture: measured `[0.5: 1, 1.0: 2]` here while this
+    /// controller had developed exactly two rungs (its own queue said `decodes: 2`). Both paths store
+    /// every development, so the ledger is the same fact with an owner on it — and a genuine second
+    /// development of a rung by *this* loupe still shows up as a 2.
     func testFitAndOneToOneStillDevelopEachRungOnce() throws {
         let url = try rawFixture()
         RAWDecoder.resetDecodeCounts()
@@ -344,7 +352,7 @@ final class LoupeQueueTests: XCTestCase {
         loupe.scheduleRender()
         settle(loupe)
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale)
-        XCTAssertEqual(RAWDecoder.decodeCounts(), [0.5: 1, 1: 1])
+        XCTAssertEqual(loupe.developedRungs, [0.5: 1, 1: 1])
         let decodesAfterOpen = loupe.developmentStats.decodes
 
         for round in 0..<5 {
@@ -357,10 +365,11 @@ final class LoupeQueueTests: XCTestCase {
             XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale)
         }
         settle(loupe)
-        print("Q29 ④ fit↔1:1 ×5 rounds: decoder counts "
-              + "\(RAWDecoder.decodeCounts().sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })"
-              + ", development queue \(loupe.developmentStats)")
-        XCTAssertEqual(RAWDecoder.decodeCounts(), [0.5: 1, 1: 1],
+        print("Q29 ④ fit↔1:1 ×5 rounds: developed rungs "
+              + "\(loupe.developedRungs.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })"
+              + ", development queue \(loupe.developmentStats)"
+              + ", process-wide \(RAWDecoder.decodeCounts().sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })")
+        XCTAssertEqual(loupe.developedRungs, [0.5: 1, 1: 1],
                        "switching fit ↔ 1:1 must never develop the file again")
         XCTAssertEqual(loupe.developmentStats.decodes, decodesAfterOpen,
                        "and must not ask the decode queue again either")

@@ -1051,6 +1051,18 @@ public final class DecodeLadder {
     private var hitCount = 0
     /// How many rungs the *last* `store` released because a bigger one replaced them.
     private var releaseCount = 0
+    /// Developments this ladder has **taken delivery of**, by rung.
+    ///
+    /// The attributable form of `RAWDecoder.decodeCounts()`, which is process-global and keyed only
+    /// by scale: two controllers in one process (a previous test class's loupe that is still
+    /// developing, and the one being measured) both land in it. Measured 2026-10-31 in the gate:
+    /// `RAWDecoder.decodeCounts()` read `[0.5: 1, 1.0: 2]` while this ladder had developed exactly
+    /// two rungs — the third development belonged to a controller from the class that ran before.
+    /// Every development funnels through `store` (the inline `rung(...)` path and the decode queue's
+    /// completion alike), so counting here is the same fact with an owner attached.
+    private var developedCounts: [Float: Int] = [:]
+
+    public var developedRungs: [Float: Int] { locked { developedCounts } }
 
     public private(set) var decodes: Int {
         get { locked { decodeCount } }
@@ -1143,9 +1155,13 @@ public final class DecodeLadder {
                 // A different photo: nothing here can be reused, and holding it would be the memory
                 // leak the single-slot cache never had.
                 rungs.removeAll()
+                // The counts are of *this photo's* developments too, or a photo switch would leave
+                // the previous file's rungs in the ledger.
+                developedCounts.removeAll()
                 self.identity = identity
             }
             rungs[rung.scale] = rung
+            developedCounts[rung.scale, default: 0] += 1
             releaseCount = 0
             for scale in rungs.keys where scale < rung.scale {
                 rungs.removeValue(forKey: scale)

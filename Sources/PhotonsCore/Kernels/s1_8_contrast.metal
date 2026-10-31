@@ -425,7 +425,30 @@ kernel void s1_8_g_contrast_apply_masked(texture2d<float, access::read> src [[te
     }
 
     float Y = s1_8_g_luma(px.rgb);
-    float G = log2(Y / max(p.c.z, 1e-6));
+    // **The mask's own linear gain belongs in `G`.** S1.6 applies `v *= d.a.xyz` (the mask's exposure
+    // EV × its white-balance gain) to the pixels under a mask, mixed in by coverage, so a masked
+    // pixel's luminance carries that gain by the time this stage reads it. The coefficient maps were
+    // built on the **whole-picture proxy**, which deliberately has no masks in it (187: masks do not
+    // participate in the statistics), so the map's own `G` at this pixel is the *unmasked* one.
+    // Dividing by `p.c.z` alone therefore read a `+0.5 EV` mask as a half-stop brighter picture and
+    // answered with a different decomposition: a flat field at `c = +100` under a full-canvas
+    // `+0.5 EV` mask landed on code 255 where the global `+0.5 EV` landed on 184, while `c = 0` (no
+    // band) agreed on both sides — the mask gain was the only asymmetry.
+    //
+    // Rebuild the same luma gain S1.6 applied — `(1 − w) + w · dot(d.a.xyz, lw)` per mask, in mask
+    // order, since S1.6 mixes in linear RGB and `Y` is linear in RGB — and put it under the `log2`
+    // together with the global gain. With no mask, or with a gain of exactly 1, the product is
+    // exactly `1` and `p.c.z * 1` is bit-identical to `p.c.z`: the global entry point does not move.
+    float maskGain = 1.0;
+    for (uint i = 0; i < uint(max(p.f.y, 0)); ++i) {
+        LocalAdjustDesc d = adjust[i];
+        if (d.a.w <= 0.0) { continue; }             // amount 0: S1.6 skips it too
+        float a = atlas.read(gid, i).r;
+        float wgt = clamp(a * d.a.w, 0.0, 1.0);
+        if (wgt <= 0.0) { continue; }
+        maskGain *= mix(1.0, dot(d.a.xyz, p.luma.xyz), wgt);
+    }
+    float G = log2(Y / max(p.c.z * maskGain, 1e-6));
 
     constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
     int q = max(p.d.z, 1);

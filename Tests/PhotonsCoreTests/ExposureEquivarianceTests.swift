@@ -394,10 +394,17 @@ final class ExposureEquivarianceTests: XCTestCase {
         return b > 0 ? a / b : 0
     }
 
-    /// 契约的**数字**：c = +100 时 L1030437 的 p50 增益是 **1.1135**，E 0 与 E +2 **同一个值**（差值 0，
+    /// 契约的**数字**：c = +100 时 L1030437 的 p50 增益是 **1.0786**，E 0 与 E +2 **同一个值**（差值 0，
     /// 见 `COMMUTE` 行的 1 ULP 结论）。这三个数字一起钉住"同一个滑杆在两种曝光下是同一个算子"：
     /// 窗口 ±0.02 让任何一端的漂移都可见，`|E+2 − E 0| ≤ 2 %` 把"两档相等"本身写成断言
     /// （`docs/tasks/174-contrast-contract.md` §0，用户 2026-10-30 的算子顺序口径）。
+    ///
+    /// **187 重钉：1.1135 → 1.0786（−100 0.98069，+50 1.06189）。** 174 §0 的 1.1135 是在"四边
+    /// clamp 边界窗"下测的 —— 那时系数图的边界按 `address::clamp_to_edge` 复制边像素，边界窗均值被
+    /// 压平、残差趋 0、增益塌向 1。187 为了不再出现用户报的"对比拉到最大、四边出现无变化条带"，把
+    /// 边界改成**按真实样本数归一**（门是 `ContrastGlobalStatsTests.testNoZeroChangeStripAlongTheFourEdges`），
+    /// 全局 p50 增益因此降 3.1 %（1.1135 → 1.0786）。这是**定向修正，不是漂移**：退回 clamp 可以
+    /// 把数字恢复成 1.1129 附近，但条带会复现。−100 / +50 按同一套算式一并重钉，理由相同。
     func testContrastGainIsPinnedAtZeroAndPlusTwoStops() throws {
         let path = Self.frames[0].1
         guard FileManager.default.fileExists(atPath: path) else {
@@ -412,19 +419,31 @@ final class ExposureEquivarianceTests: XCTestCase {
                 let frame = luma(try linearRender(graph, edit(exposure: ev, contrast: c)))
                 let gain = medianGain(frame.map { $0 / g }, none.map { $0 / g })
                 gains[ev * 10 + c] = gain
-                print(String(format: "CONTRAST · E%+.0f c=%+.0f · p50 增益 %.5f", ev, c, gain))
+                print(String(format: "CONTRAST · E%+.0f c=%+.0f · p50 增益 %.6f", ev, c, gain))
             }
         }
         let e0 = gains[100], e2 = gains[120]
         XCTAssertNotNil(e0); XCTAssertNotNil(e2)
         if let e0, let e2 {
-            XCTAssertEqual(e0, 1.1135, accuracy: 0.02,
-                           "E 0 的 +100 增益漂移了（契约数字见 174 §0）")
-            XCTAssertEqual(e2, 1.1135, accuracy: 0.02,
-                           "E +2 的 +100 增益漂移了（契约数字见 174 §0）")
+            XCTAssertEqual(e0, 1.0786, accuracy: 0.02,
+                           "E 0 的 +100 增益漂移了（契约数字见 174 §0，187 重钉为 1.0786）")
+            XCTAssertEqual(e2, 1.0786, accuracy: 0.02,
+                           "E +2 的 +100 增益漂移了（契约数字见 174 §0，187 重钉为 1.0786）")
             // 两档相等本身就是契约：S2.5 的残差增益对曝光的整幅缩放是不变的（同上一行的 1 ULP 定律）。
             XCTAssertEqual(e2, e0, accuracy: 0.02 * e0,
                            "E +2 与 E 0 的 p50 增益必须相同 —— 顺序一经确定就不许再动")
+        }
+        // 187 重钉的另外两档：同一个闸、同一套边界归一，两个曝光下各一份。
+        for (key, expected, label) in [(-100.0, 0.98069, "E 0 的 −100"),
+                                       (50.0, 1.06189, "E 0 的 +50"),
+                                       (20.0 - 100.0, 0.98069, "E +2 的 −100"),
+                                       (20.0 + 50.0, 1.06189, "E +2 的 +50")] {
+            guard let measured = gains[key] else {
+                XCTFail("\(label) 没有测到（契约数字见 174 §0 / 187 重钉）")
+                continue
+            }
+            XCTAssertEqual(measured, expected, accuracy: 0.02,
+                           "\(label) 增益漂移了（174 §0 的数字；187 按真实样本数归一后重钉）")
         }
     }
 
@@ -533,10 +552,20 @@ final class ExposureEquivarianceTests: XCTestCase {
         "whites·0": "ca29dd99716d62f978a01f429fac8bc8f6b2637752dc688d70a82684efed8f80",
         "whites·50": "df77d410c7c3fcdc4b78054d46c13ba7dda559ccc0f30ca96639ba13582669eb",
         "whites·100": "171d3efc32fed68f151157287de9d053e1c6c8221b5625c0671f1631e092f755",
-        "contrast·-100": "370c5ea47dd9a302204a7d79909666c47ee31f606f35b6b77e23a087a36f89ac",
-        "contrast·-50": "b199f90f66fcc83a3b7a41fcd859d16e4b4f170f958486cb1cb24cbe9ca019df",
-        "contrast·50": "057b4eec975c47083d450cda8997a8fb1f92575e2d30e9a4b0f7ec14dd94f389",
-        "contrast·100": "2afccef28b69ce60655413d16346f2b21e9e6ba59fca8cc25bde727ef6c79e6a",
+        "contrast·-100": "4a1c72dc944bb6a2d394dc865b8a99f5238ffcdf1576c8db978d1c457f93a382",
+        "contrast·-50": "cbcd950b1eaac55ebf1c36207b00436d6d4654317569226c024e265e5d9a0843",
+        "contrast·50": "271a3f578304f6a7f14f9f20503b6ab473a06a41d3ae3eb5ea7148f1516c94c6",
+        "contrast·100": "eeae358246cacdb0cc8e1806c5106252b102103b0e606d1cacba5614e0a6537d",
+        // **187 重钉这四个 contrast 档（gate 9b）。先判后录，判据是"动的只有跑 S2.5 的那些渲染":**
+        // (1) `whites·*` 五档与 `atlas` 仍是 147/167 的字节 —— `whites·0` 就是一份 contrast = 0
+        //     的文档，它没动，所以中性文档没有回归；(2) 蒙版入口把蒙版线性增益折进 `G` 之后
+        //     （`s1_8_contrast.metal` 的 `maskGain`），无蒙版文档的 `maskGain` 恒为 1，逐字节比较
+        //     过：带/不带该修复，下面四个 SHA 与 whites 五档完全相同；(3) 因此动的是 187 的边界
+        //     归一（`clamp_to_edge` 复制边像素 → 按真实样本数归一），它必然改变每一个真的执行了
+        //     S2.5 的渲染，且 ±50 也动（边界行在每个非零档上都略有不同，而 SHA 没有容差）。
+        // 旧 → 新：-100 370c5ea4…36f89ac → 4a1c72dc…f93a382，-50 b199f90f…ca019df →
+        // cbcd950b…d9a0843，+50 057b4eec…4dd94f389 → 271a3f57…516c94c6，
+        // +100 2afccef2…ef6c79e6a → eeae3582…e0a6537d。这几档是"新算式重录"，不是回归。
         // 167: the atlas digest below moved **only** because the luma predicate's axis no longer
         // folds HDR light to `L = 1`; at E = 0 the global gain is still exactly 1, so this remains a
         // check of 147's "unexposed tick" invariant for the same document. Old → new:

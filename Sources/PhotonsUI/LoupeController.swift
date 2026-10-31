@@ -5080,6 +5080,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         (decodeQueue.decodes, decodeQueue.coalesced, decodeQueue.deliveries, decodeQueue.drops)
     }
 
+    /// The rungs this loupe's ladder has taken delivery of, and how many times each — the
+    /// **attributable** decode count.
+    ///
+    /// `RAWDecoder.decodeCounts()` is process-global and keyed by scale only, so in a suite that runs
+    /// every class in one process it also counts a controller from an *earlier* class that was still
+    /// developing the same fixture: measured in the gate as `[0.5: 1, 1.0: 2]` while this controller
+    /// had developed exactly two rungs. "did the fit ↔ 1:1 switch develop the file again" is a
+    /// question about *this* ladder, and every development passes through `store`, so this is the
+    /// same fact with an owner on it.
+    public var developedRungs: [Float: Int] { ladder.developedRungs }
+
     /// Block until every queued development has finished — tests and the bench only. The loupe never
     /// waits for one; that is the point of the split.
     @discardableResult
