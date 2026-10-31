@@ -2291,10 +2291,38 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// inside the texture and the rect is the only thing that says where the picture is.
     private var canvasPicture: (rect: ImageRect, canvas: ImageSize)?
 
-    /// 188 — the `CropMath.canvasSize` the last present was composed for. `invalidateCanvasGeometryIfMoved`
+    /// 188 — the canvas geometry the last present was composed for. `invalidateCanvasGeometryIfMoved`
     /// compares the current document's answer against it and drops the frozen frame when it moves (a
     /// 拉直 that grows the canvas makes every frozen quad stale).
-    private var lastCanvasGeometrySize: ImageSize?
+    ///
+    /// **188b — the key is the *shape*, not the pixel count.** The canvas is
+    /// `CropMath.canvasSize(crop, in: source, straighten, …)`, and `source` here is
+    /// `cropSourceSize`, i.e. whatever decode rung is loaded (0.5 while the full one is being made).
+    /// Comparing the *pixels* therefore fired on a rung change — `4760 × 3168` → `9520 × 6336` — which
+    /// is the same document at another density, and it fired again on the very first refresh after a
+    /// present, when no size had been recorded yet. Both dropped a perfectly good frozen frame; inside
+    /// a live resize nothing re-renders by design, so nothing rebuilt it and the layer kept the old
+    /// canvas while the overlay followed the new one — 「帧与画布不一致」 (169 ④).
+    /// The angle and the keystone are the only inputs that change the canvas *shape* at a fixed crop
+    /// (the tool's preview crop is always `.full`), and neither moves with a rung.
+    private var lastCanvasGeometry: CanvasGeometryKey?
+
+    /// The geometry the crop canvas is a function of at a fixed crop: the angle the frame is drawn at
+    /// and the keystone. `Equatable`, so the gate is an exact comparison rather than a tolerance on
+    /// rounded pixels.
+    private struct CanvasGeometryKey: Equatable {
+        var straightenDegrees: Double
+        var perspective: PerspectiveMap?
+    }
+
+    /// `nil` when there is no document to answer for (nothing is stale then — there is nothing to
+    /// compare against and no frame of ours to trust).
+    private func canvasGeometryKey() -> CanvasGeometryKey? {
+        guard let edit = session?.edit, cropSourceSize.width > 1 else { return nil }
+        let geometry = cropTool.previewEdit(from: edit).geometry
+        return CanvasGeometryKey(straightenDegrees: geometry.straightenDegrees,
+                                 perspective: geometry.perspective)
+    }
 
     /// The bridge's display-cadence driver. A `Timer` on the main run loop in `.common` mode, at
     /// 120 Hz: the window is a *parameter of the present pass*, not a layer property, so nothing in
@@ -4158,20 +4186,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The draft's **crop** does not enter this number (`CropToolController.previewEdit` renders the
     /// whole frame while the tool is on), so dragging the frame's own handles does not throw the frozen
     /// image away — only an angle that actually changes `canvasSize` does.
+    ///
+    /// 188b — the comparison is `CanvasGeometryKey` (angle + keystone), and it is seeded where the frame
+    /// is: see `presentCanvas`. A decode rung change is not a geometry change, so it no longer throws
+    /// the frame the resize needs.
     private func invalidateCanvasGeometryIfMoved() {
-        guard let edit = session?.edit, cropSourceSize.width > 1 else {
-            lastCanvasGeometrySize = nil
+        guard let key = canvasGeometryKey() else {
+            lastCanvasGeometry = nil
             return
         }
-        let geometry = cropTool.previewEdit(from: edit).geometry
-        let source = cropSourceSize
-        let size = CropMath.canvasSize(crop: geometry.renderCrop(source: source), in: source,
-                                       straightenDegrees: geometry.straightenDegrees,
-                                       quarterTurns: 0,
-                                       allowsOutsideSource: true,
-                                       perspective: geometry.perspective)
-        guard size != lastCanvasGeometrySize else { return }
-        lastCanvasGeometrySize = size
+        // No frame of ours has registered its geometry yet: nothing can be stale, so **adopt** the
+        // current one instead of dropping what is on the layer (188b — dropping here cost the resize).
+        guard let held = lastCanvasGeometry else {
+            lastCanvasGeometry = key
+            return
+        }
+        guard held != key else { return }
+        lastCanvasGeometry = key
         frozenFrame = nil
         canvasPicture = nil
     }
@@ -6067,6 +6098,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         frozenFrame = FrozenFrame(texture: texture, photoRect: photoRect,
                                   frameCanvas: frameCanvas, canvas: canvas, window: window,
                                   backdropWindow: backdropWindow, placement: placement, zoom: zoom)
+        // 188b — a real render *is* the frame's statement about the canvas geometry it was composed for.
+        // A frozen re-present draws an older texture at a stretched window, so it must not claim the
+        // current geometry; only the render that just landed can.
+        if !frozen { lastCanvasGeometry = canvasGeometryKey() }
         // 2026-10-27: a frame that reached the layer is a free chance to re-read the screen's EDR budget
         // (the brightness slider moves it and posts no notification). One property read that ends in
         // "nothing changed" nine times out of ten — the histogram card's ceiling is the consumer.
