@@ -102,6 +102,18 @@ public enum MultiscaleContrast {
     /// does not.
     public static let block: Int = 4
 
+    /// 187 — the **whole-picture statistics proxy's** long edge, in picture pixels. The coefficient
+    /// maps S2.5 samples are built once at this resolution and cached, so every framing (fit, 25 %,
+    /// 1:1, a panned 1:1 window) samples *the same* map: the gain of a physical pixel cannot depend
+    /// on where the window happens to be or on `options.scale`.
+    ///
+    /// 1024 is a measurement, not a guess: at 1024 the coarse radius is 0.06·1024/4 ≈ 15 q-texels of
+    /// support (the decomposition still has its three bands), the map is 256×160 q-texels ≈ 1.2 MB,
+    /// and a picture at or below 1024 px is *its own* proxy — `proxyScale == 1`, so those renders
+    /// (every synthetic test frame, every small document) keep the pre-187 coefficients **bit for
+    /// bit** through the kernel's direct-read path.
+    public static let statisticsLongEdge: Int = 1024
+
     /// Coarse radius as a fraction of the frame's short edge, in the 1/q domain, with a cap.
     public static let coarseRadiusFraction: Double = 0.06
     public static let coarseRadiusCap: Int = 96
@@ -122,11 +134,54 @@ public enum MultiscaleContrast {
         }
     }
 
-    /// `t = contrast / 100` → the two bands' EV travels. The coarse slot is kept at 0 (see
-    /// `coarseWeight`); a caller that wants the identity asks for `t = 0`, which is exactly `(0, 0)`.
+    /// `t = contrast / 100` → the two bands' EV travels, as **additions to the residual**.
+    ///
+    /// The coarse slot is kept at 0 (see `coarseWeight`); a caller that wants the identity asks for
+    /// `t = 0`, which is exactly `(0, 0)`.
+    ///
+    /// **The two signs are not the same law, and that is the 187 fix.** Above zero the slider is a
+    /// travel: `k = W · t` EV of the band, applied to `B_m` and `D_f`. Below zero that formula is
+    /// wrong, and catastrophically so: at `t = −1` it asks for `−7.5 · B_m`, i.e. the residual
+    /// amplified 7.5× **and sign-flipped** — a negative picture, which is what the user reported
+    /// ("对比拉到负现在直接变成反相"). Negative contrast is not an inverted travel; it is *less*
+    /// local contrast, so the band multiplier must be a **shrink** that never changes sign:
+    ///
+    ///     m(t) = 1 + k(t)   with   k(t) = W · t      for t ≥ 0   (m: 1 → 1 + W)
+    ///                              k(t) = 2^t − 1    for t < 0   (m: 1 → 0.5, **no W**)
+    ///
+    /// The `W` factors are travels — they belong to amplification only. On the shrink side the
+    /// weight is in **residual units** (`2^t − 1`, multiplied by the residual itself), which is why
+    /// `scaleGains` returns `(0, k, k)` there and not `(0, W_m·k, W_f·k)`: with the travel applied to
+    /// a negative `k` the mid band asked for `−3.75·B_m`, still a 3.75× inversion.
+    ///
+    /// so `m ∈ [0.5, 1 + W]` — strictly positive and monotone in `t`, exactly 1 at `t = 0`, and at
+    /// `−100` the local residual is halved (「明显 <1 但 >0」). The positive half is **unchanged**,
+    /// which is why every pre-187 measurement at `c > 0` and every contrast-0 golden stays put.
     public static func scaleGains(t: Double) -> (coarse: Double, mid: Double, fine: Double) {
-        (coarseWeight * t, midWeight * t, fineWeight * t)
+        guard t != 0 else { return (0, 0, 0) }
+        guard t > 0 else {
+            // `2^t − 1` ∈ [−0.5, 0): the residual is multiplied by `2^t`, never by a negative number.
+            let k = pow(2, shrink * t) - 1
+            return (0, k, k)
+        }
+        return (coarseWeight * t, midWeight * t, fineWeight * t)
     }
+
+    /// The **band multipliers** `1 + k(t)` — what the picture actually multiplies its residual by.
+    /// Always positive and monotone in the slider; `1` at `contrast = 0`. Exposed because the tests
+    /// state the invariant in these terms ("恒正且关于 0 单调"), not in the raw travels.
+    public static func bandMultipliers(t: Double) -> (mid: Double, fine: Double) {
+        let k = scaleGains(t: t)
+        return (1 + k.mid, 1 + k.fine)
+    }
+
+    /// 187 — how far a **negative** slider shrinks the residual: the band multiplier is
+    /// `2^(shrink · t)`, so at `c = −100` the local contrast is 0.59× (and at `c = 0`, 1× exactly).
+    ///
+    /// 0.75 is a measurement, not a taste: `2^t` (a full halving) removes 50 % of the residual and
+    /// measures a **−1.21 code** drift of the picture's mean at `−100`, over §2's ±1 code; 0.75 lands
+    /// at −0.91. The point of the shrink is to take local contrast away, never light.
+    public static let shrink: Double = 0.75
 
     /// Radius in the 1/q domain: `fraction · shortEdge / q`, rounded, floored at 1 and capped.
     public static func radiusQ(fraction: Double, cap: Int, shortEdge: Double) -> Int {
