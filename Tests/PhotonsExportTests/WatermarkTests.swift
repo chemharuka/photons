@@ -15,7 +15,10 @@ final class WatermarkTests: XCTestCase {
     /// 探针在 main 与分支上各导出两次，四个 SHA 全等）。合同是
     /// `testEmptyWatermarkIsByteIdenticalToTheUntouchedEncoderPath` 里 Batch 与 `Exporter.write`
     /// 的**相等**；这条常量是那次跨提交实测的记录，ImageIO 的输出变了它会红，届时重新量。
-    static let baseSDRSHA = "20dc579a0fac1aa0b0d18b24c811cd1198a78976b119d6adc4318137107fd271"
+    /// 206 — the same fixture with the 8-bit TPDF dither on. The previous 180 baseline
+    /// `20dc579a…` was measured before the quantiser changed; the HDR pin below is untouched because
+    /// a gain-map base goes through `Exporter.cgImage` (dither defaults to off there).
+    static let baseSDRSHA = "b60ce712735784f6130c9dead7678fdc7bf682079e1404d1c8db61f8a9ce4863"
     /// 同上，HEIC 增益图（`fixture(hdr: true)`）。
     static let baseHDRSHA = "f808e0001731b663d63eabb86d220d02896deaba28142f4a4eae93fe381676c6"
 

@@ -84,16 +84,20 @@ public struct ExportMetadataContext {
     public var copyright: String?
     /// Embed the `crs:`/`photons:` packet. `.none` and `.copyright` never embed.
     public var embedXMP: Bool
+    /// 206 — pixels per inch to write. `nil` = write no resolution (pre-206 output, byte for byte).
+    /// Clamped to `ExportPreset.ppiRange` by the batch; re-clamped here for direct callers.
+    public var ppi: Int?
 
     public init(level: ExportMetadataLevel = .all, source: SourceMetadata? = nil,
                 edit: EditModel? = nil, author: String? = nil, copyright: String? = nil,
-                embedXMP: Bool = false) {
+                embedXMP: Bool = false, ppi: Int? = nil) {
         self.level = level
         self.source = source
         self.edit = edit
         self.author = author
         self.copyright = copyright
         self.embedXMP = embedXMP
+        self.ppi = ppi
     }
 
     /// `kCGImageProperty*Dictionary` entries for `CGImageDestinationAddImage`.
@@ -103,17 +107,51 @@ public struct ExportMetadataContext {
     /// rotation/flip into the pixels; leaving the camera's 6/8 would rotate the output a second time.
     public func properties(outputWidth width: Int, outputHeight height: Int,
                            format: ExportFormat = .jpeg) -> [CFString: Any] {
+        var properties: [CFString: Any]
         switch level {
         case .none:
             // JPEG's writer accepts `NSNull` as "no EXIF block"; without it ImageIO adds a
             // three-field EXIF block of its own (colour space + pixel dimensions). The PNG/TIFF/HEIC
             // writers reject that marker, and they cannot be told to omit their structural tags
             // either, so there we simply pass no property dictionary.
-            return format == .jpeg ? [kCGImagePropertyExifDictionary: NSNull()] : [:]
+            //
+            // 206 — that `NSNull` also suppresses the resolution tags, and resolution is a pixel
+            // fact, not a metadata policy. When a PPI is asked for, skip the marker: ImageIO then
+            // writes its minimal structural EXIF block plus the DPI/TIFF resolution. `ppi == nil`
+            // keeps the old marker, so pre-206 presets still write the same bytes.
+            properties = format == .jpeg && ppi == nil
+                ? [kCGImagePropertyExifDictionary: NSNull()] : [:]
         case .copyright:
-            return copyrightProperties()
+            properties = copyrightProperties()
         case .all:
-            return allProperties(outputWidth: width, outputHeight: height)
+            properties = allProperties(outputWidth: width, outputHeight: height)
+        }
+        addResolution(to: &properties, format: format)
+        return properties
+    }
+
+    /// 206 — write `ppi` into the properties the container actually reads back.
+    ///
+    /// Top-level `DPIWidth`/`DPIHeight` is what makes ImageIO emit the container's real resolution
+    /// tags (`TIFF.XResolution` for JPEG/TIFF/HEIC, the PNG `pHYs` chunk for PNG); the TIFF keys are
+    /// also named explicitly, as the spec asks. A source TIFF block is overwritten here: its 72/300
+    /// describes the camera file, not this export. Formats outside the four (AVIF) only get the DPI
+    /// pair, which is harmless; `nil` adds nothing at all.
+    private func addResolution(to properties: inout [CFString: Any], format: ExportFormat) {
+        guard let ppi else { return }
+        let value = min(max(ppi, ExportPreset.ppiRange.lowerBound),
+                        ExportPreset.ppiRange.upperBound)
+        properties[kCGImagePropertyDPIWidth] = value
+        properties[kCGImagePropertyDPIHeight] = value
+        switch format {
+        case .png, .avif:
+            break
+        case .jpeg, .tiff, .heic:
+            var tiff = properties[kCGImagePropertyTIFFDictionary] as? [String: Any] ?? [:]
+            tiff[kCGImagePropertyTIFFXResolution as String] = value
+            tiff[kCGImagePropertyTIFFYResolution as String] = value
+            tiff[kCGImagePropertyTIFFResolutionUnit as String] = 2
+            properties[kCGImagePropertyTIFFDictionary] = tiff
         }
     }
 

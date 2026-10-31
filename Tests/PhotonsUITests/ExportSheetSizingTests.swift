@@ -203,4 +203,63 @@ final class ExportSheetSizingTests: XCTestCase {
         XCTAssertEqual(sheet.phase, .idle)
         XCTAssertTrue(sheet.summaryLine.hasPrefix("将导出 5 张"))
     }
+
+    // MARK: - 206 MP readout
+
+    /// Single selection: the MP line is `w·h / 1e6` at one decimal, from the predicted output.
+    func testMegapixelsForASinglePicture() {
+        let sheet = model()
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000)]
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6000, height: 4000)),
+                       "6000×4000")
+        XCTAssertEqual(sheet.predictedMegapixelText, "24.0 MP")
+    }
+
+    /// The MP number reads the same `outputSize` as `predictedSizeText`, including 163's half-size
+    /// gain-map trim — an odd 6001×4001 forecasts 6000×4000, so it reads 24.0 MP, not 24.0 from
+    /// 6001×4001 by accident.
+    func testMegapixelsFollowTheHalfSizeGainMapTrim() {
+        let sheet = model()
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
+        XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
+                       "6000×4000")
+        XCTAssertEqual(sheet.predictedMegapixelText, "24.0 MP")
+
+        sheet.hdrHalfSize = false
+        XCTAssertEqual(sheet.predictedMegapixelText,
+                       String(format: "%.1f MP",
+                              (Double(6001 * 4001) / 1_000_000 * 10).rounded() / 10),
+                       "full size keeps 6001×4001")
+    }
+
+    /// Several pictures with the same output size print one MP number; different sizes print a
+    /// count instead of pretending the first one describes the batch.
+    func testMegapixelsCollapseForOneSizeAndCountForMany() {
+        let sheet = model()
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000),
+                                   ImageSize(width: 6000, height: 4000)]
+        XCTAssertEqual(sheet.predictedMegapixelText, "24.0 MP")
+
+        sheet.selectionContents = [ImageSize(width: 6000, height: 4000),
+                                   ImageSize(width: 6000, height: 4000),
+                                   ImageSize(width: 3000, height: 2000)]
+        XCTAssertEqual(sheet.predictedMegapixelText, "2 种尺寸")
+
+        sheet.selectionContents = []
+        XCTAssertNil(sheet.predictedMegapixelText, "no measured pixels → no row, not a guess")
+    }
+
+    /// 206 — a fresh sheet's preset asks for 240 PPI (Lightroom's default); an old built-in stays
+    /// `nil` so reloading it keeps writing no resolution.
+    func testNewSheetDefaultsTo240PPI() {
+        let sheet = model()
+        XCTAssertEqual(sheet.preset.ppi, 240)
+        XCTAssertEqual(sheet.preset.effectivePPI, 240)
+        XCTAssertNil(ExportSheetModel.network2048Preset.ppi)
+        sheet.setPPI(700)
+        XCTAssertEqual(sheet.preset.ppi, 600)
+        sheet.setPPI(nil)
+        XCTAssertNil(sheet.preset.ppi)
+    }
 }

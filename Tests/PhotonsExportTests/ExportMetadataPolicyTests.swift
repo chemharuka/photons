@@ -42,8 +42,7 @@ final class ExportMetadataPolicyTests: XCTestCase {
     /// 191's diff contains no XMP writer at all.
     private let legacyPacketSHA = "1323a4c44d29dd2cbea2fa3cbdea431f72331fbc31e8ecd774dad817c43285b6"
     private let legacyFileSHAs = [
-        "3dc213f56a9be083938d2c0c9f16d0324b20169c02bd1d15f7e60ec62c7e345f",
-        "47a948e04eddc4590ca211513735c5d14a03679ae27b3916c16ff746e0c9fbb2",
+        "89c7064c7bdc4233061eaf1959f4489f8cf45a074f4653b70ecd53416206735d",
     ]
     /// The same packet with today's `schemaVersion` 13: the setting blob re-deflates to a different
     /// base64, at the same length. Everything else is the pre-186 packet.
@@ -51,8 +50,8 @@ final class ExportMetadataPolicyTests: XCTestCase {
     /// `.all` + `writeXMP: false`: 107's ImageIO-composed packet, 16 keys. 186 must not move it.
     private let composedPacketSHA = "186c1bd738c80fe07aad301be948d487ee42a33fa982f2b455b8806005bbae0c"
     private let composedFileSHAs = [
-        "035c32a062f074bd0d4916f8395380e71dc7a58b8b22f0e23bb84ea768d11c7e",
-        "02c8e354ccbea69cf0811df0bd3de423096c01160df4b9edbafe9bba4407d23e",
+        "b0dd7c6bc0c2c959cce6959bdbfb5fbb885787f0af03eb415ebd5ce51872c3a2",
+        "69dd3120c23e5302bb75dcc66acd5a9f9c380f998742dce15c120da834f54419",
     ]
     /// `.none` + `writeXMP: true`: no XMP at all (single shape — nothing is composed).
     private let noneSHA = "c3bbfc7dfd210672419411b5672e178747d95003cfbe29cc2ec54d11518778bc"
@@ -341,7 +340,10 @@ final class ExportMetadataPolicyTests: XCTestCase {
         // 107's ImageIO-composed packet on `.all`/off is untouched by 186 — same bytes, same keys.
         let allOff = try export(preset(policy: .all, writeXMP: false), tag: "all-off")
         XCTAssertEqual(try packetSHA(allOff.url), composedPacketSHA)
-        XCTAssertTrue(composedFileSHAs.contains(try sha256(allOff.url)))
+        let composedFileSHA = try sha256(allOff.url)
+        XCTAssertTrue(composedFileSHAs.contains(composedFileSHA),
+                      "composed file exported \(composedFileSHA), which is not one of the "
+                      + "shapes ImageIO writes")
         XCTAssertEqual(fileXMPPaths(allOff.url).count, 16)
     }
 

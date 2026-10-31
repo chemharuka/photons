@@ -372,7 +372,7 @@ public final class ExportSheetModel {
         ExportPreset(name: "默认", format: .heic, quality: 0.85,
                      bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
                      hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}",
-                     sizingMode: ExportSizingMode.none)
+                     sizingMode: ExportSizingMode.none, ppi: 240)
     }
 
     /// 161 §1 — the old factory draft, still selectable in the preset popup. It has its own name and
@@ -603,6 +603,14 @@ public final class ExportSheetModel {
         return edge > 0 ? edge : nil
     }
 
+    /// 206 — the PPI row's one write path: `nil` turns the tag off, a number is clamped to
+    /// `ExportPreset.ppiRange` instead of being rejected (a typed 700 means "the maximum").
+    public func setPPI(_ value: Int?) {
+        preset.ppi = value.map {
+            min(max($0, ExportPreset.ppiRange.lowerBound), ExportPreset.ppiRange.upperBound)
+        }
+    }
+
     /// 168 §3 — the quality field's resting text (two decimals), and the one parser both the view
     /// and the tests use. Out-of-range and non-numeric input is **rejected**, not clamped: typing
     /// `1.5` must leave the previous legal value alone, not silently write `1.0`.
@@ -632,17 +640,41 @@ public final class ExportSheetModel {
         return out
     }
 
-    /// What the output pixels will be for a crop of `native`. The sheet's prediction and the batch's
-    /// render both go through `ExportSizing`, so this is a forecast, not a restatement.
-    /// 163 §1.6 — a half-size gain map trims an odd edge, so the forecast shows the real output.
-    public func predictedSizeText(native: ImageSize) -> String {
+    /// 206 — the output pixel size for one crop, through the same `ExportSizing` + gain-map trim the
+    /// batch uses. `predictedSizeText` and the MP readout both read this, so the sheet cannot show a
+    /// number the file will not have.
+    public func predictedOutputSize(native: ImageSize) -> ImageSize {
         let preset = effectivePreset
         var size = ExportSizing.outputSize(content: native,
                                            scale: preset.renderScale(content: native))
         if preset.hdrKind == .gainMap, preset.hdr?.halfSize == true {
             size = GainMapSizing.plan(size, halfSize: true).output
         }
+        return size
+    }
+
+    /// What the output pixels will be for a crop of `native`. The sheet's prediction and the batch's
+    /// render both go through `ExportSizing`, so this is a forecast, not a restatement.
+    /// 163 §1.6 — a half-size gain map trims an odd edge, so the forecast shows the real output.
+    public func predictedSizeText(native: ImageSize) -> String {
+        let size = predictedOutputSize(native: native)
         return "\(size.width)×\(size.height)"
+    }
+
+    /// 206 — the 图像尺寸 section's MP line, from the same predicted output size as
+    /// `predictedSizeText` (never `width × percent` by hand). One output size prints `"24.0 MP"`
+    /// (one decimal, rounded half away from zero); several different output sizes print
+    /// `"N 种尺寸"` instead of pretending one number describes the batch. `nil` when the selection
+    /// has no measured pixels yet, so the row is absent rather than wrong.
+    public var predictedMegapixelText: String? {
+        let sizes = selectionNatives.isEmpty ? selectionContents : selectionNatives
+        guard !sizes.isEmpty else { return nil }
+        let outputs = sizes.map { predictedOutputSize(native: $0) }
+        let distinct = Set(outputs.map { "\($0.width)x\($0.height)" })
+        if distinct.count > 1 { return "\(distinct.count) 种尺寸" }
+        let size = outputs[0]
+        let megapixels = Double(size.width) * Double(size.height) / 1_000_000
+        return String(format: "%.1f MP", (megapixels * 10).rounded() / 10)
     }
 
     /// 163 §1.6 — the conditional grey line under the half-size control. `nil` when the control is
@@ -1337,6 +1369,29 @@ public struct ExportSheetView: View {
                 .frame(width: model.bitDepths.count > 2 ? 200 : 130)
                 .disabled(model.phase == .running)
             }
+            // 206 — resolution is a pixel fact, so it has its own row and can be turned off. The
+            // factory preset starts at 240 (Lightroom's default); an old preset keeps `nil` (no tag).
+            HStack(spacing: 8) {
+                Toggle(isOn: ppiEnabledBinding) {
+                    Text("PPI").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .disabled(model.phase == .running)
+                .accessibilityIdentifier("export.ppi.enabled")
+                Spacer(minLength: 8)
+                if model.preset.ppi != nil {
+                    SliderNumberField(value: Double(model.preset.effectivePPI ?? 240),
+                                      range: 72 ... 600, format: "%.0f",
+                                      decimals: 0, fontSize: 10, width: 60,
+                                      accessibilityID: "export.ppi") { typed in
+                        model.setPPI(Int(typed.rounded()))
+                    }
+                    Text("像素/英寸").font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
+                    Text("不写入").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+            }
         } header: {
             sectionHeader("文件设置")
         }
@@ -1400,6 +1455,19 @@ public struct ExportSheetView: View {
                     Text("按裁切后的原始像素导出")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                     Spacer(minLength: 8)
+                }
+            }
+            // 206 — the MP reading follows `predictedOutputSize` (scale + half-size gain-map trim).
+            // Absent while the selection has no measured pixels, instead of showing a made-up size.
+            if let megapixels = model.predictedMegapixelText {
+                HStack(spacing: 8) {
+                    Text("像素量").font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text(megapixels)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("export.size.megapixels")
                 }
             }
         } header: {
@@ -1664,6 +1732,11 @@ public struct ExportSheetView: View {
     private var bitDepthBinding: Binding<Int> {
         Binding(get: { model.preset.bitDepth },
                 set: { model.selectBitDepth($0) })
+    }
+
+    private var ppiEnabledBinding: Binding<Bool> {
+        Binding(get: { model.preset.ppi != nil },
+                set: { on in model.setPPI(on ? (model.preset.ppi ?? 240) : nil) })
     }
 
     private var hdrEnabledBinding: Binding<Bool> {

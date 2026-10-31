@@ -353,7 +353,8 @@ public enum BatchExporter {
                                                  edit: item.edit,
                                                  author: item.author,
                                                  copyright: item.copyright,
-                                                 embedXMP: embedsXMP)
+                                                 embedXMP: embedsXMP,
+                                                 ppi: preset.effectivePPI)
             try Exporter.write(image, to: url, options: preset.exportOptions, metadata: metadata)
             let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
 
