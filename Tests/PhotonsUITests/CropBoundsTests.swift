@@ -10,6 +10,11 @@ import PhotonsCore
 /// quad) may never cross the viewport edge. `sourcePixelBounds` (`0…1²`) is only a readout/prompt
 /// concept now: the frame may cover the black band outside the sensor, because that band is still
 /// inside the canvas.
+///
+/// **188** — for a **draft angle** that hard edge became a *reachability* criterion: the turned quad's
+/// centre has to stay on the canvas, its edges may cross it (「旋转后裁切框可以出画布」). The upright
+/// path (`clampedToCanvas`, θ = 0) is untouched and still contains the frame, which is why the two
+/// corner tests below are unchanged.
 @MainActor
 final class CropBoundsTests: XCTestCase {
 
@@ -142,9 +147,14 @@ final class CropBoundsTests: XCTestCase {
     // MARK: - ② an angle: blank corners are legal, the canvas edge is not
 
     /// At 8° with the camera zoomed out the canvas is wider than the sensor (`-0.25…1.25`). The frame
-    /// may sit in that band — pixels outside the camera are allowed — but its turned quad's AABB must
-    /// still be inside the canvas.
-    func testAtEightDegreesTheFrameMayCoverBlankCornersButNotLeaveTheCanvas() throws {
+    /// may sit in that band — pixels outside the camera are allowed — and, since 188, **it may leave
+    /// the canvas too**: what the clamp keeps is *reachability*, the turned quad's centre on the
+    /// canvas, so the frame can always be grabbed again (user's 「旋转后裁切框可以出画布」).
+    ///
+    /// Pre-188 this test asserted the opposite (`…ButNotLeaveTheCanvas`, the quad's AABB inside the
+    /// viewport): the drag was shrunk and slid back until `frame.maxX == canvas.maxX`. Both numbers are
+    /// quoted in the log line, so the flip is visible, not asserted by hand.
+    func testAtEightDegreesTheFrameMayLeaveTheCanvasAndStayReachable() throws {
         let (controller, _) = try makeController()
         // 0.2× on a 3000×2000 source in a 900×600 canvas: the window is 4500×3000 source pixels, i.e.
         // the canvas bounds are -0.25…1.25 on both axes.
@@ -177,21 +187,25 @@ final class CropBoundsTests: XCTestCase {
               + String(format: "l %.4f t %.4f r %.4f b %.4f", controller.draft.crop.left,
                        controller.draft.crop.top, controller.draft.crop.right,
                        controller.draft.crop.bottom)
-              + " · quad AABB \(NSStringFromRect(frame)) · canvas \(NSStringFromRect(canvas))")
-        XCTAssertGreaterThanOrEqual(frame.minX, canvas.minX - 0.5)
-        XCTAssertGreaterThanOrEqual(frame.minY, canvas.minY - 0.5)
-        XCTAssertLessThanOrEqual(frame.maxX, canvas.maxX + 0.5)
-        XCTAssertLessThanOrEqual(frame.maxY, canvas.maxY + 0.5)
+              + " · quad AABB \(NSStringFromRect(frame)) · canvas \(NSStringFromRect(canvas))"
+              + String(format: " · centre (%.2f, %.2f)", frame.midX, frame.midY))
 
         let crop = controller.draft.crop
         XCTAssertGreaterThan(crop.right, 1.0, "the frame must be allowed outside the camera pixels")
         XCTAssertGreaterThan(crop.bottom, 1.0)
-        // "拖到角落" means the turned quad's AABB is flush with the canvas corner, not that the stored
-        // rect's raw edge equals the canvas bound (the 8° quad is turned under it).
-        XCTAssertEqual(frame.maxX, canvas.maxX, accuracy: 0.5,
-                       "the turned frame did not reach the canvas' right edge")
-        XCTAssertEqual(frame.maxY, canvas.maxY, accuracy: 0.5,
-                       "the turned frame did not reach the canvas' bottom edge")
+
+        // 188 — the quad's **centre** is what the clamp keeps on the canvas, so a drag into the
+        // corner ends with the centre on that corner and the frame hanging past it by half its size.
+        XCTAssertEqual(frame.midX, canvas.maxX, accuracy: 0.5,
+                       "the reachability clamp must put the quad's centre on the canvas' right edge")
+        XCTAssertEqual(frame.midY, canvas.maxY, accuracy: 0.5)
+        XCTAssertGreaterThan(frame.maxX, canvas.maxX + 40,
+                             "the frame is allowed to leave the canvas — no shrink, no pull-back")
+        XCTAssertGreaterThan(frame.maxY, canvas.maxY + 30)
+        // …and it is still findable: a grip answers at the drawn position.
+        var hits = 0
+        for corner in layout.corners where CropTool.hit(corner, in: layout) != .outside { hits += 1 }
+        XCTAssertGreaterThanOrEqual(hits, 1, "no grip is reachable — the frame would be lost")
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
                       "the frame covers the blank corner, so the warning must say so")
     }
