@@ -190,6 +190,7 @@ final class CanvasMatteGreyTests: XCTestCase {
         // The container layer too, from the source: two assignments, both from the constant, and no
         // `NSColor.black` background left in the loupe.
         let text = try String(contentsOf: Self.loupeURL, encoding: .utf8)
+            + String(contentsOf: Self.canvasViewURL, encoding: .utf8)
         XCTAssertEqual(text.components(separatedBy: "NSColor.canvasMatte.cgColor").count - 1, 2,
                        "both the metal layer and the container layer take the matte from the constant")
         XCTAssertFalse(text.contains("backgroundColor = NSColor.black.cgColor"),
@@ -466,6 +467,15 @@ final class CanvasMatteGreyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/PhotonsUI/LoupeController.swift")
+    }
+
+    /// `LoupeCanvasView.swift` — the canvas' layer background, moved out of the controller in P2.
+    private static var canvasViewURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/Loupe/LoupeCanvasView.swift")
     }
 
     /// `CanvasPresenter.swift` — the matte's remaining producer is the clear colour, and it is asserted
