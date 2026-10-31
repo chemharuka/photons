@@ -20,12 +20,14 @@ public struct LoupeFrameRequest: Equatable, Sendable {
     public var rungScale: Float
     public var contentRect: ImageRect?
     public var canvas: ImageSize
+    /// 画布像素 / 内容像素 —— 与 `RenderOptions.scale` 同一个量（1:1 时为 1）。
+    public var scale: Double
     public var display: DisplayOptions
     public var neverUpscalesContent: Bool
 
     public init(identity: String, documentHash: String, revision: Int,
                 source: Source = .edited, rungScale: Float,
-                contentRect: ImageRect? = nil, canvas: ImageSize,
+                contentRect: ImageRect? = nil, canvas: ImageSize, scale: Double,
                 display: DisplayOptions = DisplayOptions(),
                 neverUpscalesContent: Bool = false) {
         self.identity = identity
@@ -35,18 +37,19 @@ public struct LoupeFrameRequest: Equatable, Sendable {
         self.rungScale = rungScale
         self.contentRect = contentRect
         self.canvas = canvas
+        self.scale = scale
         self.display = display
         self.neverUpscalesContent = neverUpscalesContent
     }
 
     /// 映射到 `RenderOptions`（`photonsCore` 的那个），字段一一对应：
-    /// canvas / scale = 1 / outputWindow = contentRect / display /
+    /// canvas / scale = 本结构的 scale / outputWindow = contentRect / display /
     /// source = .edited → .edited、.decoded → .decoded /
     /// neverUpscalesContent / wantsPixels = false / useCache = true。
     public func renderOptions() -> RenderOptions {
         let renderSource: RenderSource = source == .decoded ? .decoded : .edited
         return RenderOptions(canvas: canvas,
-                             scale: 1,
+                             scale: scale,
                              outputWindow: contentRect,
                              display: display,
                              useCache: true,

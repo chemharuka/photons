@@ -12,6 +12,7 @@ final class LoupeFrameRequestTests: XCTestCase {
                           rungScale: 0.5,
                           contentRect: ImageRect(x: 10, y: 20, width: 800, height: 600),
                           canvas: ImageSize(width: 1600, height: 1200),
+                          scale: 2,
                           display: DisplayOptions(headroom: 1.5))
     }
 
@@ -21,7 +22,7 @@ final class LoupeFrameRequestTests: XCTestCase {
         XCTAssertEqual(options.outputWindow, ImageRect(x: 10, y: 20, width: 800, height: 600))
         XCTAssertEqual(options.display.headroom, 1.5)
         XCTAssertEqual(options.source, .decoded)
-        XCTAssertEqual(options.scale, 1)
+        XCTAssertEqual(options.scale, 2)
         XCTAssertFalse(options.wantsPixels)
         XCTAssertTrue(options.useCache)
     }
