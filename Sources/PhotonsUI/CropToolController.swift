@@ -931,9 +931,13 @@ public final class CropToolController {
         let base = seen(before)
 
         /// The rect at uniform scale `s` (about the frame's centre, so the ratio is untouched), then
-        /// moved so its quad's centre is as central on the canvas as that size allows. The move is
-        /// asked for in **view** space and converted back through the drags' own inverse; 162 replaced
-        /// the old `0…1²` clamp with the **canvas** bound (the camera-outside band is legal).
+        /// moved so its quad's centre is **on the canvas**. The move is asked for in **view** space and
+        /// converted back through the drags' own inverse.
+        ///
+        /// 188 — the target is the canvas *rectangle*, not the canvas minus the quad: the frame may
+        /// leave the expanded canvas (user's 「旋转后裁切框可以出画布」), so what has to stay reachable is
+        /// the quad's centre, and nothing here shrinks it. `s` is kept for the ratio branch and for
+        /// callers that ask about a size, but the shipped path only ever asks for `1`.
         func candidate(_ s: Double) -> CropRect {
             var width = base.width * s, height = base.height * s
             // 162: the ratio lock is a document constraint and must survive the canvas clamp; applying
@@ -947,8 +951,10 @@ public final class CropToolController {
             let raw = CropRect(x: base.centerX - width / 2, y: base.centerY - height / 2,
                                width: width, height: height).clamped(allowsOutsideSource: true)
             let box = quadBounds(raw)
-            let targetX = fit(Double(box.center.x), box.halfWidth, canvasWidth - box.halfWidth)
-            let targetY = fit(Double(box.center.y), box.halfHeight, canvasHeight - box.halfHeight)
+            // 188: reachability, not containment — the quad's centre lands on the canvas, and the
+            // frame's own edges are free to cross it (that is the 100 pt the user asked for).
+            let targetX = fit(Double(box.center.x), 0, canvasWidth)
+            let targetY = fit(Double(box.center.y), 0, canvasHeight)
             guard let centre = Self.normalized(CGPoint(x: targetX, y: targetY), mapping: mapping,
                                                source: source, pointScale: 1,
                                                rotationDegrees: degrees) else { return raw }
@@ -963,33 +969,24 @@ public final class CropToolController {
             return seen(moved)
         }
 
-        func fits(_ rect: CropRect) -> Bool {
+        /// 188 — is the frame still **reachable**? Its quad's centre is on the canvas, so the frame can
+        /// always be grabbed again; how much of it hangs over the edge is the user's business.
+        func reachable(_ rect: CropRect) -> Bool {
             let box = quadBounds(rect)
             let tolerance = 1e-7
-            return Double(box.center.x) - box.halfWidth >= -tolerance
-                && Double(box.center.x) + box.halfWidth <= canvasWidth + tolerance
-                && Double(box.center.y) - box.halfHeight >= -tolerance
-                && Double(box.center.y) + box.halfHeight <= canvasHeight + tolerance
+            return Double(box.center.x) >= -tolerance && Double(box.center.x) <= canvasWidth + tolerance
+                && Double(box.center.y) >= -tolerance && Double(box.center.y) <= canvasHeight + tolerance
         }
 
-        // The frame already fits and carries no lock to re-apply: nothing to clamp, so the stored rect
-        // (the user's intent) stays untouched — reducing the angle to 0° then gives the whole frame
-        // back. A lock still has to reshape the rect even when it already fits.
-        if draft.lock.ratio == nil, fits(base) { return false }
+        // The frame is already reachable and carries no lock to re-apply: nothing to clamp, so the
+        // stored rect (the user's intent) stays untouched — reducing the angle to 0° then gives the
+        // whole frame back. A lock still has to reshape the rect even when it already fits.
+        if draft.lock.ratio == nil, reachable(base) { return false }
 
-        var next = candidate(1)
-        if !fits(next) {
-            // The centre the visible quad needs may sit outside the crop rect's own `0…1²` room (a
-            // small frame at the top edge), so the full-size placement is illegal even though a
-            // smaller one is fine. Find the largest uniform scale whose quad's AABB fits — the
-            // frame stays as big as the canvas allows, never bigger.
-            var lower = 0.0, upper = 1.0
-            for _ in 0..<24 {
-                let middle = (lower + upper) / 2
-                if fits(candidate(middle)) { lower = middle } else { upper = middle }
-            }
-            next = candidate(lower)
-        }
+        // **No shrink** (188 deleted the `0…1²`-room binary search): a frame whose centre is off the
+        // canvas is *moved* back onto it at its own size. The frame the user drew keeps its edges, its
+        // ratio and `CropTool.minimumSpan` — the only thing this clamp does is keep it findable.
+        let next = candidate(1)
         // `base` is the derived inscribed frame, not a user edit: when the canvas needed nothing,
         // leave the stored rect alone (the 088 rule — the shrink is a view, so 0° gives it back).
         guard next != before, next != base else { return false }

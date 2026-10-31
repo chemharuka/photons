@@ -148,6 +148,13 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
     /// The part of the frame the canvas shows, in normalized frame coordinates. This is the
     /// `safeCropRect` / `canvasBounds` arithmetic that used to live in `CropToolController`; it is
     /// here so the model clamp and the bar/overlay layout read the same number.
+    ///
+    /// **188 — a reachability criterion, not a containment one, once the frame is turned.** These four
+    /// numbers still say where the canvas is (the readouts and the upright clamp measure against them),
+    /// but `CropToolController.clampRotatedQuadToView` no longer forces the turned quad inside them: the
+    /// frame may leave the expanded canvas, and only its centre has to stay here so it can be grabbed
+    /// again (「旋转后裁切框可以出画布」). Nothing about this arithmetic moved, which is why the θ = 0
+    /// values are the pre-188 ones to the last digit.
     public static func canvasBounds(mapping: LoupeMapping, source: ImageSize) -> CropRect {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
         let a = mapping.framePoint(viewX: 0, viewY: 0)

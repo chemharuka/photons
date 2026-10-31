@@ -2291,6 +2291,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// inside the texture and the rect is the only thing that says where the picture is.
     private var canvasPicture: (rect: ImageRect, canvas: ImageSize)?
 
+    /// 188 — the `CropMath.canvasSize` the last present was composed for. `invalidateCanvasGeometryIfMoved`
+    /// compares the current document's answer against it and drops the frozen frame when it moves (a
+    /// 拉直 that grows the canvas makes every frozen quad stale).
+    private var lastCanvasGeometrySize: ImageSize?
+
     /// The bridge's display-cadence driver. A `Timer` on the main run loop in `.common` mode, at
     /// 120 Hz: the window is a *parameter of the present pass*, not a layer property, so nothing in
     /// Core Animation can interpolate it for us — and a present is a full-screen quad, i.e. the same
@@ -4134,7 +4139,41 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the chrome is visible and re-seeds the draft for the photo it belongs to. Every other caller
     /// (mode change, tab switch, resize, photo switch, draft tick) goes through the same function.
     public func refreshCropTool() {
+        // 188 — a draft change may move the **canvas**, and the frozen frame must not outlive it.
+        invalidateCanvasGeometryIfMoved()
         armCropFrame(.refresh)
+    }
+
+    /// 188 — **the stale rectangle's one gate.**
+    ///
+    /// `frozenFrame` and `canvasPicture` are textures plus the geometry they were drawn with, and that
+    /// geometry is `CropMath.canvasSize` — which *moves with the straighten*. Dragging 拉直 from 0° to
+    /// 5.4° therefore leaves a frozen canvas quad that describes a canvas nobody has any more, and every
+    /// replay of it (`rePresentFrozen`, a bridge thinned out by `cancelZoomBridge`) drew the old
+    /// rectangle over a new picture. The rule kept here is the cheap one: when the canvas the current
+    /// document calls for differs from the one the held frame was composed for, drop both. One render
+    /// later there is a frame with the right geometry; until then the layer keeps its last drawable,
+    /// which is honest, where the old quad was not.
+    ///
+    /// The draft's **crop** does not enter this number (`CropToolController.previewEdit` renders the
+    /// whole frame while the tool is on), so dragging the frame's own handles does not throw the frozen
+    /// image away — only an angle that actually changes `canvasSize` does.
+    private func invalidateCanvasGeometryIfMoved() {
+        guard let edit = session?.edit, cropSourceSize.width > 1 else {
+            lastCanvasGeometrySize = nil
+            return
+        }
+        let geometry = cropTool.previewEdit(from: edit).geometry
+        let source = cropSourceSize
+        let size = CropMath.canvasSize(crop: geometry.renderCrop(source: source), in: source,
+                                       straightenDegrees: geometry.straightenDegrees,
+                                       quarterTurns: 0,
+                                       allowsOutsideSource: true,
+                                       perspective: geometry.perspective)
+        guard size != lastCanvasGeometrySize else { return }
+        lastCanvasGeometrySize = size
+        frozenFrame = nil
+        canvasPicture = nil
     }
 
     /// Why the frame is being armed. Only `.photoChanged` re-seeds the draft; the others are
@@ -4235,12 +4274,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// 「框恰好内接于画布」那一级 —— 裁切模式允许的最大缩放（canvas px per source px）。
     ///
-    /// Not a constant: the canvas' size and the frame's size both enter, so a resized window, an
-    /// anchored pan and a dragged handle all move it. `nil` when there is no frame to measure (the
-    /// tool is off) or the projection is degenerate.
+    /// **188 — an angle relaxes it.** An upright document keeps this ceiling exactly (`CropWorkspaceLayout.maxZoom`,
+    /// values and all): at θ = 0 the canvas contains the frame and the camera stopping there is what keeps
+    /// the crop the user drew from being shrunk instead. Once the frame is **turned** — a draft angle or a
+    /// document straighten — the frame is allowed to leave the canvas (user's 「旋转后裁切框可以出画布」),
+    /// so the ceiling becomes the camera's own 400 % and `clampedToCropCanvas` keeps the frame reachable.
+    ///
+    /// `nil` when there is no frame to measure (the tool is off) or the projection is degenerate.
     public func cropZoomLimit(viewport: ImageSize? = nil) -> Double? {
         guard clampsCropCamera else { return nil }
         guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
+        guard !cropFrameIsTurned else { return LoupeViewState.maximumZoom }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
         let limit = CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame)
@@ -4248,8 +4292,24 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return min(limit, LoupeViewState.maximumZoom)
     }
 
-    /// A requested camera, as the crop session allows it: zoom clamped to `cropZoomLimit`, then the
-    /// window centre moved (never the frame) until the frame is back inside the canvas.
+    /// 188 — is the frame the user is looking at **turned**? Either the draft carries an angle the
+    /// document does not (a drag in flight) or the document itself is straightened (committed): both
+    /// make the drawn frame a quad rather than the rect the projection contains, and both are what the
+    /// user means by 「旋转后」. At 0/0 this is `false`, which is the whole reverse gate.
+    private var cropFrameIsTurned: Bool {
+        abs(cropTool.draft.straighten) > 1e-9
+            || abs(session?.edit.geometry.straightenDegrees ?? 0) > 1e-9
+    }
+
+    /// A requested camera, as the crop session allows it: zoom within the workspace's ceiling, then the
+    /// window centre moved (never the frame) until the frame is back where the rule says it belongs.
+    ///
+    /// **188 — upright keeps containment, turned goes to reachability.** At θ = 0 the camera still
+    /// keeps the frame **inside** the canvas (`CropCanvasClamp.clampCenter`, the pre-188 interval, value
+    /// for value); once the frame is turned it may hang over the canvas (user's 「旋转后裁切框可以出画布」)
+    /// and the only thing the camera guarantees is that the quad's **centre** is still on the canvas, so
+    /// the frame can always be grabbed again. The turned interval (`frameCentre ± halfWindow`) is a
+    /// superset of the upright one, so nothing that used to be legal became illegal.
     ///
     /// The identity outside 裁切 mode, and the identity for `.fit` (at fit the whole frame is
     /// inscribed in the viewport by construction, so there is nothing to clamp). That is what makes
@@ -4262,15 +4322,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
                             height: Double(framing.viewport.height))
         let limit = min(CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame),
                         LoupeViewState.maximumZoom)
-        guard limit > 0 else { return state }
+        guard cropFrameIsTurned else {
+            guard limit > 0 else { return state }
+            var next = state
+            next.zoom = limit < LoupeViewState.minimumZoom
+                ? limit
+                : min(LoupeViewState.clampZoom(state.zoom), limit)
+            let centre = CropCanvasClamp.clampCenter(x: state.centerX, y: state.centerY,
+                                                     canvas: canvas, frame: frame, zoom: next.zoom)
+            next.centerX = centre.x
+            next.centerY = centre.y
+            return next
+        }
+        guard canvas.width > 0, canvas.height > 0, frame.width > 0, frame.height > 0 else { return state }
         var next = state
-        next.zoom = limit < LoupeViewState.minimumZoom
-            ? limit
-            : min(LoupeViewState.clampZoom(state.zoom), limit)
-        let centre = CropCanvasClamp.clampCenter(x: state.centerX, y: state.centerY,
-                                                 canvas: canvas, frame: frame, zoom: next.zoom)
-        next.centerX = centre.x
-        next.centerY = centre.y
+        next.zoom = min(LoupeViewState.clampZoom(state.zoom), LoupeViewState.maximumZoom)
+        // Half the window, in source pixels: how far the window centre may sit from the frame's own
+        // centre before the frame's centre leaves the canvas.
+        let halfW = Double(canvas.width) / 2 / max(next.zoom, 1e-9)
+        let halfH = Double(canvas.height) / 2 / max(next.zoom, 1e-9)
+        let midX = Double(frame.midX), midY = Double(frame.midY)
+        next.centerX = min(max(state.centerX, midX - halfW), midX + halfW)
+        next.centerY = min(max(state.centerY, midY - halfH), midY + halfH)
         return next
     }
 

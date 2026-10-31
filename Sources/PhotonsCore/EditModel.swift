@@ -1018,9 +1018,16 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// pre-9 spelling and is *wrong* for an odd turn (the rect is measured in the turned frame, so
     /// its width is a fraction of the turned width). This is the same two calls with the turned
     /// size in the second one, kept in one place so no caller can forget the swap.
+    ///
+    /// **188 — 「输出尺寸」 is the canvas the renderer allocates, so it is `CropMath.canvasSize`.**
+    /// At θ ≠ 0 the canvas is the turned crop's bounding box (162), which is what the render produces
+    /// and what the info bar has to report; keeping `frameSize` here made the readout and the
+    /// backdrop's own scale smaller than the picture on screen. At every right angle `canvasSize`
+    /// returns `outputSize` itself, so this is the pre-188 value bit for bit.
     public func outputPixels(in source: ImageSize) -> ImageSize {
-        CropMath.frameSize(renderCrop(source: source), in: orientedSource(source),
-                           allowsOutsideSource: true, perspective: perspective)
+        CropMath.canvasSize(crop: renderCrop(source: source), in: orientedSource(source),
+                            straightenDegrees: straightenDegrees, quarterTurns: 0,
+                            allowsOutsideSource: true, perspective: perspective)
     }
 
     /// One quarter turn, as a mutation of the document's geometry: the frame turns and the crop
