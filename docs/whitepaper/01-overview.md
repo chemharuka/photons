@@ -6,9 +6,9 @@
 
 这条边界带来三个直接后果，后面每一章都会用到：
 
-1. **白平衡是 S1 的增益，不是解码参数（143 起）。** 解码器永远停在文件自己的 as-shot 平衡，`CIRAWFilter` 的温度/色调从不写入；文档里的 `temperature/tint` 由 `WhiteBalanceEstimate` 在本机算成三通道增益，S1 用 `v *= gain · wb` 一次乘完（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:3`、`Sources/PhotonsCore/RAWDecoder.swift:102`）。好处是拖白平衡不再重新解码，预览就是松手帧（`docs/STATUS.md`）。注：`Sources/PhotonsCore/EditModel.swift:1284` 的注释仍写着「喂给 `CIRAWFilter`」，那是 143 之前的说法，保留它是因为字段名还没改。
+1. **白平衡是解码域的量，实现为 S1 的等效增益。** 缓冲里的像素带着文件自己的 as-shot 平衡，这是解码事实；文档里的 `temperature/tint` 自 143 起不再写回 `CIRAWFilter`，而是由 `WhiteBalanceEstimate` 在场景线性缓冲上估出画面照度、算出到目标白点的三通道增益，S1 做一次 `v *= gain · wb`（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:3`、`Sources/PhotonsCore/RAWDecoder.swift:102`）。之所以可以这样说：解码器输出与 S1 之间只有线性的通道混合（去马赛克）和增益，逐通道增益与去马赛克可交换，所以「解码域的白平衡」可以在解码之后以同域算术执行——换来的是拖滑杆不重新解码，预览与松手是同一张渲染。
 2. **解码是昂贵的、带缓存的。** 60 MP 全分辨率解码约 0.5 s（v8）/ 更久（v9），结果按 `DecodeCacheKey` 落到磁盘，第二次打开是读盘而不是解码（`Sources/PhotonsCore/LinearImageStore.swift:24`）。
-3. **解码缓冲进缓存键。** 缓冲的身份是 `DecodeCacheKey.digest`（文件 SHA-256、解码器版本、曝光、缩放、色彩空间、白平衡、细节参数、解码配方、镜头剖面），不是像素哈希——对 60 MP 每帧做哈希比渲染本身还贵（`Sources/PhotonsCore/RenderGraph.swift:11`）。
+3. **解码缓冲进缓存键。** 缓冲的身份是 `DecodeCacheKey.digest`（文件 SHA-256、解码器版本、曝光、缩放、色彩空间、细节参数、解码配方、镜头剖面），不是像素哈希——对 60 MP 每帧做哈希比渲染本身还贵（`Sources/PhotonsCore/RenderGraph.swift:11`）。键里还留着一个白平衡字段，但 143 之后解码器不读它，见 3.7。
 
 > **α 注记。** `CIRAWFilter` 的 `decoderVersion` 会被机型白名单静默降级（请求 v9 得到 v8），所以解码后必须回读能力集再决定 UI 与键（`Sources/PhotonsCore/DecoderCapabilities.swift`）。
 

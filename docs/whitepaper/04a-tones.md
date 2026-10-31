@@ -12,7 +12,7 @@
 
 **算法**
 
-解码器停在文件自带的 as-shot 平衡上，文档里的 (K, tint) 是 S1 的一次线性增益（`Sources/PhotonsCore/RenderGraph.swift:3366`）。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:240`）；tint 沿轨迹法线位移，幅度 $5\times10^{-5}$ uv/单位（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:287`）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:349`），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。
+白平衡属于解码域：解码器停在文件自带的 as-shot 平衡上，文档里的 (K, tint) 是一次**等价的场景线性增益**（`Sources/PhotonsCore/RenderGraph.swift:3366`）——解码输出到 S1 之间只有线性通道混合与增益，所以可以在 S1 执行而不改域，换来实时预览。请求先落成 CIE 1960 uv 上的一个点：普朗克轨迹用 Kim 的解析拟合，并把 6500 K 平移到位，使它与工作白 D65 重合（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:240`）；tint 沿轨迹法线位移，幅度 $5\times10^{-5}$ uv/单位（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:287`）。uv → XYZ 后做 Bradford 适应到工作白，得到 3×3 矩阵（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:349`），但过 CPU/GPU 边界的不是矩阵，是三个归一化通道数。
 
 记 $W(T)$ 为求解器在温度 $T$ 给出的线性白光，$T_{\text{ref}},\tau_{\text{ref}}$ 为参考对，则增益是通道比、绿归一：
 
@@ -61,7 +61,7 @@ GPU 侧只有一行：`v *= p.a.x * p.a.yzw`（`Sources/PhotonsCore/Kernels/s1_s
 - 估计是抽样的：至多 12 万像素、确定性步长（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:118`）。一张大面积单色的画面，三个估计器会一起错。
 - 增益夹在 1/20…20（`Sources/PhotonsCore/WhiteBalanceEstimate.swift:420`），极端请求在这个边界上饱和，而不是报错。
 - `LightGroup.whiteBalanceGains` 还留着，但它是编码域拟合、约弱 2.2 倍，管线不用它（`Sources/PhotonsCore/EditModel.swift:1446`）。读代码的人容易把它当成实现。
-- 这里与第 1.1、3.7 节的说法已经不同：那两节写「温度/色调喂给 `CIRAWFilter.neutralTemperature`」（`Sources/PhotonsCore/EditModel.swift:1284`），而 143 之后解码器不再收这个请求（`Sources/PhotonsCore/DecodeInputs.swift:8`）。以本节的代码路径为准。
+- 等价的边界：as-shot 时增益为 1，逐字节等于解码；显式白平衡没有第二条路径可逐像素比对（143 删掉了写回解码器的那条），所以「与 Apple 原本会给出的结果一致」是模型上的对齐，不是实测。
 
 ## 4.2 曝光
 

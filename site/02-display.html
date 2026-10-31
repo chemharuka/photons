@@ -22,7 +22,7 @@
   <aside class="sidebar">
     <p class="sidebar-title">目录</p>
     <ul class="chapter-list"><li><a href="00-preface.html">卷首</a></li><li><a href="01-overview.html">1 总览</a></li><li class="current"><span>2 显示架构</span></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
-    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>6bf12ff</code></p>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>4845a04</code></p>
   </aside>
   <main id="content" class="content">
     <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#画布三个尺寸不是一个">2.1 画布：三个尺寸，不是一个</a></li><li class="toc-2"><a href="#坐标谁贴在谁上面">2.2 坐标：谁贴在谁上面</a></li><li class="toc-2"><a href="#缓冲像素放在哪放几份">2.3 缓冲：像素放在哪、放几份</a></li><li class="toc-3"><a href="#解码缓冲">解码缓冲</a></li><li class="toc-3"><a href="#解码阶梯">解码阶梯</a></li><li class="toc-3"><a href="#磁盘缓存">磁盘缓存</a></li><li class="toc-3"><a href="#中间纹理与副产物">中间纹理与副产物</a></li><li class="toc-2"><a href="#渲染图键脏组队列">2.4 渲染：图、键、脏组、队列</a></li><li class="toc-3"><a href="#一张图">一张图</a></li><li class="toc-3"><a href="#键是链不是集合">键是链，不是集合</a></li><li class="toc-3"><a href="#脏组">脏组</a></li><li class="toc-3"><a href="#两条队列">两条队列</a></li><li class="toc-3"><a href="#present">present</a></li><li class="toc-2"><a href="#显示编码与-hdr">2.5 显示编码与 HDR</a></li><li class="toc-2"><a href="#帧预算时序与故障">2.6 帧预算、时序与故障</a></li></ul></nav>
@@ -110,7 +110,7 @@
 </table>
 <p>规则只有两条：同 <code>(identity, scale)</code> 命中就复用；<strong>高的一档落地时释放低的一档</strong>（同文件 <code>:1026</code>）。后者让稳态内存回到「一张缓冲」而不是两张，也解释了为什么「适应 → 1:1 → 适应 → 1:1」只解码两次而不是四次。</p>
 <h3 id="磁盘缓存">磁盘缓存</h3>
-<p>解码结果的磁盘缓存键是 <code>DecodeCacheKey.digest</code>：文件 SHA-256、解码器版本、曝光、缩放、草稿标志、色彩空间、解码配方、细节参数、镜头剖面（<code>Sources/PhotonsCore/LinearImageStore.swift:24</code>）。白平衡字段仍留在键里，但自 143 起解码器不读它——像素与文档的白平衡无关，键里的那一项只是为了旧缓冲的命名兼容（<code>Sources/PhotonsCore/RAWDecoder.swift:102</code>）。配方号 <code>v3-lens</code> 不是装饰：<code>v1</code> 的缓冲曾经整体上下镜像，<code>v2</code> 修的就是它，所以老缓冲<strong>必须</strong>因为配方号变化而失效（同文件 <code>:9</code>）。键里没有像素哈希——对 60 MP 做哈希比解码还贵。</p>
+<p>解码结果的磁盘缓存键是 <code>DecodeCacheKey.digest</code>：文件 SHA-256、解码器版本、曝光、缩放、草稿标志、色彩空间、解码配方、细节参数、镜头剖面（<code>Sources/PhotonsCore/LinearImageStore.swift:24</code>）。白平衡字段仍留在键里，但自 143 起解码器不读它：缓冲只含文件的 as-shot 平衡，文档的白平衡在 S1 以增益执行，键里的那一项只为旧缓冲的命名兼容（<code>Sources/PhotonsCore/RAWDecoder.swift:102</code>）。配方号 <code>v3-lens</code> 不是装饰：<code>v1</code> 的缓冲曾经整体上下镜像，<code>v2</code> 修的就是它，所以老缓冲<strong>必须</strong>因为配方号变化而失效（同文件 <code>:9</code>）。键里没有像素哈希——对 60 MP 做哈希比解码还贵。</p>
 <h3 id="中间纹理与副产物">中间纹理与副产物</h3>
 <ul>
 <li>每个 stage 的输出是一张画布尺寸的 <code>rgba16Float</code> 纹理；缓存的粒度就是这张纹理（第 2.4 节）。</li>
@@ -234,7 +234,7 @@ K_i = H\left(K_{i-1} \,\|\, M_i\right)
       <a class="next" href="03-processing.html">3 处理架构 →</a>
     </nav>
     <footer class="page-footer">
-      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>6bf12ff</code> · 2026-10-31</p>
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>4845a04</code> · 2026-10-31</p>
       <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
     </footer>
   </main>
