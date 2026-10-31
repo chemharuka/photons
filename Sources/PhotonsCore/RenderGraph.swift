@@ -1094,8 +1094,6 @@ private struct MaskAtlasParams {
     var f: SIMD4<Float>   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
     // 147 — S1's exposure gain (x). The picture predicates divide their sample by it.
     var g: SIMD4<Float>
-    // 120b — hasDepth (1 when a depth texture is bound), pad, pad, pad.
-    var h: SIMD4<Float>
 }
 
 private struct MaskDescU {
@@ -1457,9 +1455,6 @@ public final class RenderGraph {
     /// A 1×1 stand-in bound when the document has no semantic component. Metal requires a texture at
     /// the binding even when the kernel never samples it.
     private var semanticDummyTexture: MTLTexture?
-    /// 120b — the same stand-in for the depth binding. `MaskAtlasParams.h.x` is 0 in that case, so a
-    /// depth mask covers nothing rather than sampling the dummy's zero as "everything".
-    private var depthDummyTexture: MTLTexture?
     /// 171 — the bilateral grid's two bindings when the denoise is off. The apply kernel never reads
     /// them at amount 0, but `setTexture(nil)` is not a legal binding.
     private var denoiseDummy2DTexture: MTLTexture?
@@ -2080,23 +2075,11 @@ public final class RenderGraph {
         // key material. It enters the *stage* key instead, exactly like the tiling suffix: two frames
         // whose mattes differ must never share a cached atlas.
         //
-        // 120b: the depth map is environment too. It is appended **only when an enabled mask actually
-        // reads depth** — a document that merely carries a depth texture it does not use keeps every
-        // key (and every cached frame) byte for byte. (175 deleted the dehaze assist, which used to be
-        // the second reason to append it.)
-        let depthSuffix: String
-        if edit.hasDepthRangeMask {
-            if let depth = input.depth {
-                let material = input.depthKey ?? "\(depth.width)x\(depth.height)"
-                depthSuffix = "|depth=" + KeyBuilder.digest(of: material)
-            } else {
-                depthSuffix = "|depth=none"
-            }
-        } else {
-            depthSuffix = ""
-        }
-        let semanticSuffix = (semantics.keyMaterial.isEmpty
-            ? "" : "|" + KeyBuilder.digest(of: semantics.keyMaterial)) + depthSuffix
+        // 175 deleted 120b's `|depth=…` suffix that used to sit here: it existed only so a depth mask
+        // could not reuse an atlas built under a different depth map, and there is no depth mask any
+        // more, so every key is the pre-120b key again.
+        let semanticSuffix = semantics.keyMaterial.isEmpty
+            ? "" : "|" + KeyBuilder.digest(of: semantics.keyMaterial)
         var report: MaskStageReport? = table == nil ? nil : MaskStageReport()
         report?.semanticEvents = semantics.events
 
@@ -5182,31 +5165,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         return texture
     }
 
-    /// 120b — 1×1 zero depth, bound where `s1_5_mask_atlas` declares `texture(3)` but the input has
-    /// no map. The kernel gates on `p.h.x`, so this texture is never read for coverage.
-    private func depthDummy() throws -> MTLTexture {
-        if let hit = depthDummyTexture { return hit }
-        let desc = MTLTextureDescriptor()
-        desc.textureType = .type2D
-        desc.pixelFormat = .r16Float
-        desc.width = 1
-        desc.height = 1
-        desc.mipmapLevelCount = 1
-        desc.usage = [.shaderRead]
-        desc.storageMode = .shared
-        guard let texture = device.makeTexture(descriptor: desc) else {
-            throw RenderError.allocationFailed("depth dummy")
-        }
-        var zero = Float16(0)
-        withUnsafeBytes(of: &zero) { raw in
-            texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
-                            withBytes: raw.baseAddress!, bytesPerRow: 2)
-        }
-        depthDummyTexture = texture
-        return texture
-    }
-
-    /// 171 — the 1×1 stand-ins for the denoise's two bindings. Same rule as the depth dummy: a valid
+    /// 171 — the 1×1 stand-ins for the denoise's two bindings. Same rule: a valid
     /// texture must be bound even when the amount is 0 and the kernel never reads it.
     private func denoiseDummy2D() throws -> MTLTexture {
         if let hit = denoiseDummy2DTexture { return hit }
@@ -5447,16 +5406,6 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
                                   p0: SIMD4(Float(o.low), Float(o.high),
                                             Float(o.lowFeather), Float(o.highFeather)),
                                   p1: SIMD4(feather, 0, 0, 0))
-        case .depthRange(let g):
-            // 120b: the same ordered repair and the same two-sided window as luminance. `near`/`far`
-            // are the user's names; `ordered` maps them to the sampling axis and swaps their feathers
-            // with them. The shape's own `invert` travels in `p1.y` (not the component's `invert`,
-            // which the kernel applies to the combined component).
-            let o = g.ordered
-            return MaskShapeDescU(meta: SIMD4(6, invert, op, 0),
-                                  p0: SIMD4(Float(o.low), Float(o.high),
-                                            Float(o.lowFeather), Float(o.highFeather)),
-                                  p1: SIMD4(feather, g.invert ? 1 : 0, 0, 0))
         case .semantic(let s):
             // 005e: kind 5 samples the OS raster at this component's slice, then applies `softEdge`.
             // No raster ⇒ kind −1, i.e. exactly the pre-005e "zero coverage, never a guess".
@@ -5576,18 +5525,13 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
             // 147: the picture predicates read the sample on the decoder's light (`sample / g`), so a
             // luma/colour selection is the same selection at every EV. `g == 1` divides by one.
-            g: SIMD4(Float(edit.light.exposureGain), 0, 0, 0),
-            // 120b: whether a depth texture is bound. A depth mask with no map writes 0.
-            h: SIMD4(input.depth == nil ? 0 : 1, 0, 0, 0))
+            g: SIMD4(Float(edit.light.exposureGain), 0, 0, 0))
         guard let enc = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
         enc.setComputePipelineState(p)
         enc.setTexture(src, index: 0)
         enc.setTexture(atlas, index: 1)
         // 005e: the resolved mattes (or the 1×1 stand-in). The kernel only samples this for kind 5.
         enc.setTexture(try semanticTexture(for: semantics.rasters), index: 2)
-        // 120b: the depth map (or the 1×1 zero stand-in). Only kind 6 samples it; `p.h.x` says
-        // whether it is a measurement or a stand-in.
-        enc.setTexture(try input.depth ?? depthDummy(), index: 3)
         enc.setBytes(&params, length: MemoryLayout<MaskAtlasParams>.stride, index: 0)
         enc.setBuffer(table.maskBuffer, offset: 0, index: 1)
         enc.setBuffer(table.shapeBuffer, offset: 0, index: 2)

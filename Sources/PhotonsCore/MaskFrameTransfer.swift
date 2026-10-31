@@ -119,7 +119,7 @@ public enum MaskFrameTransfer {
             return .brush(b)
         // No geometry in the parameters: a colour/luminance predicate, an OS matte, or a kind this
         // build cannot interpret (which keeps its bytes and renders nothing — nothing to move).
-        case .colorRange, .luminanceRange, .depthRange, .semantic, .unsupported:
+        case .colorRange, .luminanceRange, .semantic, .unsupported:
             return shape
         }
     }

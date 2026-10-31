@@ -27,7 +27,6 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
     case radialGradient
     case colorRange
     case luminanceRange
-    case depthRange
     case semantic
 
     /// What the 新建 menu says.
@@ -38,7 +37,6 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
         case .radialGradient: return "径向渐变"
         case .colorRange: return "颜色范围"
         case .luminanceRange: return "亮度范围"
-        case .depthRange: return "深度范围"
         case .semantic: return "语义"
         }
     }
@@ -51,7 +49,6 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
         case .radialGradient: return "circle.dashed"
         case .colorRange: return "eyedropper.halffull"
         case .luminanceRange: return "circle.lefthalf.filled"
-        case .depthRange: return "square.stack.3d.down.right"
         case .semantic: return "person.and.background.dotted"
         }
     }
@@ -64,7 +61,6 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
         case .radialGradient: return MaskShape.radialKind
         case .colorRange: return MaskShape.colorRangeKind
         case .luminanceRange: return MaskShape.luminanceRangeKind
-        case .depthRange: return MaskShape.depthRangeKind
         case .semantic: return MaskShape.semanticKind
         }
     }
@@ -86,7 +82,6 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
         case .radialGradient: return .radialGradient
         case .colorRange: return .colorRange
         case .luminanceRange: return .luminanceRange
-        case .depthRange: return .depthRange
         case .semantic: return .semantic
         case .unsupported: return nil
         }
@@ -449,7 +444,7 @@ extension CatalogSession {
         switch kind {
         case .brush: return 0.5
         case .linearGradient, .radialGradient: return 0.5
-        case .colorRange, .luminanceRange, .depthRange, .semantic: return 0.5
+        case .colorRange, .luminanceRange, .semantic: return 0.5
         }
     }
 
@@ -480,11 +475,6 @@ extension CatalogSession {
             return .luminanceRange(LuminanceRangeShape(low: 0.0,
                                                        high: LuminanceRangeShape.hdrMax,
                                                        lowFeather: 0.10, highFeather: 0.10))
-        case .depthRange:
-            // The whole depth axis, with the documented default feathers. With no depth map the
-            // mask covers nothing and the panel says why; the moment a map arrives it selects the
-            // frame, and the user narrows it from the 近端/远端 rows.
-            return .depthRange(DepthRangeShape.default)
         case .semantic:
             // The route table decides the provider, not the menu: `CIRAWFilter` answers sky/hair/
             // skin/teeth/glasses/person, Vision answers subject/person. Asking the wrong one would

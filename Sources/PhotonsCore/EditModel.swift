@@ -121,12 +121,14 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// because no *other* key gained or changed meaning; a pre-158 reader would reject the new shape,
     /// but this build's decoder is the compatibility contract.
     ///
-    /// **13 (2026-10-31): 120b's depth-assisted 去雾 is deleted model-wide.** `effects.dehazeDepth`
-    /// was a second strength on the dehaze stage, and the depth map it read is environment, not a
-    /// document. The decode drops the key and the `;dd=` token disappears with it; a document that
-    /// still carries `effects.dehazeDepth` is stamped — but only when the old key is actually there,
-    /// because a document that never wrote it must keep its bytes (and the same rule schema 11 used
-    /// when `blackLevel`/`whiteLevel` went away).
+    /// **13 (2026-10-31): 120b is deleted model-wide — the depth-assisted 去雾 and the depth mask.**
+    /// `effects.dehazeDepth` was a second strength on the dehaze stage, and `MaskShape.depthRange`
+    /// was a two-sided window on the depth map; the map itself is environment, not a document. The
+    /// decode drops the key and the `;dd=` token disappears with it, and a `depthRange` component is
+    /// **removed** from the mask list rather than preserved as `.unsupported` (a shape the UI could
+    /// neither draw nor delete would be a dead row). Stamped — but only when one of the two old
+    /// forms is actually present, because a document that has neither must keep its bytes: the same
+    /// rule schema 11 used when `blackLevel`/`whiteLevel` went away.
     public static let currentSchemaVersion = 13
     /// Per-document processing version. Behaviour changes bump this, and old documents keep their
     /// old rendering (darktable's snapshot semantics, not RawTherapee's global version bump).
@@ -476,10 +478,46 @@ public struct EditModel: Sendable, Equatable, Codable {
         // carries `effects.dehazeDepth` loses the strength it named (and re-keys once, because the
         // `;dd=` token disappears). Stamped, unlike the additive schema-7…12 keys: the bytes change
         // (a key disappears) and the pixels would change had anything ever set it.
-        if v.schemaVersion < 13,
+        //
+        // The two halves of 13 share one version number but must both run: a document can carry
+        // *both* old forms, and the first half stamps, so the second cannot test the version it is
+        // about to overwrite. `incomingSchema` is what the file said, read before any stamp.
+        let incomingSchema = v.schemaVersion
+        if incomingSchema < 13,
            let ec = try? c.nestedContainer(keyedBy: AnyCodingKey.self, forKey: AnyCodingKey("effects")),
            ec.contains(AnyCodingKey("dehazeDepth")) {
             v.schemaVersion = EditModel.currentSchemaVersion
+        }
+        // schema 13, second half: 120b's depth mask is deleted model-wide too, and such a component
+        // is **removed** from the document rather than left as `.unsupported` — an unknown
+        // `depthRange` row would show up in the mask list, render nothing, and have no control to
+        // delete it. A mask left with no component at all goes with it (a mask with nothing to select
+        // is not a mask). Stamped only when something was actually dropped: the shape's only entry
+        // point was `depthAvailable`, which had no caller, so a real document cannot hold one and a
+        // document that does not must keep its bytes.
+        if incomingSchema < 13 {
+            // `MaskShape` has no `depthRange` case any more, so the decode above turned every such
+            // component into `.unsupported`; this is the one place that still knows the name.
+            let retired = "depthRange"
+            var kept: [Mask] = []
+            var pruned = false
+            kept.reserveCapacity(v.masks.count)
+            for mask in v.masks {
+                let components = mask.components.filter { $0.shape.kind != retired }
+                guard components.count != mask.components.count else {
+                    kept.append(mask)
+                    continue
+                }
+                pruned = true
+                guard !components.isEmpty else { continue }
+                var m = mask
+                m.components = components
+                kept.append(m)
+            }
+            if pruned {
+                v.masks = kept
+                v.schemaVersion = EditModel.currentSchemaVersion
+            }
         }
         // 2026-10-28 (078 P0-1): `healSpots` is additive (schema 7/8/9's rule): an absent key reads
         // as `[]`, which is `hasHeal == false` and no S1.9 — so there is nothing to convert and the

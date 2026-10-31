@@ -52,11 +52,6 @@ using namespace metal;
 //   luma    L = OKLab L of p (unclamped; 167 extends the axis to cbrt(16) = +4 EV)
 //           alpha = smoothstep(lo − loF, lo + loF, L) · (1 − smoothstep(hi − hiF, hi + hiF, L))
 //                                                                   (§4.5)
-//   depth   d = depthTexture.sample(uv).r, 0 = farthest, 1 = nearest (120b; the texture is the
-//               min-max normalised disparity, so no second normalisation lives here)
-//           alpha = the SAME two-sided window as luma, applied to d. `near`/`far` are repaired into
-//               lo/hi on the host by `DepthRangeShape.ordered`; `invert` flips this shape only, and
-//               `hasDepth == 0` yields 0 rather than "everything selected".
 //
 // 079 A4 — **feather lives outside the shape.** Until A4 both gradients spent `feather` *inside*
 // their shape (`1 − smoothstep(1−f, 1, r)`, `smoothstep(½−f/2, ½+f/2, t')`), so `feather = 0.5`
@@ -91,9 +86,6 @@ struct MaskAtlasParams {
     // sample **divided by g**, so a mask selects the same scene tones at every exposure; the geometry
     // and the neighbourhood operators never touch this number. `g == 1` is an exact division by 1.
     float4 g;
-    // 120b — `x` = 1 when a depth texture is bound. A depth mask with no map contributes **0**, not
-    // "the whole frame": a missing measurement is not an empty selection.
-    float4 h;
 };
 
 struct MaskDesc {
@@ -113,15 +105,14 @@ struct MaskDesc {
 };
 
 // kind: 0 linear, 1 radial, 2 brush, 3 colour range, 4 luminance range, 5 semantic matte,
-//       6 depth range, −1 not evaluated here.
+//       −1 not evaluated here.
 struct MaskShapeDesc {
     int4   meta;   // kind, componentInvert, op, pad
     float4 p0;     // linear: start.xy, end.xy   |  radial: centre.xy, radius.xy
                    // brush: firstStroke, strokeCount |  colour: firstSample, count, tol, smooth
-                   // luma/depth: low, high, lowFeather, highFeather
+                   // luma: low, high, lowFeather, highFeather
                    // semantic: rasterSlice, pad, pad, pad
     float4 p1;     // linear: midpoint, feather   |  radial: cos, sin, feather
-                   // depth: feather, shapeInvert, pad, pad
                    // semantic: softEdge, feather, pad, pad
 };
 
@@ -129,11 +120,6 @@ struct MaskShapeDesc {
 /// the upsample, so `filter::linear` is the cheapest correct answer and `clamp_to_edge` keeps a
 /// matte that does not quite reach the frame border from darkening it.
 constexpr sampler kSemanticSampler(coord::normalized, filter::linear, address::clamp_to_edge);
-
-/// 120b — the depth map is a low-resolution measurement (the model runs at 518 × 392) sampled at the
-/// **source** uv, exactly like the semantic matte: bilinear + clamp is the correct upsample and the
-/// same coordinate every other shape is measured in.
-constexpr sampler kDepthSampler(coord::normalized, filter::linear, address::clamp_to_edge);
 
 struct MaskStrokeDesc {
     int4   meta;   // pointFirst, pointCount, closed, pad
@@ -371,9 +357,9 @@ static inline float colour_range_alpha(float3 linearRGB, MaskShapeDesc d,
     return 1.0 - smoothstep(tol, upper, best);
 }
 
-/// The two-sided window, shared by the luminance (kind 4) and depth (kind 6) predicates. One
-/// expression, so the two cannot grow different boundary rules: the host repairs an inverted pair
-/// with `RangeOrdering`/`DepthRangeShape.ordered` before it reaches `p0`.
+/// The two-sided window, the luminance predicate's (kind 4). One expression, so a boundary rule
+/// cannot drift between host and kernel: the host repairs an inverted pair with `RangeOrdering`
+/// before it reaches `p0`.
 static inline float two_sided_window(float x, MaskShapeDesc d) {
     float lo = d.p0.x, hi = d.p0.y;
     float loF = max(d.p0.z, 0.0), hiF = max(d.p0.w, 0.0);
@@ -387,22 +373,9 @@ static inline float luminance_range_alpha(float3 linearRGB, MaskShapeDesc d) {
     // this folded `clamp(linearRGB, 0, 1)`, so every pixel at or above display white arrived as
     // `L = 1.0` and `high` above 1 selected nothing: the window had no resolution in the HDR half.
     // The unclamped fold extends the same OKLab axis to +4 EV; negative light is clamped inside
-    // `oklab` exactly as before, so the dark side is unchanged. Depth (kind 6) still calls
-    // `two_sided_window` on its own normalised `0…1` sample — do not extend that one.
+    // `oklab` exactly as before, so the dark side is unchanged.
     float L = oklab(linearRGB).x;
     return two_sided_window(L, d);
-}
-
-/// 120b — the depth mask. `uv` is the same **source** coordinate the luma/colour predicates read
-/// (the mapping from canvas pixel is `source_uv`, shared with every other shape), and the texture is
-/// the normalised disparity (`0` far … `1` near). A missing texture is zero coverage, never "all".
-static inline float depth_range_alpha(float2 uv, MaskShapeDesc d,
-                                      texture2d<float, access::sample> depth, bool hasDepth) {
-    if (!hasDepth) { return 0.0; }
-    float z = clamp(depth.sample(kDepthSampler, uv).r, 0.0, 1.0);
-    float a = two_sided_window(z, d);
-    if (d.p1.y > 0.5) { a = 1.0 - a; }
-    return a;
 }
 
 /// §5 — a raster the OS produced, sampled in **source** uv (the same coordinates every other shape
@@ -423,7 +396,6 @@ template <bool HAS_ROTATION>
 static inline void atlas_body(texture2d<float, access::read> src,
                               texture2d_array<float, access::write> atlas,
                               texture2d_array<float, access::sample> mattes,
-                              texture2d<float, access::sample> depth,
                               constant MaskAtlasParams &p,
                               constant MaskDesc *masks,
                               constant MaskShapeDesc *shapes,
@@ -486,7 +458,6 @@ static inline void atlas_body(texture2d<float, access::read> src,
                 case 3: v = colour_range_alpha(linearRGB, d, colours); break;
                 case 4: v = luminance_range_alpha(linearRGB, d); break;
                 case 5: v = semantic_alpha(uv, d, mattes); break;
-                case 6: v = depth_range_alpha(uv, d, depth, p.h.x > 0.5); break;
                 default: v = 0.0; break;   // unknown kind: no coverage, never a guess
                 }
                 if (d.meta.y != 0) { v = 1.0 - v; }
@@ -513,7 +484,6 @@ static inline void atlas_body(texture2d<float, access::read> src,
 kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
                             texture2d_array<float, access::write> atlas [[texture(1)]],
                             texture2d_array<float, access::sample> mattes [[texture(2)]],
-                            texture2d<float, access::sample> depth [[texture(3)]],
                             constant MaskAtlasParams &p [[buffer(0)]],
                             constant MaskDesc *masks [[buffer(1)]],
                             constant MaskShapeDesc *shapes [[buffer(2)]],
@@ -521,7 +491,7 @@ kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
                             constant float4 *points [[buffer(4)]],
                             constant float4 *colours [[buffer(5)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    atlas_body<false>(src, atlas, mattes, depth, p, masks, shapes, strokes, points, colours, gid);
+    atlas_body<false>(src, atlas, mattes, p, masks, shapes, strokes, points, colours, gid);
 }
 
 // The same body with the pixel-space turn compiled in. `RenderGraph` picks this one only when the
@@ -530,7 +500,6 @@ kernel void s1_5_mask_atlas(texture2d<float, access::read> src [[texture(0)]],
 kernel void s1_5_mask_atlas_rot(texture2d<float, access::read> src [[texture(0)]],
                                 texture2d_array<float, access::write> atlas [[texture(1)]],
                                 texture2d_array<float, access::sample> mattes [[texture(2)]],
-                                texture2d<float, access::sample> depth [[texture(3)]],
                                 constant MaskAtlasParams &p [[buffer(0)]],
                                 constant MaskDesc *masks [[buffer(1)]],
                                 constant MaskShapeDesc *shapes [[buffer(2)]],
@@ -538,5 +507,5 @@ kernel void s1_5_mask_atlas_rot(texture2d<float, access::read> src [[texture(0)]
                                 constant float4 *points [[buffer(4)]],
                                 constant float4 *colours [[buffer(5)]],
                                 uint2 gid [[thread_position_in_grid]]) {
-    atlas_body<true>(src, atlas, mattes, depth, p, masks, shapes, strokes, points, colours, gid);
+    atlas_body<true>(src, atlas, mattes, p, masks, shapes, strokes, points, colours, gid);
 }

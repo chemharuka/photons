@@ -413,15 +413,6 @@ public struct MaskListPanel: View {
                     commit: commit, label: "亮度范围条", coalesce: false)
             }
         }
-        if case .depthRange = shape, !session.depthAvailable {
-            // 120b — a missing measurement is not "everything selected". Say it in the section, not
-            // only in a tooltip: the mask currently covers 0.
-            Text("这张还没算深度：深度蒙版覆盖为 0（先运行深度，或换一张已算过的照片）")
-                .font(.system(size: 9))
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("inspector.mask.depthUnavailable")
-        }
         if case .colorRange(let c) = shape {
             maskEyedropperRow(.colour)
             sampleSwatches(c)
@@ -531,8 +522,6 @@ public struct MaskListPanel: View {
             return String(format: "tol %.2f", c.tolerance)
         case .luminanceRange(let l):
             return String(format: "%.2f – %.2f", l.low, l.high)
-        case .depthRange(let d):
-            return String(format: "%.2f – %.2f", d.far, d.near)
         case .semantic(let s):
             return "\(s.kind.displayName) · \(s.rasterDigest == nil ? "未生成" : "已生成")"
         case .brush(let b):
