@@ -752,6 +752,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The rung the last presented frame came from — what `framing()` measures and what an edit
     /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
     private var decoded: LinearImage?
+    /// 202 ④ — **whose pixels `decoded` holds** (`makeFrame`'s base identity).
+    ///
+    /// A photo switch does not clear the resident buffer: it stays until the next photo's first frame
+    /// replaces it. `framing()` read it unconditionally, so between the switch and that frame the
+    /// projection was built from the *previous* photo's pixel grid while the crop draft and
+    /// `cropSourceSize` were the new photo's — the frame came out as a small patch in the corner
+    /// (「刚好是 1/4 面积的左上角」) until the frame job caught up. A buffer is only usable for the
+    /// photo it is a buffer of.
+    private var decodedIdentity: String?
     /// 派单 105: which file `decoded` came from, so the automatic black level can ask the decoder for
     /// a second, measurement-only development of the same pixels' source. Set next to `decoded`.
     private var decodedURL: URL?
@@ -2937,7 +2946,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the camera has to describe the same picture the frame job renders (`canvasEdit`), or the
         // overlay would be projected through a crop the pixels no longer have.
         let edit = cropTool.canvasEdit(from: session?.edit ?? .neutral)
-        if let image = decoded {
+        // 202 ④ — only a buffer of **this** photo may describe this photo's projection.
+        if let image = decoded, decodedIdentity == backdropPhotoKey {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
                                 decodeScale: decodedScale,
@@ -4429,6 +4439,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             }
             return
         }
+        // 202 ④ — **a draft that belongs to the previous photo is never laid out.** A photo switch
+        // publishes the new anchor and the new source size before the observation that re-seeds the
+        // draft runs; the turns in between projected the old rect through the new framing, which is
+        // the small box in the corner the report describes. The re-seed is synchronous and happens
+        // here — the one place the overlay is built — so there is no window in which a wrong frame
+        // can reach the screen (the ask's preferred fix: 「同步种好…在第一次 present 之前」).
+        if cropTool.reseedIfPhotoMoved() { cropBar.sync() }
         // ② (2026-10-27) — mid-animation the frame is a rect of the *picture on the canvas*, not of the
         // camera: project it with the bridge's own mapping and carry it by that frame's own similarity.
         // No clamp and no bar sync here: the draft is already lawful (it was clamped when the stop
@@ -4439,8 +4456,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // has reached right now — so a draft change or a mode refresh during a transition cannot jump
         // the frame to the target either.
         if let bridge = zoomBridge {
-            cropOverlay.layout = cropToolLayout(bridge: bridge,
-                                                progress: progress ?? zoomBridgeProgress())
+            setCropOverlayLayout(cropToolLayout(bridge: bridge,
+                                                progress: progress ?? zoomBridgeProgress()))
             cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
             return
         }
@@ -4448,8 +4465,38 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // clamp belongs on this path and not only on the drag paths. When it moves the draft the bar's
         // numbers move with it, or the readout would describe a rect that is no longer on screen.
         if clampCropFrameToCanvas() { cropBar.sync() }
-        cropOverlay.layout = cropToolLayout()
+        setCropOverlayLayout(cropToolLayout())
         cropOverlay.active = cropTool.isDragging ? cropTool.lastHandle : nil
+    }
+
+    /// 202 ④ — **the overlay's layout log**, one entry per frame the overlay is given.
+    ///
+    /// Each entry names the photo the draft belongs to, so a test can say 「the first layout after the
+    /// switch is the new photo's rect」 instead of reading the view at some wall-clock instant (which
+    /// is neither a frame nor a guarantee). Capped like the other per-frame logs.
+    public struct CropOverlayLayoutFrame: Equatable, Sendable {
+        public let photoID: String?
+        public let crop: CropRect
+        public let corners: CGRect?
+    }
+    public private(set) var cropOverlayLayoutFrames: [CropOverlayLayoutFrame] = []
+    private static let cropOverlayLayoutFrameLimit = 256
+
+    private func setCropOverlayLayout(_ layout: CropToolLayout?) {
+        cropOverlay.layout = layout
+        let rect = layout.map { l -> CGRect in
+            let xs = l.corners.map(\.x), ys = l.corners.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else { return .zero }
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+        cropOverlayLayoutFrames.append(CropOverlayLayoutFrame(photoID: cropTool.draftPhotoID,
+                                                              crop: cropTool.draft.crop,
+                                                              corners: rect))
+        if cropOverlayLayoutFrames.count > Self.cropOverlayLayoutFrameLimit {
+            cropOverlayLayoutFrames
+                .removeFirst(cropOverlayLayoutFrames.count - Self.cropOverlayLayoutFrameLimit)
+        }
     }
 
     /// 169 §0 — the bar is laid out against the **layout's** canvas, not a second reading of
@@ -5754,6 +5801,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             graphPhoto = nil
         }
         decoded = image
+        decodedIdentity = baseIdentity
         decodedURL = url
         decodedScale = ds
         decodedCaps = outcome.rung.capabilities
