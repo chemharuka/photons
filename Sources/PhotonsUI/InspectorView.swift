@@ -1434,14 +1434,6 @@ public struct InspectorView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .accessibilityIdentifier("inspector.correction.autoProfile")
-        } else if spec.section == .effects, !session.depthAvailable {
-            // 120b — the user's rule: no depth map, no pretending. The 去雾深度 row is disabled for
-            // the same reason; this line says which fact is missing.
-            Text("这张还没算深度：去雾深度辅助不可用")
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .accessibilityIdentifier("inspector.effects.depthUnavailable")
         }
     }
 
@@ -1492,7 +1484,6 @@ public struct InspectorView: View {
                   decimals: row.decimals,
                   rounding: row.rounding,
                   editable: row.editable,
-                  enabled: !row.requiresDepth || session.depthAvailable,
                   accessibilityID: "\(accessibilityPrefix).\(row.title)",
                   onReset: { resets.field(row.keyPath, label: row.title) }) { editing in
             if !editing { session.commitEdit() }
@@ -1713,10 +1704,6 @@ public struct InspectorView: View {
         /// 0.01 — `edit.light.exposure * 100` is an integer — the others keep their own quantization
         /// (整数行 stay integers because their step is 1; 细节 / 白平衡 quantize in the model).
         public var quantum: Double = 0
-        /// 120b — this row only means something when the picture has a depth map (去雾深度). The card
-        /// disables it and draws the reason instead of letting a slider claim an operation that
-        /// cannot run.
-        public var requiresDepth: Bool = false
 
         /// The field's own default, read from the neutral document — never a hard-coded number.
         public var defaultValue: Double { EditModel.neutral[keyPath: keyPath] }
@@ -1809,7 +1796,7 @@ public struct InspectorView: View {
     /// table's four-axis contract intact for every test and for the baseline arithmetic).
     ///
     /// 164 moved the old 纹理 / 清晰度 / 去雾 block out of this table: 纹理 / 清晰度 are the new
-    /// **细节** card's first block, 去雾 / 去雾深度 are the **效果** card's first block.
+    /// **细节** card's first block, 去雾 is the **效果** card's first block.
     public static let textureClarityRows: [ToneRow] = [
         ToneRow(title: "纹理", range: -100 ... 100, format: "%.0f", shape: .knob,
                 keyPath: \.effects.texture),
@@ -1847,20 +1834,15 @@ public struct InspectorView: View {
     public static var detailFXRows: [ToneRow] { textureClarityRows + nonBayerRows }
 
     /// 2026-10-28 (P0-6) / 117 / 164 — the 效果 card's 去雾 block: S1.9 (117 moved it to the
-    /// scene-linear chain), Lightroom's Presence triple's last row plus 120b's depth assist.
+    /// scene-linear chain), Lightroom's Presence triple's last row.
     ///
-    /// The travel is the kernel's: −100…100 (0…100 for the depth strength). 0 means the veil is not
-    /// touched — and when both are 0 S1.9 is not encoded at all, so the frame is the pre-117 frame
-    /// byte for byte.
+    /// The travel is the kernel's: −100…100. 0 means the veil is not touched — and then S1.9 is not
+    /// encoded at all, so the frame is the pre-117 frame byte for byte.
     public static let dehazeRows: [ToneRow] = [
         // 117: 去雾 runs in the scene-linear chain (S1.9), so its row carries the linear-domain red
         // (071's class) like the vignette rows in 校正.
         ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .linear,
                 keyPath: \.effects.dehaze),
-        // 120b: the depth-assisted distribution, directly under 去雾 (the user's own wording). Its
-        // stage is still S1.9; 0 is the pre-120b frame byte for byte, and no depth map disables it.
-        ToneRow(title: "去雾深度", range: 0 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.dehazeDepth, requiresDepth: true),
     ]
 
     /// The 效果 card's rows in draw order — 164 leaves it two blocks and **no detail rows**:
@@ -2010,7 +1992,8 @@ public struct InspectorView: View {
             section: .calibration, group: .calibration,
             blocks: [Block(group: .tone, rows: InspectorView.calibrationRows)])
 
-        /// 164 — 效果 keeps only 去雾 / 去雾深度 and 颗粒.
+        /// 164 — 效果 keeps only 去雾 and 颗粒. (179 landed the 校准 card above; this lane deleted
+        /// the depth row, so both sides of the conflict survive.)
         public static let effectsCard = PanelCardSpec(
             section: .effects, group: .effects,
             blocks: [Block(group: .dehaze, rows: InspectorView.dehazeRows),
@@ -3118,7 +3101,7 @@ public struct PanelResets {
         case correction
         /// 164: 细节 — 纹理 / 清晰度 / 去噪 / 去彩噪, one double-click.
         case detailFX
-        /// 2026-10-28: 效果 — 去雾 / 去雾深度 + 颗粒, one double-click (164 removed the detail rows).
+        /// 2026-10-28: 效果 — 去雾 + 颗粒, one double-click (164 removed the detail rows).
         case effects
         /// 2026-10-28 (P0 色彩分级): 色彩分级 — the nine wheel numbers, one double-click.
         case colorGrading

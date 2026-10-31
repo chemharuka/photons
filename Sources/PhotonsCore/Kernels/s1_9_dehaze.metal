@@ -40,9 +40,9 @@ using namespace metal;
 // edge to black); the knee term is a small lift where the two estimates agree, so the blend cannot
 // dim a foggy region that both estimates call foggy. `knee = 0.15`.
 //
-// The recovery takes no depth term: the depth-assisted distribution is a separate removal
-// (`effects.dehazeDepth` is still carried and `s1_9_dehaze_limit` still measures its p1/p99 window,
-// but `t` no longer reads it).
+// The recovery takes no depth term at all: 120b's depth-assisted distribution (the p1/p99 window
+// `s1_9_dehaze_limit` used to measure and the strength `t` used to read) was removed in 175 — the
+// limit pass now writes `(A, 0, 0, 1)` and `t` is a fact about the picture alone.
 //
 // **The physics.** `I > A` gives `J > I`, and that is correct: a sample under a veil is recovered by
 // dividing by `t`, so the upper bound is `J ≤ I / t0` (10× at `t0 = 0.1`), and the amount it gains is
@@ -138,45 +138,11 @@ struct DehazeParams {
     // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
     // units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is taken on)
     float4 e;
-    // 120b — the canvas → source walk, exactly the fields `s1_5_mask_atlas` uses (same convention,
-    // same turn): contentOrigin.xy, contentSize.xy.
-    float4 f;
-    // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
-    float4 g;
-    // crop rect (left, top, width, height), normalised source
-    float4 h;
-    // cos, sin, flipH, flipV
-    float4 i;
-    // sourceSize.xy, quarterTurns, hasDepth
+    // sourceSize.xy, quarterTurns, pad
     int4 j;
-    // depthStrength (0…1), pad, pad, pad
-    float4 k;
     // the knee (the `tSmooth`/`tPixel` blend width), tests-only legacy block-min `t`, pad, pad
     float4 l;
 };
-
-/// 120b — the model's map is low resolution; bilinear + clamp is the correct upsample, the same
-/// sampler the mask atlas uses.
-constexpr sampler kDepthSampler(coord::normalized, filter::linear, address::clamp_to_edge);
-
-/// 120b — canvas pixel → normalised **uncropped source** uv. This is the same walk
-/// `s1_5_mask_atlas.metal`'s `source_uv` makes (the same fields, the same pixel-space turn from
-/// `frame_turn.metal`), so a depth sample in the dehaze assist sits under the pixels the depth mask
-/// would select. The letterbox guard in the apply pass has already excluded `x < 0`; this returns a
-/// clamped uv for every pixel inside the content rect.
-static inline float2 dehaze_source_uv(float2 pixel, constant DehazeParams &p) {
-    float2 local = pixel + 0.5 - p.f.xy;
-    float2 framePx = local + p.g.zw;
-    float2 uv = framePx / max(p.g.xy, float2(1.0));
-    if (p.i.z > 0.5) { uv.x = 1.0 - uv.x; }
-    if (p.i.w > 0.5) { uv.y = 1.0 - uv.y; }
-    float2 o = (uv - 0.5) * max(p.g.xy, float2(1.0));
-    float2 rotated = frame_turn_pixels(o, p.i.x, p.i.y);
-    float2 r = rotated / max(p.g.xy, float2(1.0)) + 0.5;
-    float2 cropped = p.h.xy + r * p.h.zw;
-    if (p.j.z != 0) { cropped = frame_unturn_uv(cropped, p.j.z); }
-    return clamp(cropped, 0.0, 1.0);
-}
 
 /// Per `q × q` block: `min` over the block of `min` over channels, in **linear Rec2020**. `min` is
 /// associative, so one block-level minimum is exactly the dark channel at the resolution `t` lives at
@@ -269,15 +235,10 @@ constant uint DEHAZE_LIMIT_LANES = 256;
 kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::read> airlight [[texture(1)]],
                               texture2d<float, access::write> limited [[texture(2)]],
-                              texture2d<float, access::sample> depth [[texture(3)]],
                               constant DehazeParams &p [[buffer(0)]],
                               uint tid [[thread_position_in_threadgroup]]) {
     threadgroup float scratch[DEHAZE_LIMIT_LANES];
     threadgroup float tailCount;
-    // 120b — the depth assist's robust window, estimated in the **same pass** as 135's p99(L): one
-    // 64-bin histogram of the depth map over the picture rect, then p1/p99 read off the cumulative
-    // counts. No extra dispatch is added to S1.9.
-    threadgroup atomic_uint depthHist[64];
 
     int w = p.c.x, h = p.c.y;
     int x0 = clamp(int(round(p.b.x)), 0, max(w - 1, 0));
@@ -285,20 +246,6 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
     int cw = clamp(int(round(p.b.z)), 1, max(w - x0, 1));
     int ch = clamp(int(round(p.b.w)), 1, max(h - y0, 1));
     int n = cw * ch;
-    bool useDepth = p.j.w != 0 && p.k.x > 0.0;
-    if (useDepth) {
-        if (tid < 64) { atomic_store_explicit(&depthHist[tid], 0u, memory_order_relaxed); }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (int s = int(tid); s < n; s += int(DEHAZE_LIMIT_LANES)) {
-            int x = x0 + s % cw;
-            int y = y0 + s / cw;
-            float2 uv = dehaze_source_uv(float2(float(x) + 0.5, float(y) + 0.5), p);
-            float z = clamp(depth.sample(kDepthSampler, uv).r, 0.0, 1.0);
-            uint bin = uint(min(int(z * 64.0), 63));
-            atomic_fetch_add_explicit(&depthHist[bin], 1u, memory_order_relaxed);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
 
     // At most ~65 k samples: enough that the 1 % tail is measured from ~650 pixels, cheap enough
     // that the pass is invisible next to the two full-resolution passes around it.
@@ -342,27 +289,7 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
     // drops 42 % instead of the required 50 %.
     if (kappa > 0.0 && A > ceiling * 1.02) { A = kappa * ceiling; }
 
-    float depthLo = 0.0, depthHi = 1.0;
-    if (useDepth && tid == 0) {
-        uint total = 0;
-        for (int i = 0; i < 64; ++i) {
-            total += atomic_load_explicit(&depthHist[i], memory_order_relaxed);
-        }
-        uint lowTarget = max(1u, uint(0.01 * float(total)));
-        uint highTarget = max(1u, uint(0.99 * float(total)));
-        uint acc = 0;
-        int loBin = 0, hiBin = 63;
-        bool haveLo = false;
-        for (int i = 0; i < 64; ++i) {
-            acc += atomic_load_explicit(&depthHist[i], memory_order_relaxed);
-            if (!haveLo && acc >= lowTarget) { loBin = i; haveLo = true; }
-            if (acc >= highTarget) { hiBin = i; break; }
-        }
-        depthLo = float(loBin) / 64.0;
-        depthHi = float(hiBin + 1) / 64.0;
-        if (depthHi <= depthLo) { depthHi = min(depthLo + 1.0 / 64.0, 1.0); }
-    }
-    limited.write(float4(clamp(A, 1e-4, 8.0), depthLo, depthHi, 1.0), uint2(0, 0));
+    limited.write(float4(clamp(A, 1e-4, 8.0), 0.0, 0.0, 1.0), uint2(0, 0));
 }
 
 // MARK: - 2026-10-31 — the guided-filter veil (block resolution)
@@ -496,7 +423,6 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::sample> veil [[texture(1)]],
                               texture2d<float, access::read> limited [[texture(2)]],
                               texture2d<float, access::write> dst [[texture(3)]],
-                              texture2d<float, access::sample> depth [[texture(4)]],
                               texture2d<float, access::sample> darkRaw [[texture(5)]],
                               constant DehazeParams &p [[buffer(0)]],
                               uint2 gid [[thread_position_in_grid]]) {

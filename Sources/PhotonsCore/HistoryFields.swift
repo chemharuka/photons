@@ -338,8 +338,6 @@ extension EditHistory {
         num("effects.nonBayerColorNR", .effects,
             before.effects.nonBayerColorNR, after.effects.nonBayerColorNR)
         num("effects.dehaze", .effects, before.effects.dehaze, after.effects.dehaze)
-        num("effects.dehazeDepth", .effects,
-            before.effects.dehazeDepth, after.effects.dehazeDepth)
         // 185 — S3.10's four numbers, so the history panel reads 「锐化数量 +80」 rather than a
         // nameless 细节 row, and a 半径/细节/蒙版 drag is visible as its own leaf.
         num("sharpen.amount", .effects, before.sharpen.amount, after.sharpen.amount)
@@ -584,7 +582,6 @@ extension EditHistory {
         "effects.nonBayerLuminanceNR": "去噪",
         "effects.nonBayerColorNR": "去彩噪",
         "effects.dehaze": "去雾",
-        "effects.dehazeDepth": "去雾深度",
         // 185 — S3.10. Deliberately distinct from the decoder's 锐化 pair below: this is the
         // 显示域 pass, and a history row that said 「锐化」 for both would hide which of the two moved.
         "sharpen.amount": "锐化数量",

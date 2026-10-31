@@ -435,8 +435,8 @@ public struct ColorRangeShape: Sendable, Equatable, Codable {
 
 /// The one repair for a two-sided range whose bounds arrived in the opposite order: the bounds swap
 /// **with their own feathers**, so a mirrored window renders as the mirror of the original and never
-/// as an empty selection (§4.5). Both `LuminanceRangeShape` and `DepthRangeShape` call this, so the
-/// two windows cannot grow different boundary rules.
+/// as an empty selection (§4.5). `LuminanceRangeShape` calls this, so the window keeps one boundary
+/// rule.
 enum RangeOrdering {
     static func ordered(low: Double, high: Double, lowFeather: Double, highFeather: Double)
         -> (low: Double, high: Double, lowFeather: Double, highFeather: Double) {
@@ -451,7 +451,7 @@ enum RangeOrdering {
 /// `oklab(clamp(linearRGB, 0, 1))`, so every pixel at or above display white arrived as `L = 1`
 /// and the upper half of the window had no resolution. It now folds the unclamped light, which
 /// extends the same OKLab axis to `cbrt(16) = 2.5198` — the +4 EV end of HDR. `low`, `high` and
-/// both feathers are all in that one unit. The depth window keeps its own `0…1` axis.
+/// both feathers are all in that one unit.
 public struct LuminanceRangeShape: Sendable, Equatable, Codable {
     /// The top of the luminance axis: OKLab `L` of neutral light at +4 EV (`cbrt(16)`).
     ///
@@ -554,68 +554,6 @@ public struct LuminanceRangeShape: Sendable, Equatable, Codable {
 
     public var keyString: String {
         "luma(lo=\(k(low));hi=\(k(high));loF=\(k(lowFeather));hiF=\(k(highFeather)))"
-    }
-}
-
-/// 120b — a two-sided window on the **normalised depth map**, in the same 0…1 unit as
-/// `LuminanceRangeShape`:
-///
-///   · `0` = farthest, `1` = nearest. The texture handed to the renderer is
-///     `DepthMap.normalised()` (min-max of the model's disparity; see `PhotonsDepth.DepthMap`), so the
-///     document's number and the kernel's sample are the same quantity at every resolution.
-///   · `near`/`far` name the two edges as the user sees them; an inverted pair is repaired by
-///     `ordered`, which swaps the bounds **with their feathers** exactly as the luminance window does
-///     (`RangeOrdering`). The kernel's boundary rule is the luminance window's own
-///     `smoothstep(edge − feather, edge + feather, x)`.
-///   · `invert` flips this shape's own coverage (inside ↔ outside the window). It is independent of
-///     `MaskComponent.invert`, which flips the component before combination.
-///
-/// The shape reads no picture: a document whose depth has not been computed yet renders coverage 0
-/// for it, never "the whole frame" (the kernel is told `hasDepth == 0`).
-public struct DepthRangeShape: Sendable, Equatable, Codable {
-    /// 0…1, 1 = nearest.
-    public var near: Double
-    /// 0…1, 0 = farthest.
-    public var far: Double
-    public var nearFeather: Double
-    public var farFeather: Double
-    public var invert: Bool
-
-    public static let `default` = DepthRangeShape()
-
-    public init(near: Double = 1, far: Double = 0,
-                nearFeather: Double = 0.10, farFeather: Double = 0.10,
-                invert: Bool = false) {
-        self.near = near
-        self.far = far
-        self.nearFeather = nearFeather
-        self.farFeather = farFeather
-        self.invert = invert
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let c = try decoder.container(keyedBy: AnyCodingKey.self)
-        var v = DepthRangeShape.default
-        v.near = c.val("near", v.near)
-        v.far = c.val("far", v.far)
-        v.nearFeather = c.val("nearFeather", v.nearFeather)
-        v.farFeather = c.val("farFeather", v.farFeather)
-        v.invert = c.val("invert", v.invert)
-        self = v
-    }
-
-    public var isOrdered: Bool { !(near < far) }
-
-    /// `far`/`near` as the low/high edges of the sampling axis, repaired by the luminance window's
-    /// own rule: an inverted pair swaps its bounds **and their feathers** (`RangeOrdering`).
-    public var ordered: (low: Double, high: Double, lowFeather: Double, highFeather: Double) {
-        RangeOrdering.ordered(low: far, high: near,
-                              lowFeather: farFeather, highFeather: nearFeather)
-    }
-
-    public var keyString: String {
-        "depth(near=\(k(near));far=\(k(far));nearF=\(k(nearFeather));farF=\(k(farFeather))"
-            + ";inv=\(invert ? 1 : 0))"
     }
 }
 
@@ -809,7 +747,6 @@ public enum MaskShape: Sendable, Equatable {
     case brush(BrushShape)
     case colorRange(ColorRangeShape)
     case luminanceRange(LuminanceRangeShape)
-    case depthRange(DepthRangeShape)
     case semantic(SemanticShape)
     case unsupported(kind: String, payload: JSONValue)
 
@@ -818,7 +755,6 @@ public enum MaskShape: Sendable, Equatable {
     public static let brushKind = "brush"
     public static let colorRangeKind = "colorRange"
     public static let luminanceRangeKind = "luminanceRange"
-    public static let depthRangeKind = "depthRange"
     public static let semanticKind = "semantic"
 
     /// The `kind` string written to the document.
@@ -829,7 +765,6 @@ public enum MaskShape: Sendable, Equatable {
         case .brush: return MaskShape.brushKind
         case .colorRange: return MaskShape.colorRangeKind
         case .luminanceRange: return MaskShape.luminanceRangeKind
-        case .depthRange: return MaskShape.depthRangeKind
         case .semantic: return MaskShape.semanticKind
         case .unsupported(let kind, _): return kind
         }
@@ -840,7 +775,7 @@ public enum MaskShape: Sendable, Equatable {
     /// contributes zero coverage with a recorded reason instead of an approximation.
     public var isRenderableNow: Bool {
         switch self {
-        case .linearGradient, .radialGradient, .brush, .colorRange, .luminanceRange, .depthRange,
+        case .linearGradient, .radialGradient, .brush, .colorRange, .luminanceRange,
              .semantic:
             return true
         case .unsupported: return false
@@ -860,7 +795,6 @@ public enum MaskShape: Sendable, Equatable {
         case .brush(let s): return s.keyString
         case .colorRange(let s): return s.keyString
         case .luminanceRange(let s): return s.keyString
-        case .depthRange(let s): return s.keyString
         case .semantic(let s): return s.keyString
         // Sorted keys and shortest-round-trip numbers: the same text in every process.
         case .unsupported(let kind, let payload): return "unknown(\(kind);\(payload.canonicalText))"
@@ -888,7 +822,6 @@ extension MaskShape: Codable {
         case MaskShape.brushKind: self = .brush(try BrushShape(from: decoder))
         case MaskShape.colorRangeKind: self = .colorRange(try ColorRangeShape(from: decoder))
         case MaskShape.luminanceRangeKind: self = .luminanceRange(try LuminanceRangeShape(from: decoder))
-        case MaskShape.depthRangeKind: self = .depthRange(try DepthRangeShape(from: decoder))
         case MaskShape.semanticKind: self = .semantic(try SemanticShape(from: decoder))
         default: self = .unsupported(kind: kind, payload: .object(try Self.payload(from: decoder)))
         }
@@ -913,7 +846,6 @@ extension MaskShape: Codable {
         case .brush(let s): try s.encode(to: encoder)
         case .colorRange(let s): try s.encode(to: encoder)
         case .luminanceRange(let s): try s.encode(to: encoder)
-        case .depthRange(let s): try s.encode(to: encoder)
         case .semantic(let s): try s.encode(to: encoder)
         case .unsupported(_, let payload):
             guard case .object(let fields) = payload else { return }
@@ -1072,18 +1004,6 @@ extension EditModel {
     }
 
     public var hasActiveMasks: Bool { masks.contains { $0.isEnabled } }
-
-    /// 120b — does any **enabled** mask read the depth map? The atlas key must not change when a
-    /// document merely carries a depth texture it does not use (the same "by value, not by presence"
-    /// rule as `hasLocalColor`).
-    public var hasDepthRangeMask: Bool {
-        masks.contains { m in
-            m.isEnabled && m.components.contains {
-                if case .depthRange = $0.shape { return true }
-                return false
-            }
-        }
-    }
 
     /// `"masks"` material of the atlas key: all enabled masks' selection keys, id sorted.
     public var maskSelectionMaterial: String {
@@ -1721,7 +1641,7 @@ public enum MaskBounds {
                 box = box.union(MaskRect.aabb(of: [(lo.x - r, lo.y - r), (hi.x + r, hi.y + r)]) ?? .empty)
             }
             return box.isEmpty ? nil : box
-        case .colorRange, .luminanceRange, .depthRange:
+        case .colorRange, .luminanceRange:
             // Content-dependent: the extent is a property of the picture, not of the parameters, so
             // the honest bound is the frame. A guess here would be a bound that is sometimes small.
             return MaskRect(0, 0, source.width, source.height)

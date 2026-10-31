@@ -96,7 +96,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// two denoises (`effects.nonBayer*`). S3.9, display-referred. Its own row so 「只勾
     /// 细节」 cannot move 开发, 校正 or 效果.
     case detailFX
-    /// 效果 — 去雾 / 去雾深度 + 颗粒, and nothing else since 164 moved 纹理 / 清晰度 to 细节.
+    /// 效果 — 去雾 + 颗粒, and nothing else since 164 moved 纹理 / 清晰度 to 细节.
     case effects
     /// 蒙版 — the mask list, re-identified and re-anchored on paste (P1-5).
     case masks
@@ -1008,7 +1008,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
     /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
     /// + detail 5 + 校正 5 (色差 R/B + 暗角 3) + 细节 4 (纹理/清晰度 + 去噪/去彩噪 ×2) + 效果 5
-    /// (颗粒 1 + 去雾/去雾深度 + …) — 164's split changed the reading, not the storage.
+    /// (颗粒 1 + 去雾 + …) — 164's split changed the reading, not the storage.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + ColorGradingPatch.fullFieldCount

@@ -84,12 +84,7 @@ for bundle in "$BUILD_DIR"/*.bundle; do
 done
 
 xattr -cr "$APP" 2>/dev/null || true
-# The depth weights are a Core ML *package*: SwiftPM cannot carry that directory type, so it is
-# compiled into the bundle here — **before** signing, because adding files to a signed bundle makes
-# `codesign --verify` fail with "a sealed resource is missing or invalid" (measured on this machine).
-if [[ -x scripts/depth-model.sh ]]; then
-    scripts/depth-model.sh || { echo "bundle-app: depth model step failed" >&2; exit 1; }
-fi
+
 # Ad-hoc signature: enough to launch locally and to keep Gatekeeper quiet on this machine.
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 \
     || codesign --force --sign - "$APP" \
