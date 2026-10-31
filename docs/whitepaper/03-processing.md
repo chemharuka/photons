@@ -39,7 +39,7 @@
 | 锐化 | `amount` 0…150、`radius` 0.5…3、`detail`/`masking` 0…100 | 显示参考 | **S3.10** | USM |
 | 光学 | `caRed`、`caBlue` ±0.005（滑杆 ±100） | 源像素 | **S0** | 径向比例，不是像素位移 |
 | 校准 | `shadowTint`、R/G/B × (`hue`,`sat`) ±100 | 场景线性 | **S1** | 线性 Rec.2020 上的 3×3 矩阵 |
-| 蒙版 | 形状 + `opacity`/`feather`/`refine`/`invert`/`blend` + 13 个局部量 | 两域 | **S1.5/S1.6/S3.5/S3.9** | 见 3.4 |
+| 蒙版 | 形状 + `opacity`/`feather`/`refine`/`invert`/`blend` + 12 个局部量 | 两域 | **S1.5/S1.6/S3.5/S3.9** | 见 3.4 |
 | 光线 | `temperature` 2000…12000 K（`nil` = as shot）、`tint` ±150（`nil`） | 场景线性 | **S1** | 自 143 起是增益，不是解码参数；`nil` = 增益 1 |
 | 解码 | `sharpening` 0…150、`sharpeningRadius` 0.5…3、`noiseLuminance/Color` 0…100、`lensCorrections` | 解码域 | `CIRAWFilter` | 机身基线，改它要重新解码 |
 
@@ -95,9 +95,9 @@
 | S3.5 | 某蒙版带色相或饱和 | `:220` |
 | S3.6 | 24 个 HSL 数任一非零 | `EditModel.swift:1933` |
 | S3.6b | 至少一个采样色且被调整 | `:1943` |
-| S3.8 | 九个分级数为任一非零 | `EditModel.swift:2163` |
+| S3.8 | 九个分级数为任一非零 | `EditModel.swift:402` |
 | S3.9 | 纹理/清晰度/去噪/去彩噪任一非零 | `:2293` |
-| S3.10 | `amount > 0` | `EditModel.swift:2434` |
+| S3.10 | `amount > 0` | `EditModel.swift:381` |
 | S3.7 | `grain > 0` | `:2287` |
 
 谓词为假时，该阶段的链接**整条不写**：不是「写一个中性值」，而是让键链与阶段列表都退化成没有这个功能时的样子。这就是为什么老文档的 trace、键、像素能同时逐字节复现（`Stage.swift:15`）。
