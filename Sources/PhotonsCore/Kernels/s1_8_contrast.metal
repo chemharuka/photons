@@ -437,12 +437,22 @@ kernel void s1_8_g_contrast_apply_masked(texture2d<float, access::read> src [[te
     //
     // Rebuild the same luma gain S1.6 applied — `(1 − w) + w · dot(d.a.xyz, lw)` per mask, in mask
     // order, since S1.6 mixes in linear RGB and `Y` is linear in RGB — and put it under the `log2`
-    // together with the global gain. With no mask, or with a gain of exactly 1, the product is
-    // exactly `1` and `p.c.z * 1` is bit-identical to `p.c.z`: the global entry point does not move.
+    // together with the global gain.
+    //
+    // **A gain of 1 must be skipped, not multiplied.** `lw` is the Rec2020 triple and its float32 sum
+    // is `0.99999994`, not 1 (`0.2627f + 0.6780f + 0.0593f`, one ULP low), so `dot(float3(1), lw)` is
+    // `1 − 2⁻²⁴` even for an identity mask. `mix(1, 1 − 2⁻²⁴, w)` is then ≠ 1 and five masks deepen it to
+    // `0.9999997`: `log2` moves by −4.3e−7, the decomposition answers a slightly different picture and
+    // a high-contrast document lands on a different code — the five-all-zero-masks document stopped
+    // being byte-identical to the unmasked one (measured: `push` `1ccecf69…` vs golden `69f1abb3…`).
+    // The identity vector is the "S1.6 multiplied by exactly 1" case, so the reconstruction is exactly
+    // 1 and the multiply is dropped; that keeps the masked path bit-identical to `s1_8_g_contrast_apply`
+    // when no mask changes anything.
     float maskGain = 1.0;
     for (uint i = 0; i < uint(max(p.f.y, 0)); ++i) {
         LocalAdjustDesc d = adjust[i];
         if (d.a.w <= 0.0) { continue; }             // amount 0: S1.6 skips it too
+        if (all(d.a.xyz == float3(1.0))) { continue; } // gain exactly 1: nothing to fold in
         float a = atlas.read(gid, i).r;
         float wgt = clamp(a * d.a.w, 0.0, 1.0);
         if (wgt <= 0.0) { continue; }
