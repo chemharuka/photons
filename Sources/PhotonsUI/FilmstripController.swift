@@ -11,6 +11,9 @@ import PhotonsCore
 /// `ThumbnailService` and one memory LRU) for both views, obtained through
 /// `ThumbnailProvider.shared(for:)`. A 111 × 69 pt cell asks for the tier its DPR implies (§1), i.e.
 /// `t256` at 1x and 2x, and the selected cell always goes out at `.onScreen` priority.
+///
+/// 223 — the image itself is a float EDR layer (`ThumbnailEDRView`); the card paints the gradient
+/// underneath and a transparent overlay paints the ring/badge above it.
 public final class FilmstripCell: NSCollectionViewItem {
     public static let reuseIdentifier = NSUserInterfaceItemIdentifier("FilmstripCell")
 
@@ -35,13 +38,37 @@ public final class FilmstripCell: NSCollectionViewItem {
 }
 
 public final class FilmstripCard: NSView {
-    public var asset: Asset? { didSet { needsDisplay = true } }
-    public var isActive = false { didSet { needsDisplay = true } }
-    public var isPicked = false { didSet { needsDisplay = true } }
+    public var asset: Asset? { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var isActive = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var isPicked = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     /// The decoded thumbnail, or nil while the hash-derived placeholder is all we have.
-    public var thumbnail: CGImage? { didSet { if thumbnail !== oldValue { needsDisplay = true } } }
+    public var thumbnail: CGImage? {
+        didSet {
+            thumbnailView.image = thumbnail
+            thumbnailView.isHidden = thumbnail == nil
+            overlay.needsDisplay = true
+        }
+    }
     /// Which tier the current image came from — `--ui-smoke` asserts the DPR choice against it.
     public var thumbnailTier: ThumbTier?
+    /// 223 — the pixel rectangle this cell asked the provider for.
+    public var thumbnailDisplayPixels: ImageSize?
+
+    /// The EDR surface, exposed for the acceptance read-back.
+    public var thumbnailLayer: CALayer? { thumbnailView.layer }
+
+    private let thumbnailView = ThumbnailEDRView(cornerRadius: 6)
+    private let overlay = FilmstripOverlayView()
+
+    public override init(frame frameRect: NSRect = .zero) {
+        super.init(frame: frameRect)
+        thumbnailView.isHidden = true
+        addSubview(thumbnailView)
+        overlay.card = self
+        addSubview(overlay)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs") }
 
     /// 「原文件已移动」 for this cell, or nil — the same string the grid card and the inspector use.
     public var missingLabel: String? { asset?.isMissing == true ? MissingFileText.moved : nil }
@@ -50,10 +77,20 @@ public final class FilmstripCard: NSView {
 
     public override var isFlipped: Bool { true }
 
+    private var thumbRect: NSRect {
+        NSRect(x: 0, y: 0, width: bounds.width,
+               height: max(1, bounds.height - WorkspaceLayout.filmstripCaptionHeight))
+    }
+
+    public override func layout() {
+        super.layout()
+        thumbnailView.frame = thumbRect
+        overlay.frame = bounds
+    }
+
     public override func draw(_ dirtyRect: NSRect) {
         guard let asset else { return }
-        let thumb = NSRect(x: 0, y: 0, width: bounds.width,
-                           height: bounds.height - WorkspaceLayout.filmstripCaptionHeight)
+        let thumb = thumbRect
         let radius: CGFloat = 6
         let path = NSBezierPath(roundedRect: thumb, xRadius: radius, yRadius: radius)
         NSGraphicsContext.saveGraphicsState()
@@ -61,9 +98,14 @@ public final class FilmstripCard: NSView {
         NSGradient(starting: PlaceholderSwatch.color(for: asset.contentHash),
                    ending: PlaceholderSwatch.secondaryColor(for: asset.contentHash))?
             .draw(in: path, angle: -90)
-        if let thumbnail {
-            drawThumbnail(thumbnail, in: thumb)
-        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// Above the EDR image: ring, 「原文件已移动」 and the filename line.
+    fileprivate func drawForeground() {
+        guard let asset else { return }
+        let thumb = thumbRect
+        let radius: CGFloat = 6
         if isPicked || isActive {
             let ring = NSBezierPath(roundedRect: thumb.insetBy(dx: 0.75, dy: 0.75),
                                     xRadius: radius, yRadius: radius)
@@ -71,7 +113,6 @@ public final class FilmstripCard: NSView {
             ring.lineWidth = isActive ? 2 : 1.5
             ring.stroke()
         }
-        NSGraphicsContext.restoreGraphicsState()
 
         // The badge is drawn *outside* the clip so its pill is never cut by the rounded corner, and
         // last, so no selection ring sits on top of the words the user has to read.
@@ -83,23 +124,14 @@ public final class FilmstripCard: NSView {
         let name = NSRect(x: 0, y: thumb.maxY + 1, width: bounds.width, height: 11)
         (asset.filename as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
     }
+}
 
-    /// Aspect-fill, centre-anchored, inside the already-clipped rounded card.
-    private func drawThumbnail(_ image: CGImage, in rect: NSRect) {
-        let iw = CGFloat(image.width), ih = CGFloat(image.height)
-        guard iw > 0, ih > 0 else { return }
-        let scale = max(rect.width / iw, rect.height / ih)
-        let size = NSSize(width: iw * scale, height: ih * scale)
-        let target = NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
-                            width: size.width, height: size.height)
-        // A flipped view (`isFlipped == true`) plus a raw `CGContext.draw(CGImage)` draws the image
-        // **bottom-up**: the cell is flipped, the CGImage is not. Go through `NSImage` with
-        // `respectFlipped`, which is the only spelling that is correct in both orientations.
-        let ns = NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
-        ns.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1,
-                respectFlipped: true,
-                hints: [.interpolation: NSImageInterpolation.medium])
-    }
+private final class FilmstripOverlayView: NSView {
+    weak var card: FilmstripCard?
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) { card?.drawForeground() }
 }
 
 public final class FilmstripController: NSViewController, NSCollectionViewDataSource, NSCollectionViewDelegate {
@@ -284,6 +316,18 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         view.window?.backingScaleFactor ?? 2
     }
 
+    /// 223 — the swatch is the cell minus its 12 pt filename caption; this is the real pixel size
+    /// the cache decodes to (111 × 57 pt → 222 × 114 px at 2×).
+    private var displayPixels: ImageSize {
+        ThumbnailProvider.displayPixels(
+            swatch: CGSize(width: flow.itemSize.width,
+                           height: max(1, flow.itemSize.height - WorkspaceLayout.filmstripCaptionHeight)),
+            backingScale: backingScale)
+    }
+
+    /// 223 — the bitmap size every strip cell asks the cache for (222 × 114 px at 2×).
+    public var displayPixelSize: ImageSize { displayPixels }
+
     // MARK: right-click (same verbs as the grid)
 
     public func menuForRightClick(_ event: NSEvent?) -> NSMenu? {
@@ -338,9 +382,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.cardView.thumbnailTier = tier
+        let display = displayPixels
+        cell.cardView.thumbnailDisplayPixels = display
         let document = document(for: asset)
         let key = ThumbnailProvider.hdKey(for: asset, document: document)
-        if let cached = provider.serveFromMemory(for: key) {
+        if let cached = provider.serveFromMemory(for: key, display: display) {
             cell.cardView.thumbnail = cached
             return
         }
@@ -349,10 +395,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         if asset.isMissing {
             guard provider.cache.exists(key) else { return }
         }
-        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
             cell.cardView.thumbnail = previous
         }
-        requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
+        requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
 
     /// The live document for the anchor photo, the stored one for every other row (218 key input).
@@ -362,11 +408,13 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         return ThumbnailProvider.document(from: asset)
     }
 
-    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
+    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,
+                                  display: ImageSize, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
         let token = provider.request(index: index, asset: asset, fileURL: url,
                                      document: document(for: asset), tier: tier, spec: .hd,
+                                     display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(index: idx, key: key, image: image)
         }
@@ -419,16 +467,20 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             thumbRequests.removeValue(forKey: index)
         }
 
+        let display = displayPixels
         for index in wanted {
             guard index < session.assets.count else { continue }
             let asset = session.assets[index]
-            if provider.memoryImage(contentHash: asset.contentHash, tier: cellTier) != nil { continue }
+            if provider.memoryImage(for: ThumbnailProvider.hdKey(for: asset,
+                                                                 document: document(for: asset)),
+                                     display: display) != nil { continue }
             if thumbRequests[index] != nil { continue }
             // §4 ①②: the selected/anchor cell wins even if it is only in the slack band; the rest of
             // the visible window is on-screen work; the slack is prefetch.
             let isAnchor = session.anchorID == asset.id || session.selection.contains(asset.id)
             let priority: ThumbPriority = (isAnchor || visible.contains(index)) ? .onScreen : .prefetch
-            requestThumbnail(index: index, asset: asset, tier: cellTier, priority: priority)
+            requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
+                             priority: priority)
         }
     }
 
