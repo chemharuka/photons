@@ -1841,8 +1841,16 @@ public final class RenderGraph {
         } ?? frame
         // Where the picture's own frame starts inside the baseline, in baseline pixels. Zero — and
         // therefore free — for every un-straightened document.
-        let inset = SIMD2<Float>((Float(baseline.width) - Float(frame.width)) / 2,
-                                 (Float(baseline.height) - Float(frame.height)) / 2)
+        //
+        // 2026-11-01 (D1) — **integer**, i.e. the odd half-pixel is truncated. The window indexes this
+        // baseline with integer pixels, and `s0_geometry` samples `framePx = windowX + local − inset`;
+        // a fractional inset made every windowed frame sample the picture at a half-pixel phase, so a
+        // 1:1 plate could not equal the same-region cut of the whole-frame render (`CropFullResCanvas`
+        // measured 75 codes of difference). With the truncation both renders take the identical walk,
+        // at the price of the picture sitting up to half a pixel off the canvas' exact centre — which
+        // no caller can see, because the canvas is our own construction.
+        let inset = SIMD2<Float>(Float((baseline.width - frame.width) / 2),
+                                 Float((baseline.height - frame.height) / 2))
         let baselineRect = ImageRect(x: 0, y: 0, width: baseline.width, height: baseline.height)
 
         // A window covering the baseline *is* no window: normalizing here means "1:1 on a picture

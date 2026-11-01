@@ -889,20 +889,20 @@ public struct LoupeFraming: Equatable, Sendable {
                                 height: max(1, Int((sourceHeight * ds).rounded())))
         // `sourceWidth`/`crop` are already the turned frame, so no quarter turn enters here.
         //
-        // 2026-11-01 — **the integer margin stays**, deliberately. `cropGeometry.canvasInset` is the
-        // continuous value, and the renderer's `plan` subtracts a `Float` inset, but a windowed 1:1
-        // plate only matches the whole-frame render byte for byte while the window's origin and the
-        // renderer's inset share one rounding (`CropFullResCanvasTests` compares the two at
-        // max |Δ| = 0 codes). Switching this alone to the continuous inset moved the plate by one
-        // pixel whenever `canvas − frame` was odd and broke that identity. Making it *correct* means
-        // snapping the inset in `RenderGraph.plan` too — a deliberate, golden-recording change, not a
-        // drive-by one. See docs/rotate-crop-architecture.md §D1.
-        let origin = CropMath.canvasOrigin(crop: crop, in: decoded,
-                                           straightenDegrees: straightenDegrees,
-                                           quarterTurns: 0)
-        let pxPerDecoded = zoom / ds
-        return (Int((Double(origin.x) * pxPerDecoded).rounded()),
-                Int((Double(origin.y) * pxPerDecoded).rounded()))
+        // 2026-11-01 (D1) — **the renderer's own arithmetic, at the render's own scale.** `plan`
+        // rounds the canvas and the frame to the render grid and then truncates `(baseline − frame)/2`
+        // to an integer; the window it hands over is indexed by that same integer inset. Computing it
+        // any other way here (a continuous margin, or an integer one at 1:1 and then scaled) puts the
+        // 1:1 plate half a pixel off the very render it is a cut of. So: same two roundings, same
+        // truncation, same answer.
+        let canvas = CropMath.canvasSize(crop: crop, in: decoded,
+                                         straightenDegrees: straightenDegrees,
+                                         quarterTurns: 0)
+        let frame = CropMath.frameSize(crop, in: decoded, allowsOutsideSource: true)
+        let scale = zoom / ds
+        func scaled(_ value: Int) -> Int { max(1, Int((Double(value) * scale).rounded())) }
+        return ((scaled(canvas.width) - scaled(frame.width)) / 2,
+                (scaled(canvas.height) - scaled(frame.height)) / 2)
     }
 
     /// The document the renderer should be given for this state, **as an output window** routed

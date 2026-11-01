@@ -111,16 +111,28 @@ orient 一次 —— 奇数 quarter turn 下裁切工具的 `source / frameSize 
 
 ## 3. 诊断出但**没有**在这次改的（及其原因）
 
-### D1 · `(canvas − frame)/2` 的半像素奇偶差
+### D1 · `(canvas − frame)/2` 的半像素奇偶差 — **已修（2026-11-01）**
 
-`CropMath.canvasOrigin` 用整数除法，`RenderGraph.plan` 用 Float，`LoupeFraming` 用整数后再缩放。
-`canvas − frame` 为奇数时两者差 0.5 px。实测：只把 loupe 改成连续值，`CropFullResCanvasTests`
-的「窗口帧 = 整幅帧」断言立刻从 `max|Δ| = 0` 变成 75 码（窗口整体移了 1 px）。
+**症状**：`CropMath.canvasOrigin` 整数除法、`RenderGraph.plan` Float、`LoupeFraming` 整数后再缩放；
+`canvas − frame` 为奇数时窗口帧与整幅帧取样相位差半个像素（实测 75 码），`CropFullResCanvasTests`
+的「窗口帧 = 整幅帧」因此只能在「两边都恰好截断」时成立。
 
-**结论**：要修必须同时把 `plan` 的 inset 也取整（窗口与整幅用同一相位），这会改变所有拉直文档的
-输出相位移，需要重录 L2/L3 金值。这是独立的一次「相位归一」任务，不该塞进这次重构。
-**现状**：新增 `CropGeometry.canvasInset`（连续、权威）已就位，`LoupeFraming.canvasOrigin` 里留注释
-指回这一节；改的时候三处一起改。
+**修法**：把相位定成**整数**，三处取同一个式子。`plan` 的 `inset` 改为
+`(baseline − frame) / 2` 的整数除法；`LoupeFraming.canvasOrigin` 复现同一对 round + 同一个截断
+（按渲染自己的 scale，`baseline = round(canvas·s)`、`frame = round(frameSize·s)`）；
+`CropGeometry.canvasInsetPixels` 是 1:1 下的同一个量，`canvasInset`（连续）只作参考值。
+代价：照片在画布里最多偏 0.5 px（画布是我们自己造的，不可见），换来窗口帧与整幅帧**逐码相等**。
+
+**连带更新**：
+
+- 金值 `render-edit-push-s0.25`（0.8°）与 `render-edit-crop-rot-s0.25`（−12.5°）按新相位重录
+  （像素确实变了，非日期噪音）；`render-edit-neutral`、解码金值不变（0° 的 inset 恒为 0）。
+- `MaskTests.testAtlasInvertsCropRotationAndFlip` 的正演模型原本用连续 `(canvas − frame)/2`，
+  已改为同一整数截断——它必须描述渲染器实际画出的那一张。
+- 顺带把 `PerspectiveTests` 那条「push 金值陈旧」的存量红对齐（它比的就是这两个金值）。
+
+**未动**：`LoupeFraming.canvasOriginPixels` / `framePlacement` 仍用连续量（backdrop 的归一化在 D2
+里连底数 `rotatedCropExtent` 一起改，单独动一半会让 188 的偏贴回来）。
 
 ### D2 · backdrop 的 `framePlacement` 二次推导
 
@@ -180,11 +192,14 @@ orient 一次 —— 奇数 quarter turn 下裁切工具的 `source / frameSize 
 ```
 swift build --build-tests --disable-automatic-resolution
 PHOTONS_TEST_RAW=~/Desktop/test/L1030433.dng swift test --skip-build --filter "Crop|Backdrop|Loupe|Window|QuarterTurn|CanvasSpaces"
+.build/debug/photonsctl golden check ~/Desktop/test/L1030433.dng --dir Tests/Golden
+.build/debug/photonsctl render … --edit Tests/Fixtures/edit-{neutral,push,crop-rot}.json --scale 0.25 --golden check
 ```
 
 - 基线（改动前）：`Crop|Backdrop|QuarterTurn|Perspective` 71 条，1 红（`PerspectiveTests` 的
   `render-edit-push-s0.25` 金值陈旧，QUEUE L22 已记）。
-- 改动后：`CropFullResCanvasTests` 4/4、`LoupeQueueTests` 8/8、`CanvasSpacesTests` 11/11、
-  `CropCanvasIsTheDocumentCanvasTests` 5/5 全绿；`WindowTests` 的
-  `testPanFrameCostDoesNotRegress` 是负载相关的性能阈值（load ≈ 10 时必红，单独跑复验通过）。
-- 金值（L2/L3）未重录：本次没有改 `plan()` 的数值路径。
+- D1 之前：`Crop|…|Perspective` 463 通过 / 1 红（同上那条）。
+- D1 之后：三个 render 金值与解码金值全部 `PASS`；`RenderTests`、`PerspectiveTests`、
+  `CropMathTests`、`MaskTests` 全绿。L22 的「push 金值陈旧」随之关闭——根因是测试侧没把
+  「解码已带该白平衡」告诉渲染图（`RenderInput.whiteBalance`），S1 二次施加，只有带 WB 的文档分叉。
+- `WindowTests.testPanFrameCostDoesNotRegress` 仍是负载相关的性能阈值（load ≈ 10 时红）。

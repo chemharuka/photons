@@ -94,16 +94,27 @@ public extension CropGeometry {
     /// The canvas in continuous pixels — `ceil` of this is `canvas`.
     var canvasExtent: DSize { frameExtent }
 
-    /// `(canvas − frame) / 2` in canvas pixels, **continuous**. This is the one margin: the renderer's
-    /// `inset`, the loupe's window offset and the backdrop's placement all come from here.
-    ///
-    /// It used to exist as an `Int` division in `CropMath.canvasOrigin` while the renderer used a
-    /// `Float` one; for an odd `canvas − frame` the two disagreed by half a pixel, and the loupe's 1:1
-    /// window was laid out with the truncated one (a whole-pixel bias shared by every frame of that
-    /// document). Continuous here, rounded exactly once by whoever needs an integer rect.
+    /// `(canvas − frame) / 2` in canvas pixels, **continuous**. Reference value: the renderer and the
+    /// loupe both snap it (see `canvasInsetPixels`) because a window and the whole frame can only be
+    /// byte-identical when the picture sits at an integer offset inside the canvas.
     var canvasInset: (x: Double, y: Double) {
         ((Double(canvas.width) - Double(frameSize.width)) / 2,
          (Double(canvas.height) - Double(frameSize.height)) / 2)
+    }
+
+    /// `(canvas − frame) / 2` **rounded the way the renderer rounds it**: integer division, i.e.
+    /// truncation of the odd half-pixel.
+    ///
+    /// 2026-11-01 (D1) — this is the one phase. `s0_geometry` places the picture at
+    /// `frameOrigin = … − inset`, and a window's pixel 0 therefore samples frame pixel
+    /// `windowX − inset`; only an integer inset makes that an integer *frame* pixel, which is what
+    /// lets a windowed 1:1 plate equal the whole-frame render byte for byte. `RenderGraph.plan`
+    /// computes the same quantity from the **scaled** sizes (`baseline = round(canvas·s)`,
+    /// `frame = round(frameSize·s)`), and `LoupeFraming.canvasOrigin` reproduces it in decoded
+    /// pixels; the two cannot disagree because both truncate the same difference.
+    var canvasInsetPixels: (x: Int, y: Int) {
+        ((canvas.width - frameSize.width) / 2,
+         (canvas.height - frameSize.height) / 2)
     }
 
     // MARK: the document canvas (space 4)

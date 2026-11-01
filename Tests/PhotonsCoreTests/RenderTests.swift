@@ -572,8 +572,14 @@ final class RenderTests: XCTestCase {
             let outcome = try RAWDecoder().decodeDetailed(url, options: DecodeOptions(decoderVersion: nil,
                                                                                      scale: decodeScale,
                                                                                      whiteBalance: model.light.whiteBalance))
+            // 194/2026-11-01 — the decode above was made **at the document's balance**, so the graph
+            // has to be told that or S1 applies it a second time. `photonsctl render` passes the same
+            // field (`RenderInput.whiteBalance`); without it this suite rendered a different picture
+            // than the golden for every document carrying a white balance, and matched only the ones
+            // that carry none (neutral, crop-rot) — the pre-existing `edit-push` mismatch.
             let graph = try RenderGraph(input: RenderInput(image: outcome.image, identity: "golden",
-                                                            lensProfile: outcome.lensProfile))
+                                                            lensProfile: outcome.lensProfile,
+                                                            whiteBalance: model.light.whiteBalance))
             let result = try graph.render(model, options: RenderOptions(scale: rec.scale / Double(decodeScale), wantsPixels: true))
             let pixels = try XCTUnwrap(result.display)
             XCTAssertEqual(pixels.width, rec.width, "\(file.lastPathComponent): width")

@@ -174,14 +174,21 @@ final class PerspectiveTests: XCTestCase {
             guard try FileDigest.sha256(of: raw) == golden.rawSHA256 else {
                 throw XCTSkip("\(name) was recorded against a different RAW fixture")
             }
-            let decodeScale = Float(max(golden.scale, 0.125))
-            let outcome = try RAWDecoder().decodeDetailed(raw, options: DecodeOptions(
-                decoderVersion: nil, scale: decodeScale))
-            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
-                                                           identity: "perspective-golden",
-                                                           lensProfile: outcome.lensProfile))
             let edit = try EditModel.load(from: Self.repoRoot
                 .appendingPathComponent("Tests/Fixtures/\(golden.edit).json"))
+            let decodeScale = Float(max(golden.scale, 0.125))
+            // 006/2026-11-01 — a document's white balance is a **decode** setting, so a golden is
+            // recorded from a development made with it (`photonsctl render` and `RenderTests` both do
+            // this). Decoding as-shot here made this suite compare a different picture than the one
+            // the golden holds — it could never match for `edit-push`, which carries a 7150 K push.
+            let outcome = try RAWDecoder().decodeDetailed(raw, options: DecodeOptions(
+                decoderVersion: nil, scale: decodeScale,
+                whiteBalance: edit.light.whiteBalance))
+            // The same field `photonsctl render` passes: the decode already carries the balance.
+            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
+                                                           identity: "perspective-golden",
+                                                           lensProfile: outcome.lensProfile,
+                                                           whiteBalance: edit.light.whiteBalance))
             XCTAssertNil(edit.geometry.perspective, "the golden document carries no keystone")
             let display = try render(graph, edit, scale: golden.scale / Double(decodeScale))
             print("IDENTITY \(name) · \(display.width)×\(display.height) · sha "
