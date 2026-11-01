@@ -611,13 +611,13 @@ public enum CropMath {
         // tolerance rather than `==`, so −0.0 and 360 count and 89.999999999 does not.)
         let quarter = straightenDegrees / 90
         if abs(quarter - quarter.rounded()) < 1e-9 { return out }
-        let (cosine, sine) = cosSin(straightenDegrees)
-        let w = Double(out.width), h = Double(out.height)
-        func ceilPixel(_ value: Double) -> Int {
-            max(1, Int((value - 1e-9).rounded(.up)))
-        }
-        return ImageSize(width: ceilPixel(w * cosine + h * sine),
-                         height: ceilPixel(w * sine + h * cosine))
+        // 2026-11-01 — the AABB itself lives in `CropGeometry.rotatedExtent` (one formula for the
+        // renderer, the loupe's fit and the crop clamp); here it only gets the one `ceil`.
+        let extent = CropGeometry.rotatedExtent(width: Double(out.width),
+                                               height: Double(out.height),
+                                               degrees: straightenDegrees)
+        return ImageSize(width: CropGeometry.canvasPixels(extent.width),
+                         height: CropGeometry.canvasPixels(extent.height))
     }
 
     /// Where the crop's own frame starts inside the **expanded canvas**, in canvas pixels:
@@ -748,10 +748,11 @@ public enum CropMath {
 
     /// Smallest axis-aligned rectangle that contains `size` after rotating it by `degrees`.
     /// Grows to the diagonal at 45°; never smaller than the source.
+    ///
+    /// The formula itself lives in `CropGeometry.rotatedExtent` (2026-11-01) — one implementation for
+    /// the renderer's canvas, the loupe's fit and the crop clamp.
     public static func containingExtent(of size: ImageSize, degrees: Double) -> DSize {
-        let (c, s) = cosSin(degrees)
-        let w = Double(size.width), h = Double(size.height)
-        return DSize(width: w * c + h * s, height: w * s + h * c)
+        CropGeometry.rotatedExtent(of: size, degrees: degrees)
     }
 
     /// Largest rectangle with the **source's own aspect** that still fits inside `size` rotated by

@@ -342,6 +342,15 @@ public enum CropTool {
                                      degrees: Double = 0,
                                      tolerance: Double = 0) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
+        // 2026-11-01 — **still the document's `[0, 1]²`, on purpose.** The wider rule the user's
+        // "画布 = 能包住全部照片像素的最小矩形" implies (the frame may enter the black corners a turn
+        // opens, bounded by `CropGeometry.documentCanvasCropRect`) is implemented and tested in
+        // `CropGeometry.clampedToDocumentCanvas`, but switching the app to it is a product decision:
+        // it rewrites 224's and 190's acceptance suites, which pin `[0,1]²` at every angle and were
+        // merged on the user's explicit instruction. See docs/rotate-crop-architecture.md §2.3/§3.
+        //
+        // Never the viewport, the zoom or the window: `mapping` and `degrees` are kept so the call
+        // sites read the same, and the law reads none of them (user 2026-11-01: 画布和屏幕无关).
         var result = c
 
         // Shrink only a rect that is genuinely larger than the document's canvas — about its centre,

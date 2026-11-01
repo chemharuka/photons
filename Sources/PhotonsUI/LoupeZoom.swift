@@ -653,12 +653,13 @@ public struct LoupeFraming: Equatable, Sendable {
     /// 132 — the axis-aligned bounding box of a `w × h` box turned by the document's angle, in
     /// pixels. At 0° the arithmetic is `w·1 + h·0` and `w·0 + h·1`, which is exactly `(w, h)`, so
     /// every θ = 0 number below is the one this type produced before the task.
+    ///
+    /// 2026-11-01: the formula moved to `CropGeometry.rotatedExtent` — the renderer's canvas, the
+    /// loupe's fit and the crop clamp now share one implementation instead of four.
     public static func rotatedExtent(width: Double, height: Double,
                                      degrees: Double) -> (width: Double, height: Double) {
-        guard degrees.isFinite, degrees != 0 else { return (width, height) }
-        let m = CropGeometry.RotationMatrix(degrees: degrees)
-        let c = abs(m.cosine), s = abs(m.sine)
-        return (width * c + height * s, width * s + height * c)
+        let e = CropGeometry.rotatedExtent(width: width, height: height, degrees: degrees)
+        return (e.width, e.height)
     }
 
     /// 188 — the picture's place **inside the expanded canvas**, in source pixels: `(0, 0)` at every
@@ -887,6 +888,15 @@ public struct LoupeFraming: Equatable, Sendable {
         let decoded = ImageSize(width: max(1, Int((sourceWidth * ds).rounded())),
                                 height: max(1, Int((sourceHeight * ds).rounded())))
         // `sourceWidth`/`crop` are already the turned frame, so no quarter turn enters here.
+        //
+        // 2026-11-01 — **the integer margin stays**, deliberately. `cropGeometry.canvasInset` is the
+        // continuous value, and the renderer's `plan` subtracts a `Float` inset, but a windowed 1:1
+        // plate only matches the whole-frame render byte for byte while the window's origin and the
+        // renderer's inset share one rounding (`CropFullResCanvasTests` compares the two at
+        // max |Δ| = 0 codes). Switching this alone to the continuous inset moved the plate by one
+        // pixel whenever `canvas − frame` was odd and broke that identity. Making it *correct* means
+        // snapping the inset in `RenderGraph.plan` too — a deliberate, golden-recording change, not a
+        // drive-by one. See docs/rotate-crop-architecture.md §D1.
         let origin = CropMath.canvasOrigin(crop: crop, in: decoded,
                                            straightenDegrees: straightenDegrees,
                                            quarterTurns: 0)
@@ -1008,10 +1018,13 @@ public struct LoupeFraming: Equatable, Sendable {
         guard state.mode == .actual else { return state }
         let z = zoom(of: state)
         guard z > 0 else { return state }
-        let theta = straightenDegrees * .pi / 180
-        let cs = cos(theta), sn = sin(theta)
-        let dx = (delta.x * cs - delta.y * sn) / z
-        let dy = (delta.x * sn + delta.y * cs) / z
+        // 2026-11-01 — the rotation of the delta comes from `CropGeometry.RotationMatrix`, the one
+        // place the angle's sign lives (it used to be a private `cos`/`sin` pair right here, the
+        // fourth spelling of `R(θ)` in the app).
+        let turned = CropGeometry.RotationMatrix(degrees: straightenDegrees)
+            .apply(x: delta.x, y: delta.y)
+        let dx = turned.x / z
+        let dy = turned.y / z
         // A drag that runs off the edge of the picture keeps its picture: the window may hang over the
         // edge (`minimumPictureCoverage`), it stops where the canvas would stop being photograph, and
         // it stays there when the hand lets go.

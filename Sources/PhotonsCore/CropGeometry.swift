@@ -57,6 +57,9 @@ public struct CropGeometry: Sendable, Equatable {
     public let flipHorizontal: Bool
     public let flipVertical: Bool
     public let aspectLock: AspectLock
+    /// 183 — the keystone, kept here so every consumer that asks this type for a pixel size gets the
+    /// same answer (`frameSize` below). `nil` for every document that never touched the two knobs.
+    public let perspective: PerspectiveMap?
 
     /// Aliases for the three things the spec names: matrix, crop rect, effective canvas.
     public var rotationMatrix: RotationMatrix { rotation }
@@ -82,6 +85,7 @@ public struct CropGeometry: Sendable, Equatable {
         self.flipHorizontal = geometry.flipHorizontal
         self.flipVertical = geometry.flipVertical
         self.aspectLock = geometry.aspectLock
+        self.perspective = geometry.perspective
     }
 
     /// The picture rotation's own cosine/sine — what the renderer needs for a canvas→source walk.

@@ -217,8 +217,18 @@ public final class CropToolController {
     /// use the turned dimensions: a rotated document is 4032×6048, not 6048×4032. At
     /// `quarterTurns == 0` this is `maskSourceSize` unchanged, which is why no pre-9 number moves.
     public var sourceSize: ImageSize {
-        let stored = session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
-        return (session?.edit.geometry ?? GeometryGroup.identity).orientedSource(stored)
+        (session?.edit.geometry ?? GeometryGroup.identity).orientedSource(uprightSource)
+    }
+
+    /// The photo's **own** frame, before the document's quarter turn — what `CropGeometry` wants.
+    ///
+    /// 2026-11-01: `CropGeometry.init(geometry:source:)` applies `orientedSource` itself, so handing
+    /// it `sourceSize` (already turned) swapped the two dimensions a second time at 90°/270°: the crop
+    /// tool's `source`, `frameSize` and `canvas` then described the *un-turned* document while
+    /// `RenderGraph` described the turned one — the frame's aspect, its pixel readout and its canvas
+    /// disagreed with the picture being rendered, and only at odd quarter turns.
+    private var uprightSource: ImageSize {
+        session?.maskSourceSize ?? ImageSize(width: 1, height: 1)
     }
 
     // MARK: 123 — the one transform value
@@ -227,7 +237,7 @@ public final class CropToolController {
     /// draft's crop, angle and lock. This value type owns the UI→document angle mapping; nothing in
     /// the card does trigonometry.
     public var transformSession: TransformSession {
-        TransformSession(geometry: draftGeometry, source: sourceSize)
+        TransformSession(geometry: draftGeometry, source: uprightSource)
     }
 
     /// Same value under the shorter name the panel reads.
@@ -238,9 +248,9 @@ public final class CropToolController {
     /// actually draws and `finish(.confirm)` writes — not the stored intent behind it.
     public var cropGeometry: CropGeometry {
         if !isActive, let session {
-            return CropGeometry(geometry: session.edit.geometry, source: sourceSize)
+            return CropGeometry(geometry: session.edit.geometry, source: uprightSource)
         }
-        return CropGeometry(geometry: effectiveGeometry(draftGeometry), source: sourceSize)
+        return CropGeometry(geometry: effectiveGeometry(draftGeometry), source: uprightSource)
     }
 
     /// The overlay draws against the **un-turned** document while the slider is dragged (088), so it
@@ -250,7 +260,7 @@ public final class CropToolController {
         var delta = effectiveGeometry(draftGeometry)
         delta.rotationDegrees = CropTool.clampStraighten(draft.straighten)
             - CropTool.clampStraighten(session?.edit.geometry.straightenDegrees ?? 0)
-        return CropGeometry(geometry: delta, source: sourceSize)
+        return CropGeometry(geometry: delta, source: uprightSource)
     }
 
     /// The draft's geometry with the document's flips and quarter turn carried (the same value
@@ -279,7 +289,7 @@ public final class CropToolController {
     /// 123 — the one UI→document angle write. `TransformSession.setAngle(uiValue:)` chooses the
     /// sign; this method only carries its answer into the draft.
     public func setAngle(uiValue: Double) {
-        var session = TransformSession(geometry: draftGeometry, source: sourceSize)
+        var session = TransformSession(geometry: draftGeometry, source: uprightSource)
         session.setAngle(uiValue: uiValue)
         draft.straighten = session.draft.straightenDegrees
         draftChanged()
@@ -958,10 +968,12 @@ public final class CropToolController {
     /// business. Built from the photo and the angle alone, which is what makes every number derived
     /// from it (the 25 % floor, the pull-back) a property of the document rather than of a framing.
     private func documentCanvas(source: ImageSize, degrees: Double) -> CGRect {
+        // 2026-11-01 — the rect now comes from `CropGeometry`, the one owner of the four spaces, so
+        // the coverage readout below and the clamp cannot describe two different canvases (they did:
+        // 190 measured this AABB while 224 clamped to `[0,1]²`).
+        let r = CropGeometry.documentCanvasCropRect(in: source, degrees: degrees)
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
-        let extent = LoupeFraming.rotatedExtent(width: w, height: h, degrees: degrees)
-        return CGRect(x: (w - extent.width) / 2, y: (h - extent.height) / 2,
-                      width: extent.width, height: extent.height)
+        return CGRect(x: r.left * w, y: r.top * h, width: r.width * w, height: r.height * h)
     }
 
     /// |frame ∩ canvas| / |frame| in document pixels. `rect` is the frame in normalized source
