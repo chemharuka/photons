@@ -98,7 +98,7 @@ final class LoupeCameraTests: XCTestCase {
             seen.append(result.accumulated)
         }
         XCTAssertEqual(state.mode, .actual)
-        XCTAssertEqual(state.zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(state.zoom, 0.125, accuracy: 1e-12)
         XCTAssertEqual(seen.count, 3)
         XCTAssertLessThan(seen[0], seen[1])
         XCTAssertLessThan(seen[1], seen[2])
@@ -115,7 +115,7 @@ final class LoupeCameraTests: XCTestCase {
     // MARK: 9
 
     func testLabelSaysFitPercent() {
-        XCTAssertEqual(camera(state: .fit).label, "适应 25%")
+        XCTAssertEqual(camera(state: .fit).label, "适应 23%")
     }
 
     // MARK: 10

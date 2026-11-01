@@ -49,8 +49,9 @@ final class CropZoomEntryTests: XCTestCase {
         CropUITestSupport.pump(0.05)
         let inside = try XCTUnwrap(loupe.framing())
         let cropFit = inside.zoom(of: loupe.viewState)
-        XCTAssertEqual(cropFit / ordinaryFit, 0.90, accuracy: 0.01,
-                       "进入裁切: the camera must be the 90 % workspace fit")
+        // 213: entering 裁切 no longer rescales — the 90 % is already inside `fitZoom`.
+        XCTAssertEqual(cropFit, ordinaryFit, accuracy: 1e-9,
+                       "进入裁切: the camera must be the ordinary fit itself")
 
         // The frame the overlay draws, in points.
         let layout = try XCTUnwrap(loupe.cropToolLayout())

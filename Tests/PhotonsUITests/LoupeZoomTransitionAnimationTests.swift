@@ -237,6 +237,10 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
         let url = try rawFixture()
         let controller = makeController()
         start(controller, url: url, identity: "anim-hash")
+        // A second controller for the direct reference render: `makeFrame` on the live controller
+        // would replace its decoded buffer under the test source's identity, and the live framing
+        // would then (correctly) refuse that buffer.
+        let reference = makeController()
         controller.zoomToActualSize(aroundView: CGPoint(x: 160, y: 100))
         XCTAssertTrue(waitFor { controller.zoomBridge == nil && controller.lastFrame?.zoom == 1 })
 
@@ -246,9 +250,9 @@ final class LoupeZoomTransitionAnimationTests: XCTestCase {
                           "round \(round): no 200 % frame")
             pump(0.05)
             let final = try XCTUnwrap(controller.lastFrame)
-            let direct = try controller.makeFrame(url: url, viewport: Self.viewport,
-                                                  decodeScale: final.decodeScale, edit: .neutral,
-                                                  state: controller.viewState, hashPixels: true)
+            let direct = try reference.makeFrame(url: url, viewport: Self.viewport,
+                                                 decodeScale: final.decodeScale, edit: .neutral,
+                                                 state: controller.viewState, hashPixels: true)
             XCTAssertEqual(final.displayHash, direct.displayHash,
                            "round \(round): the transition presented pixels that are not the stop's")
             XCTAssertEqual(final.zoom, 2, accuracy: 1e-12)

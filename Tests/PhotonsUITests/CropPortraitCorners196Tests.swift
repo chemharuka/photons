@@ -83,9 +83,13 @@ final class CropPortraitCorners196Tests: XCTestCase {
             s.centerY = cy
             return s
         }
-        var fit = LoupeViewState()
-        fit.mode = .fit
-        return [Framing(name: "fit", state: fit),
+        // 213: `.fit` is now 90 % of the viewport, so the canvas no longer fills it. This suite's
+        // render assertions ("the canvas' own corners are on the texture", "the picture reaches the
+        // canvas' edge") describe the 100 % framing it was written for; keep that framing as an
+        // actual state at `fitZoom / fitMargin` and let CropWorkspaceFitTests / CropZoomEntryTests
+        // pin the 90 % entry itself.
+        let fullViewportFit = actual(framing.fitZoom / LoupeFraming.fitMargin)
+        return [Framing(name: "满幅适应", state: fullViewportFit),
                 // 缩小到画布小于视口 —— 用户说的「缩小」: 整张画布（含 000000 边带）都在屏幕上。
                 Framing(name: "缩小10%", state: actual(0.1)),
                 Framing(name: "25%", state: actual(0.25)),
@@ -136,6 +140,7 @@ final class CropPortraitCorners196Tests: XCTestCase {
                 canvas: Self.viewport, scale: scale, outputWindow: window,
                 useCache: false, wantsPixels: false))
             let texture = try XCTUnwrap(result.output, "no render at \(f.name)")
+
             defer { graph.recycle(output: texture) }
             let target = try makeTarget(device, Self.viewport.width, Self.viewport.height)
             let request = presenter.requestForTest(texture, window: .whole, backdrop: nil,

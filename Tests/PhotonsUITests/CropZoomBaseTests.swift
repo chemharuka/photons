@@ -42,8 +42,9 @@ final class CropZoomBaseTests: XCTestCase {
         XCTAssertEqual(f.cropWidthPixels, 3000, accuracy: 1e-9)
         XCTAssertEqual(f.cropHeightPixels, 2000, accuracy: 1e-9)
 
-        // A0's rule, measured: 2560/6000 = 0.426667, 1600/4000 = 0.4 → 0.4 for *any* crop of this frame.
-        XCTAssertEqual(f.fitZoom, 0.4, accuracy: 1e-12)
+        // A0's rule, measured: 2560/6000 = 0.426667, 1600/4000 = 0.4; 213's 90 % margin → 0.36 for
+        // *any* crop of this frame.
+        XCTAssertEqual(f.fitZoom, 0.36, accuracy: 1e-12)
         // Anti-proof — the 「用裁切尺寸算」 value: min(2560/3000, 1600/2000) = 0.8, i.e. twice the scale.
         let wrong = min(Double(viewport.width) / f.cropWidthPixels,
                         Double(viewport.height) / f.cropHeightPixels)
@@ -64,10 +65,10 @@ final class CropZoomBaseTests: XCTestCase {
                      oneWindow.width, oneWindow.height, f.mapping(of: oneToOne).canvasPerSource,
                      twoWindow.width, twoWindow.height, f.mapping(of: twoToOne).canvasPerSource))
 
-        // fit: the crop covers half the viewport on each axis (the whole frame would fill it).
-        XCTAssertEqual(fitContent.width, 2560 * 0.4 * 3000 / 2560, accuracy: 1e-9)
-        XCTAssertEqual(fitContent.width, 1200, accuracy: 1e-9)
-        XCTAssertEqual(fitContent.height, 800, accuracy: 1e-9)
+        // fit: the crop covers half of the 90 % frame (the whole frame would fill 90 % of the viewport).
+        XCTAssertEqual(fitContent.width, 2560 * 0.36 * 3000 / 2560, accuracy: 1e-9)
+        XCTAssertEqual(fitContent.width, 1080, accuracy: 1e-9)
+        XCTAssertEqual(fitContent.height, 720, accuracy: 1e-9)
         // 1:1: one source pixel per device pixel, whatever the crop is.
         XCTAssertEqual(oneWindow.width, 2560, accuracy: 1e-9)
         XCTAssertEqual(oneWindow.height, 1600, accuracy: 1e-9)

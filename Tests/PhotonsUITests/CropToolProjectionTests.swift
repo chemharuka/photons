@@ -118,7 +118,7 @@ final class CropToolProjectionTests: XCTestCase {
         let theta = 9.0 * .pi / 180
         let frameW = 800 * cos(theta) + 1200 * sin(theta)
         let frameH = 800 * sin(theta) + 1200 * cos(theta)
-        let fitZoom = min(800 / frameW, 1200 / frameH)
+        let fitZoom = min(800 / frameW, 1200 / frameH) * LoupeFraming.fitMargin
         XCTAssertEqual(w, crop.width * 800 * fitZoom, accuracy: 1e-6)
     }
 
@@ -134,7 +134,8 @@ final class CropToolProjectionTests: XCTestCase {
         let grab = CropToolController.normalized(CGPoint(x: 600, y: 400), mapping: m,
                                                  source: source, pointScale: 1)!
         let drag = CropToolDrag(handle: .inside, crop: start, grab: grab)
-        let pxPerNorm = Double(source.width)   // view px == source px at this mapping
+        // 213: 适应 is 90 %, so one view pixel is `1 / 0.9` source pixels here.
+        let pxPerNorm = Double(source.width) * m.canvasPerSource
 
         for (name, dx, dy) in [("right", 100.0, 0.0), ("left", -100.0, 0.0),
                                ("down", 0.0, 100.0), ("up", 0.0, -100.0)] {
@@ -142,7 +143,7 @@ final class CropToolProjectionTests: XCTestCase {
                                                       source: source, pointScale: 1)!
             let next = drag.crop(at: moved, source: source)
             let dLeft = (next.left - start.left) * pxPerNorm
-            let dTop = (next.top - start.top) * Double(source.height)
+            let dTop = (next.top - start.top) * Double(source.height) * m.canvasPerSource
             print(String(format: "PROJ drag %@ → dLeft=%+.2f dTop=%+.2f", name, dLeft, dTop))
             XCTAssertEqual(dLeft, dx, accuracy: 1e-6, "\(name): the frame follows the hand in x")
             XCTAssertEqual(dTop, dy, accuracy: 1e-6, "\(name): and in y")

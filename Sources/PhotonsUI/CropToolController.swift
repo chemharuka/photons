@@ -871,16 +871,19 @@ public final class CropToolController {
     /// overlay reads it only to paint the frame red (`frameExceedsPicture`).
     public var sourcePixelBounds: CropRect { .full }
 
-    /// Pull the draft's rect into `safeCropRect` — the **model-layer** floor of ⑦.
+    /// Pull the draft's rect into the **screen-space canvas** — the model-layer floor of ⑦.
     ///
-    /// The overlay draws `draft.crop` and nothing else, so a clamp here is the only one that cannot
-    /// be bypassed: a view-level clamp would fix the drawing and leave the *committed* crop outside
-    /// the picture. Shrinking keeps the aspect lock (`CropTool.constrain`, anchor `.center`), moving
-    /// keeps the size; the shrink only happens when the frame genuinely has less room than its own
-    /// size (zoomed past the frame), and then the room wins — the frame stays on screen, which is
-    /// the whole point.
+    /// 213/§5 — the canvas is the **viewport**, a horizontal rectangle that never turns; the picture
+    /// and its black letterbox live inside it. The candidate frame's four corners are projected to
+    /// view points and every one of them must land in `(0, 0, viewport)`, so the check is made in the
+    /// same space the user sees. The old document-space test rotated both the frame and its bound,
+    /// which is why a frame could pass the test and still hang off the screen.
     ///
-    /// Returns `true` when the draft moved, so a caller can tell "clamped" from "already legal".
+    /// The document-space `canvasBounds` above is still what the readouts and the red warning use; it
+    /// is no longer the clamp's criterion. Moving is preferred; only a frame whose projected box is
+    /// genuinely larger than the viewport is shrunk (about its centre, ratio kept).
+    ///
+    /// Returns `true` when the draft moved.
     @discardableResult
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
         clampCalls &+= 1
@@ -890,217 +893,69 @@ public final class CropToolController {
         // crop to a pixel. A real canvas is at least 560 pt wide by contract.
         guard mapping.viewport.width > 64, mapping.viewport.height > 64 else { return false }
         let src = source ?? sourceSize
-        // 092 — at Δθ ≠ 0 the drawn frame is a **quad**, not the rect projected by the document
-        // framing. Clamping the un-turned rect would leave the turned corners outside, so the
-        // rotated path fits the quad's bounding box instead (Δθ = 0 keeps the old arithmetic bit
-        // for bit).
-        //
-        // 202 ② — **the switch reads the drawn angle, not the delta.** 196's law is stated on the
-        // quad, but this dispatch asked 「does the draft differ from the document?」, so a *committed*
-        // 拉直 (draft 5.4°, document 5.4° → delta 0) took the upright path: it clamped the un-turned
-        // rect against the turned canvas' AABB **in frame coordinates** — a rectangle nobody draws —
-        // and the quad on screen then hung outside the canvas (measured at 适应: 1 714 px off the left
-        // edge and 985 px off the bottom). The frame is turned whenever the draft carries an angle,
-        // whoever wrote it, so that is what decides the arithmetic. At θ = 0 both spells are the old
-        // path, value for value.
-        let drawnAngle = CropTool.clampStraighten(draft.straighten)
-        if drawnAngle.isFinite, abs(drawnAngle) > 1e-9 {
-            let moved = clampRotatedQuadToView(mapping: mapping, source: src, degrees: drawnAngle)
-            if moved { clampMoves &+= 1 }
-            return moved
-        }
-        // 162 — the visible canvas, in frame coordinates. At 适应 the workspace frames the picture at
-        // 90 %, so this rect is slightly **larger** than the photograph and a crop is allowed to cover
-        // that black band (「框可以出相机像素」, `CropOverlayAlertTests` measures a 4 % overhang being
-        // applied without a snap-back); the viewport is what the upright frame may not leave.
-        let room = canvasBounds(mapping: mapping, source: src)
         let before = draft.crop.clamped(allowsOutsideSource: true)
-        let next = clampedToCanvas(before, bounds: room, source: src, lock: draft.lock)
+
+        // The ratio lock is a document constraint and has to survive the clamp. Applied to the size
+        // about the frame's centre, before the canvas question is asked.
+        let shaped = reshapedForLock(before, source: src)
+        let base = seen(shaped, source: src)
+        let next = clampToCanvas(base, mapping: mapping, source: src)
+
+        if next == base {
+            // The frame already sits inside the viewport: the only thing that may still have to be
+            // written back is the lock's reshape, never the opt-in photo shrink (`effectiveCrop` is
+            // a view).
+            guard shaped != before else { return false }
+            draft.crop = shaped
+            clampMoves &+= 1
+            return true
+        }
         guard next != before else { return false }
         draft.crop = next
         clampMoves &+= 1
         return true
     }
 
-    /// 162 §2.3 — the **hard** clamp: every edge inside `bounds` (the visible canvas), with the
-    /// frame's aspect kept. This is what makes 「框不能出画布」 true for a drag as well as for a
-    /// camera change.
-    ///
-    /// A frame larger than the canvas is shrunk **uniformly** (the ratio is the user's rule), and a
-    /// frame that fits is only *moved* — its size is untouched, so ⑦'s 「不弹回」 still means "the
-    /// crop you drew stays the size you drew it". `bounds` is not `0…1²`; the source-pixel rectangle
-    /// is deliberately not consulted here (162: 框可以出相机像素).
-    private func clampedToCanvas(_ rect: CropRect, bounds: CropRect,
-                                 source: ImageSize, lock: AspectLock) -> CropRect {
-        let c = rect.clamped(allowsOutsideSource: true)
-        guard bounds.width > 1e-9, bounds.height > 1e-9 else { return c }
-        let scale = min(1, bounds.width / max(c.width, 1e-9),
-                        bounds.height / max(c.height, 1e-9))
-        var width = c.width * scale
-        var height = c.height * scale
-        // A degenerate bound (a window narrower than the tool's own floor) still has to produce a
-        // legal rect; the canvas wins because it is the hard edge.
-        width = min(max(width, min(CropTool.minimumSpan(source: source).width, bounds.width)),
-                    bounds.width)
-        height = min(max(height, min(CropTool.minimumSpan(source: source).height, bounds.height)),
-                     bounds.height)
-        if let ratio = lock.ratio, width > 0, height > 0 {
-            // Re-apply the ratio after the minimum-span floor, inside the canvas.
-            let normalized = ratio * Double(source.height) / Double(max(source.width, 1))
-            if width / height > normalized { width = height * normalized } else { height = width / normalized }
-            if width > bounds.width { width = bounds.width; height = width / normalized }
-            if height > bounds.height { height = bounds.height; width = height * normalized }
-        }
-        let left = min(max(c.centerX - width / 2, bounds.left),
-                       max(bounds.left, bounds.right - width))
-        let top = min(max(c.centerY - height / 2, bounds.top),
-                      max(bounds.top, bounds.bottom - height))
-        return CropRect(left: left, top: top, right: left + width, bottom: top + height)
+    /// 162 — the ratio lock as a **document constraint**, applied to the size about the frame's
+    /// centre so it never goes through `CropTool.constrain`'s `0…1²` clamp (which would forbid the
+    /// camera-outside band). `clampedToCanvas` used to carry this inline; 213 keeps it as one helper
+    /// so the screen-space clamp and its callers cannot disagree about the lock.
+    private func reshapedForLock(_ rect: CropRect, source: ImageSize) -> CropRect {
+        guard let ratio = draft.lock.ratio,
+              let aspect = CropTool.normalizedAspect(ratio, source: source),
+              rect.width > 0, rect.height > 0 else { return rect }
+        var w = rect.width, h = rect.height
+        if w / h > aspect { w = h * aspect } else { h = w / aspect }
+        let left: Double = rect.centerX - w / 2
+        let top: Double = rect.centerY - h / 2
+        return CropRect(left: left, top: top, right: left + w, bottom: top + h)
+            .clamped(allowsOutsideSource: true)
     }
 
-    /// 190 — the Δθ ≠ 0 half of `clampToView`: keep the **turned frame over the canvas**, and keep
-    /// it findable.
-    ///
-    /// The frame the user sees at `degrees` is `effectiveCrop` projected through `CropTool.layout`;
-    /// its four corners are a rotated quad. 092 fitted that quad's AABB into the canvas, 188 only
-    /// kept its *centre* there — and read both from `mapping.viewport`, i.e. from the **view**.
-    /// That is the bug this replaces: at 适应 the viewport is the whole canvas and the two readings
-    /// agree, but at 1:1 or 2× it is a window onto the document, so the bound shrank to nothing and
-    /// the frame could be dragged out of the canvas entirely.
-    ///
-    /// The bound is now a document fact (see `documentCanvas`): **at least a quarter of the frame's
-    /// own area still covers the canvas**, and one grip is on the canvas. A frame that breaks it is
-    /// *moved* back toward the canvas' centre at its own size — never shrunk (188's rule), and its
-    /// ratio and `minimumSpan` are untouched. The photo bound stays `effectiveCrop`'s job.
-    private func clampRotatedQuadToView(mapping: LoupeMapping, source: ImageSize,
-                                        degrees: Double) -> Bool {
-        // 132: the turned-quad clamp existed to keep the *photo-bound* frame on the canvas. With the
-        // frame allowed outside the photograph and the camera re-fitting the whole canvas (see
-        // `LoupeFraming.fitZoom`), shrinking the draft here was the 「第一次改角度框就没了」 report.
-        // 162: the **canvas** is still a hard bound at an angle — the frame's turned quad may cover the
-        // blank/camera-outside pixels, but its AABB may not leave the viewport. The photo-bound shrink
-        // stays opt-in (`clampsToRotatedFrame`), unchanged from 132.
-        let before = draft.crop.clamped(allowsOutsideSource: true)
+    /// 132's opt-in photo bound (`clampsToRotatedFrame`) — a **view** fact, so it must not reach the
+    /// stored draft when the clamp only passes through.
+    private func seen(_ rect: CropRect, source: ImageSize) -> CropRect {
         let angle = CropTool.clampStraighten(draft.straighten)
-        func seen(_ rect: CropRect) -> CropRect {
-            let c = rect.clamped(allowsOutsideSource: true)
-            guard clampsToRotatedFrame, angle != 0 else { return c }
-            return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle,
-                                                  keepsInsideRotatedFrame: true)
-        }
-        // 190 — **the bound is a document question.** 「How much of the frame still covers the
-        // canvas」 is asked of the turned frame's own pixels: `canvas` is the photograph's AABB and
-        // `documentQuad` is the four corners `CropTool.layout` projects, with the view's similarity
-        // removed. Neither number knows about a viewport, a zoom or a window, so the limit cannot
-        // move when the framing does — which is exactly what 188 got wrong: it asked the *view*
-        // (`mapping.viewport`), and it agreed with the canvas only at 适应. At 1:1 and 2× the
-        // viewport is a window onto the document, so 「the quad's centre is in the viewport」 became
-        // an almost empty rule and the frame could be dragged until a tenth of it was left
-        // (measured at 5.4°: 10.9 % of the frame on the canvas at 适应, 100 % at 1:1 and 2×).
-        let canvas = documentCanvas(source: source, degrees: angle)
+        let c = rect.clamped(allowsOutsideSource: true)
+        guard clampsToRotatedFrame, angle != 0 else { return c }
+        return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle,
+                                              keepsInsideRotatedFrame: true)
+    }
 
-        /// 162 — the ratio lock is a document constraint and has to survive this clamp. Applied to
-        /// the *size* about the frame's centre, so it never goes through `CropTool.constrain`'s
-        /// `0…1²` clamp (which would forbid the camera-outside band).
-        func withLock(_ rect: CropRect) -> CropRect {
-            guard let ratio = draft.lock.ratio,
-                  let aspect = CropTool.normalizedAspect(ratio, source: source),
-                  rect.width > 0, rect.height > 0 else { return rect }
-            var w = rect.width, h = rect.height
-            if w / h > aspect { w = h * aspect } else { h = w / aspect }
-            let left: Double = rect.centerX - w / 2
-            let top: Double = rect.centerY - h / 2
-            return CropRect(left: left, top: top, right: left + w, bottom: top + h)
-                .clamped(allowsOutsideSource: true)
-        }
-        let shaped = withLock(before)
-        let base = seen(shaped)
-        let width = Double(max(source.width, 1)), height = Double(max(source.height, 1))
-
-        /// The turned frame's bounding box in document pixels.
-        func quadBox(_ rect: CropRect) -> CGRect {
-            let corners = documentQuad(rect, source: source, degrees: angle)
-            guard let minX = corners.map({ $0.x }).min(), let maxX = corners.map({ $0.x }).max(),
-                  let minY = corners.map({ $0.y }).min(), let maxY = corners.map({ $0.y }).max()
-            else { return .zero }
-            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-        }
-
-        /// 196 (user 2026-10-31) — **the canvas is a hard bound again.** 190 read the user's
-        /// 「框可以超出扩大后的画布」 as an area rule (≥25 % of the frame still over the canvas);
-        /// the user has since reversed that: the frame may **not** leave the canvas at all, it may
-        /// only leave the *photograph* (the rotated-out `000000` corners, and the canvas inside the
-        /// photograph's edge). So the law is 162's again, stated on the **turned quad**: all four
-        /// sides inside `canvasBounds`, which is the canvas in document pixels and therefore does
-        /// not move with the zoom, the window or the framing (190's own finding, kept).
-        ///
-        /// Half a document pixel of slack: the overlay and the present round to whole pixels, and a
-        /// frame that is *at* the edge must not be pulled back by the rounding.
-        let containmentTolerance = 0.5
-        func legal(_ rect: CropRect) -> Bool {
-            let box = quadBox(rect)
-            return box.minX >= canvas.minX - containmentTolerance
-                && box.maxX <= canvas.maxX + containmentTolerance
-                && box.minY >= canvas.minY - containmentTolerance
-                && box.maxY <= canvas.maxY + containmentTolerance
-        }
-
-        // **Move, never shrink — until the frame genuinely cannot fit.** 188 deleted the
-        // `0…1²`-room search and it is not coming back: a legal-size frame is *translated* the least
-        // amount that puts its turned box inside the canvas. Only a frame whose turned box is
-        // larger than the canvas is shrunk, uniformly about its centre, and that is 162's own rule
-        // (`clampedToCanvas`), not a new one.
-        func pulledBack() -> CropRect {
-            var rect = base
-            var box = quadBox(rect)
-            let shrink = min(1, canvas.width / max(box.width, 1e-9),
-                             canvas.height / max(box.height, 1e-9))
-            if shrink < 1 {
-                let w = rect.width * shrink, h = rect.height * shrink
-                rect = CropRect(left: rect.centerX - w / 2, top: rect.centerY - h / 2,
-                                right: rect.centerX + w / 2, bottom: rect.centerY + h / 2)
-                    .clamped(allowsOutsideSource: true)
-                box = quadBox(rect)
-            }
-            var dx = 0.0, dy = 0.0
-            if box.minX < canvas.minX { dx = canvas.minX - box.minX }
-            else if box.maxX > canvas.maxX { dx = canvas.maxX - box.maxX }
-            if box.minY < canvas.minY { dy = canvas.minY - box.minY }
-            else if box.maxY > canvas.maxY { dy = canvas.maxY - box.maxY }
-            guard dx != 0 || dy != 0 else { return rect }
-            // The quad is rigid: `documentQuad` puts a rect in document pixels through `R(−θ)`, so a
-            // move of `d` in document pixels is `R(θ)·d` in the rect's own coordinates.
-            let local = CropGeometry.RotationMatrix(degrees: angle).apply(x: dx, y: dy)
-            let left = rect.left + local.x / width, top = rect.top + local.y / height
-            return CropRect(left: left, top: top, right: left + rect.width,
-                            bottom: top + rect.height)
-                .clamped(allowsOutsideSource: true)
-        }
-
-        // The frame already satisfies the law: the only thing that may still have to be written back
-        // is the **lock's reshape** (162 — a document constraint, not a canvas one). Otherwise the
-        // stored rect stays bit for bit, so reducing the angle to 0° gives the whole frame back.
-        if legal(base) {
-            // 132: the opt-in photo bound (`clampsToRotatedFrame`) is a **view** fact — it lives in
-            // `effectiveCrop` and must not reach the stored draft, so the pre-bound `shaped` is what
-            // is written back here. `base` is only read to *test* the canvas law against it.
-            guard shaped != before else { return false }
-            draft.crop = shaped
-            return true
-        }
-
-        var next = pulledBack()
-        // 190 — `seen()` is the opt-in **photo-bound** shrink (`clampsToRotatedFrame`), and a shrink
-        // is a view: it may not undo the canvas law that was just satisfied. Re-check it here and
-        // refuse a shrink that breaks the law (宁可不缩), so no path can hand back a rect that
-        // fails `legal`.
-        if clampsToRotatedFrame, angle != 0 {
-            let shrunk = seen(next)
-            if legal(shrunk) { next = shrunk }
-        }
-        guard next != before else { return false }
-        draft.crop = next
-        return true
+    /// 213/§5 — **the one containment arithmetic**: the candidate frame's four corners projected to
+    /// view points, every one inside `(0, 0, viewport.width, viewport.height)` with half a point of
+    /// slack. The canvas is the screen, it never turns; the document-space quad and its rotated AABB
+    /// are readouts only.
+    ///
+    /// A frame that fits is *moved* the least amount that brings its projected box inside; only a
+    /// frame whose box is larger than the viewport is shrunk (uniformly, about its centre). The view
+    /// translation is converted back through the same `framePoint` affine, so the rect moves with the
+    /// mapping it was projected through — never with a stale canvas.
+    private func clampToCanvas(_ rect: CropRect, mapping: LoupeMapping,
+                               source: ImageSize) -> CropRect {
+        let delta = CropTool.clampStraighten(draft.straighten)
+            - CropTool.clampStraighten(session?.edit.geometry.straightenDegrees ?? 0)
+        return CropTool.clampToCanvas(rect, mapping: mapping, source: source, degrees: delta)
     }
 
     // MARK: - the document-space canvas (190)

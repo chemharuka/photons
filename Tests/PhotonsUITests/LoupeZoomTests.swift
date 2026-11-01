@@ -108,9 +108,10 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(f.renderScale(of: actual(zoom: 1), decodeScale: 1), 1, accuracy: 1e-12)
         XCTAssertEqual(f.renderScale(of: actual(zoom: 1), decodeScale: 0.5), 2, accuracy: 1e-12)
         XCTAssertEqual(f.renderScale(of: actual(zoom: 4), decodeScale: 1), 4, accuracy: 1e-12)
-        // Fit at a half decode: 0.5 → 0.8 output per decoded pixel, which is M3's fit frame.
-        XCTAssertEqual(f.fitZoom, 0.4, accuracy: 1e-12)
-        XCTAssertEqual(f.renderScale(of: .fit, decodeScale: 0.5), 0.8, accuracy: 1e-12)
+        // 213: fit is 90 % of the viewport fit (1600/4000 × 0.9 = 0.36).
+        // Fit at a half decode: 0.36 × 2 = 0.72 output per decoded pixel.
+        XCTAssertEqual(f.fitZoom, 0.36, accuracy: 1e-12)
+        XCTAssertEqual(f.renderScale(of: .fit, decodeScale: 0.5), 0.72, accuracy: 1e-12)
     }
 
     // MARK: 3. zoom clamp 12.5 % … 400 %   (2026-10-27 用户要求加 12.5% 档)
@@ -161,7 +162,7 @@ final class LoupeZoomTests: XCTestCase {
                              decodeScale: 0.5,
                              edit: edit)
         XCTAssertLessThanOrEqual(f.fitZoom, 1)
-        XCTAssertEqual(f.fitZoom, 0.4, accuracy: 1e-12)
+        XCTAssertEqual(f.fitZoom, 0.36, accuracy: 1e-12)
         XCTAssertTrue(f.zoomedEdit(edit, for: .fit) == edit, "fit must hand the document through untouched")
         XCTAssertEqual(f.cropRect(of: .fit), f.crop)
         XCTAssertEqual(f.windowSize(of: .fit).width, f.cropWidthPixels, accuracy: 1e-9)
@@ -185,8 +186,9 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(f.cropWidthPixels, 1500, accuracy: 1e-9)
         XCTAssertEqual(f.cropHeightPixels, 800, accuracy: 1e-9)
 
-        // A0: the base is the full 6000×4000 frame → 2560/6000 = 0.4267, 1600/4000 = 0.4 → 0.4.
-        XCTAssertEqual(f.fitZoom, 0.4, accuracy: 1e-12, "fit is the whole frame's ratio, not the crop's")
+        // A0: the base is the full 6000×4000 frame → 2560/6000 = 0.4267, 1600/4000 = 0.4,
+        // then 213's 90 % margin → 0.36.
+        XCTAssertEqual(f.fitZoom, 0.36, accuracy: 1e-12, "fit is the whole frame's ratio, not the crop's")
         // Anti-proof: the crop-based value the task calls wrong is min(2560/1500, 1600/800) = 1.7067 —
         // the crop magnified by 1.71 to fill the viewport width, on a frame whose fit is 0.4.
         let wrong = min(Double(viewport.width) / f.cropWidthPixels,
@@ -194,9 +196,9 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(wrong, 2560.0 / 1500.0, accuracy: 1e-12)
         XCTAssertNotEqual(f.fitZoom, wrong, "「用裁切尺寸算」 is the value A0 forbids")
 
-        // The crop on screen at fit: 1500 × 0.4 = 600 pt wide, 800 × 0.4 = 320 pt tall, centred.
-        XCTAssertEqual(f.contentSize(of: .fit).width, 600, accuracy: 1e-9)
-        XCTAssertEqual(f.contentSize(of: .fit).height, 320, accuracy: 1e-9)
+        // The crop on screen at fit: 1500 × 0.36 = 540 pt wide, 800 × 0.36 = 288 pt tall, centred.
+        XCTAssertEqual(f.contentSize(of: .fit).width, 540, accuracy: 1e-9)
+        XCTAssertEqual(f.contentSize(of: .fit).height, 288, accuracy: 1e-9)
         // 1:1 and 2:1 are the same camera for a cropped and an uncropped frame.
         XCTAssertEqual(f.contentSize(of: actual(zoom: 1)).width, Double(viewport.width), accuracy: 1e-9)
         XCTAssertEqual(f.contentSize(of: actual(zoom: 2)).width, Double(viewport.width), accuracy: 1e-9)

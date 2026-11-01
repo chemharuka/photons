@@ -100,7 +100,7 @@ final class ZoomTwelveHalfPercentTests: XCTestCase {
             ups.append(loupe.zoomLabel)
         }
         print("③ ⌘= 轨迹 · " + ups.joined(separator: " → "))
-        XCTAssertEqual(ups, ["适应 19%", "100%", "200%", "300%", "400%", "400%", "400%"],
+        XCTAssertEqual(ups, ["适应 17%", "100%", "200%", "300%", "400%", "400%", "400%"],
                        "⌘= from fit still lands on 100 %, then the ladder")
 
         // Back to 100 % and then down, one stop at a time — 12.5 % must be on the way.
@@ -114,7 +114,7 @@ final class ZoomTwelveHalfPercentTests: XCTestCase {
         }
         print("③ ⌘− 轨迹 · " + downs.joined(separator: " → "))
         print("③ ⌘− 倍率 · " + zooms.map { String(format: "%.4g", $0) }.joined(separator: " → "))
-        XCTAssertEqual(downs, ["100%", "66.7%", "50%", "33.3%", "25%", "12.5%", "适应 19%", "适应 19%", "适应 19%"],
+        XCTAssertEqual(downs, ["100%", "66.7%", "50%", "33.3%", "25%", "12.5%", "适应 17%", "适应 17%", "适应 17%"],
                        "⌘− stops on 12.5 % before it leaves the ladder for fit")
         XCTAssertEqual(zooms[5], 0.125, accuracy: 1e-12, "the 12.5 % stop is really reached")
         XCTAssertEqual(loupe.viewState.mode, .fit, "the step below 12.5 % is fit, as before")
@@ -227,7 +227,7 @@ final class ZoomTwelveHalfPercentTests: XCTestCase {
         let vp = loupe.viewportPixels
         XCTAssertEqual(framing.fitZoom,
                        min(Double(vp.width) / framing.sourceWidth,
-                           Double(vp.height) / framing.sourceHeight),
+                           Double(vp.height) / framing.sourceHeight) * LoupeFraming.fitMargin,
                        accuracy: 1e-12)
     }
 }

@@ -592,9 +592,14 @@ public struct LoupeFraming: Equatable, Sendable {
     public var straightenDegrees: Double
     public var flipH: Bool
     public var flipV: Bool
-    /// 132 §9 — the **crop workspace's** fit is the ordinary fit × this factor (0.90 by default):
-    /// entering 裁切 leaves 10 % of room so dragging a small angle does not have to rescale the
-    /// canvas. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
+    /// 213 (D13, user 2026-11-01) — **the one fit margin.** Ordinary 适应 is this fraction of the
+    /// viewport fit, and the crop workspace uses the same number (it no longer multiplies by a second
+    /// 0.90 on entry, which produced 0.81). One constant, read by `fitZoom` and by
+    /// `CropWorkspaceLayout.entry`.
+    public static let fitMargin: Double = 0.90
+
+    /// Retained for call sites that ask "is this the crop workspace?"; **never a multiplier** since
+    /// 213. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
     public var fitScale: Double
     /// The angle above which the crop workspace re-fits the whole canvas once instead of keeping the
     /// 90 % framing (§9/§10 12). In between, the 90 % framing wins — the accepted trade.
@@ -704,16 +709,18 @@ public struct LoupeFraming: Equatable, Sendable {
         let z = min(Double(viewport.width) / max(base.width, 1e-9),
                     Double(viewport.height) / max(base.height, 1e-9))
         guard z.isFinite, z > 0 else { return 1 }
-        var zoom = min(1, z * fitScale)
-        // 132 §9 — the crop workspace keeps the 90 % framing for small angles (§10 11: the five
-        // samples must read one number), and re-fits the **whole canvas** once the turned crop no
-        // longer fits at that framing (§10 12). Both are the same `zoom`, applied to the picture and
-        // to the crop frame by the one mapping; nothing about the crop's document size moves.
-        if fitScale >= 1 || abs(straightenDegrees) > Self.cropRefitDegrees {
+        // 213 — exactly one 90 %: `fitMargin` is the ordinary 适应 and, in the crop workspace, the
+        // entry framing too. 132's second multiplication (`fitScale`) is gone; the property is only
+        // a "which workspace am I in?" flag now.
+        var zoom = min(1, z * Self.fitMargin)
+        // 132 §9 — beyond `cropRefitDegrees` the **whole canvas** is re-fitted once, because the
+        // turned crop no longer fits at the 90 % framing (§10 12). The same 90 % applies to that
+        // re-fit; taking the min with the whole-frame framing keeps the smaller of the two.
+        if abs(straightenDegrees) > Self.cropRefitDegrees {
             let aabb = rotatedCropExtent
             let fit = min(Double(viewport.width) / max(aabb.width, 1e-9),
                           Double(viewport.height) / max(aabb.height, 1e-9))
-            if fit.isFinite, fit > 0 { zoom = min(zoom, min(1, fit)) }
+            if fit.isFinite, fit > 0 { zoom = min(zoom, min(1, fit * Self.fitMargin)) }
         }
         return zoom
     }
