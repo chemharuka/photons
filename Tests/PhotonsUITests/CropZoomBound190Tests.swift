@@ -279,9 +279,10 @@ final class CropZoomBound190Tests: XCTestCase {
         }
     }
 
-    /// One far drag (a single tick that jumps the frame far off the canvas) must land **on** the
-    /// canvas' edge, not somewhere in between: the clamp is a pull-back to the boundary (196), so the
-    /// turned box ends flush with an edge and the frame keeps its size.
+    /// One far drag (a single tick that jumps the frame far off the document) must land **on the
+    /// document canvas' edge**, not somewhere in between: the clamp is a pull-back to `[0,1]²`
+    /// (224), so the rect ends flush with an edge and keeps its size. The drawn frame may sit inside
+    /// the view's picture with a margin — that margin is not part of the law any more.
     func testASingleFarDragIsPinnedOnTheCanvasEdge() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
@@ -302,24 +303,21 @@ final class CropZoomBound190Tests: XCTestCase {
                                                        mapping: mapping),
                                 mapping: mapping, source: Self.source)
         let crop = controller.draft.crop
-        let b = box(crop), c = Self.canvasPixels
+        let b = box(crop)
         let screen = screenBox(crop, mapping: mapping, degrees: Self.degrees)
         print(String(format: "190 · far drag · crop l %.6f t %.6f r %.6f b %.6f · overlap %.6f "
                      + "· screen %.3f,%.3f–%.3f,%.3f · doc box %.3f,%.3f–%.3f,%.3f",
                      crop.left, crop.top, crop.right, crop.bottom, overlapFraction(crop),
                      screen.minX, screen.minY, screen.maxX, screen.maxY,
                      b.minX, b.minY, b.maxX, b.maxY))
-        // 213/§5 — pinned on the **canvas'** edge (219: at 适应 the canvas is the window, but the
-        // bound is the picture): inside on all four sides, flush with one of them. The document box
-        // above may leave the rotated photo's AABB; that is allowed.
-        let canvas = mapping.canvasRect(rotatedBy: Self.degrees)
-        XCTAssertGreaterThanOrEqual(screen.minX, canvas.minX - 0.5)
-        XCTAssertLessThanOrEqual(screen.maxX, canvas.maxX + 0.5)
-        XCTAssertGreaterThanOrEqual(screen.minY, canvas.minY - 0.5)
-        XCTAssertLessThanOrEqual(screen.maxY, canvas.maxY + 0.5)
-        XCTAssertEqual(min(canvas.maxX - screen.maxX, screen.minX - canvas.minX,
-                           canvas.maxY - screen.maxY, screen.minY - canvas.minY),
-                       0, accuracy: 0.5, "the far drag did not reach the canvas' edge")
+        // 224 — pinned on the **document's** edge: inside `[0,1]²` on all four sides and flush with
+        // one of them. The document box above may leave the rotated photo's AABB; that is allowed.
+        XCTAssertGreaterThanOrEqual(crop.left, 0 - 1e-9)
+        XCTAssertGreaterThanOrEqual(crop.top, 0 - 1e-9)
+        XCTAssertLessThanOrEqual(crop.right, 1 + 1e-9)
+        XCTAssertLessThanOrEqual(crop.bottom, 1 + 1e-9)
+        XCTAssertEqual(min(crop.left, crop.top, 1 - crop.right, 1 - crop.bottom),
+                       0, accuracy: 1e-9, "the far drag did not reach the document's edge")
         XCTAssertEqual(crop.width, Self.frame.width, accuracy: 1e-9, "never shrunk")
         XCTAssertEqual(crop.height, Self.frame.height, accuracy: 1e-9)
     }
