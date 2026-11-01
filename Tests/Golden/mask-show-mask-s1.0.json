@@ -1,11 +1,11 @@
 {
-  "atlasSHA256" : "3a9ec54eb9a1d87e3b6922c040a82f9931fcb5cdc691d68e4af434c9fa0a3160",
+  "atlasSHA256" : "a2e5cef6ff6b817d556d120261e3bd1317188ea25c138a49cd5c86af9b5dded6",
   "maskIDs" : [
     "m-a",
     "m-b"
   ],
   "note" : "Recorded by MaskSemanticTests on the synthetic 96×65 ramp image; two masks (m-a radial +0.6 EV, m-b linear −0.6 EV, re-recorded for 102's symmetric linear feather) with showMask = m-b. `showDisplaySHA256` is the frame after the 50 % red overlay, `plainDisplaySHA256` the same document without it, so the file pins both sides of the 005e criterion. 8-bit quantised digests.",
-  "plainDisplaySHA256" : "aca318550d62dde3d3b29b59c22b92892b729fe272b57ef40c7a600236afe133",
+  "plainDisplaySHA256" : "396dee8ec994e2a68c0e933c187ac456c14c3a194bec0768f2eeda3bc0be5e82",
   "sampleX" : [
     8,
     48,
@@ -24,37 +24,37 @@
   ],
   "samples" : [
     [
-      0.418701171875,
-      0.408447265625,
-      0.398193359375
+      0.4296875,
+      0.394775390625,
+      0.384765625
     ],
     [
-      0.78076171875,
-      0.69384765625,
-      0.67724609375
+      0.7861328125,
+      0.56005859375,
+      0.546875
     ],
     [
-      0.8212890625,
-      0.314208984375,
-      0.306396484375
+      0.80078125,
+      0.40576171875,
+      0.39599609375
     ],
     [
-      0.6884765625,
-      0.578125,
-      0.56396484375
+      0.70947265625,
+      0.479248046875,
+      0.467529296875
     ],
     [
-      0.71484375,
-      0.69775390625,
-      0.6806640625
+      0.7333984375,
+      0.53759765625,
+      0.52490234375
     ],
     [
-      0.8330078125,
-      0.325439453125,
-      0.317626953125
+      0.81298828125,
+      0.441650390625,
+      0.430908203125
     ]
   ],
-  "showDisplaySHA256" : "83c0a702edd413f138463286cb69cfb5120898bd2702da0229c49369062da53c",
+  "showDisplaySHA256" : "bdc572696fe5e84739be6ebd2272e3913aec086ce2b4759c7512a9cba98c747d",
   "shownMaskID" : "m-b",
   "shownSlice" : 1,
   "sourceHeight" : 65,
