@@ -9,8 +9,13 @@ import PhotonsCore
 import PhotonsExport
 @testable import PhotonsUI
 
-/// 223 — the one HD thumbnail file three views share: a **10-bit Display P3 HLG** primary image,
+/// 223 — the one HD thumbnail file three views share: a **10-bit Display P3 PQ** primary image,
 /// 1920 long edge, q0.75, **no auxiliary gain map**.
+///
+/// 227 — the cache stays HDR (and `decodeHD` still returns float extended-linear P3), but the
+/// **display is a CAMetalLayer**: a CALayer with EDR contents let macOS raise reference white towards
+/// the panel's maximum, so the same picture looked overexposed in the grid while the loupe looked
+/// correct. CAMetalLayer keeps EDR 1.0 = SDR white and does not tone map.
 ///
 /// The numbers are asserted by reading the file back (container, depth, colour space, auxiliary
 /// items, P3-vs-sRGB primaries) and by decoding it through the shipped Core Image → Metal path at the
@@ -80,9 +85,9 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         return (used, key, data)
     }
 
-    /// Write a synthetic HLG picture with known linear P3 values. Same encoder the thumbnail
+    /// Write a synthetic PQ picture with known linear P3 values. Same encoder the thumbnail
     /// producer uses (`HDREncoding.write`), so the primaries/depth assertions cover both.
-    private func writeSyntheticHLG(linear values: (Int, Int) -> (Float, Float, Float),
+    private func writeSyntheticPQ(linear values: (Int, Int) -> (Float, Float, Float),
                                    width: Int, height: Int, to url: URL) throws {
         var rgba = [Float16](repeating: 0, count: width * height * 4)
         for y in 0..<height {
@@ -98,7 +103,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let image = DisplayImage(width: width, height: height, rgba: rgba,
                                  primaries: .displayP3, bitDepth: 16, linear: linear)
         let options = ExportOptions(format: .heic, quality: 0.75, bitDepth: 10,
-                                    hdr: HDRExport(enabled: true, kind: .hlg))
+                                    hdr: HDRExport(enabled: true, kind: .pq))
         try HDREncoding.write(image, to: url, options: options)
     }
 
@@ -111,13 +116,13 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
         XCTAssertEqual(base, same)
         XCTAssertNotEqual(base.digest, edited.digest, "an edit must produce a new cache key")
-        XCTAssertTrue(base.keyString.contains("hd1920q75p3hlg10b"))
+        XCTAssertTrue(base.keyString.contains("hd1920q75p3pq10"))
         XCTAssertTrue(base.keyString.contains("sv1"))
         XCTAssertEqual(base.spec, .hd)
         XCTAssertEqual(base.spec.longEdge, 1920)
         XCTAssertEqual(base.spec.quality, 0.75)
         XCTAssertEqual(base.spec.bitDepth, 10)
-        XCTAssertEqual(base.spec.colorSpaceName, "displayP3_HLG")
+        XCTAssertEqual(base.spec.colorSpaceName, "displayP3_PQ")
         XCTAssertEqual(base.relativePath(in: root).pathExtension, "heic")
         // The legacy ladder is byte-for-byte unchanged.
         XCTAssertEqual(ThumbKey.preview(contentHash: "abc", tier: .t256).keyString,
@@ -148,7 +153,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
     // MARK: - 2. file parameters
 
     @available(macOS 15.0, *)
-    func testGeneratedFileIsTenBitDisplayP3HLGWithNoGainMap() throws {
+    func testGeneratedFileIsTenBitDisplayP3PQWithNoGainMap() throws {
         let generated = try generateHD()
         let data = generated.data
         let path = generated.provider.cache.url(for: generated.key)
@@ -161,14 +166,14 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
         let primary = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertLessThanOrEqual(max(primary.width, primary.height), 1920, "long edge ≤ 1920")
-        // HEIF has no 16-bit mode: asking for 16 reads back 10. Accept either spelling of "HLG".
+        // HEIF has no 16-bit mode: asking for 16 reads back 10. Accept either spelling of "PQ".
         XCTAssertTrue(primary.bitsPerComponent == 10 || primary.bitsPerComponent == 16,
                       "bitsPerComponent \(primary.bitsPerComponent)")
 
         // The colour space is the file's, read through the same Core Image door the cells use.
         let ci = try XCTUnwrap(CIImage(contentsOf: path))
-        XCTAssertEqual(ci.colorSpace?.name, CGColorSpace.displayP3_HLG,
-                       "Display P3 primaries + HLG curve, not Rec.2020")
+        XCTAssertEqual(ci.colorSpace?.name, CGColorSpace.displayP3_PQ,
+                       "Display P3 primaries + PQ curve, not Rec.2020")
 
         // No gain map: 218 wrote an ISO RGB auxiliary image; 223 writes a single primary item.
         if #available(macOS 15.0, *) {
@@ -183,7 +188,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
                                                               display: ImageSize(width: 326, height: 242)))
         let filePeak = try peak(of: decoded)
         XCTAssertGreaterThanOrEqual(filePeak, 1.05,
-                                    "the HLG file must carry light above SDR white")
+                                    "the PQ file must carry light above SDR white")
 
         print("223 file: \(primary.width)×\(primary.height) depth \(primary.bitsPerComponent) "
               + "HEIC \(data.count) bytes · peak \(filePeak)")
@@ -195,10 +200,10 @@ final class ThumbnailHDRCacheTests: XCTestCase {
     @available(macOS 15.0, *)
     func testP3PrimariesAreRealNotJustATag() throws {
         let url = root.appendingPathComponent("p3-red.heic")
-        try writeSyntheticHLG(linear: { _, _ in (1.0, 0.0, 0.0) },
+        try writeSyntheticPQ(linear: { _, _ in (1.0, 0.0, 0.0) },
                               width: 64, height: 64, to: url)
         let data = try Data(contentsOf: url)
-        XCTAssertEqual(CIImage(contentsOf: url)?.colorSpace?.name, CGColorSpace.displayP3_HLG)
+        XCTAssertEqual(CIImage(contentsOf: url)?.colorSpace?.name, CGColorSpace.displayP3_PQ)
 
         let decoded = try XCTUnwrap(ThumbnailProvider.decodeHD(
             data, display: ImageSize(width: 64, height: 64)))
@@ -215,7 +220,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertGreaterThan(rgb.r, 1.05, "P3 red is above sRGB's gamut (linear R \(rgb.r))")
         XCTAssertLessThan(rgb.g, 0, "P3 red needs a negative sRGB green (\(rgb.g))")
 
-        // Rendering that red as sRGB must lose saturation. The file declares HLG headroom; a viewer
+        // Rendering that red as sRGB must lose saturation. The file declares PQ headroom; a viewer
         // that honours it (Core Graphics does, on an SDR target) rolls the out-of-gamut red off —
         // a pure sRGB red would stay at 255. 208 is the measured value for P3 red.
         let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
@@ -282,7 +287,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
     @available(macOS 15.0, *)
     @MainActor
-    func testTheCellLayerIsEDRAndCarriesPixelsAboveSDRWhite() throws {
+    func testTheCellLayerIsCAMetalAndKeepsFloatPixels() throws {
         let generated = try generateHD()
         let display = ImageSize(width: 326, height: 242)
         let image = try XCTUnwrap(ThumbnailProvider.decodeHD(generated.data, display: display))
@@ -290,22 +295,136 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let view = ThumbnailEDRView(cornerRadius: 6)
         view.frame = NSRect(x: 0, y: 0, width: 326, height: 242)
         view.image = image
-        let layer = try XCTUnwrap(view.layer)
+        let metal = try XCTUnwrap(view.layer as? CAMetalLayer,
+                                  "227: the thumbnail surface is a CAMetalLayer")
 
-        XCTAssertTrue(layer.wantsExtendedDynamicRangeContent, "the compositor must be allowed EDR")
-        XCTAssertEqual(layer.contentsFormat, .RGBA16Float, "half-float storage, so >1 survives")
-        let contents = try XCTUnwrap(view.image, "the layer holds the decoded float image")
-        XCTAssertTrue((layer.contents as AnyObject) === contents,
-                      "layer.contents is the float image, not a placeholder")
+        // 227 — a CAMetalLayer does not tone map: EDR 1.0 stays SDR white, values above 1 use the
+        // current headroom. A CALayer with EDR contents lifted reference white to the panel max.
+        XCTAssertTrue(metal.wantsExtendedDynamicRangeContent, "CAMetalLayer opts into EDR headroom")
+        XCTAssertEqual(metal.pixelFormat, .rgba16Float, "half-float drawable, so >1 survives")
+        XCTAssertEqual(metal.colorspace?.name, CGColorSpace.extendedLinearDisplayP3)
+        XCTAssertTrue(metal.framebufferOnly)
+        XCTAssertFalse(metal.isOpaque, "rounded corners stay transparent over the card")
+
+        let contents = try XCTUnwrap(view.image, "the view holds the decoded float image")
         XCTAssertEqual(contents.width, display.width)
         XCTAssertEqual(contents.height, display.height)
         XCTAssertGreaterThanOrEqual(contents.contentHeadroom, 1.05,
                                     "the measured peak is attached, not ImageIO's default")
 
         let peak = try peak(of: contents)
-        XCTAssertGreaterThanOrEqual(peak, 1.05, "layer pixels reach \(peak) × SDR white")
-        print("223 EDR layer: peak \(peak) · headroom \(contents.contentHeadroom) · "
-              + "contentsFormat \(layer.contentsFormat)")
+        XCTAssertGreaterThanOrEqual(peak, 1.05,
+                                    "the in-memory pixels still reach \(peak) × SDR white")
+        print("227 CAMetal layer: peak \(peak) · headroom \(contents.contentHeadroom) · "
+              + "pixelFormat \(metal.pixelFormat.rawValue)")
+    }
+
+    /// 227 — the CAMetalLayer pass itself: the float texture must reach the drawable upright and
+    /// without clamping the >1 highlights to SDR. (A real screen can only be judged by eye; this is
+    /// the pipeline's geometry and values.)
+    @available(macOS 15.0, *)
+    @MainActor
+    func testTheMetalSurfaceKeepsUprightAndHDRValues() throws {
+        guard ThumbnailMetalRenderer.shared.isAvailable else {
+            throw XCTSkip("no Metal device")
+        }
+        let w = 64, h = 64
+        var halves = [UInt16](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let top = y < h / 2
+                // Top half red at 4× SDR white, bottom half blue at 1× — both orientation and HDR.
+                halves[i] = top ? Float16(4).bitPattern : 0
+                halves[i + 1] = 0
+                halves[i + 2] = top ? 0 : Float16(1).bitPattern
+                halves[i + 3] = Float16(1).bitPattern
+            }
+        }
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3))
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                                      | CGBitmapInfo.floatComponents.rawValue
+                                      | CGBitmapInfo.byteOrder16Little.rawValue)
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes: halves,
+                                                              count: halves.count * 2) as CFData))
+        let image = try XCTUnwrap(CGImage(width: w, height: h, bitsPerComponent: 16,
+                                          bitsPerPixel: 64, bytesPerRow: w * 8, space: space,
+                                          bitmapInfo: bitmapInfo, provider: provider,
+                                          decode: nil, shouldInterpolate: false,
+                                          intent: .defaultIntent))
+        let view = ThumbnailEDRView(cornerRadius: 0)
+        view.frame = NSRect(x: 0, y: 0, width: w, height: h)
+        view.image = image
+        view.layoutSubtreeIfNeeded()
+
+        let texture = try XCTUnwrap(view.renderForTesting(width: w, height: h),
+                                    "the CAMetalLayer pass produced a texture")
+        var out = [UInt16](repeating: 0, count: w * h * 4)
+        out.withUnsafeMutableBytes { buffer in
+            texture.getBytes(buffer.baseAddress!, bytesPerRow: w * 8,
+                             from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        func pixel(_ x: Int, _ y: Int) -> (Float, Float, Float) {
+            let i = (y * w + x) * 4
+            return (Float(Float16(bitPattern: out[i])),
+                    Float(Float16(bitPattern: out[i + 1])),
+                    Float(Float16(bitPattern: out[i + 2])))
+        }
+        let top = pixel(w / 2, 0)
+        let bottom = pixel(w / 2, h - 1)
+        XCTAssertEqual(top.0, 4, accuracy: 0.1, "top row is the 4× red half (not flipped)")
+        XCTAssertEqual(top.2, 0, accuracy: 0.01)
+        XCTAssertEqual(bottom.2, 1, accuracy: 0.02, "bottom row is the blue half")
+        XCTAssertEqual(bottom.0, 0, accuracy: 0.01)
+        print("227 CAMetal pass: top \(top) · bottom \(bottom)")
+    }
+
+    /// 227 — the layer must actually receive a drawable in a real window (the offscreen test proves
+    /// the shader, this proves `nextDrawable` on the shipped view).
+    @available(macOS 15.0, *)
+    @MainActor
+    func testTheMetalSurfacePresentsToARealWindow() throws {
+        guard ThumbnailMetalRenderer.shared.isAvailable, !NSScreen.screens.isEmpty else {
+            throw XCTSkip("no Metal device or no screen")
+        }
+        let w = 64, h = 64
+        var halves = [UInt16](repeating: 0, count: w * h * 4)
+        for i in stride(from: 0, to: halves.count, by: 4) {
+            halves[i] = Float16(0.18).bitPattern
+            halves[i + 1] = Float16(0.18).bitPattern
+            halves[i + 2] = Float16(0.18).bitPattern
+            halves[i + 3] = Float16(1).bitPattern
+        }
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3))
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                                      | CGBitmapInfo.floatComponents.rawValue
+                                      | CGBitmapInfo.byteOrder16Little.rawValue)
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes: halves,
+                                                              count: halves.count * 2) as CFData))
+        let image = try XCTUnwrap(CGImage(width: w, height: h, bitsPerComponent: 16,
+                                          bitsPerPixel: 64, bytesPerRow: w * 8, space: space,
+                                          bitmapInfo: bitmapInfo, provider: provider,
+                                          decode: nil, shouldInterpolate: false,
+                                          intent: .defaultIntent))
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        window.contentView = host
+        let view = ThumbnailEDRView(cornerRadius: 6)
+        view.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
+        host.addSubview(view)
+        view.image = image
+        window.orderFront(nil)
+        view.layoutSubtreeIfNeeded()
+        for _ in 0..<10 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertGreaterThan(view.presentedFramesForTesting, 0,
+                             "the CAMetalLayer received a drawable")
+        XCTAssertFalse(view.isHidden, "the view unhides only after the new drawable landed")
+        window.orderOut(nil)
     }
 
     // MARK: - 5. SDR stays correct
@@ -314,7 +433,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
     func testSDRTargetKeepsNeutralGreyAndClipsThePeak() throws {
         let url = root.appendingPathComponent("sdr-check.heic")
         // Four vertical bands: 18 % grey, SDR white, 4× white, black.
-        try writeSyntheticHLG(linear: { x, _ in
+        try writeSyntheticPQ(linear: { x, _ in
             switch x {
             case 0..<16: return (0.18, 0.18, 0.18)
             case 16..<32: return (1.0, 1.0, 1.0)
@@ -387,7 +506,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let p90 = times[Int(Double(times.count) * 0.9)]
         var load = [Double](repeating: 0, count: 3)
         getloadavg(&load, 3)
-        print(String(format: "223 1920 P3-HLG → 326 px float: p50 %.2f ms · p90 %.2f ms · load %.2f",
+        print(String(format: "223 1920 P3-PQ → 326 px float: p50 %.2f ms · p90 %.2f ms · load %.2f",
                      p50, p90, load[0]))
         // ImageIO's HEVC path measures 79–100 ms for this same file, so anything in the single-digit
         // range is the Core Image → Metal path. The spec's 8 ms budget is stated for an idle machine

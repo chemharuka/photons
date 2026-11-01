@@ -12,8 +12,9 @@ import PhotonsCore
 /// `ThumbnailProvider.shared(for:)`. A 111 × 69 pt cell asks for the tier its DPR implies (§1), i.e.
 /// `t256` at 1x and 2x, and the selected cell always goes out at `.onScreen` priority.
 ///
-/// 223 — the image itself is a float EDR layer (`ThumbnailEDRView`); the card paints the gradient
-/// underneath and a transparent overlay paints the ring/badge above it.
+/// 223/227 — the image itself is a `CAMetalLayer` (`ThumbnailEDRView`) showing the float
+/// extended-linear P3 bitmap; the card paints the gradient underneath and a transparent overlay
+/// paints the ring/badge above it.
 public final class FilmstripCell: NSCollectionViewItem {
     public static let reuseIdentifier = NSUserInterfaceItemIdentifier("FilmstripCell")
 
@@ -26,10 +27,12 @@ public final class FilmstripCell: NSCollectionViewItem {
     public override var isSelected: Bool { didSet { card.isPicked = isSelected } }
 
     public func configure(asset: Asset, isActive: Bool) {
-        // A recycled cell must not show the previous photo for one frame: clear first, the
-        // controller re-applies from the shared memory cache right after (a synchronous hit).
-        card.thumbnail = nil
-        card.thumbnailTier = nil
+        // A recycled cell must not show a *different* photo for one frame; the same asset keeps
+        // its bitmap (a filter/metadata refresh is not a pixel change).
+        if card.asset?.id != asset.id {
+            card.clearThumbnail()
+            card.thumbnailTier = nil
+        }
         card.asset = asset
         card.isActive = isActive
         card.isPicked = isSelected
@@ -45,9 +48,22 @@ public final class FilmstripCard: NSView {
     public var thumbnail: CGImage? {
         didSet {
             thumbnailView.image = thumbnail
-            thumbnailView.isHidden = thumbnail == nil
             overlay.needsDisplay = true
         }
+    }
+    /// Same invariant as the grid: same key + same bitmap = no layer work.
+    public private(set) var thumbnailKey: ThumbKey?
+    public private(set) var thumbnailDisplay: ImageSize?
+    public func applyThumbnail(_ image: CGImage?, key: ThumbKey, display: ImageSize) {
+        if thumbnailKey == key, thumbnailDisplay == display, thumbnail === image { return }
+        thumbnailKey = key
+        thumbnailDisplay = display
+        thumbnail = image
+    }
+    public func clearThumbnail() {
+        thumbnailKey = nil
+        thumbnailDisplay = nil
+        thumbnail = nil
     }
     /// Which tier the current image came from — `--ui-smoke` asserts the DPR choice against it.
     public var thumbnailTier: ThumbTier?
@@ -141,6 +157,21 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     public let contextMenu = AssetContextMenu()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
+
+    /// One snapshot per update: ids/order/edit/metadata decide the list; selection/anchor only move
+    /// the ring. No per-property refresh paths.
+    private struct ModelSnapshot: Equatable {
+        var ids: [String]
+        var edit: Int
+        var metadata: Int
+    }
+    private var lastSnapshot: ModelSnapshot?
+
+    private func modelSnapshot(_ session: CatalogSession) -> ModelSnapshot {
+        ModelSnapshot(ids: session.assets.map(\.id),
+                      edit: session.persistCount,
+                      metadata: session.metadataRevision)
+    }
     private weak var session: CatalogSession?
     private var isApplyingModel = false
     public var onActivate: ((String) -> Void)?
@@ -269,7 +300,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private func observeModel() {
         bridge.observe({ [weak self] in
             guard let self, let session = self.session else { return }
-            _ = session.assets.count
+            _ = session.assets
             _ = session.selection
             _ = session.anchorID
             _ = session.metadataRevision
@@ -278,8 +309,30 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             // 218 — a commit moved the thumbnail key; re-ask instead of redrawing the old pixels.
             _ = session.persistCount
         }, { [weak self] in
-            self?.refresh()
+            self?.applyModelSnapshot()
         })
+    }
+
+    private func applyModelSnapshot() {
+        guard isViewLoaded, let session else { return }
+        let next = modelSnapshot(session)
+        guard next != lastSnapshot else {
+            updateSelectionAndActive()
+            return
+        }
+        lastSnapshot = next
+        refresh()
+    }
+
+    /// Selection/anchor are view state: update the rings in place, never reload the cells.
+    public func updateSelectionAndActive() {
+        guard isViewLoaded, let session else { return }
+        applySelectionFromModel()
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let cell = collectionView.item(at: path) as? FilmstripCell,
+                  let asset = cell.cardView.asset else { continue }
+            cell.cardView.isActive = session.anchorID == asset.id
+        }
     }
 
     public func refresh() {
@@ -293,6 +346,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         isApplyingModel = false
         applySelectionFromModel()
         DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
+        if let session { lastSnapshot = modelSnapshot(session) }
     }
 
     public func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
@@ -387,7 +441,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         let document = document(for: asset)
         let key = ThumbnailProvider.hdKey(for: asset, document: document)
         if let cached = provider.serveFromMemory(for: key, display: display) {
-            cell.cardView.thumbnail = cached
+            cell.cardView.applyThumbnail(cached, key: key, display: display)
             return
         }
         // A missing original has nothing to decode: only an already-cached thumbnail may stand in,
@@ -396,7 +450,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             guard provider.cache.exists(key) else { return }
         }
         if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
-            cell.cardView.thumbnail = previous
+            cell.cardView.applyThumbnail(previous, key: key, display: display)
         }
         requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
@@ -416,12 +470,12 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                                      document: document(for: asset), tier: tier, spec: .hd,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
-            self?.thumbnailDidLoad(index: idx, key: key, image: image)
+            self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
         }
         thumbRequests[index] = token
     }
 
-    private func thumbnailDidLoad(index: Int, key: ThumbKey, image: CGImage?) {
+    private func thumbnailDidLoad(index: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
         thumbRequests[index] = nil
         guard let image, let session, index >= 0, index < session.assets.count else { return }
         let path = IndexPath(item: index, section: 0)
@@ -429,7 +483,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // The cell may have been recycled between request and delivery; the asset id is the guard.
         guard cell.cardView.asset?.id == session.assets[index].id else { return }
         cell.cardView.thumbnailTier = key.tier
-        cell.cardView.thumbnail = image
+        cell.cardView.applyThumbnail(image, key: key, display: display)
     }
 
     private func scheduleThumbnailReconcile() {
@@ -579,7 +633,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             .compactMap { session.assets[safe: $0.item]?.id }
             .first { session.anchorID == $0 } ?? ids.first
         session.setSelection(Set(ids), anchor: anchor)
-        collectionView.reloadData()
+        updateSelectionAndActive()
         // The new anchor is priority ① for the next reconcile.
         scheduleThumbnailReconcile()
         revealAnchor()

@@ -577,11 +577,11 @@ public final class ThumbnailProvider: @unchecked Sendable {
     // MARK: - HD thumbnail (218 → 223)
 
     /// Render one HD thumbnail: the **same** `RenderGraph` the loupe and the exporter use, at a
-    /// scale whose long edge is at most 1920, then the existing PQ/HLG encoder
-    /// (`HDREncoding.write`) with the four pinned parameters: Display P3 primaries, HLG curve,
+    /// scale whose long edge is at most 1920, then the existing PQ encoder
+    /// (`HDREncoding.write`) with the four pinned parameters: Display P3 primaries, PQ curve,
     /// 10-bit HEIC, q0.75.
     ///
-    /// One render, not two: unlike 218's gain-map base + auxiliary image, an HLG file *is* the
+    /// One render, not two: unlike 218's gain-map base + auxiliary image, a PQ file *is* the
     /// extended-range picture, so the linear exit (`s4_display_linear` in P3) is the only frame
     /// needed. Reusing this door is what keeps "grid thumbnail == export preview" a fact instead of
     /// a claim — and it is why 223 does not add a second encoder.
@@ -610,8 +610,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
 
-        // Display P3 primaries, linear exit: HDREncoding converts this to `displayP3_HLG` by the
-        // system's own colour management (the same table `Export.swift` uses for `case .hlg`).
+        // Display P3 primaries, linear exit: HDREncoding converts this to `displayP3_PQ` by the
+        // system's own colour management (the same table `Export.swift` uses for `case .pq`).
         let linearOptions = RenderOptions(canvas: nil, scale: scale,
                                           display: DisplayOptions(primaries: .displayP3, bitDepth: 16,
                                                                   headroom: 1, linearOutput: true),
@@ -627,7 +627,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         let options = ExportOptions(format: .heic,
                                     quality: ThumbSpec.hd.quality,
                                     bitDepth: ThumbSpec.hd.bitDepth,
-                                    hdr: HDRExport(enabled: true, kind: .hlg))
+                                    hdr: HDRExport(enabled: true, kind: .pq))
         try HDREncoding.write(image, to: tmp, options: options)
         let data = try Data(contentsOf: tmp)
 
@@ -635,7 +635,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         runsPerKey[key.digest, default: 0] += 1
         runsPerContent[key.contentHash, default: 0] += 1
         lock.unlock()
-        return ThumbPayload(data: data, source: "graph-hlg",
+        return ThumbPayload(data: data, source: "graph-pq",
                             sourceLongEdge: max(linear.width, linear.height))
     }
 
@@ -654,14 +654,16 @@ public final class ThumbnailProvider: @unchecked Sendable {
     ///
     /// 223 — an HD payload is decoded **through Core Image → Metal at the cell's display pixels**,
     /// never through ImageIO and never at 1920 into memory: a 326 px grid cell must not pay for
-    /// 2.4 M pixels. The result is a float image in extended linear Display P3, which is what the
-    /// cell's EDR layer wants. The legacy JPEG ladder keeps ImageIO (it is the fast path there).
+    /// 2.4 M pixels. The result is a float image in extended linear Display P3; 227 keeps that
+    /// bitmap (and its HDR values) in memory but composites it **SDR**, so `CALayer` tone maps it to
+    /// SDR white instead of lifting reference white to the panel's maximum. The legacy JPEG ladder
+    /// keeps ImageIO (it is the fast path there).
     static func decode(_ data: Data, for key: ThumbKey, display: ImageSize) -> CGImage? {
         guard key.spec == .hd else { return ThumbnailCache.decode(data) }
         return decodeHD(data, display: display)
     }
 
-    /// 223 — the HD decode is the shared `ThumbnailHDRDecoder`: `CIImage` (display P3 HLG) → one
+    /// 223 — the HD decode is the shared `ThumbnailHDRDecoder`: `CIImage` (display P3 PQ) → one
     /// pooled `MTLTexture` of exactly `display` → a half-float `CGImage` in extended linear P3.
     ///
     /// The 2026-11-01 measurement that decided this path: ImageIO's HEVC door is 79–100 ms for the
@@ -777,18 +779,20 @@ public final class ThumbnailProvider: @unchecked Sendable {
 ///     `maxPixelSize: 326`: **79–100 ms** — the HEVC frame is the cost, not the requested size.
 ///   · `CIImage` → `CIContext.render(_:to: MTLTexture)`: **~3–7 ms** for the same file at 326 px.
 ///
-/// So the code path is: lazy `CIImage` (which reads the 10-bit Display P3 HLG profile), aspect-fill
+/// So the code path is: lazy `CIImage` (which reads the 10-bit Display P3 PQ profile), aspect-fill
 /// transform + centre crop in Core Image, render directly into a **display-sized** texture, then one
 /// half-float read-back for `CALayer.contents`. The texture is returned to the pool, never allocated
 /// per cell; the context is created once, not per thumbnail.
 ///
 /// The read-back `CGImage` carries a **measured** content headroom (`max(R,G,B)`, floored at 1.0),
-/// not ImageIO's default 4.926. That is what keeps HLG reference white on SDR white: the compositor
-/// only rolls off the highlights that actually exist, so a mid-grey stays where the old JPEG put it.
+/// not ImageIO's default 4.926. 227 — the cell composites SDR, so the headroom no longer drives an
+/// EDR layer; it remains the honest description of the bitmap (and the number an EDR path would use
+/// if one ever returns). SDR white is `1.0` in this space, exactly like the old JPEG.
 final class ThumbnailHDRDecoder: @unchecked Sendable {
     static let shared = ThumbnailHDRDecoder()
 
-    /// Display P3 primaries with a linear transfer — the space the EDR cells draw in.
+    /// Display P3 primaries with a linear transfer — the space the cells decode in. The cell
+    /// composites SDR (227), but the bitmap keeps the extended-range values.
     let outputSpace: CGColorSpace?
 
     private let queue: MTLCommandQueue?
@@ -820,26 +824,26 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         }
     }
 
-    /// 226 — the file's HLG profile has to be **explicit**.
+    /// 226 — the file's PQ profile has to be **explicit**.
     ///
-    /// The cache is a 10-bit HEIC written from a `displayP3_HLG` bitmap. ImageIO hands that file
+    /// The cache is a 10-bit HEIC written from a `displayP3_PQ` bitmap. ImageIO hands that file
     /// back with `CGImage.colorSpace == nil` (the profile travels only in the ICC payload, and the
     /// 10-bit HEVC path drops it), so `CIImage(data:)` returned an image with **no transfer function**
-    /// and Core Image copied the HLG signal straight into the linear working space: mid-grey came out
+    /// and Core Image copied the PQ signal straight into the linear working space: mid-grey came out
     /// at 0.69 instead of 0.117, i.e. 5.9× too bright, and highlights ran past 4.93.
     ///
-    /// Tagging the source explicitly is still "hand it to the system": ColorSync performs the HLG
+    /// Tagging the source explicitly is still "hand it to the system": ColorSync performs the PQ
     /// EOTF + reference-white mapping. We only tell it what the bytes are.
     static func sourceImage(_ data: Data) -> CIImage? {
         if let tagged = CIImage(data: data,
-                                options: [.colorSpace: CGColorSpace(name: CGColorSpace.displayP3_HLG)
+                                options: [.colorSpace: CGColorSpace(name: CGColorSpace.displayP3_PQ)
                                           ?? CGColorSpace(name: CGColorSpace.sRGB)!]) {
             return tagged
         }
         return CIImage(data: data)
     }
 
-    /// Decode `data` (a 10-bit Display P3 HLG HEIC) into exactly `display` pixels.
+    /// Decode `data` (a 10-bit Display P3 PQ HEIC) into exactly `display` pixels.
     ///
     /// Aspect-fill, centre-anchored — the same crop the cell's `contentsGravity` would apply, done
     /// once here so the bitmap the cache holds *is* the bitmap the user sees (no second resample).
@@ -964,41 +968,6 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
             }
             lock.unlock()
         }
-    }
-}
-
-// MARK: - EDR display layer (223)
-
-/// The three cells' thumbnail surface, in one place.
-///
-/// A `CALayer` can carry extended range only if it is told both halves: `contentsFormat =
-/// .rgba16Float` (the storage is half float, so a value above 1 survives) and
-/// `wantsExtendedDynamicRangeContent = true` (the window/compositor may use the panel's EDR headroom;
-/// on an SDR panel the system tone maps instead, which is the "SDR 屏不能坏" half). The contents are
-/// the **extended linear Display P3** images `ThumbnailProvider.decodeHD` produces — never an sRGB
-/// bitmap, whose values are clamped at 1 by construction.
-public enum ThumbnailDisplay {
-    /// The working/output space of every EDR thumbnail: Display P3 primaries, linear transfer.
-    public static var colorSpace: CGColorSpace? {
-        CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
-    }
-
-    public static func configure(_ layer: CALayer, cornerRadius: CGFloat = 0, scale: CGFloat = 2) {
-        layer.contentsGravity = .resizeAspectFill
-        layer.masksToBounds = true
-        layer.cornerRadius = cornerRadius
-        layer.contentsScale = max(1, scale)
-        layer.wantsExtendedDynamicRangeContent = true
-        layer.contentsFormat = .RGBA16Float
-        layer.minificationFilter = .linear
-        layer.magnificationFilter = .linear
-    }
-
-    public static func apply(_ image: CGImage?, to layer: CALayer, scale: CGFloat) {
-        layer.contentsScale = max(1, scale)
-        layer.wantsExtendedDynamicRangeContent = true
-        layer.contentsFormat = .RGBA16Float
-        layer.contents = image
     }
 }
 

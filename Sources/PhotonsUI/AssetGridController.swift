@@ -28,31 +28,91 @@ public final class AssetCollectionView: NSCollectionView {
     }
 }
 
-/// The card's image surface: a layer-backed view whose `contents` is the float extended-linear P3
-/// bitmap `ThumbnailProvider.decodeHD` produced. `contentsFormat = .rgba16Float` +
-/// `wantsExtendedDynamicRangeContent = true` is what lets values above 1 reach an EDR panel; on an
-/// SDR panel the compositor tone maps the same layer.
+/// The card's image surface: a `CAMetalLayer` showing the float extended-linear P3 bitmap
+/// `ThumbnailProvider.decodeHD` produced.
+///
+/// 227 — a `CALayer` with EDR contents let macOS tone map the picture and lift reference white towards
+/// the panel's maximum on an HDR display ("SDR white = screen max brightness"). A `CAMetalLayer`
+/// does not tone map: EDR `1.0` stays SDR white and values above 1 use the current headroom. The
+/// bitmap still lives in the provider's memory LRU; this view owns only the GPU copy for its cell.
+///
+/// No Metal (headless/VM): falls back to a plain SDR `CALayer`, so the grid still draws.
 final class ThumbnailEDRView: NSView {
     var image: CGImage? {
-        didSet { ThumbnailDisplay.apply(image, to: layer!, scale: window?.backingScaleFactor ?? 2) }
+        didSet {
+            guard let image else {
+                surface?.setImage(nil)
+                if surface == nil { layer?.contents = nil }
+                isHidden = true
+                return
+            }
+            if let surface {
+                // Stay hidden until the new drawable is on the compositor. Otherwise a recycled
+                // CAMetalLayer shows its previous photo for one frame ("wrong photo, then correct").
+                isHidden = true
+                surface.setImage(image) { [weak self] in self?.isHidden = false }
+            } else {
+                layer?.contents = image
+                isHidden = false
+            }
+        }
     }
 
     private let cornerRadius: CGFloat
+    private var surface: ThumbnailMetalSurface?
 
     init(cornerRadius: CGFloat) {
         self.cornerRadius = cornerRadius
         super.init(frame: .zero)
         wantsLayer = true
-        ThumbnailDisplay.configure(layer!, cornerRadius: cornerRadius, scale: 2)
-        layer?.contentsGravity = .resizeAspectFill
+        if let metal = layer as? CAMetalLayer {
+            surface = ThumbnailMetalSurface(layer: metal, cornerRadius: cornerRadius)
+        } else {
+            layer?.contentsGravity = .resizeAspectFill
+            layer?.masksToBounds = true
+            layer?.cornerRadius = cornerRadius
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
+    override func makeBackingLayer() -> CALayer {
+        if ThumbnailMetalRenderer.shared.isAvailable {
+            return CAMetalLayer()
+        }
+        let fallback = CALayer()
+        fallback.contentsGravity = .resizeAspectFill
+        fallback.masksToBounds = true
+        fallback.cornerRadius = cornerRadius
+        return fallback
+    }
+
     override func layout() {
         super.layout()
-        layer?.contentsScale = window?.backingScaleFactor ?? 2
+        let scale = window?.backingScaleFactor ?? 2
+        layer?.contentsScale = scale
+        surface?.layout(size: bounds.size, scale: scale)
     }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    /// Offscreen render of this cell's layer contents (orientation/HDR read-back in tests).
+    func renderForTesting(width: Int, height: Int) -> MTLTexture? {
+        surface?.renderOffscreen(width: width, height: height)
+    }
+
+    /// Drawables this surface has presented (0 before layout/on a headless session).
+    var presentedFramesForTesting: Int { surface?.presentCount ?? 0 }
 }
 
 /// Transparent sibling *above* `ThumbnailEDRView`: a sublayer's contents always composite above the
@@ -112,9 +172,23 @@ public final class AssetCardView: NSView {
     public var thumbnail: CGImage? {
         didSet {
             thumbnailView.image = thumbnail
-            thumbnailView.isHidden = thumbnail == nil
             overlay.needsDisplay = true
         }
+    }
+    /// The identity of the pixels currently in `thumbnail`. Re-applying the same key/bitmap is a
+    /// **no-op**: a refresh that did not change this file must not hide or re-present the layer.
+    public private(set) var thumbnailKey: ThumbKey?
+    public private(set) var thumbnailDisplay: ImageSize?
+    public func applyThumbnail(_ image: CGImage?, key: ThumbKey, display: ImageSize) {
+        if thumbnailKey == key, thumbnailDisplay == display, thumbnail === image { return }
+        thumbnailKey = key
+        thumbnailDisplay = display
+        thumbnail = image
+    }
+    public func clearThumbnail() {
+        thumbnailKey = nil
+        thumbnailDisplay = nil
+        thumbnail = nil
     }
     /// Which tier the current image came from — printed by `--ui-smoke` and used to prove the cell
     /// asked for the size it should have (006 §1).
@@ -239,10 +313,12 @@ public final class AssetGridItem: NSCollectionViewItem {
     }
 
     public func configure(asset: Asset, isActive: Bool) {
-        // A recycled cell must not show the previous photo for one frame: clear first, the
-        // controller re-applies from the memory cache (a synchronous `NSCache` hit) right after.
-        card.thumbnail = nil
-        card.thumbnailTier = nil
+        // A recycled cell must not show a *different* photo for one frame; the same asset keeps
+        // its bitmap (a filter/metadata refresh is not a pixel change).
+        if card.asset?.id != asset.id {
+            card.clearThumbnail()
+            card.thumbnailTier = nil
+        }
         card.asset = asset
         card.isActive = isActive
         card.isPicked = isSelected
@@ -262,6 +338,26 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
+
+    /// One model decision, made from a snapshot instead of from individual properties. The list
+    /// (ids + order), the edit/metadata generation and the filter decide whether the cells are
+    /// rebuilt; selection/anchor are the only things that may change without rebuilding them.
+    private struct ModelSnapshot: Equatable {
+        var ids: [String]
+        var edit: Int
+        var metadata: Int
+        var filter: String
+        var cameras: [String]
+    }
+    private var lastSnapshot: ModelSnapshot?
+
+    private func modelSnapshot(_ session: CatalogSession) -> ModelSnapshot {
+        ModelSnapshot(ids: session.assets.map(\.id),
+                      edit: session.persistCount,
+                      metadata: session.metadataRevision,
+                      filter: String(describing: session.filter),
+                      cameras: session.allCameraKeys)
+    }
     private weak var session: CatalogSession?
     private var isApplyingModel = false
     private(set) public var metrics = GridLayout.metrics(forWidth: 800)
@@ -396,7 +492,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard session != nil else { return }
         bridge.observe({ [weak self] in
             guard let self, let session = self.session else { return }
-            _ = session.assets.count
+            _ = session.assets
             _ = session.selection
             _ = session.anchorID
             // A rating/flag/colour write repaints the badges; a filter change re-ran the query.
@@ -410,8 +506,34 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             // the next reconcile must re-ask instead of reusing the old cell image.
             _ = session.persistCount
         }, { [weak self] in
-            self?.refresh()
+            self?.applyModelSnapshot()
         })
+    }
+
+    /// The one update path. Build the snapshot first, then either rebuild the list once or only
+    /// move the selection/active ring — never refresh thumbnails for a selection change.
+    private func applyModelSnapshot() {
+        guard isViewLoaded, let session else { return }
+        let next = modelSnapshot(session)
+        guard next != lastSnapshot else {
+            updateSelectionAndActive()
+            return
+        }
+        lastSnapshot = next
+        refresh()
+    }
+
+    /// Selection and anchor are view state: update the rings in place. **Never** reload the cells —
+    /// that would clear each thumbnail and re-ask the provider, which is the flash this exists to
+    /// prevent.
+    public func updateSelectionAndActive() {
+        guard isViewLoaded, let session else { return }
+        applySelectionFromModel()
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let item = collectionView.item(at: path) as? AssetGridItem,
+                  let asset = item.cardView.asset else { continue }
+            item.cardView.isActive = session.anchorID == asset.id
+        }
     }
 
     public func refresh() {
@@ -441,6 +563,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // `reloadData` recycles every visible cell, so every visible cell re-asks for its image.
         // Deferred by one runloop turn because the flow layout has not produced attributes yet.
         DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
+        if let session { lastSnapshot = modelSnapshot(session) }
     }
 
     private func updateMetrics() {
@@ -498,7 +621,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // `serveFromMemory` (not `memoryImage`) so a warm cell is counted as a hit rather than
         // disappearing from the statistics.
         if let cached = provider.serveFromMemory(for: key, display: display) {
-            cell.cardView.thumbnail = cached
+            cell.cardView.applyThumbnail(cached, key: key, display: display)
             return
         }
         if asset.isMissing {
@@ -507,7 +630,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // 218 — a commit changed the key, so the new one is a miss by construction; draw the
         // previous rendering while the rebuild runs instead of flashing the hash swatch.
         if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
-            cell.cardView.thumbnail = previous
+            cell.cardView.applyThumbnail(previous, key: key, display: display)
         }
         requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
@@ -580,13 +703,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let token = provider.request(index: index, asset: asset, fileURL: url,
                                      document: document(for: asset), tier: tier, spec: .hd,
                                      display: display,
-                                     priority: priority) { [weak self] idx, _, image in
-            self?.thumbnailDidLoad(index: idx, image: image)
+                                     priority: priority) { [weak self] idx, key, image in
+            self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
         }
         thumbRequests[index] = token
     }
 
-    private func thumbnailDidLoad(index: Int, image: CGImage?) {
+    private func thumbnailDidLoad(index: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
         thumbRequests[index] = nil
         // A nil image is a real answer ("no preview / unreadable"): the card keeps its placeholder.
         guard let image, let session, index >= 0, index < session.assets.count else { return }
@@ -594,7 +717,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard let cell = collectionView.item(at: path) as? AssetGridItem else { return }
         // The cell may have been recycled between request and delivery; the asset id is the guard.
         guard cell.cardView.asset?.id == session.assets[index].id else { return }
-        cell.cardView.thumbnail = image
+        cell.cardView.applyThumbnail(image, key: key, display: display)
     }
 
     private func scheduleThumbnailReconcile() {
@@ -779,8 +902,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             .compactMap { session.assets[safe: $0.item]?.id }
             .first { session.anchorID == $0 } ?? ids.first
         session.setSelection(Set(ids), anchor: anchor)
-        // Active ring must follow the anchor even when the selection set did not change.
-        collectionView.reloadData()
+        // Active ring must follow the anchor even when the selection set did not change. In place:
+        // a `reloadData()` here would recycle every cell and clear its thumbnail for no reason.
+        updateSelectionAndActive()
     }
 
     public func applySelectionFromModel() {

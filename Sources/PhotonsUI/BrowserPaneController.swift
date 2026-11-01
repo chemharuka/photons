@@ -35,6 +35,33 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private let photosScroll = NSScrollView()
     private let matte = NSVisualEffectView()
     private let bridge = ObservationBridge()
+
+    /// Same one-snapshot rule as the grid/filmstrip: the photo ids/order plus the tree/album
+    /// structure decide a rebuild; selection/anchor only move the row highlight.
+    private struct ModelSnapshot: Equatable {
+        var ids: [String]
+        var edit: Int
+        var metadata: Int
+        var structure: String
+    }
+    private var lastSnapshot: ModelSnapshot?
+
+    private func modelSnapshot(_ session: CatalogSession) -> ModelSnapshot {
+        let structure = [
+            "\(session.roots.count)",
+            "\(session.folderNodes.count)",
+            "\(session.albums.count)",
+            session.selectedRootID ?? "",
+            session.selectedFolderPath ?? "",
+            session.selectedAlbumID ?? "",
+            "\(session.albumRevision)",
+            String(describing: session.stats)
+        ].joined(separator: "|")
+        return ModelSnapshot(ids: session.assets.map(\.id),
+                             edit: session.persistCount,
+                             metadata: session.metadataRevision,
+                             structure: structure)
+    }
     private weak var session: CatalogSession?
     private var isApplyingModel = false
 
@@ -345,8 +372,35 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             // 218 — a commit moved the HD thumbnail key; refresh so visible rows ask for the new file.
             _ = session.persistCount
         }, { [weak self] in
-            self?.refresh()
+            self?.applyModelSnapshot()
         })
+    }
+
+    private func applyModelSnapshot() {
+        guard isViewLoaded, let session else { return }
+        let next = modelSnapshot(session)
+        guard next != lastSnapshot else {
+            updateSelectionAndActive()
+            return
+        }
+        lastSnapshot = next
+        refresh()
+    }
+
+    /// Selection/anchor only: update the selected rows, the footer and the active label colour.
+    /// No `reloadData()` — that would recycle every row and clear its thumbnail for no pixel change.
+    public func updateSelectionAndActive() {
+        guard isViewLoaded, let session else { return }
+        applySelectionFromModel()
+        footer.stringValue = session.selection.isEmpty
+            ? "未选择"
+            : "已选 \(session.selection.count)"
+        for row in 0..<photosTable.numberOfRows {
+            guard let cell = photosTable.view(atColumn: 0, row: row,
+                                              makeIfNecessary: false) as? PhotoRowCell,
+                  let id = cell.assetID else { continue }
+            cell.setActive(session.anchorID == id)
+        }
     }
 
     public func refresh() {
@@ -378,6 +432,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // `reloadData` recycles every visible row, so every visible row re-asks for its image.
         // Deferred one runloop turn because the table has not laid its rows out yet.
         DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
+        lastSnapshot = modelSnapshot(session)
     }
 
     // MARK: folder tree
@@ -663,14 +718,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         let document = document(for: asset)
         let key = ThumbnailProvider.hdKey(for: asset, document: document)
         if let cached = provider.serveFromMemory(for: key, display: display) {
-            cell.setThumbnail(cached)
+            cell.applyThumbnail(cached, key: key, display: display)
             return
         }
         if asset.isMissing {
             guard provider.cache.exists(key) else { return }
         }
         if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
-            cell.setThumbnail(previous)
+            cell.applyThumbnail(previous, key: key, display: display)
         }
         requestThumbnail(row: row, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
@@ -690,19 +745,19 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                                      document: document(for: asset), tier: tier, spec: .hd,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
-            self?.thumbnailDidLoad(row: idx, key: key, image: image)
+            self?.thumbnailDidLoad(row: idx, key: key, display: display, image: image)
         }
         thumbRequests[row] = token
     }
 
-    private func thumbnailDidLoad(row: Int, key: ThumbKey, image: CGImage?) {
+    private func thumbnailDidLoad(row: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
         thumbRequests[row] = nil
         guard let image, let session, row >= 0, row < session.assets.count else { return }
         guard let cell = photosTable.view(atColumn: 0, row: row, makeIfNecessary: false) as? PhotoRowCell,
               cell.assetID == session.assets[row].id else { return }
         // The row may have been recycled between request and delivery; the asset id is the guard.
         cell.thumbnailTier = key.tier
-        cell.setThumbnail(image)
+        cell.applyThumbnail(image, key: key, display: display)
     }
 
     @objc private func photoListDidScroll() {
@@ -1298,6 +1353,8 @@ private final class SourceRowCell: NSTableCellView {
 
 final class PhotoRowCell: NSTableCellView {
     private let swatch = NSView()
+    /// 227 — the image is its own CAMetalLayer surface, above the placeholder square.
+    private let thumbnailView = ThumbnailEDRView(cornerRadius: 6)
     private let name = NSTextField(labelWithString: "")
     private let meta = NSTextField(labelWithString: "")
     private let stars = NSTextField(labelWithString: "")
@@ -1309,12 +1366,15 @@ final class PhotoRowCell: NSTableCellView {
     private(set) var assetID: String?
     /// The decoded thumbnail, or nil while the flat placeholder is all we have.
     private(set) var thumbnail: CGImage?
+    /// Identity of the pixels currently held: same key + same bitmap means a refresh is a no-op.
+    private(set) var thumbnailKey: ThumbKey?
+    private(set) var thumbnailDisplay: ImageSize?
     /// Which tier the current image came from — the probe asserts the DPR choice against it.
     var thumbnailTier: ThumbTier?
     /// 223 — the pixel rectangle this row asked the provider for.
     var thumbnailDisplayPixels: ImageSize?
-    /// The EDR square, exposed for the acceptance read-back.
-    var thumbnailLayer: CALayer? { swatch.layer }
+    /// The thumbnail surface, exposed for the acceptance read-back.
+    var thumbnailLayer: CALayer? { thumbnailView.layer }
     /// 「原文件已移动」 for this row, or nil. A string, not just a colour, so the row can be asserted
     /// on (the grid card and the strip cell expose the same one, from the same constant).
     private(set) var missingLabel: String?
@@ -1384,12 +1444,12 @@ final class PhotoRowCell: NSTableCellView {
     init() {
         super.init(frame: .zero)
         swatch.wantsLayer = true
-        // 223 — the row's square is an EDR surface: float contents in extended linear Display P3.
-        ThumbnailDisplay.configure(swatch.layer!, cornerRadius: 6, scale: 2)
-        // The image is aspect-filled and centre-anchored, exactly like a grid card: the cell decides
-        // the crop, never the image. `contentsGravity` also keeps this off the draw path — a list
-        // row is 34 pt and `CALayer` composites it on the GPU.
-        swatch.layer?.contentsGravity = .resizeAspectFill
+        swatch.layer?.cornerRadius = 6
+        swatch.layer?.masksToBounds = true
+        // 227 — a CAMetalLayer image sits on top of the placeholder square; the square keeps the
+        // hash colour for the loading/failed state.
+        thumbnailView.isHidden = true
+        swatch.addSubview(thumbnailView)
         name.font = .systemFont(ofSize: 11, weight: .medium)
         name.lineBreakMode = .byTruncatingMiddle
         meta.font = .systemFont(ofSize: 9)
@@ -1404,10 +1464,12 @@ final class PhotoRowCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
     func configure(asset: Asset, isActive: Bool) {
-        // A recycled row must not show the previous photo for one frame: clear first, the controller
-        // re-applies from the memory cache (a synchronous `NSCache` hit) right after.
-        setThumbnail(nil)
-        thumbnailTier = nil
+        // A recycled row must not show a *different* photo for one frame; the same asset keeps its
+        // bitmap (a filter/metadata refresh is not a pixel change).
+        if assetID != asset.id {
+            clearThumbnail()
+            thumbnailTier = nil
+        }
         assetID = asset.id
         // The placeholder stays underneath the image (006 §2): a row is never a white hole, and a
         // failure looks like "not yet", not like "broken".
@@ -1439,11 +1501,29 @@ final class PhotoRowCell: NSTableCellView {
     /// `contentsScale` is set here rather than once in `init` because the cell can be adopted by a
     /// different window (a 1× display) after being created; without it a 256 px thumbnail would be
     /// resampled as if it were 256 pt.
+    /// Selection moved without changing this row's asset: update the active label in place.
+    func setActive(_ active: Bool) {
+        name.textColor = active ? .labelColor : .secondaryLabelColor
+    }
+
+    /// Same invariant as the grid/filmstrip: same key + same bitmap = no layer work.
+    func applyThumbnail(_ image: CGImage?, key: ThumbKey, display: ImageSize) {
+        if thumbnailKey == key, thumbnailDisplay == display, thumbnail === image { return }
+        thumbnailKey = key
+        thumbnailDisplay = display
+        setThumbnail(image)
+    }
+
+    func clearThumbnail() {
+        thumbnailKey = nil
+        thumbnailDisplay = nil
+        setThumbnail(nil)
+    }
+
     func setThumbnail(_ image: CGImage?) {
         guard thumbnail !== image else { return }
         thumbnail = image
-        ThumbnailDisplay.apply(image, to: swatch.layer!, scale: window?.backingScaleFactor ?? 2)
-        swatch.layer?.contentsGravity = .resizeAspectFill
+        thumbnailView.image = image
         needsDisplay = image == nil
     }
 
@@ -1451,6 +1531,7 @@ final class PhotoRowCell: NSTableCellView {
         super.layout()
         let side = BrowserPaneController.thumbnailSide
         swatch.frame = NSRect(x: 2, y: (bounds.height - side) / 2, width: side, height: side)
+        thumbnailView.frame = swatch.bounds
 
         let textX: CGFloat = 44
         let width = max(10, bounds.width - textX - 2)

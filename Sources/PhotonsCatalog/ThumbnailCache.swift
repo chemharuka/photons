@@ -55,18 +55,18 @@ public enum ThumbPipeline: String, Sendable, CaseIterable, Codable {
 }
 
 /// 223 — what an on-disk file *is*. The legacy spec is the pre-218 8-bit sRGB JPEG ladder; `hd` is
-/// the one thumbnail three views now share: a **10-bit Display P3 HLG** primary image, 1920 long
+/// the one thumbnail three views now share: a **10-bit Display P3 PQ** primary image, 1920 long
 /// edge, q75, HEIC container. There is **no auxiliary gain map** any more (218 wrote an 8-bit SDR
 /// base plus a half-size ISO map).
 ///
 /// The spec is part of the key string, so the two families can never alias even when they land on
 /// the same `ThumbTier` sentinel (`.t2048`). The spelling changed from `hd1920q75gm23` to
-/// `hd1920q75p3hlg10`, which is what makes every 218 file an unreachable key (the LRU reclaims it;
+/// `hd1920q75p3hlg10`/`hd1920q75p3pq10`, which is what makes every 218/HLG file an unreachable key (the LRU reclaims it;
 /// nothing deletes it by hand). The file extension is a property of the spec, not of the key,
 /// because the cache directory has to keep both kinds while the old files age out.
 public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     case legacy = "v1"
-    case hd = "hd1920q75p3hlg10b"
+    case hd = "hd1920q75p3pq10"
 
     /// The longest edge the spec promises. 0 means "the tier decides" (legacy).
     public var longEdge: Int { self == .hd ? 1920 : 0 }
@@ -74,9 +74,9 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     public var quality: Double { self == .hd ? 0.75 : ThumbnailJPEG.quality }
     /// 223 — the HD primary item's bit depth (HEIF's one legal HDR depth) and transfer curve.
     public var bitDepth: Int { self == .hd ? 10 : 8 }
-    public var isHLG: Bool { self == .hd }
-    /// The colour space the HD file is tagged with: **Display P3 HLG**, not Rec.2020 HLG.
-    public var colorSpaceName: String? { self == .hd ? "displayP3_HLG" : nil }
+    public var isHDR: Bool { self == .hd }
+    /// The colour space the HD file is tagged with: **Display P3 PQ**, not Rec.2020 PQ.
+    public var colorSpaceName: String? { self == .hd ? "displayP3_PQ" : nil }
     /// Bumped when the meaning of a spec changes without changing its spelling.
     public var schemaVersion: Int { 1 }
 }
@@ -121,7 +121,7 @@ public enum ThumbRecipe {
     /// here too. That is what makes "commit an edit ⇒ new key ⇒ cache miss ⇒ background rebuild" a
     /// consequence of the render graph's own key chain rather than a second diffing mechanism.
     /// `thumbSpec` and the stage-version material are appended again on purpose: the key must name
-    /// the file parameters (1920/q75/10-bit/Display P3 HLG/HEIC) and the arithmetic generation
+    /// the file parameters (1920/q75/10-bit/Display P3 PQ/HEIC) and the arithmetic generation
     /// even if a future stage list forgets them.
     public static func editFingerprint(_ document: EditModel) -> String {
         let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
@@ -184,7 +184,7 @@ public enum ThumbPolicy {
 public enum ThumbNamespace {
     public static let preview = "p"
     public static var graph: String { "g-" + StageAlgorithmVersion.fingerprint }
-    /// 218 → 223 — the HD/HLG family. Its key already carries the edit fingerprint, so a superseded
+    /// 218 → 223 — the HD/HDR family. Its key already carries the edit fingerprint, so a superseded
     /// edit is an unreachable key (reclaimed by the LRU, and by undo's old key becoming live again)
     /// rather than a directory generation.
     public static let hd = "hd"
@@ -201,7 +201,7 @@ public struct ThumbKey: Hashable, Sendable {
     public let tier: ThumbTier
     public let pipeline: ThumbPipeline
     public let recipeDigest: String
-    /// 218 → 223 — which file family this key belongs to (`legacy` JPEG or the shared HD HLG HEIC).
+    /// 218 → 223 — which file family this key belongs to (`legacy` JPEG or the shared HD HDR HEIC).
     public let spec: ThumbSpec
     /// 218 — `sha256` over the document's stage keys. For `legacy` keys it is the placeholder `-`
     /// and the legacy key string is byte-identical to the pre-218 one (the tier ladder's cache is
@@ -521,7 +521,7 @@ public final class ThumbnailCache {
         return data
     }
 
-    /// 223 — the HD HEIC is a single 10-bit Display P3 HLG primary item (no auxiliary gain map).
+    /// 223 — the HD HEIC is a single 10-bit Display P3 PQ primary item (no auxiliary gain map).
     /// Completeness is per spec so a truncated HEIC is a miss too.
     public static func payloadLooksComplete(_ data: Data, for key: ThumbKey) -> Bool {
         key.spec == .hd ? looksLikeHEIC(data) : ThumbnailJPEG.looksComplete(data)
