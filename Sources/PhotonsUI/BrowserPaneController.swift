@@ -553,6 +553,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         view.window?.backingScaleFactor ?? 2
     }
 
+    /// 223 — the 34 pt square at the window's backing scale (68 × 68 px at 2×). This is the size the
+    /// cache decodes to; the list never asks for the 1920 primary item.
+    private var displayPixels: ImageSize {
+        ThumbnailProvider.displayPixels(swatch: CGSize(width: BrowserPaneController.thumbnailSide,
+                                                       height: BrowserPaneController.thumbnailSide),
+                                        backingScale: backingScale)
+    }
+
+    /// 223 — the bitmap size every list row asks the cache for (68 × 68 px at 2×).
+    public var displayPixelSize: ImageSize { displayPixels }
     /// 双击照片行 = 在单图（loupe）里打开它。与网格/胶片条的双击同义：只选中这一张，再切到单图模式。
     ///
     /// `clickedRow` 是 AppKit 在派发 `doubleAction` 前设好的；键盘触发（`performDoubleClick`）时
@@ -648,19 +658,21 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.thumbnailTier = tier
+        let display = displayPixels
+        cell.thumbnailDisplayPixels = display
         let document = document(for: asset)
         let key = ThumbnailProvider.hdKey(for: asset, document: document)
-        if let cached = provider.serveFromMemory(for: key) {
+        if let cached = provider.serveFromMemory(for: key, display: display) {
             cell.setThumbnail(cached)
             return
         }
         if asset.isMissing {
             guard provider.cache.exists(key) else { return }
         }
-        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
             cell.setThumbnail(previous)
         }
-        requestThumbnail(row: row, asset: asset, tier: tier, priority: .onScreen)
+        requestThumbnail(row: row, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
 
     /// The live document for the anchor photo, the stored one for every other row (218 key input).
@@ -670,11 +682,13 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         return ThumbnailProvider.document(from: asset)
     }
 
-    private func requestThumbnail(row: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
+    private func requestThumbnail(row: Int, asset: Asset, tier: ThumbTier,
+                                  display: ImageSize, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[row] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
         let token = provider.request(index: row, asset: asset, fileURL: url,
                                      document: document(for: asset), tier: tier, spec: .hd,
+                                     display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(row: idx, key: key, image: image)
         }
@@ -739,9 +753,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         for row in wanted {
             guard row < session.assets.count else { continue }
             let asset = session.assets[row]
-            if provider.memoryImage(contentHash: asset.contentHash, tier: cellTier) != nil { continue }
+            let display = displayPixels
+            let key = ThumbnailProvider.hdKey(for: asset, document: document(for: asset))
+            if provider.memoryImage(for: key, display: display) != nil { continue }
             if thumbRequests[row] != nil { continue }
-            requestThumbnail(row: row, asset: asset, tier: cellTier,
+            requestThumbnail(row: row, asset: asset, tier: cellTier, display: display,
                              priority: visible.contains(row) ? .onScreen : .prefetch)
         }
     }
@@ -1295,6 +1311,10 @@ final class PhotoRowCell: NSTableCellView {
     private(set) var thumbnail: CGImage?
     /// Which tier the current image came from — the probe asserts the DPR choice against it.
     var thumbnailTier: ThumbTier?
+    /// 223 — the pixel rectangle this row asked the provider for.
+    var thumbnailDisplayPixels: ImageSize?
+    /// The EDR square, exposed for the acceptance read-back.
+    var thumbnailLayer: CALayer? { swatch.layer }
     /// 「原文件已移动」 for this row, or nil. A string, not just a colour, so the row can be asserted
     /// on (the grid card and the strip cell expose the same one, from the same constant).
     private(set) var missingLabel: String?
@@ -1364,8 +1384,8 @@ final class PhotoRowCell: NSTableCellView {
     init() {
         super.init(frame: .zero)
         swatch.wantsLayer = true
-        swatch.layer?.cornerRadius = 6
-        swatch.layer?.masksToBounds = true
+        // 223 — the row's square is an EDR surface: float contents in extended linear Display P3.
+        ThumbnailDisplay.configure(swatch.layer!, cornerRadius: 6, scale: 2)
         // The image is aspect-filled and centre-anchored, exactly like a grid card: the cell decides
         // the crop, never the image. `contentsGravity` also keeps this off the draw path — a list
         // row is 34 pt and `CALayer` composites it on the GPU.
@@ -1422,8 +1442,8 @@ final class PhotoRowCell: NSTableCellView {
     func setThumbnail(_ image: CGImage?) {
         guard thumbnail !== image else { return }
         thumbnail = image
-        swatch.layer?.contents = image
-        swatch.layer?.contentsScale = window?.backingScaleFactor ?? 2
+        ThumbnailDisplay.apply(image, to: swatch.layer!, scale: window?.backingScaleFactor ?? 2)
+        swatch.layer?.contentsGravity = .resizeAspectFill
         needsDisplay = image == nil
     }
 

@@ -3,9 +3,11 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import ImageIO
+import Metal
 import PhotonsCatalog
 import PhotonsCore
 import PhotonsExport
+import QuartzCore
 
 // MARK: - request token
 
@@ -84,8 +86,9 @@ final class RequestState: @unchecked Sendable {
 /// Layers, in the order a cell asks for them — memory, then the content-addressed file on disk, then a
 /// freshly generated one:
 ///
-/// 1. **memory** — `NSCache` keyed by `ThumbKey.digest`, 512 images / 96 MB, cost = w·h·4. A cell
-///    that scrolls back into view is answered synchronously, with no file I/O and no queue hop.
+/// 1. **memory** — `NSCache` keyed by `ThumbKey.digest` + display pixels, 512 images / 256 MB,
+///    cost = w·h·8 (a half-float RGBA bitmap). A cell that scrolls back into view is answered
+///    synchronously, with no file I/O and no queue hop.
 /// 2. **service** — which is itself disk→generate: the content-addressed JPEG in
 ///    `~/Library/Caches/Photons/<libHash>/thumbs/`, or the P path producing a new one.
 /// 3. **generate** — `produce(_:source:)` rides through ImageIO on a RAW's *embedded* preview
@@ -119,6 +122,16 @@ public final class ThumbnailProvider: @unchecked Sendable {
         /// 218 — image decodes performed inside `deliver`. A 200-cell grid where every cell is served
         /// from the memory LRU must leave this at 0; it is the measurement behind "全部命中时零解码".
         public var decodes = 0
+        /// 223 — decodes that used ImageIO's **whole-image** door
+        /// (`CGImageSourceCreateImageAtIndex`). The HD HEIC path must leave this at 0; only the
+        /// legacy JPEG ladder may use it.
+        public var imageIOWholeDecodes = 0
+        /// 223 — decodes that used ImageIO's **thumbnail** door
+        /// (`CGImageSourceCreateThumbnailAtIndex`). Also 0 for every HD cell: HEIC pixels come from
+        /// Core Image → Metal, never from ImageIO.
+        public var imageIOThumbnailDecodes = 0
+        /// 223 — decodes that went through Core Image → `MTLTexture` (the HD HEIC path).
+        public var gpuDecodes = 0
         /// Policy downgrades by reason (`dngCeiling`), 006 §6.1. Printed, not estimated.
         public var skipReasons: [String: Int] = [:]
 
@@ -134,15 +147,19 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
 
         public var summary: String {
-            String(format: "requests %d · applied %d · memory %d · disk %d · generated %d · failed %d · cancelled %d · decode %d · hit %.3f",
-                   requests, applied, memoryHits, diskHits, generated, failures, cancelled, decodes, hitRatio)
+            String(format: "requests %d · applied %d · memory %d · disk %d · generated %d · failed %d · cancelled %d · decode %d · gpu %d · hit %.3f",
+                   requests, applied, memoryHits, diskHits, generated, failures, cancelled, decodes,
+                   gpuDecodes, hitRatio)
         }
     }
 
     /// 006 §1 asks for a 32 MB window-sized LRU; the brief sets the floor at 512 images / 96 MB.
-    /// Both are enforced: `NSCache` evicts on whichever limit trips first.
+    /// 223 raises the byte ceiling to 256 MB: a half-float display bitmap is 8 bytes per pixel, so
+    /// 200 grid cells at 326×242 are ~126 MB — an acceptance that says "the second switch decodes
+    /// nothing" cannot be met by a 96 MB cache that evicts a quarter of them.
+    /// Both limits are enforced: `NSCache` evicts on whichever limit trips first.
     public static let memoryCountLimit = 512
-    public static let memoryByteLimit = 96 * 1024 * 1024
+    public static let memoryByteLimit = 256 * 1024 * 1024
     /// 006 §4 "并发上限 3" — handed to the service, which is the only thing that schedules.
     public static let defaultConcurrency = 3
 
@@ -157,8 +174,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// Deliberately small: it is a placeholder cache, not a second thumbnail LRU.
     private let recent = NSCache<NSString, ImageBox>()
     /// The documents behind in-flight HD keys. `ThumbnailProducer` only receives a key and a source
-    /// URL, so the edit itself has to ride here from `request` to `produce`.
+    /// URL, so the edit itself has to ride here from `request` to `produce`. 223 — bounded: this is
+    /// a hand-off, not a second store of the library.
     private var documentsByKey: [String: EditModel] = [:]
+    private var documentOrder: [String] = []
+    /// 223 — digest → the display size its bitmap was last stored at (the back-compat lookup).
+    private var displaySizesByDigest: [String: ImageSize] = [:]
+    private var displaySizeOrder: [String] = []
+    /// Ceiling for the two bookkeeping maps above (`documentsByKey`, `displaySizesByDigest`).
+    static let indexLimit = 4096
     /// `ThumbnailService` holds its producer strongly, so the adapter holds the provider weakly:
     /// that is what keeps provider ↔ service from being a retain cycle.
     private let adapter: ProducerAdapter
@@ -249,10 +273,28 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return (limit, "dngCeiling")
     }
 
-    // MARK: - memory layer
+    // MARK: - memory layer (223: keyed by content key **and** display pixels)
 
-    public func memoryImage(for key: ThumbKey) -> CGImage? {
-        memory.object(forKey: key.digest as NSString)?.image
+    /// The memory layer holds **display-sized** bitmaps only. Two cells of the same photo on the
+    /// same screen share one entry; the grid, the filmstrip and the list do not, because their
+    /// swatches are different sizes and resampling a 326 px grid bitmap down to 68 px would be both
+    /// soft and a lie about which size was decoded.
+    static func memoryKey(_ key: ThumbKey, display: ImageSize) -> NSString {
+        "\(key.digest)|\(display.width)x\(display.height)" as NSString
+    }
+
+    static func recentKey(_ contentHash: String, display: ImageSize) -> NSString {
+        "\(contentHash)|\(display.width)x\(display.height)" as NSString
+    }
+
+    public func memoryImage(for key: ThumbKey, display: ImageSize? = nil) -> CGImage? {
+        if let display {
+            return memory.object(forKey: ThumbnailProvider.memoryKey(key, display: display))?.image
+        }
+        // Back-compat for callers that only know the content key (the sort-order probe): remember
+        // the last display size each digest was stored at and ask for that one.
+        guard let last = lastDisplaySize(for: key.digest) else { return nil }
+        return memory.object(forKey: ThumbnailProvider.memoryKey(key, display: last))?.image
     }
 
     public func memoryImage(contentHash: String, tier: ThumbTier) -> CGImage? {
@@ -261,16 +303,39 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
     /// 218 — the previous rendering of a photo, for the one frame between a commit's cache miss and
     /// the rebuilt file. Never counted as a cache hit: it is explicitly *not* the requested key.
-    public func placeholderImage(contentHash: String) -> CGImage? {
-        recent.object(forKey: contentHash as NSString)?.image
+    public func placeholderImage(contentHash: String, display: ImageSize? = nil) -> CGImage? {
+        let pixels = display ?? ImageSize(width: 256, height: 256)
+        return recent.object(forKey: ThumbnailProvider.recentKey(contentHash, display: pixels))?.image
     }
 
-    private func remember(_ image: CGImage, for key: ThumbKey) {
-        let cost = max(1, image.width * image.height * 4)
-        memory.setObject(ImageBox(image), forKey: key.digest as NSString, cost: cost)
+    private func remember(_ image: CGImage, for key: ThumbKey, display: ImageSize) {
+        // A float RGBA bitmap is 8 bytes per pixel; the old cost (4) under-counted the EDR form.
+        let cost = max(1, image.width * image.height * 8)
+        memory.setObject(ImageBox(image),
+                         forKey: ThumbnailProvider.memoryKey(key, display: display), cost: cost)
+        lock.lock()
+        rememberDisplaySize(display, for: key.digest)
+        lock.unlock()
         if key.spec == .hd {
-            recent.setObject(ImageBox(image), forKey: key.contentHash as NSString, cost: cost)
+            recent.setObject(ImageBox(image),
+                             forKey: ThumbnailProvider.recentKey(key.contentHash, display: display),
+                             cost: cost)
         }
+    }
+
+    /// digest → the display size it was last remembered at. Tiny (one entry per asset), bounded by
+    /// the same FIFO as `documentsByKey` so a 10k-photo library cannot grow it without limit.
+    private func rememberDisplaySize(_ display: ImageSize, for digest: String) {
+        if displaySizesByDigest[digest] == nil { displaySizeOrder.append(digest) }
+        displaySizesByDigest[digest] = display
+        while displaySizeOrder.count > ThumbnailProvider.indexLimit {
+            displaySizesByDigest.removeValue(forKey: displaySizeOrder.removeFirst())
+        }
+    }
+
+    private func lastDisplaySize(for digest: String) -> ImageSize? {
+        lock.lock(); defer { lock.unlock() }
+        return displaySizesByDigest[digest]
     }
 
     // MARK: - key selection (218)
@@ -291,6 +356,24 @@ public final class ThumbnailProvider: @unchecked Sendable {
             document: document ?? ThumbnailProvider.document(from: asset))
     }
 
+    /// 223 — the pixel rectangle a cell actually shows, from its layout size in points and the
+    /// window's backing scale. One helper: the grid, the filmstrip and the list must not each round
+    /// differently, or the memory key would never be hit twice.
+    public static func displayPixels(swatch: CGSize, backingScale: CGFloat) -> ImageSize {
+        let scale = max(1, backingScale)
+        return ImageSize(width: max(1, Int((max(1, swatch.width) * scale).rounded())),
+                         height: max(1, Int((max(1, swatch.height) * scale).rounded())))
+    }
+
+    private func rememberDocument(_ document: EditModel, for digest: String) {
+        lock.lock(); defer { lock.unlock() }
+        if documentsByKey[digest] == nil { documentOrder.append(digest) }
+        documentsByKey[digest] = document
+        while documentOrder.count > ThumbnailProvider.indexLimit {
+            documentsByKey.removeValue(forKey: documentOrder.removeFirst())
+        }
+    }
+
     // MARK: - loading
 
     /// Load a cell's thumbnail. `completion` always runs on the main actor and is skipped entirely
@@ -305,13 +388,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
                         document: EditModel? = nil,
                         tier: ThumbTier,
                         spec: ThumbSpec = .legacy,
+                        display: ImageSize? = nil,
                         priority: ThumbPriority = .onScreen,
                         completion: @escaping @MainActor (Int, ThumbKey, CGImage?) -> Void) -> ThumbnailRequest {
+        let pixels = display ?? ImageSize(width: 512, height: 512)
         let key: ThumbKey
         if spec == .hd {
             let doc = document ?? ThumbnailProvider.document(from: asset)
             key = ThumbKey.hd(contentHash: asset.contentHash, document: doc)
-            lock.lock(); documentsByKey[key.digest] = doc; lock.unlock()
+            rememberDocument(doc, for: key.digest)
         } else {
             let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
             if let reason = plan.skipReason {
@@ -321,7 +406,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
 
         // 1. memory. Synchronous, so a cell that scrolls back into view draws in the same frame.
-        if let hit = memoryImage(for: key) {
+        // 223 — the key includes the display pixels: a grid bitmap is never handed to the list.
+        if let hit = memoryImage(for: key, display: spec == .hd ? pixels : nil) {
             note { $0.requests += 1; $0.memoryHits += 1; $0.applied += 1 }
             let token = ThumbnailRequest(index: index, key: key, ticket: nil, provider: self)
             token.state.markFinished()
@@ -343,15 +429,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
         let state = RequestState()
         let spec = ThumbRequestSpec(key: key, source: fileURL)
         let ticket = service.request(spec, priority: priority) { [weak self] result in
-            self?.deliver(result, index: index, state: state, completion: completion)
+            self?.deliver(result, index: index, state: state, display: pixels, completion: completion)
         }
         return ThumbnailRequest(index: index, key: key, ticket: ticket, provider: self, state: state)
     }
 
     /// Synchronous memory hit for a cell being configured — counted, so the acceptance harness can
     /// distinguish "served from the LRU" from "regenerated the same image".
-    public func serveFromMemory(for key: ThumbKey) -> CGImage? {
-        guard let hit = memoryImage(for: key) else { return nil }
+    public func serveFromMemory(for key: ThumbKey, display: ImageSize? = nil) -> CGImage? {
+        guard let hit = memoryImage(for: key, display: display) else { return nil }
         note { $0.requests += 1; $0.memoryHits += 1; $0.applied += 1 }
         return hit
     }
@@ -361,7 +447,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
     public var queueDepth: Int { service.pendingCount + service.stats().active }
 
     /// Runs on a service worker. Books the delivery and hands the decoded image to the main thread.
-    private func deliver(_ result: ThumbResult, index: Int, state: RequestState,
+    private func deliver(_ result: ThumbResult, index: Int, state: RequestState, display: ImageSize,
                          completion: @escaping @MainActor (Int, ThumbKey, CGImage?) -> Void) {
         state.markFinished()
         switch result.origin {
@@ -374,12 +460,22 @@ public final class ThumbnailProvider: @unchecked Sendable {
             DispatchQueue.main.async { completion(index, result.key, nil) }
             return
         }
-        guard let image = ThumbnailProvider.decode(data, for: result.key) else {
+        // 223 — the two decode doors are counted separately, so "the HEIC path used ImageIO" is a
+        // number a test can refute rather than a claim in a comment.
+        let image: CGImage?
+        if result.key.spec == .hd {
+            image = ThumbnailProvider.decodeHD(data, display: display)
+            if image != nil { note { $0.gpuDecodes += 1 } }
+        } else {
+            image = ThumbnailCache.decode(data)
+            if image != nil { note { $0.imageIOWholeDecodes += 1 } }
+        }
+        guard let image else {
             DispatchQueue.main.async { completion(index, result.key, nil) }
             return
         }
         note { $0.decodes += 1 }
-        remember(image, for: result.key)
+        remember(image, for: result.key, display: display)
         note { $0.applied += 1 }
         DispatchQueue.main.async { completion(index, result.key, image) }
     }
@@ -434,6 +530,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
             // The file already is a rendered JPEG/HEIC: ImageIO's own downscale *is* the fast path,
             // and `CreateThumbnailFromImageIfAbsent` is what lets it use the DCT-scaled decoder.
             embedded = ThumbnailProvider.imageIOThumbnail(source, maxPixelSize: key.tier.longEdge)
+            if embedded != nil { note { $0.imageIOThumbnailDecodes += 1 } }
         }
         guard let embedded else {
             throw ThumbProviderError.noPreview(source, tier: key.tier)
@@ -477,15 +574,17 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return cg
     }
 
-    // MARK: - HD thumbnail (218)
+    // MARK: - HD thumbnail (218 → 223)
 
     /// Render one HD thumbnail: the **same** `RenderGraph` the loupe and the exporter use, at a
-    /// scale whose long edge is at most 1920, then `GainMapHEIC.write` with the four pinned
-    /// parameters (q0.75, 8-bit SDR base, half-size colour gain map, +2.3 EV).
+    /// scale whose long edge is at most 1920, then the existing PQ/HLG encoder
+    /// (`HDREncoding.write`) with the four pinned parameters: Display P3 primaries, HLG curve,
+    /// 10-bit HEIC, q0.75.
     ///
-    /// Two renders of one document, exactly as the exporter does it: the SDR base through
-    /// `s4_display`, then the extended-linear exit through `s4_display_linear`. Reusing this door is
-    /// what keeps "grid thumbnail == export preview" a fact instead of a claim.
+    /// One render, not two: unlike 218's gain-map base + auxiliary image, an HLG file *is* the
+    /// extended-range picture, so the linear exit (`s4_display_linear` in P3) is the only frame
+    /// needed. Reusing this door is what keeps "grid thumbnail == export preview" a fact instead of
+    /// a claim — and it is why 223 does not add a second encoder.
     private func produceHD(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
         guard FileManager.default.fileExists(atPath: source.path) else {
             throw ThumbProviderError.unreadable(source)
@@ -511,40 +610,33 @@ public final class ThumbnailProvider: @unchecked Sendable {
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
 
-        let sdrOptions = RenderOptions(canvas: nil, scale: scale,
-                                       display: DisplayOptions(primaries: .sRGB, bitDepth: 8,
-                                                               headroom: 1),
-                                       useCache: false, wantsPixels: true)
-        guard let sdr = try? graph.render(document, options: sdrOptions).display else {
-            throw ThumbProviderError.encodeFailed(source)
-        }
+        // Display P3 primaries, linear exit: HDREncoding converts this to `displayP3_HLG` by the
+        // system's own colour management (the same table `Export.swift` uses for `case .hlg`).
         let linearOptions = RenderOptions(canvas: nil, scale: scale,
-                                          display: DisplayOptions(primaries: .sRGB, bitDepth: 16,
+                                          display: DisplayOptions(primaries: .displayP3, bitDepth: 16,
                                                                   headroom: 1, linearOutput: true),
                                           useCache: false, wantsPixels: true)
         guard let linear = try? graph.render(document, options: linearOptions).display else {
             throw ThumbProviderError.encodeFailed(source)
         }
+        let image = linear.withLinear(LinearPixels(linear))
 
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
             "photons-hd-thumb-\(UUID().uuidString).heic")
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let written = try GainMapHEIC.write(
-            sdr: sdr, linear: LinearPixels(linear), to: tmp,
-            options: HDRGainMapOptions(gainMap: .iso, halfSize: true,
-                                       headroom: .manual(ThumbSpec.hd.gainMapHeadroomRatio),
-                                       quality: ThumbSpec.hd.quality, bitDepth: 8,
-                                       forceGainMap: true),
-            format: .heic)
+        let options = ExportOptions(format: .heic,
+                                    quality: ThumbSpec.hd.quality,
+                                    bitDepth: ThumbSpec.hd.bitDepth,
+                                    hdr: HDRExport(enabled: true, kind: .hlg))
+        try HDREncoding.write(image, to: tmp, options: options)
         let data = try Data(contentsOf: tmp)
 
         lock.lock()
         runsPerKey[key.digest, default: 0] += 1
         runsPerContent[key.contentHash, default: 0] += 1
         lock.unlock()
-        return ThumbPayload(data: data,
-                            source: written.isHDR ? "graph-hd" : "graph-sdr",
-                            sourceLongEdge: max(w, h))
+        return ThumbPayload(data: data, source: "graph-hlg",
+                            sourceLongEdge: max(linear.width, linear.height))
     }
 
     /// Pixel size of the file's primary image without decoding it (ImageIO metadata only).
@@ -558,26 +650,26 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return max(w, h) > 0 ? max(w, h) : nil
     }
 
-    /// Decode a cached payload for display. HD files go through Core Image with
-    /// `expandToHDR`, so the gain map is applied in an extended linear working space; on an SDR
-    /// panel Core Graphics performs the tone map when the `CGImage` is drawn.
-    static func decode(_ data: Data, for key: ThumbKey) -> CGImage? {
+    /// Decode a cached payload for display.
+    ///
+    /// 223 — an HD payload is decoded **through Core Image → Metal at the cell's display pixels**,
+    /// never through ImageIO and never at 1920 into memory: a 326 px grid cell must not pay for
+    /// 2.4 M pixels. The result is a float image in extended linear Display P3, which is what the
+    /// cell's EDR layer wants. The legacy JPEG ladder keeps ImageIO (it is the fast path there).
+    static func decode(_ data: Data, for key: ThumbKey, display: ImageSize) -> CGImage? {
         guard key.spec == .hd else { return ThumbnailCache.decode(data) }
-        return decodeHD(data)
+        return decodeHD(data, display: display)
     }
 
-    static func decodeHD(_ data: Data) -> CGImage? {
-        if #available(macOS 15.0, *) {
-            guard let ci = CIImage(data: data, options: [.expandToHDR: true]) else { return nil }
-            let options: [CIContextOption: Any] = [
-                .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) as Any,
-                .workingFormat: CIFormat.RGBAh,
-                .cacheIntermediates: false,
-            ]
-            let context = CIContext(options: options)
-            return context.createCGImage(ci, from: ci.extent)
-        }
-        return ThumbnailCache.decode(data)
+    /// 223 — the HD decode is the shared `ThumbnailHDRDecoder`: `CIImage` (display P3 HLG) → one
+    /// pooled `MTLTexture` of exactly `display` → a half-float `CGImage` in extended linear P3.
+    ///
+    /// The 2026-11-01 measurement that decided this path: ImageIO's HEVC door is 79–100 ms for the
+    /// same 1920 file **at any `maxPixelSize`** (the cost is the HEVC frame, not the pixel count),
+    /// while `CIImage` → `CIContext.render(MTLTexture)` is ~3–7 ms. `ImageIO + maxPixelSize` was
+    /// therefore a wrong hypothesis, not a tuning knob.
+    static func decodeHD(_ data: Data, display: ImageSize) -> CGImage? {
+        ThumbnailHDRDecoder.shared.decode(data, display: display)
     }
 
     private func rawDecoder() -> RAWDecoder? {
@@ -671,6 +763,223 @@ public final class ThumbnailProvider: @unchecked Sendable {
             }
             return try provider.produce(key, source: source)
         }
+    }
+}
+
+// MARK: - Core Image → Metal decode (223)
+
+/// The HD thumbnail decoder: one `CIContext`, one `MTLCommandQueue`, a pooled set of
+/// display-sized `MTLTexture`s, for the whole process.
+///
+/// Why this shape (measured on this machine, 2026-11-01):
+///
+///   · `CGImageSourceCreateImageAtIndex` on a 1920 HEIC: **93 ms**; `CreateThumbnailAtIndex` at
+///     `maxPixelSize: 326`: **79–100 ms** — the HEVC frame is the cost, not the requested size.
+///   · `CIImage` → `CIContext.render(_:to: MTLTexture)`: **~3–7 ms** for the same file at 326 px.
+///
+/// So the code path is: lazy `CIImage` (which reads the 10-bit Display P3 HLG profile), aspect-fill
+/// transform + centre crop in Core Image, render directly into a **display-sized** texture, then one
+/// half-float read-back for `CALayer.contents`. The texture is returned to the pool, never allocated
+/// per cell; the context is created once, not per thumbnail.
+///
+/// The read-back `CGImage` carries a **measured** content headroom (`max(R,G,B)`, floored at 1.0),
+/// not ImageIO's default 4.926. That is what keeps HLG reference white on SDR white: the compositor
+/// only rolls off the highlights that actually exist, so a mid-grey stays where the old JPEG put it.
+final class ThumbnailHDRDecoder: @unchecked Sendable {
+    static let shared = ThumbnailHDRDecoder()
+
+    /// Display P3 primaries with a linear transfer — the space the EDR cells draw in.
+    let outputSpace: CGColorSpace?
+
+    private let queue: MTLCommandQueue?
+    private let context: CIContext
+    private let pool: TexturePool?
+
+    init() {
+        let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        outputSpace = space
+        var options: [CIContextOption: Any] = [
+            .workingFormat: CIFormat.RGBAh,
+            .cacheIntermediates: false,
+        ]
+        if let space {
+            options[.workingColorSpace] = space
+            options[.outputColorSpace] = space
+        }
+        if let device = MTLCreateSystemDefaultDevice(),
+           let queue = device.makeCommandQueue() {
+            self.queue = queue
+            self.context = CIContext(mtlCommandQueue: queue, options: options)
+            self.pool = TexturePool(device: device)
+        } else {
+            // No Metal: Core Image still decodes correctly, just through its CPU renderer. Keeping
+            // this branch means a headless/VM machine shows thumbnails instead of empty cells.
+            self.queue = nil
+            self.context = CIContext(options: options)
+            self.pool = nil
+        }
+    }
+
+    /// Decode `data` (a 10-bit Display P3 HLG HEIC) into exactly `display` pixels.
+    ///
+    /// Aspect-fill, centre-anchored — the same crop the cell's `contentsGravity` would apply, done
+    /// once here so the bitmap the cache holds *is* the bitmap the user sees (no second resample).
+    func decode(_ data: Data, display: ImageSize) -> CGImage? {
+        guard display.width > 0, display.height > 0,
+              let space = outputSpace,
+              let image = CIImage(data: data) else { return nil }
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let width = CGFloat(display.width), height = CGFloat(display.height)
+        let scale = max(width / extent.width, height / extent.height)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let e = scaled.extent
+        let crop = CGRect(x: e.midX - width / 2, y: e.midY - height / 2,
+                          width: width, height: height)
+
+        if let pool,
+           let texture = pool.acquire(width: display.width, height: display.height) {
+            defer { pool.release(texture) }
+            // CI writes through a compute shader, so the texture must allow `.shaderWrite` as well
+            // as being a render target; without it the render silently leaves the texture empty.
+            // The explicit buffer + `waitUntilCompleted` is what makes the read-back below observe
+            // finished pixels — a nil buffer renders asynchronously and sometimes reads zeroes.
+            guard let queue, let command = queue.makeCommandBuffer() else {
+                return context.createCGImage(scaled, from: crop, format: .RGBAh, colorSpace: space)
+            }
+            context.render(scaled, to: texture, commandBuffer: command,
+                           bounds: crop, colorSpace: space)
+            command.commit()
+            command.waitUntilCompleted()
+            guard command.status == .completed, command.error == nil else { return nil }
+            return makeCGImage(from: texture, space: space)
+        }
+
+        // CPU fallback: `createCGImage` is the same colour conversion, just not texture-pooled.
+        return context.createCGImage(scaled, from: crop, format: .RGBAh, colorSpace: space)
+    }
+
+    /// Half-float read-back → `CGImage` in extended linear P3 with a measured content headroom.
+    private func makeCGImage(from texture: MTLTexture, space: CGColorSpace) -> CGImage? {
+        let width = texture.width, height = texture.height
+        guard width > 0, height > 0 else { return nil }
+        let bytesPerRow = width * 8
+        var halves = [UInt16](repeating: 0, count: width * height * 4)
+        halves.withUnsafeMutableBytes { buffer in
+            texture.getBytes(buffer.baseAddress!, bytesPerRow: bytesPerRow,
+                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+
+        // The peak is both the acceptance number and the headroom the compositor may use: a cell
+        // whose content reaches 1.3× white must say 1.3, or the SDR tone map will darken it anyway.
+        var peak: Float = 0
+        halves.withUnsafeBufferPointer { src in
+            var i = 0
+            while i < src.count {
+                peak = max(peak, max(Float(Float16(bitPattern: src[i])),
+                                     max(Float(Float16(bitPattern: src[i + 1])),
+                                         Float(Float16(bitPattern: src[i + 2])))))
+                i += 4
+            }
+        }
+        let headroom = max(1, min(peak, 16))
+
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
+                                      | CGBitmapInfo.floatComponents.rawValue
+                                      | CGBitmapInfo.byteOrder16Little.rawValue)
+        let data = halves.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        if #available(macOS 15.0, *) {
+            // One allocation: `CGImageCreateCopyWithContentHeadroom` would copy the 630 KB buffer.
+            return CGImage(headroom: headroom, width: width, height: height,
+                           bitsPerComponent: 16, bitsPerPixel: 64, bytesPerRow: bytesPerRow,
+                           space: space, bitmapInfo: bitmapInfo, provider: provider,
+                           decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        }
+        return CGImage(width: width, height: height, bitsPerComponent: 16, bitsPerPixel: 64,
+                       bytesPerRow: bytesPerRow, space: space, bitmapInfo: bitmapInfo,
+                       provider: provider, decode: nil, shouldInterpolate: true,
+                       intent: .defaultIntent)
+    }
+
+    /// One texture per (width, height) per in-flight decode; a handful are kept for the next cell.
+    private final class TexturePool: @unchecked Sendable {
+        private let device: MTLDevice
+        private let lock = NSLock()
+        private var free: [String: [MTLTexture]] = [:]
+        private let perSizeLimit = 4
+        /// Resizing a window asks for a new width every few pixels; without a global ceiling the
+        /// pool would keep four textures per width forever. Sixteen display-sized half-float
+        /// textures is a few megabytes, and the next decode simply allocates instead of growing.
+        private let totalLimit = 16
+        private var total = 0
+
+        init(device: MTLDevice) { self.device = device }
+
+        func acquire(width: Int, height: Int) -> MTLTexture? {
+            let key = "\(width)x\(height)"
+            lock.lock()
+            if var list = free[key], let texture = list.popLast() {
+                free[key] = list
+                total -= 1
+                lock.unlock()
+                return texture
+            }
+            lock.unlock()
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
+            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            descriptor.storageMode = .shared
+            return device.makeTexture(descriptor: descriptor)
+        }
+
+        func release(_ texture: MTLTexture) {
+            let key = "\(texture.width)x\(texture.height)"
+            lock.lock()
+            var list = free[key] ?? []
+            if total < totalLimit && list.count < perSizeLimit {
+                list.append(texture)
+                free[key] = list
+                total += 1
+            }
+            lock.unlock()
+        }
+    }
+}
+
+// MARK: - EDR display layer (223)
+
+/// The three cells' thumbnail surface, in one place.
+///
+/// A `CALayer` can carry extended range only if it is told both halves: `contentsFormat =
+/// .rgba16Float` (the storage is half float, so a value above 1 survives) and
+/// `wantsExtendedDynamicRangeContent = true` (the window/compositor may use the panel's EDR headroom;
+/// on an SDR panel the system tone maps instead, which is the "SDR 屏不能坏" half). The contents are
+/// the **extended linear Display P3** images `ThumbnailProvider.decodeHD` produces — never an sRGB
+/// bitmap, whose values are clamped at 1 by construction.
+public enum ThumbnailDisplay {
+    /// The working/output space of every EDR thumbnail: Display P3 primaries, linear transfer.
+    public static var colorSpace: CGColorSpace? {
+        CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+    }
+
+    public static func configure(_ layer: CALayer, cornerRadius: CGFloat = 0, scale: CGFloat = 2) {
+        layer.contentsGravity = .resizeAspectFill
+        layer.masksToBounds = true
+        layer.cornerRadius = cornerRadius
+        layer.contentsScale = max(1, scale)
+        layer.wantsExtendedDynamicRangeContent = true
+        layer.contentsFormat = .RGBA16Float
+        layer.minificationFilter = .linear
+        layer.magnificationFilter = .linear
+    }
+
+    public static func apply(_ image: CGImage?, to layer: CALayer, scale: CGFloat) {
+        layer.contentsScale = max(1, scale)
+        layer.wantsExtendedDynamicRangeContent = true
+        layer.contentsFormat = .RGBA16Float
+        layer.contents = image
     }
 }
 

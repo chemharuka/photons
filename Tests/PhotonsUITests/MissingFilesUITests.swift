@@ -305,9 +305,16 @@ final class MissingFilesUITests: XCTestCase {
                                    pixelsHigh: Int(max(1, view.bounds.height)),
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        // 223 — a thumbnail card is now three surfaces: the card paints the gradient, the EDR image
+        // is a layer, and a transparent overlay paints the ring/badges *above* it. Painting only the
+        // card would silently skip the overlay, which is exactly the surface the user reads.
+        view.layout()
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         view.draw(view.bounds)
+        for subview in view.subviews where !subview.isHidden {
+            subview.draw(subview.bounds)
+        }
         NSGraphicsContext.restoreGraphicsState()
     }
 

@@ -28,16 +28,67 @@ public final class AssetCollectionView: NSCollectionView {
     }
 }
 
+/// The card's image surface: a layer-backed view whose `contents` is the float extended-linear P3
+/// bitmap `ThumbnailProvider.decodeHD` produced. `contentsFormat = .rgba16Float` +
+/// `wantsExtendedDynamicRangeContent = true` is what lets values above 1 reach an EDR panel; on an
+/// SDR panel the compositor tone maps the same layer.
+final class ThumbnailEDRView: NSView {
+    var image: CGImage? {
+        didSet { ThumbnailDisplay.apply(image, to: layer!, scale: window?.backingScaleFactor ?? 2) }
+    }
+
+    private let cornerRadius: CGFloat
+
+    init(cornerRadius: CGFloat) {
+        self.cornerRadius = cornerRadius
+        super.init(frame: .zero)
+        wantsLayer = true
+        ThumbnailDisplay.configure(layer!, cornerRadius: cornerRadius, scale: 2)
+        layer?.contentsGravity = .resizeAspectFill
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs") }
+
+    override func layout() {
+        super.layout()
+        layer?.contentsScale = window?.backingScaleFactor ?? 2
+    }
+}
+
+/// Transparent sibling *above* `ThumbnailEDRView`: a sublayer's contents always composite above the
+/// parent view's own `draw`, so the ring/badges/caption need their own surface to stay on top.
+private final class CardOverlayView: NSView {
+    weak var card: AssetCardView?
+
+    override var isFlipped: Bool { true }
+
+    /// Clicks belong to the card (context menu, selection), never to this transparent sheet.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        card?.drawForeground()
+    }
+}
+
 /// One card: the thumbnail (when we have one), else the hash-derived placeholder block, plus the
 /// filename and stars.
 ///
 /// The placeholder is never removed: a missing, failed or still-loading thumbnail draws the
 /// M3 swatch underneath, so a cell is never a white hole and a failure looks like "not yet",
 /// not like "broken".
+///
+/// 223 — the image is a **layer** (`ThumbnailEDRView`) so it can hold a float extended-range
+/// bitmap. Its two siblings keep the old drawing path: the card itself paints the gradient under
+/// it, and a transparent overlay paints the ring/badges over it.
 public final class AssetCardView: NSView {
-    public var asset: Asset? { didSet { needsDisplay = true } }
-    public var isActive: Bool = false { didSet { needsDisplay = true } }
-    public var isPicked: Bool = false { didSet { needsDisplay = true } }
+    public var asset: Asset? { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var isActive: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var isPicked: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+
+    /// 223 — the image lives in its own layer so it can be an EDR surface (float contents); the
+    /// placeholder, ring, caption and badges stay in ordinary `draw` above/below it.
+    private let thumbnailView = ThumbnailEDRView(cornerRadius: WorkspaceLayout.cardCornerRadius)
+    private let overlay = CardOverlayView()
 
     /// What the last `draw` painted in the corners ("stars:3", "flag:pick", "color:red"). The smoke
     /// reads this back off the cell that actually painted, so "the badge is drawn" is an observation
@@ -58,20 +109,52 @@ public final class AssetCardView: NSView {
     public var badgeSignature: String { asset.map { AssetBadges(asset: $0).signature } ?? "—" }
 
     /// The decoded thumbnail for this asset, or nil while the placeholder is all we have.
-    public var thumbnail: CGImage? { didSet { if thumbnail !== oldValue { needsDisplay = true } } }
+    public var thumbnail: CGImage? {
+        didSet {
+            thumbnailView.image = thumbnail
+            thumbnailView.isHidden = thumbnail == nil
+            overlay.needsDisplay = true
+        }
+    }
     /// Which tier the current image came from — printed by `--ui-smoke` and used to prove the cell
     /// asked for the size it should have (006 §1).
     public var thumbnailTier: ThumbTier?
+    /// 223 — the pixel rectangle this card asked the provider for (for probes and logs).
+    public var thumbnailDisplayPixels: ImageSize?
+
+    /// The EDR surface, exposed so a test can read back `wantsExtendedDynamicRangeContent`,
+    /// `contentsFormat` and the actual float pixels (acceptance 223 §3).
+    public var thumbnailLayer: CALayer? { thumbnailView.layer }
+
+    public override init(frame frameRect: NSRect = .zero) {
+        super.init(frame: frameRect)
+        thumbnailView.isHidden = true
+        addSubview(thumbnailView)
+        overlay.card = self
+        addSubview(overlay)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs") }
 
     public override var isFlipped: Bool { true }
     public override var wantsUpdateLayer: Bool { false }
 
+    public override func layout() {
+        super.layout()
+        let rect = swatchRect
+        thumbnailView.frame = rect
+        overlay.frame = bounds
+    }
+
+    private var swatchRect: NSRect {
+        let labelHeight = GridLayout.labelHeight
+        return NSRect(x: 0, y: 0, width: bounds.width,
+                      height: max(1, bounds.height - labelHeight))
+    }
+
     public override func draw(_ dirtyRect: NSRect) {
         guard let asset else { return }
-        let bounds = self.bounds
-        let labelHeight = GridLayout.labelHeight
-        let swatchRect = NSRect(x: 0, y: 0, width: bounds.width,
-                                height: max(1, bounds.height - labelHeight)).insetBy(dx: 0, dy: 0)
+        let swatchRect = self.swatchRect
         let radius: CGFloat = WorkspaceLayout.cardCornerRadius
 
         let path = NSBezierPath(roundedRect: swatchRect, xRadius: radius, yRadius: radius)
@@ -81,12 +164,7 @@ public final class AssetCardView: NSView {
         let secondary = PlaceholderSwatch.secondaryColor(for: asset.contentHash)
         NSGradient(starting: primary, ending: secondary)?.draw(in: path, angle: -90)
 
-        if let thumbnail {
-            // Aspect-fill inside the swatch: the cell decides the crop, never the image. Drawing a
-            // smaller cached tier larger is intentional — the alternative is an empty cell, and the
-            // tier is clamped at request time so this is never a cache lie (see ThumbnailProvider).
-            drawThumbnail(thumbnail, in: swatchRect)
-        } else {
+        if thumbnail == nil {
             // A thin "this is a placeholder" rule set: one diagonal + the extension, no image work.
             NSColor.black.withAlphaComponent(0.12).setStroke()
             let diag = NSBezierPath()
@@ -99,6 +177,16 @@ public final class AssetCardView: NSView {
             (ext as NSString).draw(at: NSPoint(x: 8, y: 6), withAttributes: PlaceholderStyle.captionAttributes)
         }
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// Everything that composites *above* the EDR image: the selection ring and the badges. Called
+    /// by `overlay`, which sits above `thumbnailView` in the subview order so a sublayer image can
+    /// never cover the star the user is looking at.
+    fileprivate func drawForeground() {
+        guard let asset else { return }
+        let bounds = self.bounds
+        let swatchRect = self.swatchRect
+        let radius: CGFloat = WorkspaceLayout.cardCornerRadius
 
         // Selection / active ring: accent for the anchor, softer accent for the rest of the selection.
         if isPicked || isActive {
@@ -110,7 +198,7 @@ public final class AssetCardView: NSView {
         }
 
         let captionRect = NSRect(x: 2, y: swatchRect.maxY + 4, width: bounds.width - 4,
-                                 height: labelHeight - 6)
+                                 height: GridLayout.labelHeight - 6)
         (asset.filename as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
 
         // Stars / flag / colour label go *on* the thumbnail, in its corners — not in the caption
@@ -127,23 +215,6 @@ public final class AssetCardView: NSView {
             lastDrawnMissingLabel = missingLabel
         }
         lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
-    }
-
-    /// Aspect-fill, centre-anchored. `NSGraphicsContext` is already clipped to the rounded swatch.
-    private func drawThumbnail(_ image: CGImage, in rect: NSRect) {
-        let iw = CGFloat(image.width), ih = CGFloat(image.height)
-        guard iw > 0, ih > 0 else { return }
-        let scale = max(rect.width / iw, rect.height / ih)
-        let size = NSSize(width: iw * scale, height: ih * scale)
-        let origin = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
-        let target = NSRect(origin: origin, size: size)
-        // A flipped view (`isFlipped == true`) plus a raw `CGContext.draw(CGImage)` draws the image
-        // **bottom-up**: the cell is flipped, the CGImage is not. Go through `NSImage` with
-        // `respectFlipped`, which is the only spelling that is correct in both orientations.
-        let ns = NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
-        ns.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1,
-                respectFlipped: true,
-                hints: [.interpolation: NSImageInterpolation.medium])
     }
 }
 
@@ -420,11 +491,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.cardView.thumbnailTier = tier
+        let display = displayPixels
+        cell.cardView.thumbnailDisplayPixels = display
         let document = document(for: asset)
         let key = ThumbnailProvider.hdKey(for: asset, document: document)
         // `serveFromMemory` (not `memoryImage`) so a warm cell is counted as a hit rather than
         // disappearing from the statistics.
-        if let cached = provider.serveFromMemory(for: key) {
+        if let cached = provider.serveFromMemory(for: key, display: display) {
             cell.cardView.thumbnail = cached
             return
         }
@@ -433,10 +506,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         // 218 — a commit changed the key, so the new one is a miss by construction; draw the
         // previous rendering while the rebuild runs instead of flashing the hash swatch.
-        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash, display: display) {
             cell.cardView.thumbnail = previous
         }
-        requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
+        requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
 
     // MARK: thumbnails
@@ -452,6 +525,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var backingScale: CGFloat {
         view.window?.backingScaleFactor ?? 2
     }
+
+    /// 223 — the swatch's real pixel rectangle (the card is `itemSize` high including its 22 pt
+    /// caption). This is the size the cache decodes to; 1920 is never requested by a cell.
+    private var displayPixels: ImageSize {
+        ThumbnailProvider.displayPixels(
+            swatch: CGSize(width: metrics.itemSize.width,
+                           height: max(1, metrics.itemSize.height - GridLayout.labelHeight)),
+            backingScale: backingScale)
+    }
+
+    /// 223 — the bitmap size every grid cell asks the cache for (the acceptance read-back).
+    public var displayPixelSize: ImageSize { displayPixels }
 
     /// The tier this cell should ask for: cell edge in points × DPR, clamped to what the source
     /// can actually fill, then to the preview ceiling (a DNG never gets a `> t512` placeholder,
@@ -488,11 +573,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         return made
     }
 
-    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
+    private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,
+                                  display: ImageSize, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
         let token = provider.request(index: index, asset: asset, fileURL: url,
                                      document: document(for: asset), tier: tier, spec: .hd,
+                                     display: display,
                                      priority: priority) { [weak self] idx, _, image in
             self?.thumbnailDidLoad(index: idx, image: image)
         }
@@ -549,13 +636,16 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
 
         let visible = Set(collectionView.indexPathsForVisibleItems().map { $0.item })
+        let display = displayPixels
         for index in wanted {
             guard index < session.assets.count else { continue }
             let asset = session.assets[index]
-            if provider.memoryImage(contentHash: asset.contentHash, tier: cellTier) != nil { continue }
+            if provider.memoryImage(for: ThumbnailProvider.hdKey(for: asset,
+                                                                 document: document(for: asset)),
+                                     display: display) != nil { continue }
             if thumbRequests[index] != nil { continue }
             // §4 ②③: what is on screen is on-screen work; the one-row slack is prefetch.
-            requestThumbnail(index: index, asset: asset, tier: cellTier,
+            requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
                              priority: visible.contains(index) ? .onScreen : .prefetch)
         }
     }
