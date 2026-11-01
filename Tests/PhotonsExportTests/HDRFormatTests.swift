@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import CoreImage
 import CoreVideo
 import ImageIO
 import UniformTypeIdentifiers
@@ -223,6 +224,61 @@ final class HDRFormatTests: XCTestCase {
                 XCTAssertEqual(image.bitsPerComponent, bits)
             }
         }
+    }
+
+    /// 216 §3 — the lossless containers' *default* HDR kind (PQ at 16 bits) really reaches the file.
+    /// Read back through ImageIO: 16 bits per component, a PQ profile, and — after the file's own tag
+    /// is decoded into extended linear sRGB — pixels above SDR white. The 1.05 threshold is 163's
+    /// gain-map acceptance.
+    func testTIFFAndPNGDefaultPQ16CarriesPixelsAboveSDRWhite() throws {
+        for format in [ExportFormat.tiff, .png] {
+            XCTAssertEqual(format.defaultHDRKind, .pq, "\(format.rawValue) default kind")
+            let bits = try XCTUnwrap(format.hdrTransferBitDepth(for: format.defaultHDRKind))
+            XCTAssertEqual(bits, 16)
+            let preset = ExportPreset(format: format, bitDepth: bits,
+                                      hdr: HDRExport(kind: format.defaultHDRKind))
+            XCTAssertNoThrow(try preset.validated())
+
+            let out = try write(preset, "default-pq.\(format.fileExtension)",
+                                metadata: ExportMetadataContext(level: .none))
+            let props = try properties(out)
+            XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 16,
+                           "\(format.rawValue) depth")
+            let profile = try profile(out)
+            XCTAssertTrue(profile.contains("SMPTE ST 2084 PQ"),
+                          "\(format.rawValue) transfer function was '\(profile)'")
+
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(out as CFURL, nil))
+            let cg = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            XCTAssertEqual(cg.bitsPerComponent, 16, "\(format.rawValue) bitsPerComponent")
+            XCTAssertEqual(cg.colorSpace?.name as String?, "kCGColorSpaceITUR_709_PQ")
+
+            let peak = try linearPeak(cg)
+            print(String(format: "216 · %@ pq16 · depth %d · linear peak %.3f × SDR white",
+                         format.rawValue, cg.bitsPerComponent, peak))
+            XCTAssertGreaterThanOrEqual(peak, 1.05,
+                                        "\(format.rawValue) must carry light above SDR white")
+            XCTAssertLessThan(peak, 2.5, "\(format.rawValue) peak is a real sample, not garbage")
+        }
+    }
+
+    /// The largest RGB sample after the PQ-tagged file is colour-matched into **extended** linear
+    /// sRGB. A value above 1.0 is light the SDR picture cannot show; Core Image is what applies the
+    /// file's embedded profile, so this measures the file, not the value we passed in.
+    private func linearPeak(_ cg: CGImage) throws -> Double {
+        let w = cg.width, h = cg.height
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
+        let ci = CIImage(cgImage: cg)
+        let context = CIContext(options: [.workingColorSpace: space, .outputColorSpace: space])
+        var out = [Float](repeating: 0, count: w * h * 4)
+        context.render(ci, toBitmap: &out, rowBytes: w * 16,
+                       bounds: CGRect(x: 0, y: 0, width: w, height: h),
+                       format: .RGBAf, colorSpace: space)
+        var peak: Float = 0
+        for i in stride(from: 0, to: out.count, by: 4) {
+            peak = max(peak, out[i], out[i + 1], out[i + 2])
+        }
+        return Double(peak)
     }
 
     /// 163 §1.4 — AVIF's ImageIO writer really stores 10-bit primaries. The old "AVIF is 8-only"
