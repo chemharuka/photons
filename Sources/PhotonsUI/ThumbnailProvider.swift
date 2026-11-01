@@ -820,6 +820,25 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         }
     }
 
+    /// 226 — the file's HLG profile has to be **explicit**.
+    ///
+    /// The cache is a 10-bit HEIC written from a `displayP3_HLG` bitmap. ImageIO hands that file
+    /// back with `CGImage.colorSpace == nil` (the profile travels only in the ICC payload, and the
+    /// 10-bit HEVC path drops it), so `CIImage(data:)` returned an image with **no transfer function**
+    /// and Core Image copied the HLG signal straight into the linear working space: mid-grey came out
+    /// at 0.69 instead of 0.117, i.e. 5.9× too bright, and highlights ran past 4.93.
+    ///
+    /// Tagging the source explicitly is still "hand it to the system": ColorSync performs the HLG
+    /// EOTF + reference-white mapping. We only tell it what the bytes are.
+    static func sourceImage(_ data: Data) -> CIImage? {
+        if let tagged = CIImage(data: data,
+                                options: [.colorSpace: CGColorSpace(name: CGColorSpace.displayP3_HLG)
+                                          ?? CGColorSpace(name: CGColorSpace.sRGB)!]) {
+            return tagged
+        }
+        return CIImage(data: data)
+    }
+
     /// Decode `data` (a 10-bit Display P3 HLG HEIC) into exactly `display` pixels.
     ///
     /// Aspect-fill, centre-anchored — the same crop the cell's `contentsGravity` would apply, done
@@ -827,7 +846,7 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
     func decode(_ data: Data, display: ImageSize) -> CGImage? {
         guard display.width > 0, display.height > 0,
               let space = outputSpace,
-              let image = CIImage(data: data) else { return nil }
+              let image = Self.sourceImage(data) else { return nil }
         let extent = image.extent
         guard extent.width > 0, extent.height > 0 else { return nil }
 

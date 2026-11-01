@@ -111,7 +111,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
         XCTAssertEqual(base, same)
         XCTAssertNotEqual(base.digest, edited.digest, "an edit must produce a new cache key")
-        XCTAssertTrue(base.keyString.contains("hd1920q75p3hlg10"))
+        XCTAssertTrue(base.keyString.contains("hd1920q75p3hlg10b"))
         XCTAssertTrue(base.keyString.contains("sv1"))
         XCTAssertEqual(base.spec, .hd)
         XCTAssertEqual(base.spec.longEdge, 1920)

@@ -66,7 +66,7 @@ public enum ThumbPipeline: String, Sendable, CaseIterable, Codable {
 /// because the cache directory has to keep both kinds while the old files age out.
 public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     case legacy = "v1"
-    case hd = "hd1920q75p3hlg10"
+    case hd = "hd1920q75p3hlg10b"
 
     /// The longest edge the spec promises. 0 means "the tier decides" (legacy).
     public var longEdge: Int { self == .hd ? 1920 : 0 }

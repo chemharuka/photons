@@ -348,7 +348,7 @@ final class ThumbnailCacheTests: XCTestCase {
         let changed = ThumbKey.hd(contentHash: hash("a"), document: edited)
         XCTAssertNotEqual(neutral.digest, changed.digest, "the stage keys must move the cache key")
         XCTAssertEqual(neutral.relativePath(in: root).pathExtension, "heic")
-        XCTAssertTrue(neutral.keyString.contains("hd1920q75p3hlg10"))
+        XCTAssertTrue(neutral.keyString.contains("hd1920q75p3hlg10b"))
         XCTAssertTrue(neutral.keyString.contains("sv1"))
     }
 
