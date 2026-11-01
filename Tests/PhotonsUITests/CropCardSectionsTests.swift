@@ -58,7 +58,7 @@ final class CropCardSectionsTests: XCTestCase {
         XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"])
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "perspective", "rotation", "mirror"])
         XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["旋转", "镜像"])
 
         // …and the panel really drew its headers in that order, top to bottom. 122 A (user 2026-10-29):
         // the 「转动」 sub-header is gone — the card is titled 「旋转」 and the angle row sits directly
@@ -109,11 +109,15 @@ final class CropCardSectionsTests: XCTestCase {
               + "· 角度卡 \(String(format: "%.1f×%.1f", angleCard.width, angleCard.height))")
         XCTAssertGreaterThan(angleCard.minY, cropCard.maxY, "087: 角度卡在裁切卡之后")
 
-        // 087: the rows belong to two cards. Each one is measured against the card that owns it.
+        // 214: the rows belong to two cards. 裁切 owns 宽高比 / 角度 / 透视 / 底部行; 旋转 owns
+        // 旋转 / 镜像. Each row is measured against the card that owns it.
         let owners: [(CGRect, [String], [CropSection])] = [
-            (cropCard, [CropCardID.aspect, CropCardID.apply], [.crop]),
-            (angleCard, [CropCardID.angle, CropCardID.turn, CropCardID.mirror],
-             [.angle, .rotation, .mirror]),
+            (cropCard, [CropCardID.aspect, CropCardID.angle,
+                        CropCardID.perspectiveVertical, CropCardID.perspectiveHorizontal,
+                        CropCardID.apply],
+             [.crop, .angle, .perspective]),
+            (angleCard, [CropCardID.turn, CropCardID.mirror],
+             [.rotation, .mirror]),
         ]
         var gaps: [String] = []
         for (card, rowIDs, sections) in owners {

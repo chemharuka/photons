@@ -3547,92 +3547,86 @@ public struct PanelResets {
         }
     }
 
-    // MARK: 082 — 裁切卡的四个分区复位
+    // MARK: 214 — geometry resets, derived from the card/section declarations
 
-    /// One **section** of the 裁切 card back to its default: **one** document edit, **one** history
-    /// row, and the crop tool's draft re-seeded so the frame on screen is the frame just written.
+    /// One **section** of the transform workspace back to its default: **one** document edit, **one**
+    /// history row, and the crop tool's draft re-seeded so the frame on screen is the frame just
+    /// written.
     ///
-    /// The user asked for exactly this shape: 「每个分区小标题双击 = 该分区复位（比例/角度/旋转/镜像
-    /// 各一条历史）」. The four sections are not four kinds of state: 角度 and 旋转 read/write the
-    /// **document's** geometry (`rotationDegrees`, `quarterTurns`) while the slider's live value is the
-    /// draft's copy, so a reset that only touched the draft would show 0° and leave the picture
-    /// straight — the wrong half. It is written once and the draft follows it.
-    ///
-    /// `nil` (no change) writes nothing, so a double-click on a section that is already at its default
-    /// cannot mint an empty snapshot or truncate the redo branch.
+    /// The scope is `CropSection.fields`, not a `switch` here: a section that moves to another card,
+    /// or a field added to a section, changes its reset in the same edit that changes the declaration.
     @discardableResult
     public func cropSection(_ section: CropSection) -> Bool {
-        switch section {
-        case .crop:
-            // 比例 / 裁切框: the whole frame, no constraint. The draft's lock follows (`setLock`), so
-            // the popup and the frame agree the moment the row redraws.
-            return cropGeometryVerb(label: section.title) { geometry in
-                guard geometry.cropRect != .full || geometry.aspectLock != .original else { return false }
-                geometry.cropRect = .full
-                geometry.aspectLock = .original
-                return true
-            }
+        reset(fields: section.fields, label: section.title)
+    }
 
-        case .angle:
-            // 滑块角度 / 实际角度: the straighten back to 0. `quarterTurns` and both flips keep what
-            // they hold — 旋转 and 镜像 are their own sections (076's rule, read here).
-            return cropGeometryVerb(label: section.title) { geometry in
-                guard geometry.straightenDegrees != 0 else { return false }
-                geometry.rotationDegrees = 0
-                return true
-            }
+    /// 214 — a **card title's** double-click: the union of the card's sections' fields back to
+    /// `GeometryGroup.identity`, in **one** snapshot.
+    ///
+    /// The caller names a `TransformCardSpec`, never a `CropSection`: 「裁切」 covers
+    /// `.crop + .angle + .perspective`, 「旋转」 covers `.rotation + .mirror`, and the two keep their
+    /// hands off each other because the declarations are disjoint.
+    @discardableResult
+    public func cropCard(_ card: TransformCardSpec) -> Bool {
+        reset(fields: card.fields, label: card.title)
+    }
 
-        case .perspective:
-            // 183: 透视 — both keystone knobs back to 0 (the homography becomes the identity again).
-            // Nothing else in the geometry group moves.
-            return cropGeometryVerb(label: section.title) { geometry in
-                guard geometry.perspectiveVertical != 0 || geometry.perspectiveHorizontal != 0
-                else { return false }
-                geometry.perspectiveVertical = 0
-                geometry.perspectiveHorizontal = 0
-                return true
-            }
-
-        case .rotation:
-            // 旋转: back to 0° **by turning the rect back with it** — `GeometryGroup.turn` is the only
-            // place that knows a quarter turn also rewrites the crop rect and inverts the lock, so
-            // this verb calls it instead of assigning `quarterTurns = 0` (which would silently re-crop
-            // the picture). All of it inside the one `applyEdit` = one row.
-            let turns = GeometryGroup.normalizedQuarterTurns(session.edit.geometry.quarterTurns)
-            guard turns != 0 else { return false }
-            return cropGeometryVerb(label: section.title) { geometry in
-                // `turn(clockwise: false)` steps the count back by one (it is `+3 mod 4`), so one
-                // counter-clockwise turn per turn taken lands on 0 — not `4 − turns` of them, which
-                // would land on `2·turns` mod 4 (measured: 1 turn → 2).
-                for _ in 0..<turns {
-                    geometry.turn(clockwise: false)
-                }
-                return true
-            }
-
-        case .mirror:
-            return cropGeometryVerb(label: section.title) { geometry in
-                guard geometry.flipHorizontal || geometry.flipVertical else { return false }
-                geometry.flipHorizontal = false
-                geometry.flipVertical = false
-                return true
-            }
+    /// The **one** geometry-reset implementation: every field in `fields` back to its value in
+    /// `GeometryGroup.identity` (the document's own default initializer — never a literal), inside the
+    /// one `cropGeometryVerb` edit. `false` when every named field was already there, so a stray
+    /// double-click cannot mint an empty snapshot or truncate the redo branch.
+    @discardableResult
+    public func reset(fields: GeometryFieldSet, label: String) -> Bool {
+        cropGeometryVerb(label: label) { geometry in
+            PanelResets.writeDefaults(of: fields, into: &geometry)
         }
     }
 
-    /// 双击卡标题 = **整卡复位**: 裁切 / 角度 / 旋转 / 镜像 一起回默认，**一条**历史（·⌘Z 一次）。
+    /// Fields → document writes, one `switch` over the field enum. The order is the enum's, so the
+    /// same set always writes in the same order; each branch compares with `GeometryGroup.identity`
+    /// before assigning, so a field already at its default is not a change.
+    private static func writeDefaults(of fields: GeometryFieldSet, into geometry: inout GeometryGroup) -> Bool {
+        let defaults = GeometryGroup.identity
+        var changed = false
+        for field in fields.ordered {
+            switch field {
+            case .cropRect:
+                guard geometry.cropRect != defaults.cropRect else { continue }
+                geometry.cropRect = defaults.cropRect
+            case .aspectLock:
+                guard geometry.aspectLock != defaults.aspectLock else { continue }
+                geometry.aspectLock = defaults.aspectLock
+            case .straightenDegrees:
+                guard geometry.rotationDegrees != defaults.rotationDegrees else { continue }
+                geometry.rotationDegrees = defaults.rotationDegrees
+            case .quarterTurns:
+                guard geometry.quarterTurns != defaults.quarterTurns else { continue }
+                geometry.quarterTurns = defaults.quarterTurns
+            case .flipHorizontal:
+                guard geometry.flipHorizontal != defaults.flipHorizontal else { continue }
+                geometry.flipHorizontal = defaults.flipHorizontal
+            case .flipVertical:
+                guard geometry.flipVertical != defaults.flipVertical else { continue }
+                geometry.flipVertical = defaults.flipVertical
+            case .perspectiveVertical:
+                guard geometry.perspectiveVertical != defaults.perspectiveVertical else { continue }
+                geometry.perspectiveVertical = defaults.perspectiveVertical
+            case .perspectiveHorizontal:
+                guard geometry.perspectiveHorizontal != defaults.perspectiveHorizontal else { continue }
+                geometry.perspectiveHorizontal = defaults.perspectiveHorizontal
+            }
+            changed = true
+        }
+        return changed
+    }
+
+    /// 双击整张变换卡 = 全部 geometry 回默认，**一条**历史（·⌘Z 一次）。
     ///
-    /// Not a `Group` case: `Group` is the parameter cards' enum, and this verb's default is a whole
-    /// `GeometryGroup` — crop full, angle 0, no turn, no flips — which is `GeometryGroup.identity`
-    /// itself, the document's own default initializer and never a literal.
+    /// 214: not a separate table any more — it is the union of the two cards' declarations, so a field
+    /// that moves to a card is still covered here.
     @discardableResult
     public func cropGeometry() -> Bool {
-        guard session.edit.geometry != .identity else { return false }
-        return cropGeometryVerb(label: InspectorView.Section.crop.title) { geometry in
-            let changed = geometry != .identity
-            geometry = .identity
-            return changed
-        }
+        reset(fields: .all, label: InspectorView.Section.crop.title)
     }
 
     /// The one writer both crop resets go through: close the tool session (072/077's rule for a

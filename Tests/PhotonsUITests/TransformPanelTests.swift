@@ -67,8 +67,8 @@ final class TransformPanelTests: XCTestCase {
                      panel.cards.cardTitles.first ?? "-",
                      card.minX, card.minY, card.width, card.height))
         XCTAssertGreaterThan(card.width, 200, "卡片比面板还窄")
-        XCTAssertGreaterThan(card.height, 60, "裁切卡（宽高比 + 底部行）不该只有 \(card.height) pt")
-        XCTAssertGreaterThan(angleCard.height, 100, "角度卡（三节）不该只有 \(angleCard.height) pt")
+        XCTAssertGreaterThan(card.height, 100, "裁切卡（宽高比 / 角度 / 透视 + 底部行）不该只有 \(card.height) pt")
+        XCTAssertGreaterThan(angleCard.height, 60, "旋转卡（旋转 / 镜像）不该只有 \(angleCard.height) pt")
         XCTAssertGreaterThan(angleCard.minY, card.maxY, "角度卡必须在裁切卡之后")
         // 卡在滚动内容里、在直方图下方 —— 它是一张普通的卡。
         XCTAssertLessThan(panel.histogramPlot.maxY, card.minY)
@@ -319,7 +319,7 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertEqual(CropSection.crop.title, "宽高比")
         XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
         XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["旋转", "镜像"])
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
         let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
@@ -416,16 +416,17 @@ final class TransformPanelTests: XCTestCase {
 
             let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")
             let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "\(width) pt：没有角度卡 frame")
-            // 087: the two cards own two row sets. The crop card is 宽高比 + 底部行; the angle card is
-            // 转动 / 旋转 / 镜像.
+            // 214: the two cards own two row sets. The crop card is 宽高比 / 角度 / 透视 + 底部行; the
+            // rotation card is 旋转 / 镜像.
             let cardRows: [(String, CGRect, CGRect)] = [
                 (CropCardID.aspect, card),
+                (CropCardID.angle, card),
+                (CropCardID.perspectiveVertical, card),
                 (CropCardID.apply, card),
-                (CropCardID.angle, angleCard),
                 (CropCardID.turn, angleCard),
                 (CropCardID.mirror, angleCard),
             ].compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
-            XCTAssertEqual(cardRows.count, 5, "\(width) pt：五行里少了（\(cardRows.map(\.0))）")
+            XCTAssertEqual(cardRows.count, 6, "\(width) pt：六行里少了（\(cardRows.map(\.0))）")
             XCTAssertGreaterThan(angleCard.minY, card.maxY,
                                  "\(width) pt：角度卡必须在裁切卡之后")
 

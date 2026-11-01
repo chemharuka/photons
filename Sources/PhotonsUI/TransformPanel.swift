@@ -18,16 +18,15 @@ import SwiftUI
 //   > 不能变灰。接下来二级标题是「宽高比」，取代第二个「裁切」，右边是选单和交换。九宫格/应用/取消
 //   > 放在最底下。
 //
-// 于是这张卡是裁切工具的**全部**控件，四段，每段一条分隔线 + 11 pt 次级小标题：
+// 于是这张卡是裁切工具的**全部**控件，五段，每段一条分隔线 + 11 pt 次级小标题：
 //
 //     宽高比   标题 · 比例选单 · ⇄ 交换（同一行）
 //     角度     滑块角度（−45…+45 的行，行标签「角度」）
-//     旋转     左旋 · 右旋 · 最右角度（⌘[ / ⌘]，同一个动词）
-//     镜像     水平 / 垂直
+//     透视     垂直 / 水平两条滑杆（183）
 //     底部     九宫格（左）· 应用 取消（右，卡片最后一行）
 //
-// 分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里四区不换行、不重叠、任何两行不相交
-// （`CropCardSectionsTests` 量的是真实 frame）。
+// 第二张卡是 旋转 / 镜像。分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里五区不
+// 换行、不重叠、任何两行不相交（`CropCardSectionsTests` 量的是真实 frame）。
 //
 // ## 进变换就进裁切，卡头不再有开关
 //
@@ -56,14 +55,20 @@ import SwiftUI
 
 extension InspectorView {
 
-    /// 「变换」的第一张卡：宽高比 + 底部三件（087 把转动 / 旋转 / 镜像搬到第二张卡）。
+    /// 「变换」的第一张卡：宽高比 + 角度 + 透视 + 底部三件。
+    ///
+    /// 214: the card's sections are its `TransformCardSpec`'s, and the title reset is the union of
+    /// their `fields` — 旋转 / 镜像 belong to the second card and keep what they hold here.
     var cropTransformCard: some View {
         let tool = loupe?.cropTool
-        return InspectorCardShell(title: Section.crop.title,
-                                  reset: { resets.cropGeometry() },
+        let spec = TransformCardSpec.cropCard
+        return InspectorCardShell(title: spec.title,
+                                  reset: { resets.cropCard(spec) },
                                   accessory: { EmptyView() }) {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
                 cropAspectSection(tool)
+                cropAngleSection(tool)
+                cropPerspectiveSection()
                 cropBottomRow(tool)
             }
         }
@@ -72,17 +77,17 @@ extension InspectorView {
         .background(CropRowProbeHost(rowID: CropCardID.card))
     }
 
-    /// 「变换」的第二张卡（087）：转动 / 旋转 / 镜像。没有整卡复位，也没有应用 / 取消 ——
-    /// 转动松手即写、旋转与镜像是一次文档动作，Esc 才是回退。
+    /// 「变换」的第二张卡（087）：旋转 / 镜像。没有应用 / 取消 —— 旋转与镜像是一次文档动作，
+    /// Esc 才是回退。214: its title reset is `.rotation + .mirror`; 角度 / 透视 belong to the first
+    /// card and are not touched.
     var angleTransformCard: some View {
         let tool = loupe?.cropTool
         let geometry = session.edit.geometry
-        return InspectorCardShell(title: Section.angle.title,
-                                  reset: nil,
+        let spec = TransformCardSpec.rotationCard
+        return InspectorCardShell(title: spec.title,
+                                  reset: { resets.cropCard(spec) },
                                   accessory: { EmptyView() }) {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
-                cropAngleSection(tool)
-                cropPerspectiveSection()
                 cropRotationSection(geometry: geometry, tool: tool)
                 cropMirrorSection(geometry: geometry, tool: tool)
             }
@@ -102,7 +107,8 @@ extension InspectorView {
     private func cropAspectSection(_ tool: CropToolController?) -> some View {
         HStack(spacing: 6) {
             CropSectionTitle(title: CropSection.crop.title,
-                             reset: { resets.cropSection(.crop) })
+                             reset: { resets.reset(fields: CropSection.crop.fields,
+                                                   label: CropSection.crop.title) })
                 .background(CropRowProbeHost(rowID: CropCardID.section(.crop)))
             Spacer(minLength: 2)
             CropAspectRow(tool: tool)
@@ -137,9 +143,8 @@ extension InspectorView {
     private func cropAngleSection(_ tool: CropToolController?) -> some View {
         let straighten = Binding<Double>(get: { tool?.angleUIValue ?? 0 },
                                          set: { tool?.setAngle(uiValue: $0) })
-        // 122 A: the card is titled 「旋转」 and the old 「转动」 sub-header is gone — the angle row sits
-        // directly under the card title. The section keeps its reset button on the row itself
-        // (`sliderRow`'s own reset), so nothing is lost with the header.
+        // 122 A: the old 「转动」 sub-header is gone — the angle row sits directly under the card
+        // title. The section keeps its reset on the row itself, wired to the section's declaration.
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
                 sliderRow("角度",
@@ -150,8 +155,8 @@ extension InspectorView {
                           enabled: true,
                           accessibilityID: "inspector.crop.angle",
                           onReset: {
-                              tool?.setAngle(uiValue: 0)
-                              _ = tool?.commitStraighten()
+                              _ = resets.reset(fields: CropSection.angle.fields,
+                                               label: CropSection.angle.title)
                           },
                           onEditingChanged: { editing in
                               guard !editing else { return }
@@ -170,11 +175,8 @@ extension InspectorView {
     private func cropPerspectiveSection() -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.perspective.title, isFirst: false, reset: {
-                session.applyEdit {
-                    $0.geometry.perspectiveVertical = 0
-                    $0.geometry.perspectiveHorizontal = 0
-                }
-                _ = session.commitEdit(label: "透视", coalesce: false)
+                _ = resets.reset(fields: CropSection.perspective.fields,
+                                 label: CropSection.perspective.title)
             })
             sliderRow("垂直",
                       Binding(get: { session.edit.geometry.perspectiveVertical },
@@ -193,7 +195,7 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           if !editing { session.commitEdit(label: "透视", coalesce: true) }
                       })
-                .background(CropRowProbeHost(rowID: "perspective.vertical"))
+                .background(CropRowProbeHost(rowID: CropCardID.perspectiveVertical))
             sliderRow("水平",
                       Binding(get: { session.edit.geometry.perspectiveHorizontal },
                               set: { value in
@@ -211,7 +213,7 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           if !editing { session.commitEdit(label: "透视", coalesce: true) }
                       })
-                .background(CropRowProbeHost(rowID: "perspective.horizontal"))
+                .background(CropRowProbeHost(rowID: CropCardID.perspectiveHorizontal))
         }
     }
 
@@ -222,7 +224,8 @@ extension InspectorView {
     private func cropRotationSection(geometry: GeometryGroup, tool: CropToolController?) -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.rotation.title, isFirst: false,
-                              reset: { resets.cropSection(.rotation) })
+                              reset: { resets.reset(fields: CropSection.rotation.fields,
+                                                    label: CropSection.rotation.title) })
             CropTurnRow(turns: loupe?.quarterTurns ?? tool?.quarterTurns ?? geometry.quarterTurns,
                         isEnabled: loupe != nil || tool != nil,
                         onCounterClockwise: { turn(clockwise: false, tool: tool) },
@@ -238,7 +241,8 @@ extension InspectorView {
     private func cropMirrorSection(geometry: GeometryGroup, tool: CropToolController?) -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
             CropSectionHeader(title: CropSection.mirror.title, isFirst: false,
-                              reset: { resets.cropSection(.mirror) })
+                              reset: { resets.reset(fields: CropSection.mirror.fields,
+                                                    label: CropSection.mirror.title) })
             CropMirrorRow(horizontal: geometry.flipHorizontal,
                           vertical: geometry.flipVertical,
                           onHorizontal: { flip(horizontal: true, tool: tool) },
@@ -276,9 +280,11 @@ extension InspectorView {
     }
 }
 
-// MARK: - 082: the four section names
+// MARK: - 082: the section names
 
-/// The card's four sections — one spelling for the header, the reset verb and the tests.
+/// The card's sections — one spelling for the header, the reset verb and the tests. 214: each case
+/// also declares the geometry fields it owns (`TransformCardSpec.swift`), and the cards declare which
+/// sections they contain.
 public enum CropSection: String, CaseIterable, Sendable, Hashable {
     case crop
     case angle
@@ -300,11 +306,12 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         }
     }
 
-    /// The order they are stacked in, top to bottom (all five, across both cards).
-    public static var displayOrder: [CropSection] { [.crop, .angle, .perspective, .rotation, .mirror] }
+    /// The order they are stacked in, top to bottom — 214: the cards' own declarations are the source,
+    /// so a section that moves between cards moves here too.
+    public static var displayOrder: [CropSection] { TransformCardSpec.all.flatMap(\.sections) }
 
-    /// 087: the second card's three sections, in the user's order.
-    public static var angleCardOrder: [CropSection] { [.angle, .rotation, .mirror] }
+    /// 087 / 214: the second card's sections, in the user's order.
+    public static var angleCardOrder: [CropSection] { TransformCardSpec.rotationCard.sections }
 
     /// The accessibility / probe id of the section's small title.
     public var headerID: String { "inspector.crop.section.\(rawValue)" }
@@ -314,10 +321,10 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
 
 /// One section's small title: a hairline, then an 11 pt secondary label.
 ///
-/// The hairline is the 「视觉分隔线」 the user asked for (the four sections have to *look* separated,
-/// not only be spaced); the first section has none, because the card's own top edge is the line
-/// above it. Double-clicking the title is the section's reset — the same `ResetOnDoubleClick` gesture
-/// every other card uses, wired to one `PanelResets` verb per section.
+/// The hairline is the 「视觉分隔线」 the user asked for (the sections have to *look* separated, not
+/// only be spaced); the first section has none, because the card's own top edge is the line above it.
+/// Double-clicking the title is the section's reset — the same `ResetOnDoubleClick` gesture every
+/// other card uses, wired to that section's `fields` (`PanelResets.reset(fields:)`).
 struct CropSectionHeader: View {
 
     let title: String
@@ -1229,6 +1236,9 @@ enum CropCardID {
     static let angle = "angle"
     static let turn = CropTurnRow.probeID
     static let mirror = CropMirrorRow.probeID
+    /// 183: the two keystone sliders' frames.
+    static let perspectiveVertical = "perspective.vertical"
+    static let perspectiveHorizontal = "perspective.horizontal"
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"
