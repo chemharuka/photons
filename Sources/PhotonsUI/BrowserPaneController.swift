@@ -1,5 +1,6 @@
 import AppKit
 import PhotonsCatalog
+import PhotonsCore
 
 /// Left browser (Phos "素材浏览"): the source roots on top, the photo list below.
 ///
@@ -341,6 +342,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             _ = session.albumRevision
             // 排序（网格/胶片条/左侧栏同源）：这一行让左侧照片行跟着换序，见 `PhotoSortOrder`。
             _ = session.sortOrder
+            // 218 — a commit moved the HD thumbnail key; refresh so visible rows ask for the new file.
+            _ = session.persistCount
         }, { [weak self] in
             self?.refresh()
         })
@@ -645,21 +648,33 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.thumbnailTier = tier
-        if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
+        let document = document(for: asset)
+        let key = ThumbnailProvider.hdKey(for: asset, document: document)
+        if let cached = provider.serveFromMemory(for: key) {
             cell.setThumbnail(cached)
             return
         }
         if asset.isMissing {
-            let key = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
             guard provider.cache.exists(key) else { return }
         }
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+            cell.setThumbnail(previous)
+        }
         requestThumbnail(row: row, asset: asset, tier: tier, priority: .onScreen)
+    }
+
+    /// The live document for the anchor photo, the stored one for every other row (218 key input).
+    private func document(for asset: Asset) -> EditModel {
+        guard let session else { return .neutral }
+        if asset.id == session.loadedEditAssetID { return session.edit }
+        return ThumbnailProvider.document(from: asset)
     }
 
     private func requestThumbnail(row: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[row] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
-        let token = provider.request(index: row, asset: asset, fileURL: url, tier: tier,
+        let token = provider.request(index: row, asset: asset, fileURL: url,
+                                     document: document(for: asset), tier: tier, spec: .hd,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(row: idx, key: key, image: image)
         }

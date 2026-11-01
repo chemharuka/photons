@@ -1,5 +1,6 @@
 import AppKit
 import PhotonsCatalog
+import PhotonsCore
 
 /// The filmstrip: a horizontal `NSCollectionView` that is the *same* browser as the photo list,
 /// just laid out along the bottom (Phos mode B: a 122 pt bar of 74×50 thumbs, ⌃⌘B shows/hides it,
@@ -242,6 +243,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             _ = session.metadataRevision
             // 排序（与网格、左侧栏同一个值）：点了按钮，胶片条按 `session.assets` 的新顺序重排。
             _ = session.sortOrder
+            // 218 — a commit moved the thumbnail key; re-ask instead of redrawing the old pixels.
+            _ = session.persistCount
         }, { [weak self] in
             self?.refresh()
         })
@@ -335,24 +338,35 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.cardView.thumbnailTier = tier
-        if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
+        let document = document(for: asset)
+        let key = ThumbnailProvider.hdKey(for: asset, document: document)
+        if let cached = provider.serveFromMemory(for: key) {
             cell.cardView.thumbnail = cached
             return
         }
         // A missing original has nothing to decode: only an already-cached thumbnail may stand in,
         // otherwise the cell keeps its placeholder and its badge (identical rule to the grid).
         if asset.isMissing {
-            let key = ThumbKey.preview(contentHash: asset.contentHash,
-                                       tier: ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext).tier)
             guard provider.cache.exists(key) else { return }
         }
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+            cell.cardView.thumbnail = previous
+        }
         requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
+    }
+
+    /// The live document for the anchor photo, the stored one for every other row (218 key input).
+    private func document(for asset: Asset) -> EditModel {
+        guard let session else { return .neutral }
+        if asset.id == session.loadedEditAssetID { return session.edit }
+        return ThumbnailProvider.document(from: asset)
     }
 
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
-        let token = provider.request(index: index, asset: asset, fileURL: url, tier: tier,
+        let token = provider.request(index: index, asset: asset, fileURL: url,
+                                     document: document(for: asset), tier: tier, spec: .hd,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(index: idx, key: key, image: image)
         }

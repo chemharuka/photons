@@ -335,6 +335,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             // 排序是会话上的一个值，三个视图都读它：这一行就是「点了按钮，网格跟着重排」的全部接线
             // （`reloadData` 复用的还是同一批单元格，缩略图从内存层同步取出，不重新解码）。
             _ = session.sortOrder
+            // 218 — every commit (and undo) writes the catalog; the thumbnail key moved with it, so
+            // the next reconcile must re-ask instead of reusing the old cell image.
+            _ = session.persistCount
         }, { [weak self] in
             self?.refresh()
         })
@@ -417,21 +420,34 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard let provider = provider() else { return }
         let tier = tier(for: asset)
         cell.cardView.thumbnailTier = tier
+        let document = document(for: asset)
+        let key = ThumbnailProvider.hdKey(for: asset, document: document)
         // `serveFromMemory` (not `memoryImage`) so a warm cell is counted as a hit rather than
         // disappearing from the statistics.
-        if let cached = provider.serveFromMemory(for: .preview(contentHash: asset.contentHash, tier: tier)) {
+        if let cached = provider.serveFromMemory(for: key) {
             cell.cardView.thumbnail = cached
             return
         }
         if asset.isMissing {
-            let key = ThumbKey.preview(contentHash: asset.contentHash,
-                                       tier: ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext).tier)
             guard provider.cache.exists(key) else { return }
+        }
+        // 218 — a commit changed the key, so the new one is a miss by construction; draw the
+        // previous rendering while the rebuild runs instead of flashing the hash swatch.
+        if let previous = provider.placeholderImage(contentHash: asset.contentHash) {
+            cell.cardView.thumbnail = previous
         }
         requestThumbnail(index: index, asset: asset, tier: tier, priority: .onScreen)
     }
 
     // MARK: thumbnails
+
+    /// The live document for the anchor photo, the stored one for every other row. The thumbnail key
+    /// is derived from this, which is how a slider commit changes the cache file the grid draws.
+    private func document(for asset: Asset) -> EditModel {
+        guard let session else { return .neutral }
+        if asset.id == session.loadedEditAssetID { return session.edit }
+        return ThumbnailProvider.document(from: asset)
+    }
 
     private var backingScale: CGFloat {
         view.window?.backingScaleFactor ?? 2
@@ -475,7 +491,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier, priority: ThumbPriority) {
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
-        let token = provider.request(index: index, asset: asset, fileURL: url, tier: tier,
+        let token = provider.request(index: index, asset: asset, fileURL: url,
+                                     document: document(for: asset), tier: tier, spec: .hd,
                                      priority: priority) { [weak self] idx, _, image in
             self?.thumbnailDidLoad(index: idx, image: image)
         }
