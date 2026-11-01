@@ -52,7 +52,7 @@ final class CropPanelTests: XCTestCase {
                                       "二级标题「\(title)」没有画出来")
             headers.append(probe.convert(probe.bounds, to: inspector))
         }
-        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["角度", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["旋转", "镜像"])
         for (a, b) in zip(headers, headers.dropFirst()) {
             XCTAssertGreaterThan(b.minY, a.minY)
         }
