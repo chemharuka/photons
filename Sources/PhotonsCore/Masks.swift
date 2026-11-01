@@ -228,6 +228,11 @@ public struct NormalizedPoint: Sendable, Equatable, Codable, Hashable {
 
 /// §4.2 — a gradient between two lines. `start` and `end` are the centres of the two lines; the
 /// shape is evaluated analytically, so it is exact at every scale and needs no raster.
+///
+/// 215 — coverage is **linear across the whole span**: 10 % of the way from the start line is 10 %
+/// strength (`alpha = clamp(t', 0, 1)` at `feather = 0`). The component's `feather` widens the
+/// transition symmetrically *outside* the two lines instead of softening a ramp centred on ½, which
+/// is what made the mask look dead until the middle.
 public struct LinearGradientShape: Sendable, Equatable, Codable {
     public var start: NormalizedPoint
     public var end: NormalizedPoint
@@ -864,10 +869,16 @@ public struct MaskComponent: Sendable, Equatable, Codable {
     public var op: CombineOp
     /// Applied to this component's coverage before combining (§3.3: invert is per component).
     public var invert: Bool
-    /// The shape's feather radius as a **percentage of the short edge** (0…1 ⇒ 0…10 %), spent
-    /// *outside* the shape: the interior stays 1.0 and the coverage decays quadratically to 0 across
-    /// this radius beyond the rim (079 A4 — darktable's drawn-mask rule). `0` = a hard edge, and the
-    /// pre-A4 arithmetic verbatim.
+    /// The shape's feather, read **per shape** (the two units have always disagreed, and 215 keeps
+    /// the linear one honest):
+    ///
+    /// - radial / brush: a **percentage of the short edge** (0…1 ⇒ 0…10 %), spent *outside* the
+    ///   shape: the interior stays 1.0 and the coverage decays quadratically to 0 across this radius
+    ///   beyond the rim (079 A4 — darktable's drawn-mask rule). `0` = a hard edge, and the pre-A4
+    ///   arithmetic verbatim.
+    /// - linear: a fraction of the **span between the two lines**, split symmetrically *outside*
+    ///   them — the ramp is linear across the whole span and the transition is `f/2` wide past each
+    ///   line (215). `0` = a strict `alpha = clamp(t', 0, 1)`.
     public var feather: Double
     public var shape: MaskShape
 
@@ -1521,10 +1532,12 @@ public enum MaskRadius {
     /// short edge (canvas pixels) keeps one parameter identical at thumbnail, fit, 1:1 and export
     /// scale — the same rule as every other distance in §4.
     ///
-    /// 079 A4 — the **shape's own** `MaskComponent.feather` is this same number (same unit, same
+    /// 079 A4 — the **radial / brush** `MaskComponent.feather` is this same number (same unit, same
     /// clamp), read in the atlas kernel as `f · 0.1 · min(srcSize)` and spent *outside* the shape.
-    /// The two radii are therefore one quantity with two operators, and `MaskBounds.sourceExtent`
-    /// uses this function to grow a shape by its own feather.
+    /// (215: the **linear** gradient's feather is a fraction of its own span, not a short-edge
+    /// percentage, so it never goes through this function.) The two radii are one quantity with two
+    /// operators, and `MaskBounds.sourceExtent` uses this function to grow a radial shape by its own
+    /// feather.
     public static func featherPixels(_ feather: Double, content: ImageSize) -> Double {
         min(max(feather, 0), 1) * 0.1 * Double(min(content.width, content.height))
     }
@@ -1579,16 +1592,14 @@ public enum MaskBounds {
         let minSide = min(w, h)
         switch component.shape {
         case .linearGradient(let g):
-            // `alpha > 0` from `t' = lo` onwards. 102: the linear feather is a **symmetric** ramp of
-            // width `f` of the span, centred on `t' = ½` — the same `lo = ½ − f/2` the kernel uses.
-            // (079 A4 briefly made this the radial rule, `lo = ½ − featherPx/span`, which cut the
-            // atlas' own support in half once the kernel went back to the symmetric ramp.)
-            // `t' = t^(log ½ / log m)`, so `t_cut = lo^(log m / log ½)` — the exact inverse of the
-            // kernel's midpoint remap.
-            let lo = max(0.5 - 0.5 * min(max(component.feather, 0), 1), 0)
-            let m = min(max(g.midpoint, 0.02), 0.98)
-            let exponent = log(0.5) / log(m)
-            let tCut = lo <= 0 ? 0 : pow(lo, 1 / exponent)
+            // 215 — the ramp is linear across the whole span and the feather is a band **outside** the
+            // two lines: `alpha = clamp((t' + f/2)/(1 + f))`, so `alpha > 0 ⇔ t' > −f/2`. The kernel
+            // applies the midpoint remap only for `t > 0`, so below the start line `t' = t` and the cut
+            // is `t_cut = −f/2` **verbatim** — no exponent inverse, and *not* 0: writing 0 would leave
+            // the outward half of the band outside the bound, and a tiled pass would not draw it.
+            // (`−f/2 ≤ 0` always, so the cut never sits past the start line.)
+            let f = min(max(component.feather, 0), 1)
+            let tCut = -0.5 * f
             let quad = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
             let ax = g.start.x * w, ay = g.start.y * h
             let dx = g.end.x * w - ax, dy = g.end.y * h - ay

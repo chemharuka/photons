@@ -14,10 +14,12 @@ import Metal
 ///   1. `feather = 0.5` at `r = 0.25` short edges keeps 100 % coverage out to **0.25** (was 0.125);
 ///   2. the 11-point profile: exactly 1.0 inside, monotone and quadratic outside, to the analytic
 ///      value within one 8-bit code;
-///   3. `feather = 0` is the pre-A4 frame **byte for byte** (digest recorded on main `c9aa22e`);
+///   3. `feather = 0` is the pre-A4 frame **byte for byte** (digest recorded on main `c9aa22e`) —
+///      radial only since 215, which deliberately linearised the linear gradient's ramp;
 ///   4. `MaskBounds.rasterRect` covers the whole falloff — the bound is grown by the outward radius,
 ///      and the value at its edge is the analytic one (a box that stopped at the rim would cut it);
-///   5. the linear gradient follows the same rule across its own half-way line.
+///   5. (215) the linear gradient is a **straight line across the whole span** and its feather is a
+///      band *outside* the two lines — 10 % of the span is 10 % strength at `f = 0`.
 ///
 /// The counter-proof is one edit: restore `1 − smoothstep(1 − f, 1, r)` in `s1_5_mask_atlas.metal` and
 /// claim (1) goes red at 0.125 while (2) and (4) follow.
@@ -99,9 +101,8 @@ final class MaskFeatherShapeTests: XCTestCase {
         return ratio * ratio
     }
 
-    /// 102: a **symmetric** smoothstep ramp of width `f` centred on the half-way line. (079 A4's
-    /// one-sided "outside the rim" ramp applied to the open shapes was the bug this file now records the
-    /// fix for; the radial helper above keeps that rule.)
+    /// 215: coverage is **linear across the whole span** — `alpha = clamp((t' + f/2)/(1 + f))`, the
+    /// feather (if any) split outside the two lines. Same arithmetic as the kernel's `linear_alpha`.
     private func linearAlpha(x: Double, y: Double, _ s: LinearGradientShape, feather f: Double,
                              size: (w: Int, h: Int)) -> Double {
         let w = Double(size.w), h = Double(size.h)
@@ -109,16 +110,12 @@ final class MaskFeatherShapeTests: XCTestCase {
         let bx = s.end.x * w, by = s.end.y * h
         let dx = bx - ax, dy = by - ay
         let denom = max(dx * dx + dy * dy, 1e-12)
-        var t = ((x - ax) * dx + (y - ay) * dy) / denom
-        t = min(max(t, 0), 1)
+        let t = ((x - ax) * dx + (y - ay) * dy) / denom
         let m = min(max(s.midpoint, 0.02), 0.98)
         var tp = t
         if abs(m - 0.5) > 1e-6 && t > 0 { tp = pow(t, log(0.5) / log(m)) }
         let radius = min(max(f, 0), 1)
-        let lo = 0.5 - 0.5 * radius
-        let hi = max(0.5 + 0.5 * radius, lo + 1e-5)
-        let tt = min(max((tp - lo) / (hi - lo), 0), 1)
-        return tt * tt * (3 - 2 * tt)
+        return min(max((tp + 0.5 * radius) / (1 + radius), 0), 1)
     }
 
     private func h16(_ v: Float) -> Double { Double(Float16(v)) }
@@ -250,13 +247,14 @@ final class MaskFeatherShapeTests: XCTestCase {
         XCTAssertGreaterThan(falloff[2], falloff[7], "the decay must be real, not numeric dust")
     }
 
-    // MARK: - 3. linear gradient: symmetric ramp, unlike the radial rule
+    // MARK: - 3. linear gradient: linear across the whole span, feather outside the two lines
 
-    /// 102 — the linear feather is a **symmetric** ramp of width `f` of the span, centred on the
-    /// half-way line, so coverage is 0 below `½ − f/2`, 0.5 at `½` and 1 above `½ + f/2`. 079 A4 had
-    /// pinned the opposite (solid past `½`, a squared `0.1·shortEdge` band below it) by applying the
-    /// radial rule to the open shapes. That was the regression: one-sided and a tenth as wide.
-    func testLinearFeatherIsSymmetricAboutTheHalfWayLine() throws {
+    /// 215 — the linear ramp is **linear**: `alpha = clamp((t' + f/2)/(1 + f))`. At `f = 0` the coverage
+    /// is exactly `t'`, so 10 % of the span is 0.10 strength; a feather only widens the transition
+    /// symmetrically **outside** the two lines (`t' = −f/2` → 0, `t' = 1 + f/2` → 1). 102's
+    /// `smoothstep` put the whole band on top of the span and left the mask at 0 until a quarter of the
+    /// way in — the "no strength until the middle" the user reported.
+    func testLinearFeatherKeepsTheRampLinearAndSpendsTheBandOutside() throws {
         let image = rampImage(width: 320, height: 300)
         let shape = LinearGradientShape(start: NormalizedPoint(0.5, 0), end: NormalizedPoint(0.5, 1))
         var worst = 0.0
@@ -269,16 +267,13 @@ final class MaskFeatherShapeTests: XCTestCase {
                     worst = max(worst, abs(expected - sample(dump, x, y)))
                 }
             }
-            // Past the ramp it is solid; below it, empty. At f = 0 that is the hard edge at ½.
-            let solidFrom = Int(((0.5 + 0.5 * f) * Double(image.height)).rounded(.up))
-            let emptyBelow = Int(((0.5 - 0.5 * f) * Double(image.height)).rounded(.down))
-            for y in solidFrom..<image.height {
-                XCTAssertEqual(sample(dump, image.width / 2, y), 1.0,
-                               "f = \(f): the half past the ramp must be exactly 1.0 (row \(y))")
-            }
-            for y in 0..<emptyBelow {
-                XCTAssertEqual(sample(dump, image.width / 2, y), 0.0,
-                               "f = \(f): the half below the ramp must be exactly 0.0 (row \(y))")
+            // Every row of the span is on the ramp — none is pinned at 0 before the middle, and none is
+            // solid before the band's own end.
+            for y in 0..<image.height {
+                let t = (Double(y) + 0.5) / Double(image.height)
+                XCTAssertEqual(sample(dump, image.width / 2, y),
+                               min(max((t + 0.5 * f) / (1 + f), 0), 1), accuracy: 1.5 / 255.0,
+                               "f = \(f), row \(y): the ramp must be linear across the span")
             }
         }
         XCTAssertLessThan(worst, 1.5 / 255.0, "the linear gradient deviates from its own reference")
@@ -286,38 +281,30 @@ final class MaskFeatherShapeTests: XCTestCase {
 
     // MARK: - 4. feather 0 is the pre-A4 frame, byte for byte
 
-    /// The two digests were recorded on **main `c9aa22e`**, i.e. with the pre-A4 kernel: `feather == 0`
-    /// must keep the old expression verbatim (both kernels still carry it), so every document in the
-    /// wild that has no shape feather renders the same bytes it did before the change.
-    func testFeatherZeroFrameIsByteIdenticalToThePreA4Graph() throws {
+    /// The digest was recorded on **main `c9aa22e`**, i.e. with the pre-A4 kernel: the **radial**
+    /// `feather == 0` branch keeps the old expression verbatim, so it still renders the same bytes.
+    /// The linear half is deliberately **not** pinned here any more: 215 replaced `smoothstep(½, 1, t')`
+    /// with `clamp(t', 0, 1)` on purpose, so its digest must move (the numeric ramps are pinned in
+    /// `MaskLinearRampTests`).
+    func testFeatherZeroRadialFrameIsByteIdenticalToThePreA4Graph() throws {
         let image = rampImage(width: 160, height: 120)
         let radial = doc(.radialGradient(RadialGradientShape(center: NormalizedPoint(0.5, 0.5),
                                                              radius: NormalizedPoint(0.3, 0.25),
                                                              angle: 20)),
                          feather: 0)
-        let linear = doc(.linearGradient(LinearGradientShape(start: NormalizedPoint(0.2, 0.1),
-                                                             end: NormalizedPoint(0.7, 0.95),
-                                                             midpoint: 0.4)),
-                         feather: 0)
 
         let radialSHA = try XCTUnwrap(try makeGraph(image).render(
             radial, options: RenderOptions(scale: 1, wantsPixels: true)).display).sha256()
-        let linearSHA = try XCTUnwrap(try makeGraph(image).render(
-            linear, options: RenderOptions(scale: 1, wantsPixels: true)).display).sha256()
 
         print("A4 feather 0 frame sha256 (radial) = \(radialSHA)")
-        print("A4 feather 0 frame sha256 (linear) = \(linearSHA)")
 
         XCTAssertEqual(radialSHA, Self.radialFeatherZeroSHA,
                        "a radial mask with feather 0 must be the pre-A4 frame, byte for byte")
-        XCTAssertEqual(linearSHA, Self.linearFeatherZeroSHA,
-                       "a linear mask with feather 0 must be the pre-A4 frame, byte for byte")
     }
 
-    /// Recorded on main `c9aa22e` (pre-A4 kernel). `swift test --filter testFeatherZeroFrameIsByte`
-    /// prints the current values if a deliberate change ever has to move them.
+    /// Recorded on main `c9aa22e` (pre-A4 kernel). `swift test --filter testFeatherZero` prints the
+    /// current value if a deliberate change ever has to move it.
     private static let radialFeatherZeroSHA = "7adba4e58d4550689e566bec4992d467617abf4fb2ed3483d8a8cfce1df4b8ea"
-    private static let linearFeatherZeroSHA = "8d63b9200f0d63d808f47617ee923920e4243ba4fbf905e81fc36031603aeb83"
 
     // MARK: - 5. the raster box covers the falloff
 

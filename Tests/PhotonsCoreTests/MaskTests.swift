@@ -114,10 +114,11 @@ final class MaskTests: XCTestCase {
         return t * t * (3 - 2 * t)
     }
 
-    /// Linear gradient (102): `t = dot(p−start, d)/dot(d,d)`, midpoint remap, then a **symmetric**
-    /// smoothstep ramp of width `f` centred on the half-way line `t' = ½`. 079 A4's "short-edge
-    /// percentage spent outside the rim" rule is the *radial* one; applying it to the open shapes made
-    /// the linear ramp one-sided and a tenth as wide, so 102 restores the pre-A4 (`e3a011d^`) contract.
+    /// Linear gradient (215): `t = dot(p−start, d)/dot(d,d)` **unclamped**, midpoint remap, then a
+    /// **linear** ramp `alpha = clamp((t' + f/2)/(1 + f))`. `f` is the width of the transition split
+    /// outside the two lines, so 10 % of the span is 0.10 at `f = 0` and the mask is 0 at `t' = −f/2`
+    /// and 1 at `t' = 1 + f/2`. No `smoothstep`: 102's symmetric ramp was the "dead until the middle"
+    /// one.
     private func linearAlpha(x: Double, y: Double, _ s: LinearGradientShape,
                              feather f: Double, size: (w: Int, h: Int)) -> Double {
         let w = Double(size.w), h = Double(size.h)
@@ -125,15 +126,12 @@ final class MaskTests: XCTestCase {
         let bx = s.end.x * w, by = s.end.y * h
         let dx = bx - ax, dy = by - ay
         let denom = max(dx * dx + dy * dy, 1e-12)
-        var t = ((x - ax) * dx + (y - ay) * dy) / denom
-        t = min(max(t, 0), 1)
+        let t = ((x - ax) * dx + (y - ay) * dy) / denom
         let m = min(max(s.midpoint, 0.02), 0.98)
         var tp = t
         if abs(m - 0.5) > 1e-6 && t > 0 { tp = pow(t, log(0.5) / log(m)) }
         let radius = min(max(f, 0), 1)
-        let lo = 0.5 - 0.5 * radius
-        let hi = max(0.5 + 0.5 * radius, lo + 1e-5)
-        return smoothstep(lo, hi, tp)
+        return min(max((tp + 0.5 * radius) / (1 + radius), 0), 1)
     }
 
     /// 079 A4: `q = R(−angle)·(p−centre)/radius`, `r = |q|`; `alpha = 1` for `r ≤ 1`, then
@@ -639,7 +637,7 @@ final class MaskTests: XCTestCase {
                                         midpoint: 0.5)
         var edit = EditModel.neutral
         edit.masks = [Mask(id: "m-lin",
-                           components: [MaskComponent(id: "c", feather: 1.0, shape: .linearGradient(shape))],
+                           components: [MaskComponent(id: "c", feather: 0, shape: .linearGradient(shape))],
                            adjustments: LocalAdjustments(exposure: 1))]
         let dump = try atlas(edit, image)
         XCTAssertEqual(dump.width, image.width)
@@ -650,18 +648,18 @@ final class MaskTests: XCTestCase {
         for y in 0..<image.height {
             for x in 0..<image.width {
                 let expected = linearAlpha(x: Double(x) + 0.5, y: Double(y) + 0.5, shape,
-                                           feather: 1.0, size: (image.width, image.height))
+                                           feather: 0, size: (image.width, image.height))
                 worst = max(worst, abs(expected - sample(dump, 0, x, y)))
             }
         }
         XCTAssertLessThan(worst, 1.5 / 255.0, "linear gradient deviates from the distance field")
 
-        // The three points the spec calls out, on the vertical centre line. The ramp is symmetric
-        // about the middle (102), so `t = 0.5` is the **half-coverage** point, not the rim.
-        XCTAssertEqual(sample(dump, 0, 48, 0), 0, accuracy: 1.0 / 255.0, "t = 0 must be 0")
+        // 215: the ramp *is* `t` across the whole span. Row 0 sits at t = 0.5/65, row 32 (the vertical
+        // middle) exactly at 0.5, row 64 at 64.5/65 — no dead quarter at either end.
+        XCTAssertEqual(sample(dump, 0, 48, 0), 0.5 / 65, accuracy: 1.5 / 255.0, "t = 0.0077")
         XCTAssertEqual(sample(dump, 0, 48, 32), 0.5, accuracy: 1.5 / 255.0,
                        "t = 0.5 is the middle of the ramp: exactly half coverage")
-        XCTAssertEqual(sample(dump, 0, 48, 64), 1, accuracy: 1.0 / 255.0, "t = 1 must be 1")
+        XCTAssertEqual(sample(dump, 0, 48, 64), 64.5 / 65, accuracy: 1.5 / 255.0, "t = 0.9923")
 
         // Monotone along the ramp: a gradient that folds is a gradient that lies.
         for y in 1..<image.height {
@@ -669,97 +667,105 @@ final class MaskTests: XCTestCase {
         }
     }
 
-    /// The midpoint exponent `t^(log 0.5 / log m)` decides **where the ramp is centred**. At m = 0.25
+    /// The midpoint exponent `t^(log 0.5 / log m)` decides **where the ramp crosses 50 %**. At m = 0.25
     /// the half-way line `t' = ½` sits at `t = 0.25`, so half coverage arrives a quarter of the way
-    /// along and the transition is symmetric around that line.
+    /// along — whatever the feather, because `(t' + f/2)/(1 + f) = ½ ⇔ t' = ½` (215).
     func testLinearGradientMidpointMovesTheRamp() throws {
         let image = rampImage()
         let shape = LinearGradientShape(start: NormalizedPoint(0.5, 0), end: NormalizedPoint(0.5, 1),
                                         midpoint: 0.25)
         var edit = EditModel.neutral
         edit.masks = [Mask(id: "m-mid",
-                           components: [MaskComponent(id: "c", feather: 1.0, shape: .linearGradient(shape))])]
+                           components: [MaskComponent(id: "c", feather: 0, shape: .linearGradient(shape))])]
         let dump = try atlas(edit, image)
 
         // t = 0.25 → row where (y + 0.5)/65 = 0.25 → y = 15.75, so use y = 16 and the analytic value.
         let y = 16
-        let expected = linearAlpha(x: 48.5, y: Double(y) + 0.5, shape, feather: 1.0,
+        let expected = linearAlpha(x: 48.5, y: Double(y) + 0.5, shape, feather: 0,
                                    size: (image.width, image.height))
         XCTAssertEqual(expected, 0.5058, accuracy: 0.01, "t' = ½ at t = 0.25: half coverage")
         XCTAssertEqual(sample(dump, 0, 48, y), expected, accuracy: 1.5 / 255.0)
 
-        // Two rows below the centre the ramp is already below half — the transition of a m = 0.25
-        // midpoint is centred on t = 0.25, so it lives in t ∈ [0.125, 0.375] at f = 1.
+        // Two rows above the crossing the ramp is already below half — the transition of a m = 0.25
+        // midpoint is centred on t = 0.25.
         XCTAssertLessThan(sample(dump, 0, 48, y - 4), 0.5)
         XCTAssertGreaterThan(sample(dump, 0, 48, y - 4), 0)
 
-        // With the midpoint pulled up, the solid region arrives far earlier than the geometric middle.
-        XCTAssertGreaterThan(sample(dump, 0, 48, image.height / 2), 0.75,
-                             "m = 0.25 must be solid well before the middle row")
+        // 215: the ramp is linear in `t'`, so at the geometric middle (t = 0.5 ⇒ t' = 0.7071) it is
+        // already past 70 % — the old smoothstep had reached 1.0 there.
+        XCTAssertGreaterThan(sample(dump, 0, 48, image.height / 2), 0.7,
+                             "m = 0.25 must be well past half by the middle row")
         for y in 1..<image.height {
             XCTAssertGreaterThanOrEqual(sample(dump, 0, 48, y) + 1e-4, sample(dump, 0, 48, y - 1))
         }
     }
 
-    /// 102 — the feather is a **symmetric** ramp of width `f` of the span, centred on the half-way
-    /// line: coverage is 0 below `½ − f/2`, 0.5 at `½`, and 1 above `½ + f/2`. 079 A4 pinned the
-    /// opposite (a hard rim at `½` with a squared `0.1·shortEdge` band below it) because it applied the
-    /// *radial* rule to the open shapes; that is exactly the bug 102 fixes.
-    func testLinearGradientFeatherIsSymmetricAboutTheMidpoint() throws {
+    /// 215 — the feather is a band of `f/2` **outside each line**: coverage is 0 at `t' = −f/2`, 1 at
+    /// `t' = 1 + f/2`, and linear in between (still exactly ½ at `t' = ½`). 102's ramp put the whole
+    /// band on top of the span, so `f = 0.2` left the mask at 0 until `t' = 0.4`.
+    func testLinearGradientFeatherSitsOutsideTheTwoLines() throws {
         let image = rampImage()
         let shape = LinearGradientShape()          // start (0.5, 0) → end (0.5, 1): a vertical ramp
+        let f = 0.2
         var edit = EditModel.neutral
         edit.masks = [Mask(id: "m-feather",
-                           components: [MaskComponent(id: "c", feather: 0.2,
+                           components: [MaskComponent(id: "c", feather: f,
                                                       shape: .linearGradient(shape))])]
         let dump = try atlas(edit, image)
 
-        // f = 0.2 ⇒ the ramp is `t' ∈ [0.4, 0.6]`, symmetric about the middle.
+        // f = 0.2 ⇒ 0.1 past each line: `alpha = (t' + 0.1)/1.2`, exactly ½ at the middle.
         for y in 0..<image.height {
             let t = (Double(y) + 0.5) / Double(image.height)
-            let a = sample(dump, 0, 48, y)
-            if t > 0.6 + 1e-9 {
-                XCTAssertEqual(a, 1, accuracy: 1.0 / 255.0, "row \(y): past the ramp the mask is solid")
-            }
-            if t < 0.4 - 1e-9 {
-                XCTAssertEqual(a, 0, accuracy: 1.0 / 255.0, "row \(y): below the ramp it is empty")
-            }
+            XCTAssertEqual(sample(dump, 0, 48, y), (t + 0.5 * f) / (1 + f), accuracy: 1.5 / 255.0,
+                           "row \(y): the span must be linear and the band outside it")
         }
+        XCTAssertEqual(sample(dump, 0, 48, 32), 0.5, accuracy: 1.5 / 255.0,
+                       "t' = ½ is still the half-coverage line")
 
-        // … and the whole field still matches the reference, ramp included.
+        // … and the whole field still matches the reference, band included.
         var worst = 0.0
         for y in 0..<image.height {
             for x in 0..<image.width {
                 let expected = linearAlpha(x: Double(x) + 0.5, y: Double(y) + 0.5, shape,
-                                           feather: 0.2, size: (image.width, image.height))
+                                           feather: f, size: (image.width, image.height))
                 worst = max(worst, abs(expected - sample(dump, 0, x, y)))
             }
         }
         XCTAssertLessThan(worst, 1.5 / 255.0, "linear gradient deviates from the distance field")
     }
 
-    /// 102 acceptance 1–2: on a 1584-px span with `f = 0.5` the ramp is symmetric about `t' = ½`
-    /// (`α(0.35) ≈ 0.104`, `α(0.5) = 0.5`, `α(0.35) = 1 − α(0.65)`) and its width is the feather
-    /// fraction of the span. The crossing at half coverage is measured by interpolating the two pixel
-    /// centres that straddle it, so a half-texel offset cannot hide a one-sided ramp.
-    func testLinearGradientFeatherSymmetryAndWidth() throws {
+    /// 215 acceptance 1–2 on a 1584-px span: with `f = 0.5` every point is `(t + 0.25)/1.5`, so
+    /// `α(0.35) = 0.40`, `α(0.5) = 0.50`, `α(0.9) = 0.7667` — and equal steps in `t` are equal steps
+    /// in alpha from the first row to the last. A `smoothstep` flat-tails at both ends; that is
+    /// exactly the "no strength until 50 %" the user saw. The crossing is measured by interpolating
+    /// the two pixel centres that straddle it, so a half-texel offset cannot hide a shifted ramp.
+    func testLinearGradientFeatherIsLinearAndCrossesAtTheMidpoint() throws {
         let image = rampImage(width: 64, height: 1584)   // span = 1584 px, short edge 64
         let shape = LinearGradientShape()                // vertical: (0.5, 0) → (0.5, 1)
         let f = 0.5
         let dump = try atlas(doc(.linearGradient(shape), feather: f), image)
         let span = Double(image.height)
 
-        func analytic(_ t: Double) -> Double {
-            linearAlpha(x: 32.5, y: t * span, shape, feather: f, size: (image.width, image.height))
-        }
+        func analytic(_ t: Double) -> Double { (t + 0.5 * f) / (1 + f) }
         func row(at t: Double) -> Int { Int((t * span - 0.5).rounded()) }
 
-        // Symmetry and the two spec probes, from the analytic reference and from the atlas.
-        XCTAssertEqual(analytic(0.35), 0.1041, accuracy: 0.0005, "smoothstep at t' = 0.35")
         XCTAssertEqual(analytic(0.5), 0.5, accuracy: 1e-12, "the crossing is exactly at t' = ½")
-        XCTAssertEqual(analytic(0.35), 1 - analytic(0.65), accuracy: 1e-9, "symmetric ramp")
-        XCTAssertEqual(sample(dump, 0, 32, row(at: 0.35)), analytic(0.35), accuracy: 1.5 / 255.0)
-        XCTAssertEqual(sample(dump, 0, 32, row(at: 0.5)), 0.5, accuracy: 1.5 / 255.0)
+        XCTAssertEqual(sample(dump, 0, 32, row(at: 0.35)), 0.4000, accuracy: 1.5 / 255.0)
+        XCTAssertEqual(sample(dump, 0, 32, row(at: 0.5)), 0.5000, accuracy: 1.5 / 255.0)
+        XCTAssertEqual(sample(dump, 0, 32, row(at: 0.9)), 0.7667, accuracy: 1.5 / 255.0)
+        XCTAssertEqual(sample(dump, 0, 32, 0), analytic(0.5 / span), accuracy: 1.5 / 255.0,
+                       "the first row is already at the ramp's value, not 0")
+        XCTAssertEqual(sample(dump, 0, 32, image.height - 1), analytic((span - 0.5) / span),
+                       accuracy: 1.5 / 255.0, "… and the last is not 1")
+
+        // Equal pixel steps ⇒ equal alpha steps, at the start, the middle and the end of the span.
+        for start in [100, 700, 1100, 1400] {
+            let a0 = sample(dump, 0, 32, start)
+            let a1 = sample(dump, 0, 32, start + 40)
+            let a2 = sample(dump, 0, 32, start + 80)
+            XCTAssertEqual(a2 - a1, a1 - a0, accuracy: 2 / 255.0,
+                           "rows \(start)…\(start + 80): the ramp must be linear, not an S-curve")
+        }
 
         // Half-coverage crossing, interpolated between rows 791 and 792 (t = 0.4997 / 0.5003).
         let low = row(at: 0.5) - 1, high = row(at: 0.5)
@@ -767,25 +773,6 @@ final class MaskTests: XCTestCase {
         let fraction = (0.5 - a0) / max(a1 - a0, 1e-9)
         let crossing = ((Double(low) + fraction) + 0.5) / span
         XCTAssertEqual(crossing, 0.5, accuracy: 0.001, "the ½ crossing must sit at t' = 0.5")
-
-        // Width of the visible ramp. `smoothstep` spends its flat tails before 0.02 and after 0.98, so
-        // the 2 %–98 % width is `(1 − 2s)` of the ramp with `s²(3−2s) = 0.02` (s ≈ 0.0838), i.e.
-        // 0.8323·f·span; the full 0→1 ramp is exactly f·span = 792 px.
-        var first: Int?, last: Int?
-        for y in 0..<image.height {
-            let a = sample(dump, 0, 32, y)
-            if a >= 0.02 { first = first ?? y }
-            if a >= 0.98, last == nil { last = y }
-        }
-        let width = Double((last ?? 0) - (first ?? 0) + 1)
-        let s = 0.0838
-        let expectedWidth = (1 - 2 * s) * f * span
-        print(String(format: "102 linear f=0.5 span=%.0f: 2–98%% width %.1f px (analytic %.1f, f·span %.1f)",
-                     span, width, expectedWidth, f * span))
-        XCTAssertEqual(width, expectedWidth, accuracy: expectedWidth * 0.02,
-                       "the 2 %–98 % ramp must be the smoothstep's own width")
-        XCTAssertEqual(width, f * span, accuracy: f * span * 0.2,
-                       "… and within the quarter of f·span the smoothstep tails occupy")
     }
 
     // MARK: - 005b: radial gradient against the analytic value
@@ -891,10 +878,11 @@ final class MaskTests: XCTestCase {
     /// add = union (max), subtract = `acc·(1−a)`, intersect = `acc·a`, first op ignored.
     func testCombineOpsTruthTable() throws {
         let image = rampImage()
-        // Two linear gradients whose ramps overlap at row 30 — 102's symmetric ramp gives a = 0.4539
-        // (f = 1, t' = 0.4692) and b = 0.3855 (f = 0.4, t' = 0.4692 in a 0.3…0.7 ramp).
+        // Two linear gradients whose ramps overlap at row 30 — 215's linear ramp gives a = 0.4846
+        // (f = 1, t' = 0.4692) and b = 0.6321 (f = 0.4, midpoint 0.25 ⇒ t' = 0.6850).
         let narrow = { (op: CombineOp) in
-            MaskComponent(id: "c2", op: op, feather: 0.4, shape: .linearGradient(LinearGradientShape()))
+            MaskComponent(id: "c2", op: op, feather: 0.4, shape: .linearGradient(
+                LinearGradientShape(midpoint: 0.25)))
         }
         func doc(op: CombineOp, feather: Double = 1.0, opacity: Double = 1,
                  invert: Bool = false, componentInvert: Bool = false) -> EditModel {
@@ -908,17 +896,18 @@ final class MaskTests: XCTestCase {
         }
         let y = 30, x = 48
 
-        XCTAssertEqual(sample(try atlas(doc(op: .add), image), 0, x, y), 0.4539, accuracy: 1.5 / 255.0,
-                       "add must be max(0.454, 0.386)")
-        XCTAssertEqual(sample(try atlas(doc(op: .subtract), image), 0, x, y), 0.2789, accuracy: 1.5 / 255.0,
-                       "subtract must be 0.454 · (1 − 0.386)")
-        XCTAssertEqual(sample(try atlas(doc(op: .intersect), image), 0, x, y), 0.1750, accuracy: 1.5 / 255.0,
-                       "intersect must be 0.454 · 0.386")
+        XCTAssertEqual(sample(try atlas(doc(op: .add), image), 0, x, y), 0.6321, accuracy: 1.5 / 255.0,
+                       "add must be max(0.485, 0.632)")
+        XCTAssertEqual(sample(try atlas(doc(op: .subtract), image), 0, x, y), 0.1783, accuracy: 1.5 / 255.0,
+                       "subtract must be 0.485 · (1 − 0.632)")
+        XCTAssertEqual(sample(try atlas(doc(op: .intersect), image), 0, x, y), 0.3063, accuracy: 1.5 / 255.0,
+                       "intersect must be 0.485 · 0.632")
 
-        // The first component's op is ignored: a leading subtract must not subtract from nothing.
+        // The first component's op is ignored: a leading subtract must not subtract from nothing, so
+        // the result is still the union (0.632), not `0.485 · (1 − 0.632)`.
         var leading = doc(op: .add)
         leading.masks[0].components[0].op = .subtract
-        XCTAssertEqual(sample(try atlas(leading, image), 0, x, y), 0.4539, accuracy: 1.5 / 255.0)
+        XCTAssertEqual(sample(try atlas(leading, image), 0, x, y), 0.6321, accuracy: 1.5 / 255.0)
 
         // One component, so invert can be measured without a second component in the way.
         func single(feather: Double, invert: Bool = false, maskInvert: Bool = false,
@@ -1247,12 +1236,13 @@ final class MaskTests: XCTestCase {
     /// 1.5/255 window is the R16F storage plus a float32 kernel against a double reference, and it
     /// is far tighter than any change of formula (the nearest alternative values are ≥ 0.01 away).
     func testFiveShapeKindsProduceFixedCoverage() throws {
-        // linear: 102 restores the symmetric ramp (f = 1 spans the whole field), so row 32 is the
-        // half-coverage point and rows 28/30 sit on the smoothstep below it.
+        // linear: 215's ramp is linear across the whole span with the feather split outside the two
+        // lines, so at f = 1 coverage is `(t' + ½)/2`: 0.5 on the half-way row, 0.4692 / 0.4846 on
+        // rows 28/30.
         let linear = try atlas(doc(.linearGradient(LinearGradientShape()), feather: 1.0), rampImage())
         XCTAssertEqual(sample(linear, 0, 48, 32), 0.5000, accuracy: 1.5 / 255, "t' = 0.5")
-        XCTAssertEqual(sample(linear, 0, 10, 28), 0.4082, accuracy: 1.5 / 255, "t' = 0.4385")
-        XCTAssertEqual(sample(linear, 0, 80, 30), 0.4539, accuracy: 1.5 / 255, "t' = 0.4692")
+        XCTAssertEqual(sample(linear, 0, 10, 28), 0.4692, accuracy: 1.5 / 255, "t' = 0.4385")
+        XCTAssertEqual(sample(linear, 0, 80, 30), 0.4846, accuracy: 1.5 / 255, "t' = 0.4692")
 
         // radial: centre (48, 32.5) px, radius 0.25 · 65 = 16.25 px, feather 0.5 → r_out = 1.2.
         let radial = try atlas(doc(.radialGradient(RadialGradientShape()), feather: 0.5), rampImage())
@@ -2127,10 +2117,11 @@ final class MaskTests: XCTestCase {
         XCTAssertEqual(result.report.refineMaskCount, 0)
         XCTAssertEqual(result.report.atlasDependency, .pointwise)
 
-        // The pointwise pass alone, with the symmetric ramp (½ coverage at row 32, smoothstep below).
+        // The pointwise pass alone, with 215's linear ramp (½ coverage at row 32, the straight line
+        // through the two lines elsewhere).
         XCTAssertEqual(sample(result.dump, 0, 48, 32), 0.5000, accuracy: 1.5 / 255)
-        XCTAssertEqual(sample(result.dump, 0, 10, 28), 0.4082, accuracy: 1.5 / 255)
-        XCTAssertEqual(sample(result.dump, 0, 80, 30), 0.4539, accuracy: 1.5 / 255)
+        XCTAssertEqual(sample(result.dump, 0, 10, 28), 0.4692, accuracy: 1.5 / 255)
+        XCTAssertEqual(sample(result.dump, 0, 80, 30), 0.4846, accuracy: 1.5 / 255)
     }
 
     /// The guided filter has to leave a mask in [0, 1] and actually change it: a uniform guide turns it

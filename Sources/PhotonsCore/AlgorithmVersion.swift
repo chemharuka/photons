@@ -78,6 +78,13 @@ public enum StageAlgorithmVersion {
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
     public static let sceneLinear = 8
+    /// **6** — 215: the linear gradient lost its `smoothstep` and now ramps **linearly across the
+    /// whole span**, with `feather` split outside the two lines instead of centring a symmetric band
+    /// on ½. `alpha = clamp((t' + f/2)/(1 + f))`: 10 % of the span is 0.10 at `f = 0` (it used to be
+    /// 0), and the default `f = ½` no longer holds the mask at 0 for the first quarter. Every
+    /// document with a `linearGradient` component renders different pixels — including `feather = 0`,
+    /// where `smoothstep(½, 1, t')` becomes `clamp(t', 0, 1)`. Every other shape is byte-identical.
+    ///
     /// **3** — 147: a mask's `luminanceRange`/`colorRange` predicate reads the S1 sample divided by
     /// the global exposure gain, so the selection no longer drifts with the EV slider. A document
     /// with a picture-reading mask and `exposure != 0` now renders different pixels; `exposure == 0`
@@ -100,7 +107,7 @@ public enum StageAlgorithmVersion {
     /// intent), while the new axis reads their real `L` and `high = 1.0` closes the window there
     /// (`alpha = 0`). Users who want the highlights back drag the handle up. See
     /// `LuminanceRangeShape` for why `default` and the v1 decode fallback are separate constants.
-    public static let maskAtlas = 5
+    public static let maskAtlas = 6
     /// **4** — 159: contrast left S1.6 for S2.5 (after the tone map). A mask that carries a contrast
     /// value no longer runs the scene-linear `tone_contrast` here; the same stored number is applied
     /// by the display-domain residual operator, so the pixels inside such a mask change. A mask whose

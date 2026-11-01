@@ -39,8 +39,8 @@ using namespace metal;
 // Shape maths (all public mathematics; nothing here is copied from ART/RapidTherapee/darktable
 // (GPL-3.0) or RapidRAW (AGPL-3.0), which §7 keeps read-only):
 //   linear  t = dot(p − a, d) / dot(d, d), t' = t^(log ½ / log m)  (m = midpoint, ½ ⇒ identity)
-//           alpha = 1 outside the half-plane t' ≥ ½, squared falloff over `f·0.1·shortEdge` px
-//                   before it: `clamp(1 − (d/w)²)²`                    (079 A4, was §4.2)
+//           alpha = clamp((t' + f/2) / (1 + f)): **linear across the whole span**, the feather
+//                   split outside the two lines (f/2 past each)           (215, linearised)
 //   radial  q = R(−angle)·(p − centre) / radius, r = |q|
 //           alpha = 1 for r ≤ 1; `clamp((r_out² − r²)/(r_out² − 1))²` for 1 < r < r_out,
 //                   r_out = 1 + `f·0.1·shortEdge` / min(rx, ry)         (079 A4, was §4.3)
@@ -62,6 +62,13 @@ using namespace metal;
 // the mask-level `featherPixels` — instead of a percentage of the shape. `feather = 0` keeps the
 // pre-A4 expression verbatim (both branches are still in the two functions), because a document
 // with no feather must not move a single byte.
+//
+// 215 — the linear gradient is **linear again**. 102 had restored the pre-A4 symmetric ramp, but
+// that ramp is a `smoothstep` centred on `t' = ½` over `[½ − f/2, ½ + f/2]`: at the default
+// `f = ½` the mask was 0 until a quarter of the way in and barely moved before the middle, which is
+// the "no strength until 50 %" the user reported. The ramp now spans the **whole** span linearly
+// (`alpha = (t' + f/2)/(1 + f)`, 10 % of the span = 0.10 at `f = 0`) and the feather is a band of
+// `f/2` **outside each line**. No `smoothstep` on this shape any more.
 //
 // Since 005d the atlas is a two-part stage: this kernel writes the *pointwise* coverage
 // (`opacity · combine · invert`), then `s1_7_mask_neighbourhood.metal` applies the two
@@ -189,7 +196,10 @@ static inline float linear_alpha(float2 p, MaskShapeDesc d, float2 srcSize) {
     float2 a = d.p0.xy * srcSize;
     float2 b = d.p0.zw * srcSize;
     float2 dir = b - a;
-    float t = clamp(dot(p - a, dir) / max(dot(dir, dir), 1e-12), 0.0, 1.0);
+    // 215 — **unclamped**: the feather's transition band lies outside the two lines (`t' < 0` and
+    // `t' > 1`), so the projection must be allowed to leave `[0, 1]`. The final `clamp` below is the
+    // only place that saturates, and at `f = 0` it saturates at exactly the lines.
+    float t = dot(p - a, dir) / max(dot(dir, dir), 1e-12);
 
     // Midpoint remap. m = 0.5 is the identity, and the guard keeps a 0.5 that is only *nearly*
     // 0.5 from turning into a pow with a near-infinite exponent.
@@ -199,22 +209,13 @@ static inline float linear_alpha(float2 p, MaskShapeDesc d, float2 srcSize) {
         tp = pow(t, log(0.5) / log(m));
     }
 
+    // 215 — **linear, across the whole span**. `f` is no longer a fraction of the span centred on
+    // ½; it is the width of the transition, split symmetrically **outside** the two lines: alpha is
+    // 0 at `t' = −f/2`, 1 at `t' = 1 + f/2`, and exactly `t'` in between at `f = 0`. No `smoothstep`
+    // — the user asked for 10 % of the span to be 10 % strength, and a smoothstep's flat tails are
+    // what made the mask look dead until the middle.
     float f = clamp(d.p1.y, 0.0, 1.0);
-    // 079 A4's "short-edge percentage spent outside the rim" is the **radial** rule (darktable's
-    // `masks/ellipse.c:1502-1534`); 079 A4 applied it to the open shapes too and that broke the linear
-    // gradient — one-sided, a tenth as wide, and no longer through the midpoint. Restored here to the
-    // pre-A4 (e3a011d^) contract: `f` is the fraction of the **whole span**, centred on `t' = ½`.
-    float lo = 0.5 - 0.5 * f;
-    float hi = max(0.5 + 0.5 * f, lo + 1e-5);
-    if (f <= 0.0) {
-        // f == 0 (or a zero-length gradient, which has no span to ramp over): the pre-079 arithmetic,
-        // verbatim. Every document that carries `feather = 0` must stay **bit-identical** — the
-        // recorded atlases and every digest taken from them were produced by this expression.
-        return smoothstep(lo, hi, tp);
-    }
-
-    // Symmetric ramp: alpha = 0 at `lo`, 0.5 exactly at the half-way line `t' = ½`, 1 at `hi`.
-    return smoothstep(lo, hi, tp);
+    return clamp((tp + 0.5 * f) / (1.0 + f), 0.0, 1.0);
 }
 
 static inline float radial_alpha(float2 p, MaskShapeDesc d, float2 srcSize, float minSide) {
@@ -235,9 +236,10 @@ static inline float radial_alpha(float2 p, MaskShapeDesc d, float2 srcSize, floa
     // region was half the radius. darktable's ellipse instead keeps `r ≤ 1` at exactly 1 and spends
     // the feather **outside** the rim (`ellipse.c:1502-1534`: `ratio = (r_out² − r²)/(r_out² − r_in²)`,
     // clipped, then squared), so a feather never shrinks the shape's own solid area.
-    float featherPx = f * 0.1 * minSide;              // short-edge percentage, as in `linear_alpha`
+    float featherPx = f * 0.1 * minSide;              // short-edge percentage (the radial rule; 215
+                                                      // moved the linear shape off this unit)
     if (featherPx <= 0.0) {
-        // f == 0: the pre-079 arithmetic, verbatim, for bit-identical documents (see `linear_alpha`).
+        // f == 0: the pre-079 arithmetic, verbatim, for bit-identical documents.
         return 1.0 - smoothstep(1.0 - f, 1.0, r);
     }
     // The same radius in **ellipse-radius units**: the outer rim is `r_out = 1 + g`, i.e. the ellipse

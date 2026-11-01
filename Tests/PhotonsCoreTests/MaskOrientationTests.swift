@@ -306,14 +306,15 @@ final class MaskOrientationTests: XCTestCase {
             let expectedRadius = MaskRadius.featherPixels(feather, content: size)
             XCTAssertEqual(expectedRadius, 0.1 * Double(min(size.width, size.height)), accuracy: 1e-9)
 
-            // A hard vertical edge, then a hard horizontal edge: same blur, two directions.
-            let verticalEdge = document(.linearGradient(LinearGradientShape(start: NormalizedPoint(0, 0.5),
-                                                                            end: NormalizedPoint(1, 0.5),
-                                                                            midpoint: 0.5)),
+            // A hard vertical edge, then a hard horizontal edge: same blur, two directions. 215: the
+            // linear gradient can no longer make a hard edge (its ramp spans the whole picture, so a
+            // 10–90 % measurement there would be the component ramp, not the blur), so the edges are
+            // the straight sides of a zero-feather capsule — coverage is 1 inside it and 0 outside.
+            let verticalEdge = document(.brush(BrushShape(size: 0.4, strokes: [
+                Stroke(points: [0.5, 0, 0.5, 1], radius: 0.35, feather: 0)])),
                                         componentFeather: 0, maskFeather: feather, id: "m-x")
-            let horizontalEdge = document(.linearGradient(LinearGradientShape(start: NormalizedPoint(0.5, 0),
-                                                                              end: NormalizedPoint(0.5, 1),
-                                                                              midpoint: 0.5)),
+            let horizontalEdge = document(.brush(BrushShape(size: 0.4, strokes: [
+                Stroke(points: [0, 0.5, 1, 0.5], radius: 0.35, feather: 0)])),
                                           componentFeather: 0, maskFeather: feather, id: "m-y")
 
             let image = uprightPicture(size)
