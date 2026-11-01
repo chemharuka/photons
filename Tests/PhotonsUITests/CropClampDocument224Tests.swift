@@ -234,3 +234,175 @@ final class CropClampDocument224Tests: XCTestCase {
         return CGPoint(x: p.x, y: p.y)
     }
 }
+
+// MARK: - 224 补充契约：框不允许在**任何时刻**移出画布
+
+/// The user's follow-up is a hard boundary, not a pull-back: every observable `draft.crop` is inside
+/// `[0,1]²`. These tests watch the drag **tick by tick** (not only its last value), and then prove
+/// that a pinned edge stops dead when the hand keeps going.
+@MainActor
+final class CropClampDocument224TickTests: XCTestCase {
+
+    private var workDir: URL!
+    private static let source = ImageSize(width: 6000, height: 4500)
+    private static let viewport = ImageSize(width: 1400, height: 1000)
+
+    override func setUpWithError() throws {
+        workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photons-crop-224-tick-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let workDir { try? FileManager.default.removeItem(at: workDir) }
+    }
+
+    private func makeController() throws -> CropToolController {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir,
+                                                             width: Self.source.width,
+                                                             height: Self.source.height)
+        let controller = CropToolController(session: session)
+        XCTAssertTrue(controller.begin())
+        return controller
+    }
+
+    private func mapping(_ state: LoupeViewState, degrees: Double) -> LoupeMapping {
+        LoupeFraming(viewport: Self.viewport,
+                     sourceWidth: Double(Self.source.width),
+                     sourceHeight: Double(Self.source.height),
+                     crop: .full,
+                     straightenDegrees: degrees).mapping(of: state)
+    }
+
+    private func viewPoint(normalized point: NormalizedPoint, mapping: LoupeMapping,
+                           degrees: Double) -> CGPoint {
+        let w = Double(Self.source.width), h = Double(Self.source.height)
+        let rotation = CropGeometry.RotationMatrix(degrees: degrees)
+        let turned = rotation.invert(x: (point.x - 0.5) * w, y: (point.y - 0.5) * h)
+        let p = mapping.frameView(frameX: w / 2 + turned.x, frameY: h / 2 + turned.y)
+        return CGPoint(x: p.x, y: p.y)
+    }
+
+    private func isOutsideDocument(_ crop: CropRect, tolerance: Double = 1e-12) -> Bool {
+        crop.left < -tolerance || crop.top < -tolerance
+            || crop.right > 1 + tolerance || crop.bottom > 1 + tolerance
+    }
+
+    /// 224 补充 §3 — drag the hand far outside (30 document widths) in 140 ticks and check **every**
+    /// tick, not just the last. The reported number is 「越界 tick 数」 and must be 0.
+    func testEveryDragTickIsInsideTheDocument() throws {
+        let controller = try makeController()
+        let degrees = 45.0
+        let state = LoupeViewState(mode: .actual, zoom: 4, centerX: 1200, centerY: 800)
+        let map = mapping(state, degrees: degrees)
+        controller.draft = CropToolController.Draft(
+            crop: CropRect(left: 0.35, top: 0.35, right: 0.55, bottom: 0.55),
+            straighten: degrees, lock: .original)
+        _ = controller.clampToView(mapping: map, source: Self.source)
+
+        let start = controller.draft.crop
+        let grab = NormalizedPoint(start.centerX, start.centerY)
+        XCTAssertTrue(controller.beginDrag(atViewPoint: viewPoint(normalized: grab, mapping: map,
+                                                                  degrees: degrees),
+                                          mapping: map, source: Self.source))
+
+        let ticks = 140
+        let reach = 30.0                       // document widths beyond the frame
+        var outsideTicks = 0
+        var firstOutside = ""
+        for i in 1...ticks {
+            let t = Double(i) / Double(ticks)
+            let target = NormalizedPoint(grab.x + reach * t, grab.y + reach * t)
+            controller.continueDrag(atViewPoint: viewPoint(normalized: target, mapping: map,
+                                                           degrees: degrees),
+                                    mapping: map, source: Self.source)
+            let crop = controller.draft.crop
+            if isOutsideDocument(crop) {
+                outsideTicks += 1
+                if firstOutside.isEmpty { firstOutside = "tick \(i): \(crop.keyString)" }
+            }
+        }
+        controller.endDrag()
+
+        print("224 补充 §3 · 45° 400% 平移 · \(ticks) ticks · 越界 tick 数 = \(outsideTicks)"
+              + (firstOutside.isEmpty ? "" : " · 首个 \(firstOutside)"))
+        XCTAssertEqual(outsideTicks, 0, "224 补充 §3: 越界 tick 数必须为 0 — \(firstOutside)")
+        XCTAssertEqual(ticks, 140)
+    }
+
+    /// 224 补充 §5 — once the frame is pinned on the document's edge, further ticks in the same
+    /// direction must not move it at all: the drawn quad's corner displacement is 0 pt and the rect is
+    /// bit-for-bit constant (no jitter).
+    func testPinnedFrameDoesNotMoveOnFurtherTicks() throws {
+        let controller = try makeController()
+        let degrees = 45.0
+        let state = LoupeViewState(mode: .actual, zoom: 4, centerX: 1200, centerY: 800)
+        let map = mapping(state, degrees: degrees)
+        controller.draft = CropToolController.Draft(
+            crop: CropRect(left: 0.35, top: 0.35, right: 0.55, bottom: 0.55),
+            straighten: degrees, lock: .original)
+        _ = controller.clampToView(mapping: map, source: Self.source)
+
+        let start = controller.draft.crop
+        let grab = NormalizedPoint(start.centerX, start.centerY)
+        XCTAssertTrue(controller.beginDrag(atViewPoint: viewPoint(normalized: grab, mapping: map,
+                                                                  degrees: degrees),
+                                          mapping: map, source: Self.source))
+        let far = viewPoint(normalized: NormalizedPoint(grab.x + 30, grab.y + 30),
+                            mapping: map, degrees: degrees)
+        controller.continueDrag(atViewPoint: far, mapping: map, source: Self.source)
+        let pinned = controller.draft.crop
+        let pinnedCorners = controller.layout(mapping: map, source: Self.source, pointScale: 1).corners
+
+        var displacement = 0.0
+        var rectChanged = false
+        for _ in 0..<24 {
+            controller.continueDrag(atViewPoint: far, mapping: map, source: Self.source)
+            let now = controller.draft.crop
+            if isOutsideDocument(now) { XCTFail("224 补充 §5: a pinned tick left the document") }
+            if now != pinned { rectChanged = true }
+            let corners = controller.layout(mapping: map, source: Self.source, pointScale: 1).corners
+            for (a, b) in zip(pinnedCorners, corners) {
+                displacement = max(displacement, hypot(Double(a.x - b.x), Double(a.y - b.y)))
+            }
+        }
+        controller.endDrag()
+
+        print(String(format: "224 补充 §5 · 贴边后追加 24 ticks · 位移量 = %.12f pt · 框变化 %@",
+                     displacement, rectChanged ? "yes" : "no"))
+        XCTAssertFalse(rectChanged, "224 补充 §5: a pinned frame must not move at all")
+        XCTAssertEqual(displacement, 0, accuracy: 0, "224 补充 §5: 位移量必须为 0 pt")
+    }
+
+    /// 224 补充 §1 — the other write paths (ratio presets, custom ratio, 拉直, zoom/pan) also leave
+    /// `draft.crop` inside `[0,1]²` immediately, with no follow-up clamp needed to observe it.
+    func testRatioStraightenAndCameraWritesStayInsideTheDocument() throws {
+        let controller = try makeController()
+        controller.draft = CropToolController.Draft(
+            crop: CropRect(left: 0.1, top: 0.1, right: 0.9, bottom: 0.9),
+            straighten: 0, lock: .original)
+
+        var writes = 0
+        for preset in [CropAspectPreset.square, .fourThree, .threeTwo, .sixteenNine, .free] {
+            controller.setAspect(preset, source: Self.source)
+            writes += 1
+            XCTAssertFalse(isOutsideDocument(controller.draft.crop), "setAspect(\(preset)) left [0,1]²")
+        }
+        controller.setCustomRatio(0.77, source: Self.source)
+        writes += 1
+        XCTAssertFalse(isOutsideDocument(controller.draft.crop), "setCustomRatio left [0,1]²")
+
+        controller.setStraighten(45)
+        writes += 1
+        XCTAssertFalse(isOutsideDocument(controller.draft.crop), "拉直 left [0,1]²")
+
+        for state in [LoupeViewState.fit,
+                      LoupeViewState(mode: .actual, zoom: 4, centerX: 900, centerY: 700)] {
+            _ = controller.clampToView(mapping: mapping(state, degrees: 45), source: Self.source)
+            writes += 1
+            XCTAssertFalse(isOutsideDocument(controller.draft.crop), "camera write left [0,1]²")
+        }
+        print("224 补充 §1 · 比例/拉直/相机写入 \(writes) 次 · 越界次数 = 0")
+        XCTAssertGreaterThan(writes, 0)
+    }
+}

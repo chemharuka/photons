@@ -138,7 +138,9 @@ public final class CropToolController {
         }
 
         public init(geometry: GeometryGroup) {
-            self.init(crop: geometry.cropRect,
+            // 224 — the draft is a rect of the document canvas: a legacy document carrying an
+            // out-of-canvas crop is shown (and edited) from its legal rect, never outside it.
+            self.init(crop: geometry.cropRect.clamped(),
                       straighten: geometry.straightenDegrees,
                       lock: geometry.aspectLock)
         }
@@ -1104,9 +1106,10 @@ public final class CropToolController {
         rotating = rotate && (handle == .outside || handle == .inside)
         rotateStart = draft.straighten
         // The hand grabs the frame **it can see**, which at a non-zero straighten is the constrained
-        // one (`effectiveCrop`), not the stored intent behind it.
+        // one (`effectiveCrop`), not the stored intent behind it. `clamped()` (224) keeps even the
+        // mouse-down snapshot inside the document canvas.
         drag = CropToolDrag(handle: rotating ? .inside : handle,
-                            crop: effectiveCrop(source: source), grab: normalized)
+                            crop: effectiveCrop(source: source).clamped(), grab: normalized)
         isDragging = true
         return true
     }
@@ -1134,18 +1137,26 @@ public final class CropToolController {
         let next = drag.crop(at: normalized, source: source, lock: draft.lock)
         // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
         // shrinking (there is no size at that centre), and jumping it back to the middle from under the
-        // hand would be worse than ignoring it: the last legal frame stands. Everything else is stored
-        // as the hand drew it — the constraint is applied on the way *out* (`effectiveCrop`), so a
-        // frame pushed against the turned edge pins there and comes back smoothly.
+        // hand would be worse than ignoring it: the last legal frame stands.
         if clampsToRotatedFrame, draft.straighten != 0,
            CropMath.rotatedFrameScale(next, in: source, degrees: draft.straighten) <= 0 {
             return
         }
-        draft.crop = next
-        // 162 §2.3 — a drag is the one path that can put the frame outside the canvas; the hard
-        // boundary is applied on the tick itself (not only on the next camera change), so the stored
-        // rect and the drawn rect are the same legal four edges at all times.
-        _ = clampToView(mapping: mapping, source: source)
+        // 224 补充契约 — clamp the candidate **before** the single write. `draft.crop` is inside
+        // `[0,1]²` at every observable moment: there is no "outside for one tick, pulled back on the
+        // next" state, and no second write to hide one. A tick that is already pinned produces the
+        // same rect, so the draft does not change at all (no jitter, no drift).
+        // `clampsFrameToView = false` remains the tests' anti-proof switch and writes the candidate
+        // unclamped; the app never turns it off.
+        guard clampsFrameToView else {
+            draft.crop = next
+            return
+        }
+        let candidate = reshapedForLock(next, source: source)
+        let clamped = CropTool.clampToCanvas(candidate, mapping: mapping, source: source)
+        clampCalls &+= 1
+        if clamped != candidate { clampMoves &+= 1 }
+        draft.crop = clamped
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.
