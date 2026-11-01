@@ -167,11 +167,10 @@ final class CropClampMatrixProbe202Tests: XCTestCase {
         let doc = documentBox(crop, degrees: controller.draft.straighten)
         let canvas = documentCanvas(degrees: controller.draft.straighten)
         let screenQuad = drawn(controller: controller, mapping: map)
-        // 213/§5 — the canvas is the **viewport**, not the picture inside it: a frame may cover the
-        // black letterbox, it may not leave the screen.
-        let screenCanvas = CGRect(x: 0, y: 0,
-                                  width: Double(map.viewport.width),
-                                  height: Double(map.viewport.height))
+        // 213/§5 — the canvas, re-based by 219 on the picture at the **drafted** angle (the document's
+        // angle is in the mapping, the draft delta is what the frame was drawn with). The screen is
+        // only a window onto it once zoomed in, so the quad may leave the viewport.
+        let screenCanvas = map.canvasRect(rotatedBy: degrees)
         let frameBounds = controller.canvasBounds(mapping: map, source: Self.source)
         return Cell(angle: degrees, framing: f.name, method: method.title,
                     calls: controller.clampCalls - callsBefore,
@@ -225,15 +224,16 @@ final class CropClampMatrixProbe202Tests: XCTestCase {
             }
         }
 
-        // 213/§5 — the law is stated on what the tool actually draws and in **screen space**: the
-        // projected quad's four corners inside the horizontal viewport (0.5 px of slack). The
-        // document-space document quad is printed above as a readout only; it may leave the photo's
-        // rotated AABB when the frame covers the black letterbox, which is allowed.
+        // 213/§5 — the law is stated on what the tool actually draws and in **canvas space**: the
+        // projected quad's box inside the horizontal canvas (0.5 px of slack), which 219 made the
+        // picture at the drafted angle rather than the viewport. The document-space quad is printed
+        // above as a readout only; it may leave the photo's rotated AABB when the frame covers the
+        // black letterbox, which is allowed.
         for cell in cells {
             let (detail, excess) = out(cell.screenQuad, of: cell.screenCanvas, tolerance: 0.5)
             XCTAssertLessThanOrEqual(excess, 0,
                                      "θ \(cell.angle)° \(cell.framing) \(cell.method): the "
-                                     + "frame leaves the viewport — \(detail) (px)")
+                                     + "frame leaves the canvas — \(detail) (px)")
         }
     }
 }

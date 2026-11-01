@@ -1126,6 +1126,43 @@ public struct LoupeMapping: Equatable, Sendable {
     public var originX: Double { (Double(viewport.width) - contentWidth) / 2 }
     public var originY: Double { (Double(viewport.height) - contentHeight) / 2 }
 
+    /// 219 — **the canvas this projection draws**, in device pixels: the whole document (its source's
+    /// bounding box after the document's own straighten) at the current camera. Horizontal and never
+    /// rotated, like the frame it contains.
+    ///
+    /// This is deliberately *not* `contentWidth/contentHeight` alone. Those are the letterboxed
+    /// picture **inside the viewport**, and at 1:1 the viewport is a window onto the canvas, not the
+    /// canvas: the whole picture is then 6000 × 4500 device pixels while `content` is only the
+    /// 1400 × 1000 screen. A crop frame may leave the screen (the user pans it there); it may not
+    /// leave this rect. The one extra piece is the workspace margin at 适应, where the 90 % picture is
+    /// smaller than the screen and that black band is legal canvas (162/⑦).
+    public var canvasRect: CGRect { canvasRect(rotatedBy: 0) }
+
+    /// 219 — the same canvas with `extraDegrees` added to the document's own angle. The crop tool
+    /// passes the draft-vs-document delta: on a 拉直 tick the frame turns under the still picture and
+    /// the canvas it may not leave is the one the release will produce (the whole picture's AABB at
+    /// the **drafted** angle), so a tick never shrinks the frame.
+    public func canvasRect(rotatedBy extraDegrees: Double) -> CGRect {
+        let w = max(frameWidth, 1e-9), h = max(frameHeight, 1e-9)
+        let degrees = atan2(sinT, cosT) * 180 / .pi + extraDegrees
+        let extent = LoupeFraming.rotatedExtent(width: w, height: h, degrees: degrees)
+        let left = w / 2 - extent.width / 2, top = h / 2 - extent.height / 2
+        let corners = [frameView(frameX: left, frameY: top),
+                       frameView(frameX: left + extent.width, frameY: top),
+                       frameView(frameX: left + extent.width, frameY: top + extent.height),
+                       frameView(frameX: left, frameY: top + extent.height)]
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        let picture = CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                             width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                             height: (ys.max() ?? 0) - (ys.min() ?? 0))
+        // At 适应 the picture is the 90 % fit, smaller than the screen; the black margin around it is
+        // canvas too (162's `canvasBounds` includes it, and ⑦'s 1.04 example covers exactly that
+        // band). Zoomed in the picture already contains the viewport, so this is a no-op there.
+        return picture.union(CGRect(x: 0, y: 0,
+                                    width: Double(viewport.width),
+                                    height: Double(viewport.height)))
+    }
+
     /// Canvas pixels per source pixel this projection draws at — `contentWidth / cropWidth`, which is
     /// `zoom` for an `actual` camera and `fitZoom` for the whole-frame one. The uniform scale between
     /// two cameras is the ratio of these (`LoupeZoomBridge.scale`).
