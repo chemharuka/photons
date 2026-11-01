@@ -149,22 +149,26 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertTrue(sheet.showsToneMappingRow, "HDR 关必须有色调映射行")
     }
 
-    /// 168 §3 — a typed quality writes only a legal 0.10–1.00 value, with two decimals in the box.
-    /// An empty/non-numeric/out-of-range string leaves the previous legal value untouched.
-    func testTypedQualityCommitsLegalValuesAndRejectsTheRest() {
+    /// 217 — quality goes through `setQuality`: a legal value is clamped into the slider's
+    /// 0.10–1.00 travel and kept at the two decimals the row shows; a non-finite value never writes.
+    func testSetQualityClampsAndKeepsTwoDecimals() {
         let sheet = model()
-        XCTAssertEqual(sheet.qualityText, "0.85", "161 的默认质量仍是 0.85")
+        XCTAssertEqual(sheet.preset.quality, 0.85, accuracy: 1e-12, "161 的默认质量仍是 0.85")
 
-        XCTAssertTrue(sheet.commitQuality("0.92"))
-        XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12)
-        XCTAssertEqual(sheet.qualityText, "0.92")
+        sheet.setQuality(0.5)
+        XCTAssertEqual(sheet.preset.quality, 0.5, accuracy: 1e-12)
 
-        for bad in ["1.5", "abc", "", "  ", "0.05", "nan"] {
-            XCTAssertFalse(sheet.commitQuality(bad), bad)
-            XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12,
-                           "非法值 \(bad) 不许回写文档")
-        }
-        XCTAssertEqual(sheet.qualityText, "0.92")
+        sheet.setQuality(0.923)
+        XCTAssertEqual(sheet.preset.quality, 0.92, accuracy: 1e-12, "显示与写入都是两位小数")
+
+        sheet.setQuality(2.0)
+        XCTAssertEqual(sheet.preset.quality, 1.0, accuracy: 1e-12, "超出上界钳到 1.0")
+        sheet.setQuality(0.05)
+        XCTAssertEqual(sheet.preset.quality, 0.10, accuracy: 1e-12, "超出下界钳到 0.10")
+
+        let kept = sheet.preset.quality
+        sheet.setQuality(.nan)
+        XCTAssertEqual(sheet.preset.quality, kept, accuracy: 1e-12, "nan 不许回写文档")
     }
 
     /// §4.3 — RGB + Apple is not reachable; each legal pair lands on the right `GainMap`.
