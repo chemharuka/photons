@@ -317,93 +317,57 @@ public enum CropTool {
         return layout
     }
 
-    // MARK: the screen-space canvas clamp (213, re-based on the canvas by 219)
+    // MARK: the document-space canvas clamp (224)
 
-    /// **The one containment arithmetic** for 213/§5 / 219: the frame may not leave the canvas, and
-    /// the canvas is the **picture** at the current camera (`LoupeMapping.canvasRect`) — a horizontal
-    /// rectangle that never turns. The candidate rect's four corners are projected through the same
-    /// projection `layout` draws with (including the 088 quad rotation), and all four must land inside
-    /// that rect; half a device pixel of slack absorbs the overlay's rounding.
+    /// **The one containment arithmetic** for 224: the frame is a rectangle of the **document**, and
+    /// the document's canvas is the frame rectangle `[0,1]²`. The bound is read from the rect alone —
+    /// never from the viewport, the zoom, the window size or the straightened picture's AABB — so the
+    /// same candidate yields the same answer at every framing and at every angle.
     ///
-    /// 219 — the bound is the canvas, **not the viewport**. At 100 % and above the picture is larger
-    /// than the screen: a frame that fills it must stay full (a full frame used to be shrunk to 22 %
-    /// at 100 %), and it may leave the screen, because the user pans it there on purpose.
+    /// 224 replaced 213/219's screen-space reading, which made the canvas the *picture at the current
+    /// camera* (`LoupeMapping.canvasRect(rotatedBy:)`): at 45° that rectangle is 1485 × 1485 on a
+    /// 1400 × 1000 viewport, so the frame could be dragged without an upper bound. The user's rule is
+    /// simpler than either: 屏幕不参与 — the canvas is the document's own rectangle.
     ///
-    /// `degrees` is the draft-minus-document delta: the canvas is taken at the angle the release
-    /// will produce (`canvasRect(rotatedBy:)`), so a 拉直 tick turns the frame without shrinking it.
-    /// At 适应 that canvas is at least the viewport, which keeps the workspace's black margin legal
-    /// (162/⑦'s 1.04 frame); zoomed in it is the picture and contains the viewport.
+    /// Moving is preferred: a rect that fits is translated the least amount that brings it inside.
+    /// Only a rect genuinely larger than the canvas is shrunk, uniformly about its centre, so an
+    /// aspect lock survives. The picture's turned quad is a **warning** (`frameExceedsPicture`),
+    /// never a bound: the frame may cover the black corners a straighten cuts off.
     ///
-    /// Moving is preferred: a frame whose projected box fits is translated the least amount that
-    /// brings it inside. Only a frame whose box is genuinely larger than the canvas is shrunk,
-    /// uniformly about its centre. The view-space translation is converted back through
-    /// `LoupeMapping.framePoint`'s affine, so the rect always moves with the mapping handed in.
-    ///
-    /// The document-space `CropWorkspaceLayout.canvasBounds` is deliberately **not** consulted: it is
-    /// the readout / red-warning rectangle, and clamping against it (with the frame's own document
-    /// quad) was the double rotation that let frames hang off the screen.
+    /// `mapping`, `source` and `degrees` are kept for the call sites (a drag tick, a camera move, a
+    /// 拉直 tick); the law itself reads none of them, which is what makes the result screen-free.
     public static func clampToCanvas(_ rect: CropRect,
                                      mapping: LoupeMapping,
                                      source: ImageSize,
                                      degrees: Double = 0,
-                                     tolerance: Double = 0.5) -> CropRect {
+                                     tolerance: Double = 0) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
-        let canvas = mapping.canvasRect(rotatedBy: degrees)
-        guard canvas.width > 1, canvas.height > 1 else { return c }
-
-        func projectedBox(_ rect: CropRect) -> CGRect {
-            let corners = layout(crop: rect, source: source, mapping: mapping,
-                                 pointScale: 1, showsGrid: false,
-                                 quadRotationDegrees: degrees).corners
-            let xs = corners.map(\.x), ys = corners.map(\.y)
-            guard let minX = xs.min(), let maxX = xs.max(),
-                  let minY = ys.min(), let maxY = ys.max() else { return .zero }
-            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-        }
-        func inside(_ box: CGRect) -> Bool {
-            box.minX >= canvas.minX - tolerance && box.minY >= canvas.minY - tolerance
-                && box.maxX <= canvas.maxX + tolerance && box.maxY <= canvas.maxY + tolerance
-        }
-
         var result = c
-        var box = projectedBox(result)
-        guard !inside(box) else { return c }
 
-        // Shrink only when the frame is larger than the canvas. Scaling the rect about its centre is
-        // a uniform scale in view space, so the ratio is untouched.
-        let shrink = min(1, canvas.width / max(box.width, 1e-9),
-                         canvas.height / max(box.height, 1e-9))
-        if shrink < 1 {
+        // Shrink only a rect that is genuinely larger than the document's canvas — about its centre,
+        // so a ratio lock is preserved. A rect that already fits is never resized.
+        if result.width > 1 || result.height > 1 {
+            let shrink = min(1, 1 / max(result.width, 1e-9), 1 / max(result.height, 1e-9))
             let width = result.width * shrink, height = result.height * shrink
             result = CropRect(left: result.centerX - width / 2,
                               top: result.centerY - height / 2,
                               right: result.centerX + width / 2,
                               bottom: result.centerY + height / 2)
-                .clamped(allowsOutsideSource: true)
-            box = projectedBox(result)
         }
 
-        // Move the least amount that puts the projected box inside. A translation in view space is a
-        // translation in frame space (both `frameView` and its inverse are axis-aligned affines).
-        var dx = 0.0, dy = 0.0
-        if box.minX < canvas.minX - tolerance { dx = canvas.minX - box.minX }
-        else if box.maxX > canvas.maxX + tolerance { dx = canvas.maxX - box.maxX }
-        if box.minY < canvas.minY - tolerance { dy = canvas.minY - box.minY }
-        else if box.maxY > canvas.maxY + tolerance { dy = canvas.maxY - box.maxY }
-        guard dx != 0 || dy != 0 else { return result }
+        // Move the least amount that puts the rect inside `[0,1]²`. Horizontal and vertical slides
+        // are independent, so a corner overhang is pulled on both axes in one step.
+        var du = 0.0, dv = 0.0
+        if result.left < 0 { du = -result.left }
+        else if result.right > 1 { du = 1 - result.right }
+        if result.top < 0 { dv = -result.top }
+        else if result.bottom > 1 { dv = 1 - result.bottom }
 
-        let frameDX = dx * mapping.cropWidth / max(mapping.contentWidth, 1e-9)
-        let frameDY = dy * mapping.cropHeight / max(mapping.contentHeight, 1e-9)
-        // `layout` turns the rect's **local** offset by R(−θ) before projecting, so a desired image
-        // translation has to be turned back by R(θ) to become a rect translation. At θ = 0 this is
-        // `(du, dv) = (frameDX/W, frameDY/H)`, the Upright path's old arithmetic.
-        let local = CropGeometry.RotationMatrix(degrees: degrees)
-            .apply(x: frameDX, y: frameDY)
-        let du = local.x / Double(max(source.width, 1))
-        let dv = local.y / Double(max(source.height, 1))
+        // The last `.clamped(false)` is the exact statement of the law: four edges in `0…1`, zero
+        // slack, whatever rounding the slide above produced.
         return CropRect(left: result.left + du, top: result.top + dv,
                         right: result.right + du, bottom: result.bottom + dv)
-            .clamped(allowsOutsideSource: true)
+            .clamped(allowsOutsideSource: false)
     }
 
     // MARK: hit test

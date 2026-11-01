@@ -871,29 +871,23 @@ public final class CropToolController {
     /// overlay reads it only to paint the frame red (`frameExceedsPicture`).
     public var sourcePixelBounds: CropRect { .full }
 
-    /// Pull the draft's rect into the **screen-space canvas** — the model-layer floor of ⑦.
+    /// Pull the draft's rect onto the **document's canvas** — `[0,1]²` in the rect's own space.
     ///
-    /// 213/§5 — the canvas is a horizontal rectangle that never turns. 219 fixed *which* rectangle:
-    /// the **picture at the current camera** (`LoupeMapping.canvasRect`), not the viewport. At 100 %
-    /// and above the canvas is larger than the screen — a full frame must stay full instead of being
-    /// shrunk to 22 % — and a frame may leave the screen, because the user pans it there on purpose.
-    /// The candidate frame's four corners are projected to view points and every one of them must
-    /// land in that rect, so the check is made in the same space the user sees.
+    /// 224 — the bound is the document, not the screen. 213 measured the frame in the viewport and
+    /// 219 re-based it on the picture at the current camera (`LoupeMapping.canvasRect`); that made the
+    /// canvas grow with the angle (1485 × 1485 at 45° on a 1400 × 1000 viewport) and the frame could
+    /// be dragged out without an upper bound. The user's rule — 「画布就是画布，和屏幕无关」 — makes
+    /// the answer a property of the rect alone: every framing and every angle clamp identically.
     ///
-    /// The document-space `canvasBounds` above is still what the readouts and the red warning use; it
-    /// is no longer the clamp's criterion. Moving is preferred; only a frame whose projected box is
-    /// genuinely larger than the canvas is shrunk (about its centre, ratio kept).
+    /// The document's `canvasBounds` / `sourcePixelBounds` below remain readouts; the picture's turned
+    /// quad is the red warning (`frameExceedsPicture`), never a clamp. Moving is preferred; only a
+    /// rect genuinely larger than `[0,1]²` is shrunk (about its centre, so the ratio keeps).
     ///
     /// Returns `true` when the draft moved.
     @discardableResult
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
         clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
-        // A viewport that has not been laid out yet (a zero-sized one in a headless test, or the
-        // first `layout` pass) is not an opinion about what fits: the mapping would be degenerate and
-        // clamping against it would shrink the crop to a pixel. A real canvas is at least 560 pt wide
-        // by contract.
-        guard mapping.viewport.width > 64, mapping.viewport.height > 64 else { return false }
         let src = source ?? sourceSize
         let before = draft.crop.clamped(allowsOutsideSource: true)
 
@@ -904,9 +898,8 @@ public final class CropToolController {
         let next = clampToCanvas(base, mapping: mapping, source: src)
 
         if next == base {
-            // The frame already sits inside the canvas: the only thing that may still have to be
-            // written back is the lock's reshape, never the opt-in photo shrink (`effectiveCrop` is
-            // a view).
+            // The frame already sits inside `[0,1]²`: the only thing that may still have to be
+            // written back is the lock's reshape.
             guard shaped != before else { return false }
             draft.crop = shaped
             clampMoves &+= 1
@@ -934,30 +927,21 @@ public final class CropToolController {
             .clamped(allowsOutsideSource: true)
     }
 
-    /// 132's opt-in photo bound (`clampsToRotatedFrame`) — a **view** fact, so it must not reach the
-    /// stored draft when the clamp only passes through.
+    /// 224 — the straightened picture's quad is a **warning, not a clamp**. The old opt-in shrink
+    /// (`CropMath.clampedToRotatedFrame`, 132) pulled the frame back inside the turned photograph and
+    /// therefore fought 「允许出照片像素」: the frame may cover the black corners a straighten cuts off.
+    /// `effectiveCrop`'s explicit opt-in is the only place left that can still inscribe, and the app
+    /// never turns it on; `frameExceedsPicture` is what tells the overlay to paint the frame red.
     private func seen(_ rect: CropRect, source: ImageSize) -> CropRect {
-        let angle = CropTool.clampStraighten(draft.straighten)
-        let c = rect.clamped(allowsOutsideSource: true)
-        guard clampsToRotatedFrame, angle != 0 else { return c }
-        return CropMath.clampedToRotatedFrame(c, in: source, degrees: angle,
-                                              keepsInsideRotatedFrame: true)
+        rect.clamped(allowsOutsideSource: true)
     }
 
-    /// 213/§5 — **the one containment arithmetic**: the candidate frame's four corners projected to
-    /// view points, every one inside the picture at the current camera (`LoupeMapping.canvasRect`)
-    /// with half a point of slack. The canvas never turns; the document-space quad and its rotated
-    /// AABB are readouts only.
-    ///
-    /// A frame that fits is *moved* the least amount that brings its projected box inside; only a
-    /// frame whose box is larger than the canvas is shrunk (uniformly, about its centre). The view
-    /// translation is converted back through the same `framePoint` affine, so the rect moves with the
-    /// mapping it was projected through — never with a stale canvas.
+    /// 224 — the document-space containment: the candidate rect is clamped to `[0,1]²` by
+    /// `CropTool.clampToCanvas`, which reads no mapping, no angle and no source. Kept as a named
+    /// hop so the single call site stays legible.
     private func clampToCanvas(_ rect: CropRect, mapping: LoupeMapping,
                                source: ImageSize) -> CropRect {
-        let delta = CropTool.clampStraighten(draft.straighten)
-            - CropTool.clampStraighten(session?.edit.geometry.straightenDegrees ?? 0)
-        return CropTool.clampToCanvas(rect, mapping: mapping, source: source, degrees: delta)
+        CropTool.clampToCanvas(rect, mapping: mapping, source: source)
     }
 
     // MARK: - the document-space canvas (190)

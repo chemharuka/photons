@@ -91,12 +91,12 @@ final class CropOverlayAlertTests: XCTestCase {
               + "history +\(session.history.snapshots.count - history) · revision +\(session.editRevision - revision)")
     }
 
-    /// 132 §3 3 / 162 §2.3 — a frame dragged past the right edge of the **photograph** is applied
-    /// as-is: one commit, one history row, and the stored rect keeps its width and its right edge
-    /// outside 1. It stays inside the **canvas** (162): the old 1.1 example was outside the 90 %
-    /// workspace's letterbox too (its hard bound is 1.0556), which is precisely what the user's third
-    /// report forbids. 1.04 is outside the camera pixels and inside the canvas.
-    func testAFrameOutsideThePictureIsAppliedWithoutSnappingBack() throws {
+    /// 224 — a frame past the **document canvas** (`[0,1]²`) is pulled back at its own size, and the
+    /// document records exactly what the overlay drew. 132's 「框可以出照片」 still holds where it
+    /// matters — a straightened picture's black corners — but `[0,1]²` is the frame rectangle and is a
+    /// hard bound at every angle. At 0° the photograph *is* the document, so a 1.04 seed is clamped to
+    /// 1.0; the width the user drew is kept and the rect slides.
+    func testAFramePastTheDocumentCanvasIsPulledBackAtItsOwnSize() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.close() }
         let loupe = editor.rootView.loupeController
@@ -107,17 +107,21 @@ final class CropOverlayAlertTests: XCTestCase {
         let outside = CropRect(x: 0.5, y: 0.2, width: 0.54, height: 0.6)   // right = 1.04
         loupe.cropTool.draft.crop = outside
         loupe.refreshCropTool()
-        XCTAssertEqual(loupe.cropTool.effectiveCrop().right, 1.04, accuracy: 1e-9,
-                       "the model must not pull the frame back onto the photograph")
+        // 224: the canvas is the document's `[0,1]²`, so the edge comes back to 1.0 — and it is
+        // moved, not shrunk: 0.54 stays 0.54.
+        XCTAssertEqual(loupe.cropTool.effectiveCrop().right, 1.0, accuracy: 1e-9,
+                       "the frame must not leave the document canvas")
+        XCTAssertEqual(loupe.cropTool.effectiveCrop().width, 0.54, accuracy: 1e-9,
+                       "a clamp may move the frame, never resize it")
         let history = session.history.snapshots.count
         let revision = session.editRevision
         XCTAssertTrue(loupe.applyCropTool(), "应用 must commit the frame where it is")
         XCTAssertEqual(session.history.snapshots.count, history + 1, "one apply = one history row")
         XCTAssertEqual(session.editRevision, revision + 1)
         let stored = session.edit.geometry.cropRect
-        XCTAssertEqual(stored.right, 1.04, accuracy: 1e-9, "the outside edge was clamped")
+        XCTAssertEqual(stored.right, 1.0, accuracy: 1e-9, "the outside edge was clamped")
         XCTAssertEqual(stored.width, 0.54, accuracy: 1e-9, "the width moved")
-        print("132 §3 · stored crop r \(stored.right) w \(stored.width) · history +\(session.history.snapshots.count - history)")
+        print("224 §3 · stored crop r \(stored.right) w \(stored.width) · history +\(session.history.snapshots.count - history)")
     }
 
     /// 197 ② — 用户的顺序：**裁剪 → ↵应用 → 再进裁切 → 缩到 25 % → 把框拖去盖住旋转空角**。

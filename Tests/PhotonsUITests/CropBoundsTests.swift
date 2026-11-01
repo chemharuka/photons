@@ -56,10 +56,6 @@ final class CropBoundsTests: XCTestCase {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    private func canvasRect() -> CGRect {
-        CGRect(x: 0, y: 0, width: Double(Self.viewport.width), height: Double(Self.viewport.height))
-    }
-
     /// A press in the middle of the frame, then one tick far away in `direction` — the shipped drag
     /// path, not `CropToolDrag` in isolation.
     private func drag(_ controller: CropToolController, mapping: LoupeMapping,
@@ -81,12 +77,18 @@ final class CropBoundsTests: XCTestCase {
 
     // MARK: - ① corners, upright
 
-    /// Four directions, same start: the frame lands flush on the canvas edge it was pushed toward,
-    /// with no gap and no overshoot.
+    /// Four directions, same start: the frame lands flush on the **document canvas** (`[0,1]²`, which
+    /// at 0° 适应 projects to the picture rect) with no gap and no overshoot. 224: the edge is the
+    /// document's, not the viewport's, so the flush edges sit at `mapping.frameView(0,0)` /
+    /// `(W,H)` — the 90 % fit's 45 / 30 pt margin is outside the document and not part of the law.
     func testDraggingToEachCornerPinsTheFrameToTheCanvas() throws {
         let (controller, _) = try makeController()
         let map = mapping(.fit)
-        let canvas = canvasRect()
+        let origin = map.frameView(frameX: 0, frameY: 0)
+        let end = map.frameView(frameX: Double(Self.source.width),
+                                frameY: Double(Self.source.height))
+        let canvas = CGRect(x: min(origin.x, end.x), y: min(origin.y, end.y),
+                            width: abs(end.x - origin.x), height: abs(end.y - origin.y))
         let crop = CropRect(left: 0.40, top: 0.40, right: 0.60, bottom: 0.60)
         let tolerance = 0.5
 
@@ -122,7 +124,7 @@ final class CropBoundsTests: XCTestCase {
     }
 
     /// The model value is what is clamped, not just the drawing: `draft.crop` itself is inside the
-    /// canvas rect after the drag.
+    /// **document canvas** `[0,1]²` after the drag (224 — the viewport no longer participates).
     func testTheDraftRectItselfStaysInsideTheCanvas() throws {
         let (controller, _) = try makeController()
         let map = mapping(.fit)
@@ -130,48 +132,29 @@ final class CropBoundsTests: XCTestCase {
              from: CropRect(left: 0.40, top: 0.40, right: 0.60, bottom: 0.60),
              to: CGVector(dx: -5000, dy: -5000))
         let c = controller.draft.crop
-        let bounds = controller.canvasBounds(mapping: map, source: Self.source)
-        print(String(format: "162 G3 · draft l %.6f t %.6f r %.6f b %.6f · canvas bounds l %.6f t %.6f "
-                     + "r %.6f b %.6f",
-                     c.left, c.top, c.right, c.bottom,
-                     bounds.left, bounds.top, bounds.right, bounds.bottom))
-        XCTAssertGreaterThanOrEqual(c.left, bounds.left - 1e-9)
-        XCTAssertGreaterThanOrEqual(c.top, bounds.top - 1e-9)
-        XCTAssertLessThanOrEqual(c.right, bounds.right + 1e-9)
-        XCTAssertLessThanOrEqual(c.bottom, bounds.bottom + 1e-9)
-        // 213: at 90 % fit the visible canvas is 5 % larger than the source on each side
-        // (origin = (45, 30), content = 810 × 540 → −1/18 … 1 + 1/18), so the draft lands on those
-        // edges, not on `0…1²`.
-        XCTAssertEqual(bounds.left, -1.0 / 18, accuracy: 1e-9)
-        XCTAssertEqual(bounds.top, -1.0 / 18, accuracy: 1e-9)
-        XCTAssertEqual(bounds.right, 1 + 1.0 / 18, accuracy: 1e-9)
-        XCTAssertEqual(bounds.bottom, 1 + 1.0 / 18, accuracy: 1e-9)
+        print(String(format: "224 G3 · draft l %.6f t %.6f r %.6f b %.6f",
+                     c.left, c.top, c.right, c.bottom))
+        XCTAssertGreaterThanOrEqual(c.left, 0 - 1e-9)
+        XCTAssertGreaterThanOrEqual(c.top, 0 - 1e-9)
+        XCTAssertLessThanOrEqual(c.right, 1 + 1e-9)
+        XCTAssertLessThanOrEqual(c.bottom, 1 + 1e-9)
+        // The drag went to the top-left: the rect lands flush on the document's own edges, not on
+        // the 90 % fit's letterbox (`-1/18 … 1 + 1/18`, which 213 used as the canvas).
+        XCTAssertEqual(c.left, 0, accuracy: 1e-9)
+        XCTAssertEqual(c.top, 0, accuracy: 1e-9)
     }
 
     // MARK: - ② an angle: blank corners are legal, the canvas edge is not
 
-    /// At 8° with the camera zoomed out the canvas is wider than the sensor (`-0.25…1.25`). The frame
-    /// may sit in that band — pixels outside the camera are allowed — and, since 188, **it may leave
-    /// the canvas too** (user's 「旋转后裁切框可以出画布」).
-    ///
-    /// 190 replaced *how far*: 188 kept the turned quad's centre on the canvas, a rule that read the
-    /// viewport and therefore moved with the zoom. The bound is now a document one — at least a
-    /// quarter of the frame's own area still covers the canvas — so this drag pins where 25 % is
-    /// still on the canvas instead of where the centre sits on its edge. The frame keeps its size
-    /// (no shrink) and stays grabbable (a corner is on the canvas).
+    /// At 8° the frame may cover the turned-out corner — the photograph's black corner — but it may
+    /// **not** leave the document canvas `[0,1]²` (224). The old 188/190 reading measured the frame
+    /// against the viewport's window and let it hang a quarter off; that is exactly what made the
+    /// excursion grow with the zoom and, at 45°, unbounded.
     func testAtEightDegreesTheFrameIsPulledInsideTheCanvas() throws {
         let (controller, _) = try makeController()
-        // 0.2× on a 3000×2000 source in a 900×600 canvas: the window is 4500×3000 source pixels, i.e.
-        // the canvas bounds are -0.25…1.25 on both axes.
+        // 0.2× on a 3000×2000 source in a 900×600 canvas: the viewport is a window of the document.
         let state = LoupeViewState(mode: .actual, zoom: 0.2, centerX: 1500, centerY: 1000)
         let map = mapping(state)
-        let bounds = controller.canvasBounds(mapping: map, source: Self.source)
-        print(String(format: "162 G3 · 0.2× · canvas bounds l %.4f t %.4f r %.4f b %.4f",
-                     bounds.left, bounds.top, bounds.right, bounds.bottom))
-        XCTAssertEqual(bounds.left, -0.25, accuracy: 1e-9)
-        XCTAssertEqual(bounds.top, -0.25, accuracy: 1e-9)
-        XCTAssertEqual(bounds.right, 1.25, accuracy: 1e-9)
-        XCTAssertEqual(bounds.bottom, 1.25, accuracy: 1e-9)
 
         controller.draft = CropToolController.Draft(
             crop: CropRect(left: 0.40, top: 0.40, right: 0.60, bottom: 0.60),
@@ -187,48 +170,24 @@ final class CropBoundsTests: XCTestCase {
 
         let layout = controller.layout(mapping: map, source: Self.source, pointScale: 1)
         let frame = rect(layout)
-        let canvas = canvasRect()
-        print("162 G3 · 8° · draft "
+        print("224 G3 · 8° · draft "
               + String(format: "l %.4f t %.4f r %.4f b %.4f", controller.draft.crop.left,
                        controller.draft.crop.top, controller.draft.crop.right,
                        controller.draft.crop.bottom)
-              + " · quad AABB \(NSStringFromRect(frame)) · canvas \(NSStringFromRect(canvas))"
+              + " · quad AABB \(NSStringFromRect(frame))"
               + String(format: " · centre (%.2f, %.2f)", frame.midX, frame.midY))
 
         let crop = controller.draft.crop
-        // The drag is pulled back toward the canvas' centre, so it ends up hanging over whichever
-        // edge the hand came from — here the bottom. Either way it is past the camera's pixels,
-        // which is the 132 promise the pre-188 test pinned on the right edge.
-        XCTAssertGreaterThan(crop.bottom, 1.0, "the frame must be allowed outside the camera pixels")
-
-        // 190 — 「最多 3/4 出去」, measured where the clamp measures it: the **document**. The pair of
-        // numbers below is the whole law — the frame left the camera pixels (above) and left the
-        // canvas by exactly three quarters, no more, no less. Comparing against the *visible* canvas
-        // rect would repeat 188's mistake: at 0.2× the viewport is a window of the document, so a
-        // frame three quarters off the canvas is still comfortably inside the view.
-        let quadDoc = layout.corners.map { map.framePoint(viewX: Double($0.x), viewY: Double($0.y)) }
-        let extent = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
-                                                height: Double(Self.source.height), degrees: 8)
-        let canvasLow = (x: (Double(Self.source.width) - extent.width) / 2,
-                         y: (Double(Self.source.height) - extent.height) / 2)
-        let canvasHigh = (x: (Double(Self.source.width) + extent.width) / 2,
-                          y: (Double(Self.source.height) + extent.height) / 2)
-        let minX = quadDoc.map(\.x).min() ?? 0, maxX = quadDoc.map(\.x).max() ?? 0
-        let minY = quadDoc.map(\.y).min() ?? 0, maxY = quadDoc.map(\.y).max() ?? 0
-        print(String(format: "196 · 8° · quad doc x %.1f…%.1f (canvas %.1f…%.1f) · "
-                     + "y %.1f…%.1f (canvas %.1f…%.1f) · frame %@",
-                     minX, maxX, canvasLow.x, canvasHigh.x, minY, maxY,
-                     canvasLow.y, canvasHigh.y, NSStringFromRect(frame)))
-        // 213/§5 — the hard bound is the **viewport**, stated in screen space: the drawn quad's four
-        // sides inside (0, 0, 900, 600). The document-space quad printed above may leave the rotated
-        // photo's AABB (it covers the blank corner), which is allowed.
-        let tolerance = 0.5
-        XCTAssertGreaterThanOrEqual(frame.minX, -tolerance, "the frame leaves the viewport on the left")
-        XCTAssertGreaterThanOrEqual(frame.minY, -tolerance, "the frame leaves the viewport on the top")
-        XCTAssertLessThanOrEqual(frame.maxX, Double(Self.viewport.width) + tolerance,
-                                 "the frame leaves the viewport on the right")
-        XCTAssertLessThanOrEqual(frame.maxY, Double(Self.viewport.height) + tolerance,
-                                 "the frame leaves the viewport on the bottom")
+        // 224 — the document is the bound: all four edges stay in `0…1`, and the far drag lands
+        // flush on at least one of them.
+        XCTAssertGreaterThanOrEqual(crop.left, 0 - 1e-9, "the frame leaves [0,1]² on the left")
+        XCTAssertGreaterThanOrEqual(crop.top, 0 - 1e-9, "the frame leaves [0,1]² on the top")
+        XCTAssertLessThanOrEqual(crop.right, 1 + 1e-9, "the frame leaves [0,1]² on the right")
+        XCTAssertLessThanOrEqual(crop.bottom, 1 + 1e-9, "the frame leaves [0,1]² on the bottom")
+        XCTAssertEqual(min(crop.left, crop.top, 1 - crop.right, 1 - crop.bottom), 0,
+                       accuracy: 1e-9, "the far drag did not reach the document's edge")
+        // …and the turned-out corner is allowed: the frame sits on the picture's blank pixels, which
+        // is a red warning, not a clamp.
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
                       "the frame covers the blank corner, so the warning must say so")
     }
