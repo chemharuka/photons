@@ -567,4 +567,25 @@ final class GridFilterSlotsTests: XCTestCase {
                            modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
                            eventNumber: 0, clickCount: 1, pressure: 1)!
     }
+
+    /// 227 — the grid is a diffable data source keyed by asset id: sorting moves the **same cell**
+    /// (and its CAMetalLayer/thumbnail) with its photo instead of recycling every cell by index.
+    func testSortKeepsTheSameCellWithItsAsset() throws {
+        grid.view.layoutSubtreeIfNeeded()
+        settle()
+        let first = try XCTUnwrap(session.assets.first)
+        let before = try XCTUnwrap(grid.collectionView.item(at: IndexPath(item: 0, section: 0))
+                                       as? AssetGridItem)
+        XCTAssertEqual(before.cardView.asset?.id, first.id)
+
+        session.toggleSortOrder()
+        settle(8)
+        grid.view.layoutSubtreeIfNeeded()
+
+        let index = try XCTUnwrap(session.assets.firstIndex { $0.id == first.id })
+        let after = try XCTUnwrap(grid.collectionView.item(at: IndexPath(item: index, section: 0))
+                                      as? AssetGridItem)
+        XCTAssertTrue(before === after, "the same asset must keep its cell across a sort")
+        XCTAssertEqual(after.cardView.asset?.id, first.id)
+    }
 }

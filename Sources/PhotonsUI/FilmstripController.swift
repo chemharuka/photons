@@ -158,6 +158,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
 
+    /// Diffable identity is the asset id: filtering/sorting moves the cell with its photo.
+    private enum Section: Hashable { case main }
+    private var diffableDataSource: NSCollectionViewDiffableDataSource<Section, String>!
+    private var assetsByID: [String: Asset] = [:]
+
     /// One snapshot per update: ids/order/edit/metadata decide the list; selection/anchor only move
     /// the ring. No per-property refresh paths.
     private struct ModelSnapshot: Equatable {
@@ -259,8 +264,27 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     public override func viewDidLoad() {
         super.viewDidLoad()
+        makeDiffableDataSource()
         refresh()
         observeModel()
+    }
+
+    private func makeDiffableDataSource() {
+        diffableDataSource = NSCollectionViewDiffableDataSource<Section, String>(
+            collectionView: collectionView) { [weak self] collectionView, indexPath, id in
+                guard let self, let asset = self.assetsByID[id] else { return nil }
+                let item = collectionView.makeItem(withIdentifier: FilmstripCell.reuseIdentifier,
+                                                   for: indexPath)
+                guard let cell = item as? FilmstripCell else { return item }
+                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id)
+                self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
+                return item
+            }
+        // A diffable data source starts with **no sections**; the collection view (and tests) may
+        // ask for section 0 before the first refresh. Install the empty section once, now.
+        var initial = NSDiffableDataSourceSnapshot<Section, String>()
+        initial.appendSections([.main])
+        diffableDataSource.apply(initial, animatingDifferences: false)
     }
 
     public override func viewDidLayout() {
@@ -337,15 +361,26 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     public func refresh() {
         guard isViewLoaded else { return }
-        // Same trap as the grid: `reloadData` clears the selection and posts `didDeselectItemsAt`,
-        // and this view observes the session even while it is hidden (the strip is a second browser,
-        // not a lazy one). Writing that transient state back would collapse a 5-photo selection to
-        // one row every time anything refreshed — from either browser.
+        // One snapshot, applied once; item identity is the asset id, so a filter/sort moves cells
+        // instead of recycling them by index (and their CAMetalLayers) wholesale.
+        assetsByID = Dictionary(uniqueKeysWithValues: (session?.assets ?? []).map { ($0.id, $0) })
+        var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+        snapshot.appendSections([.main])
+        snapshot.appendItems((session?.assets ?? []).map(\.id), toSection: .main)
         isApplyingModel = true
-        collectionView.reloadData()
+        // `animatingDifferences: false` is documented as a reloadData (no diff), which would
+        // recycle the cells and defeat the identity. Use the diff, with a zero-length animation
+        // so filter/sort changes do not visibly slide.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            diffableDataSource.apply(snapshot, animatingDifferences: true)
+        }
         isApplyingModel = false
         applySelectionFromModel()
-        DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshVisibleThumbnails()
+            self?.reconcileThumbnails(force: true)
+        }
         if let session { lastSnapshot = modelSnapshot(session) }
     }
 
@@ -497,6 +532,17 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     /// Visible cells plus one cell of slack on either side (006 §5 "可见 + 上下一行"; horizontally
     /// that is one cell). Everything else is cancelled, index by index.
+    /// Same-key re-application is a no-op inside the card; this only does work for a changed edit.
+    private func refreshVisibleThumbnails() {
+        guard let session else { return }
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let cell = collectionView.item(at: path) as? FilmstripCell,
+                  let asset = cell.cardView.asset,
+                  let index = session.assets.firstIndex(where: { $0.id == asset.id }) else { continue }
+            applyThumbnail(to: cell, index: index, asset: asset)
+        }
+    }
+
     private func reconcileThumbnails(force: Bool) {
         guard isViewLoaded, let session, !session.assets.isEmpty, let provider = provider() else { return }
 

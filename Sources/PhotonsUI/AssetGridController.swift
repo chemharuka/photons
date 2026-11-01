@@ -339,6 +339,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
 
+    /// Diffable identity: the item identifier is the **asset id**, never the index. A filter/sort
+    /// moves the same cell with its photo instead of recycling every cell by index.
+    private enum Section: Hashable { case main }
+    private var diffableDataSource: NSCollectionViewDiffableDataSource<Section, String>!
+    private var assetsByID: [String: Asset] = [:]
+
     /// One model decision, made from a snapshot instead of from individual properties. The list
     /// (ids + order), the edit/metadata generation and the filter decide whether the cells are
     /// rebuilt; selection/anchor are the only things that may change without rebuilding them.
@@ -478,8 +484,27 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     public override func viewDidLoad() {
         super.viewDidLoad()
+        makeDiffableDataSource()
         refresh()
         observeModel()
+    }
+
+    private func makeDiffableDataSource() {
+        diffableDataSource = NSCollectionViewDiffableDataSource<Section, String>(
+            collectionView: collectionView) { [weak self] collectionView, indexPath, id in
+                guard let self, let asset = self.assetsByID[id] else { return nil }
+                let item = collectionView.makeItem(withIdentifier: AssetGridItem.reuseIdentifier,
+                                                   for: indexPath)
+                guard let cell = item as? AssetGridItem else { return item }
+                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id)
+                self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
+                return item
+            }
+        // A diffable data source starts with **no sections**; the collection view (and tests) may
+        // ask for section 0 before the first refresh. Install the empty section once, now.
+        var initial = NSDiffableDataSourceSnapshot<Section, String>()
+        initial.appendSections([.main])
+        diffableDataSource.apply(initial, animatingDifferences: false)
     }
 
     @objc private func clipViewBoundsChanged() {
@@ -544,15 +569,25 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             lastLibraryURL = url
             resetThumbnails()
         }
-        let before = collectionView.numberOfItems(inSection: 0)
+        let before = collectionView.numberOfSections > 0
+            ? collectionView.numberOfItems(inSection: 0) : 0
         updateMetrics()
-        // `reloadData` clears the collection view's selection, which posts `didDeselectItemsAt`
-        // for every row it dropped. Those are *not* the user's doing — writing them back would
-        // collapse a 5-photo selection to whatever AppKit kept, one photo after every metadata
-        // write or filter change. The model is the truth here, so the transient callbacks are
-        // ignored and `applySelectionFromModel()` below re-installs the real selection.
+        // One snapshot, applied once. Item identity is the asset id, so adding a camera filter or
+        // changing sort moves cells instead of recycling them (and their thumbnails) by index.
+        assetsByID = Dictionary(uniqueKeysWithValues: (session?.assets ?? []).map { ($0.id, $0) })
+        var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+        snapshot.appendSections([.main])
+        snapshot.appendItems((session?.assets ?? []).map(\.id), toSection: .main)
+        // `apply` may clear the selection transiently; the model is the truth, so keep the
+        // selection callbacks from writing AppKit's transient state back.
         isApplyingModel = true
-        collectionView.reloadData()
+        // `animatingDifferences: false` is documented as a reloadData (no diff), which would
+        // recycle the cells and defeat the identity. Use the diff, with a zero-length animation
+        // so filter/sort changes do not visibly slide.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            diffableDataSource.apply(snapshot, animatingDifferences: true)
+        }
         isApplyingModel = false
         reloadCount += 1
         filterBar.update(filter: session?.filter ?? .none,
@@ -560,9 +595,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                          cameraLabels: session?.allCameraLabels ?? [:])
         applySelectionFromModel()
         if before == 0 { collectionView.scroll(.zero) }
-        // `reloadData` recycles every visible cell, so every visible cell re-asks for its image.
-        // Deferred by one runloop turn because the flow layout has not produced attributes yet.
-        DispatchQueue.main.async { [weak self] in self?.reconcileThumbnails(force: true) }
+        // A moved cell keeps its bitmap, but an edit (`persistCount`) can change a key without
+        // changing the id. Re-apply from memory once the diffable pass has laid the cells out.
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshVisibleThumbnails()
+            self?.reconcileThumbnails(force: true)
+        }
         if let session { lastSnapshot = modelSnapshot(session) }
     }
 
@@ -733,6 +771,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     /// Visible items plus exactly one row either side (006 §5: prefetch is "visible + one row",
     /// computed from the layout function, not guessed in pixels). Everything else is cancelled.
+    /// Re-apply the snapshot's thumbnails to whatever cells the diffable pass reused. Same key +
+    /// same bitmap is a no-op inside the card, so this is cheap for an unchanged list.
+    private func refreshVisibleThumbnails() {
+        guard let session else { return }
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let cell = collectionView.item(at: path) as? AssetGridItem,
+                  let asset = cell.cardView.asset,
+                  let index = session.assets.firstIndex(where: { $0.id == asset.id }) else { continue }
+            applyThumbnail(to: cell, index: index, asset: asset)
+        }
+    }
+
     private func reconcileThumbnails(force: Bool) {
         guard isViewLoaded, let session, !session.assets.isEmpty else { return }
         guard let provider = provider() else { return }
