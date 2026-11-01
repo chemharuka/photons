@@ -141,13 +141,13 @@ final class LoupeZoomLadderTests: XCTestCase {
 
     // MARK: 4. the bridge geometry
 
-    /// `fit → 100 %` on a 60 MP frame: the fit picture occupies 2400×1600 of a 2560×1600 canvas (its
-    /// 1.5 crop aspect fitted), the 1:1 picture occupies the whole canvas.
+    /// `fit → 100 %` on a 60 MP frame: at 213's 90 % fit the picture occupies 2160×1440 of a
+    /// 2560×1600 canvas (its 1.5 crop aspect fitted), the 1:1 picture occupies the whole canvas.
     ///
     /// The bridge's scale is **not** the ratio of those two rects (1.0667) — that is only how much
     /// bigger the *letterbox* gets, and scaling the fit picture by it would end the animation showing
     /// the whole frame at 43 %, which is not the frame the 100 % camera is about to draw. The scale is
-    /// the ratio of the two cameras: `zoomN / zoomO = 1 / 0.4 = 2.5`.
+    /// the ratio of the two cameras: `zoomN / zoomO = 1 / 0.36 = 2.7778`.
     func testBridgeScaleIsTheRatioOfTheTwoCameras() {
         let framing = LoupeFraming(viewport: ImageSize(width: 2560, height: 1600),
                                   sourceWidth: 6000, sourceHeight: 4000)
@@ -155,7 +155,7 @@ final class LoupeZoomLadderTests: XCTestCase {
         let oneToOne = LoupeViewState(mode: .actual, zoom: 1, centerX: 3000, centerY: 2000)
         let actualContent = framing.contentPixels(of: oneToOne)
 
-        XCTAssertEqual(fitContent, ImageSize(width: 2400, height: 1600))
+        XCTAssertEqual(fitContent, ImageSize(width: 2160, height: 1440))
         XCTAssertEqual(actualContent, ImageSize(width: 2560, height: 1600))
 
         let bridge = LoupeZoomBridge(fromContent: fitContent, toContent: actualContent,
@@ -163,7 +163,7 @@ final class LoupeZoomLadderTests: XCTestCase {
                                      toMapping: framing.mapping(of: oneToOne),
                                      canvas: framing.viewport)
         XCTAssertEqual(bridge.scale, 1 / framing.fitZoom, accuracy: 1e-12)
-        XCTAssertEqual(bridge.scale, 2.5, accuracy: 1e-12)
+        XCTAssertEqual(bridge.scale, 2.7777777777777777, accuracy: 1e-12)
         XCTAssertTrue(bridge.isVisible)
 
         // Back the other way it shrinks, by the reciprocal of the same number.

@@ -106,11 +106,13 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertEqual(placement.region.width, 1, accuracy: 1 / 1400)
         XCTAssertEqual(placement.region.height, 1, accuracy: 1 / 1000)
 
-        // …and the quad the user sees, in points: the picture's own rect, no second margin.
-        XCTAssertEqual(px.x, 0.0471 * 1400, accuracy: 1, "left margin of the quad")
-        XCTAssertEqual(px.y, 0, accuracy: 1, "the quad starts at the canvas' top edge")
-        XCTAssertEqual(px.w, 0.9057 * 1400, accuracy: 1, "the quad's width")
-        XCTAssertEqual(px.h, 1000, accuracy: 1, "and it fills the canvas' height")
+        // …and the quad the user sees, in points. 213: 适应 is 90 % of the viewport, so the canvas is
+        // 1141.2 × 900 with a (129.4, 50) margin; the picture's own rect inside it is the same
+        // 0.0471/0.9057 fraction at 90 % scale.
+        XCTAssertEqual(px.x, 70 + 0.9 * 0.0471 * 1400, accuracy: 1, "left margin of the quad")
+        XCTAssertEqual(px.y, 50, accuracy: 1, "the quad starts at the canvas' top edge")
+        XCTAssertEqual(px.w, 0.9 * 0.9057 * 1400, accuracy: 1, "the quad's width")
+        XCTAssertEqual(px.h, 0.9 * 1000, accuracy: 1, "and it fills the canvas' height")
 
         // The picture quad the present pass paints the matte's edge from is the same rectangle: the
         // backdrop and the photograph agree to the pixel, so the `0F0F0F` band starts where it must.
@@ -131,10 +133,12 @@ final class CropRotation188Tests: XCTestCase {
         let diagonal = framing(degrees: 45)
         let at45 = backdropQuad(diagonal.framePlacement(of: diagonal.mapping(of: .fit)))
         print(String(format: "188 ① · 45° · quad (%.4f, %.4f, %.4f, %.4f)", at45.u0, at45.v0, at45.du, at45.dv))
-        XCTAssertEqual(at45.du, 1000.0 / 1400, accuracy: 1 / 1400, "45°: the AABB is square")
-        XCTAssertEqual(at45.dv, 1, accuracy: 1 / 1000)
-        XCTAssertEqual(at45.u0, 200.0 / 1400, accuracy: 1 / 1400, "centred in the canvas")
-        XCTAssertEqual(at45.v0, 0, accuracy: 1 / 1000)
+        // 213: at 90 % the square canvas is 900 × 900 centred, i.e. u0 = 250/1400, du = 900/1400,
+        // v0 = 50/1000, dv = 900/1000.
+        XCTAssertEqual(at45.du, 900.0 / 1400, accuracy: 1 / 1400, "45°: the AABB is square")
+        XCTAssertEqual(at45.dv, 900.0 / 1000, accuracy: 1 / 1000)
+        XCTAssertEqual(at45.u0, 250.0 / 1400, accuracy: 1 / 1400, "centred in the viewport")
+        XCTAssertEqual(at45.v0, 50.0 / 1000, accuracy: 1 / 1000)
     }
 
     // MARK: - ② the frame stays inside the canvas, and may cover its letterbox
@@ -266,10 +270,12 @@ final class CropRotation188Tests: XCTestCase {
         // The whole source at 适应 with no angle: the texture is the picture, and the 4:3 picture in a
         // 1.4 canvas is letterboxed by 33.33 pt on each side — the pre-188 numbers.
         XCTAssertEqual(fit.region, .full)
-        XCTAssertEqual(Double(fit.rect.u0), 33.3333 / 1400, accuracy: 1e-6)
-        XCTAssertEqual(Double(fit.rect.du), 1333.333 / 1400, accuracy: 1e-6)
-        XCTAssertEqual(Double(fit.rect.v0), 0, accuracy: 1e-12)
-        XCTAssertEqual(Double(fit.rect.dv), 1, accuracy: 1e-12)
+        // 213: at 90 % the 4:3 picture is 1200 × 900 centred in the 1400 × 1000 viewport, so the
+        // picture's rect is u0 = 100/1400, du = 1200/1400, v0 = 50/1000, dv = 0.9.
+        XCTAssertEqual(Double(fit.rect.u0), 100.0 / 1400, accuracy: 1e-6)
+        XCTAssertEqual(Double(fit.rect.du), 1200.0 / 1400, accuracy: 1e-6)
+        XCTAssertEqual(Double(fit.rect.v0), 50.0 / 1000, accuracy: 1e-6)
+        XCTAssertEqual(Double(fit.rect.dv), 0.9, accuracy: 1e-6)
 
         // A 2:1 window in the middle: the region is the old `(window − crop)/crop`, unchanged.
         let zoomed = LoupeViewState(mode: .actual, zoom: 2, centerX: 3000, centerY: 2250)
@@ -301,10 +307,13 @@ final class CropRotation188Tests: XCTestCase {
         let bounds = CropWorkspaceLayout.canvasBounds(mapping: own.mapping(of: .fit), source: source)
         print(String(format: "188 ④ · canvasBounds l %.12f t %.12f r %.12f b %.12f",
                      bounds.left, bounds.top, bounds.right, bounds.bottom))
-        XCTAssertEqual(bounds.left, 0, accuracy: 1e-12)
-        XCTAssertEqual(bounds.right, 1, accuracy: 1e-12)
-        XCTAssertEqual(bounds.top, -1.0 / 28, accuracy: 1e-9,
+        // 213: the 90 % picture is 1260 × 840 in a 1400 × 1000 viewport → originX = 70, originY = 80,
+        // so the visible canvas in frame units is −70/1260 … 1 + 70/1260 on x (−1/18) and
+        // −80/840 … 1 + 80/840 on y (−2/21).
+        XCTAssertEqual(bounds.left, -1.0 / 18, accuracy: 1e-9)
+        XCTAssertEqual(bounds.right, 1 + 1.0 / 18, accuracy: 1e-9)
+        XCTAssertEqual(bounds.top, -2.0 / 21, accuracy: 1e-9,
                        "the letterbox band above the picture, in frame units")
-        XCTAssertEqual(bounds.bottom, 1 + 1.0 / 28, accuracy: 1e-9)
+        XCTAssertEqual(bounds.bottom, 1 + 2.0 / 21, accuracy: 1e-9)
     }
 }

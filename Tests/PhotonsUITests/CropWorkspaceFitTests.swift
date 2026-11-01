@@ -21,7 +21,7 @@ final class CropWorkspaceFitTests: XCTestCase {
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
     }
 
-    func testSmallAnglesKeepOneZoomAtNinetyPercentOfTheOrdinaryFit() throws {
+    func testSmallAnglesKeepTheOrdinaryFitExactly() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.close() }
         let loupe = editor.rootView.loupeController
@@ -30,14 +30,21 @@ final class CropWorkspaceFitTests: XCTestCase {
         // The ordinary fit is measured with the tool off — the denominator §10 11 names.
         loupe.zoomToFit()
         CropUITestSupport.pump(0.05)
-        let ordinaryFit = try XCTUnwrap(loupe.framing()).fitZoom
+        let ordinaryFraming = try XCTUnwrap(loupe.framing())
+        let ordinaryFit = ordinaryFraming.fitZoom
         XCTAssertEqual(loupe.effectiveZoom, ordinaryFit, accuracy: 1e-9)
+        // 213 acceptance 1: the ordinary fit is the viewport fit × the one 90 % margin.
+        let extent = ordinaryFraming.rotatedSourceExtent
+        let viewportFit = min(Double(ordinaryFraming.viewport.width) / extent.width,
+                              Double(ordinaryFraming.viewport.height) / extent.height)
+        XCTAssertEqual(ordinaryFit, min(1, viewportFit * LoupeFraming.fitMargin), accuracy: 1e-12,
+                       "ordinary 适应 must be the viewport fit × 0.90")
 
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session), "裁切 mode did not open")
         CropUITestSupport.pump(0.05)
         let cropFit = loupe.effectiveZoom
-        XCTAssertEqual(cropFit / ordinaryFit, CropWorkspaceFitTests.ninetyPercent,
-                       accuracy: 0.01, "裁切 fit must be ordinary fit × 0.90")
+        XCTAssertEqual(cropFit, ordinaryFit, accuracy: 1e-9,
+                       "裁切入口 must be the ordinary fit itself, not another 0.90")
 
         var samples: [(Double, Double)] = []
         for angle in [-5.0, -3, 0, 3, 5] {
@@ -47,7 +54,7 @@ final class CropWorkspaceFitTests: XCTestCase {
             samples.append((angle, loupe.effectiveZoom))
         }
         for (angle, zoom) in samples {
-            XCTAssertEqual(zoom / ordinaryFit, CropWorkspaceFitTests.ninetyPercent, accuracy: 0.01,
+            XCTAssertEqual(zoom, ordinaryFit, accuracy: 1e-9,
                            "\(angle)° changed the zoom — the drag must not jump")
         }
         XCTAssertEqual(Set(samples.map { ($0.1 * 1e9).rounded() }).count, 1,
@@ -59,8 +66,9 @@ final class CropWorkspaceFitTests: XCTestCase {
         XCTAssertFalse(loupe.isCropToolActive)
         XCTAssertEqual(loupe.effectiveZoom, ordinaryFit, accuracy: 1e-9,
                        "退出裁切 must return to the ordinary fit")
-        print(String(format: "132 §10 · ordinary fit %.6f · crop fit %.6f · ratio %.4f · samples %@",
-                     ordinaryFit, cropFit, cropFit / ordinaryFit,
+        print(String(format: "213 · viewport fit %.6f × 0.90 = ordinary %.6f · crop entry %.6f "
+                     + "· ratio %.4f · samples %@",
+                     viewportFit, ordinaryFit, cropFit, cropFit / ordinaryFit,
                      samples.map { String(format: "%.6f", $0.1) }.joined(separator: ", ")))
     }
 
@@ -92,8 +100,8 @@ final class CropWorkspaceFitTests: XCTestCase {
         let aabb = framing.rotatedCropExtent
         let aabbFit = min(Double(framing.viewport.width) / aabb.width,
                           Double(framing.viewport.height) / aabb.height)
-        XCTAssertEqual(refit, aabbFit, accuracy: 1e-6,
-                       "45° must fit exactly the rotated canvas, no more")
+        XCTAssertEqual(refit, min(1, aabbFit * LoupeFraming.fitMargin), accuracy: 1e-6,
+                       "45° must fit the rotated canvas at the one 90 % margin")
         XCTAssertLessThan(refit, cropFit * 0.95,
                           "45° must re-fit the whole canvas once (the AABB no longer fits at 90 %)")
         XCTAssertGreaterThan(refit, ordinaryFit * 0.7,
@@ -135,8 +143,6 @@ final class CropWorkspaceFitTests: XCTestCase {
                      Double(frame.width), Double(frame.height), expectedWidth,
                      Double(canvas.width), Double(canvas.height)))
     }
-
-    private static let ninetyPercent = 0.90
 
     private static func bounds(_ corners: [CGPoint]) -> NSRect {
         let xs = corners.map(\.x), ys = corners.map(\.y)

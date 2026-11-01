@@ -16,7 +16,7 @@ final class LoupeViewportTests: XCTestCase {
 
     func testFitZoomIsWholeFrameFit() {
         let viewport = makeViewport()
-        XCTAssertEqual(viewport.zoom, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(viewport.zoom, 0.225, accuracy: 1e-12)
     }
 
     func testFitHasNoOutputWindow() {
@@ -26,7 +26,7 @@ final class LoupeViewportTests: XCTestCase {
 
     func testZoomAtCentreKeepsCentre() {
         let viewport = makeViewport().zoomed(aroundCanvas: CGPoint(x: 500, y: 400), by: 2)
-        XCTAssertEqual(viewport.zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(viewport.zoom, 0.45, accuracy: 1e-12)
         let centre = viewport.framing.windowCenter(of: viewport.state)
         XCTAssertEqual(centre.x, 2000, accuracy: 1e-9)
         XCTAssertEqual(centre.y, 1500, accuracy: 1e-9)
@@ -61,7 +61,7 @@ final class LoupeViewportTests: XCTestCase {
 
     func testResizeRecomputesFit() {
         let resized = makeViewport().resized(to: ImageSize(width: 2000, height: 1600))
-        XCTAssertEqual(resized.zoom, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(resized.zoom, 0.45, accuracy: 1e-12)
     }
 
     func testResizeKeepsActualZoomAndCentre() {

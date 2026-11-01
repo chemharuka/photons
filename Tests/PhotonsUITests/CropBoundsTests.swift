@@ -139,9 +139,13 @@ final class CropBoundsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(c.top, bounds.top - 1e-9)
         XCTAssertLessThanOrEqual(c.right, bounds.right + 1e-9)
         XCTAssertLessThanOrEqual(c.bottom, bounds.bottom + 1e-9)
-        // The source is the fit frame here, so the two coincide; the next test is the case where they
-        // do not, and proves the frame may use the band between them.
-        XCTAssertEqual(bounds, CropRect.full)
+        // 213: at 90 % fit the visible canvas is 5 % larger than the source on each side
+        // (origin = (45, 30), content = 810 × 540 → −1/18 … 1 + 1/18), so the draft lands on those
+        // edges, not on `0…1²`.
+        XCTAssertEqual(bounds.left, -1.0 / 18, accuracy: 1e-9)
+        XCTAssertEqual(bounds.top, -1.0 / 18, accuracy: 1e-9)
+        XCTAssertEqual(bounds.right, 1 + 1.0 / 18, accuracy: 1e-9)
+        XCTAssertEqual(bounds.bottom, 1 + 1.0 / 18, accuracy: 1e-9)
     }
 
     // MARK: - ② an angle: blank corners are legal, the canvas edge is not
@@ -215,12 +219,16 @@ final class CropBoundsTests: XCTestCase {
                      + "y %.1f…%.1f (canvas %.1f…%.1f) · frame %@",
                      minX, maxX, canvasLow.x, canvasHigh.x, minY, maxY,
                      canvasLow.y, canvasHigh.y, NSStringFromRect(frame)))
-        // 196 — the canvas is the hard bound: the turned quad's AABB is inside it, at the frame's own
-        // size (moved, never shrunk). 190 pinned the 25 % overlap here; the user reversed that.
-        XCTAssertGreaterThanOrEqual(minX, canvasLow.x - 2)
-        XCTAssertLessThanOrEqual(maxX, canvasHigh.x + 2)
-        XCTAssertGreaterThanOrEqual(minY, canvasLow.y - 2)
-        XCTAssertLessThanOrEqual(maxY, canvasHigh.y + 2)
+        // 213/§5 — the hard bound is the **viewport**, stated in screen space: the drawn quad's four
+        // sides inside (0, 0, 900, 600). The document-space quad printed above may leave the rotated
+        // photo's AABB (it covers the blank corner), which is allowed.
+        let tolerance = 0.5
+        XCTAssertGreaterThanOrEqual(frame.minX, -tolerance, "the frame leaves the viewport on the left")
+        XCTAssertGreaterThanOrEqual(frame.minY, -tolerance, "the frame leaves the viewport on the top")
+        XCTAssertLessThanOrEqual(frame.maxX, Double(Self.viewport.width) + tolerance,
+                                 "the frame leaves the viewport on the right")
+        XCTAssertLessThanOrEqual(frame.maxY, Double(Self.viewport.height) + tolerance,
+                                 "the frame leaves the viewport on the bottom")
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
                       "the frame covers the blank corner, so the warning must say so")
     }

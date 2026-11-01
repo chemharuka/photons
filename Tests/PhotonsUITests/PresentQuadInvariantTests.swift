@@ -249,12 +249,15 @@ final class PresentQuadInvariantTests: XCTestCase {
         let device = try self.device()
         let presenter = try CanvasPresenter(device: device)
         let canvas = ImageSize(width: 640, height: 400)
-        // A 6000×4000 picture fitted into 640×400: content 600×400, so 20 px bars left and right.
+        // 213: a 6000×4000 picture at 90 % fit in 640×400 is 540×360, so 50 px bars left/right and
+        // 20 px bands top/bottom.
         let framing = LoupeFraming(viewport: canvas, sourceWidth: 6000, sourceHeight: 4000)
         let fitMapping = framing.mapping(of: .fit)
-        let heldRect = ImageRect(x: Int(fitMapping.originX.rounded()), y: 0,
-                                 width: Int(fitMapping.contentWidth.rounded()), height: 400)
-        XCTAssertEqual(heldRect, ImageRect(x: 20, y: 0, width: 600, height: 400),
+        let heldRect = ImageRect(x: Int(fitMapping.originX.rounded()),
+                                 y: Int(fitMapping.originY.rounded()),
+                                 width: Int(fitMapping.contentWidth.rounded()),
+                                 height: Int(fitMapping.contentHeight.rounded()))
+        XCTAssertEqual(heldRect, ImageRect(x: 50, y: 20, width: 540, height: 360),
                        "the fixture is the fit letterbox this test is about")
 
         // fit → 1:1, halfway. The picture grows by 640 × 400 / 600 × 400 = 1.0667 and moves left.
@@ -295,8 +298,8 @@ final class PresentQuadInvariantTests: XCTestCase {
             for x in 0..<canvas.width {
                 let i = (y * canvas.width + x) * 4
                 // A pixel the picture has grown over: inside the canvas, outside the held letterbox —
-                // the left bar (x < 20) is where the growing picture arrives first.
-                if x < 20 || x >= 620 {
+                // the left bar (x < 50) is where the growing picture arrives first.
+                if x < heldRect.x || x >= heldRect.maxX {
                     if abs(before[i] - matteCode) < 1e-3 { greyBefore += 1 }
                     if abs(now[i] - matteCode) < 1e-3 { greyAfter += 1 }
                 }

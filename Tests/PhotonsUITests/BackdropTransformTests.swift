@@ -401,6 +401,8 @@ final class BackdropTransformTests: XCTestCase {
         let canvas = ImageSize(width: 640, height: 400)
         // 1.6 aspect, so 适应 fills the canvas exactly: the cleanest form of "covers [0, 1]".
         let framing = LoupeFraming(viewport: canvas, sourceWidth: 6000, sourceHeight: 3750)
+        // 213: `.fit` is 90 % of the viewport, so the picture sits 5 % in from each edge of the
+        // canvas (the composition below covers −1/18 … 1 + 1/18 of the picture).
         // The camera centred on the picture: a 300 % window is 213 × 133 source px in the middle.
         let from = LoupeViewState(mode: .actual, zoom: 3, centerX: 3000, centerY: 1875)
         let to = LoupeViewState.fit
@@ -429,12 +431,15 @@ final class BackdropTransformTests: XCTestCase {
         XCTAssertGreaterThan(Double(startPicture.u0), 0.4, "the 300 % window is in the middle of the picture")
         XCTAssertLessThan(Double(startPicture.u0 + startPicture.du), 1)
 
-        // 适应: the composition covers exactly the whole picture.
+        // 适应 at 213's 90 %: the composition shows the picture with a 1/18 band of canvas on each
+        // side, so it spans −1/18 … 1 + 1/18 in picture coordinates.
         let fitPicture = atFit.onWholePicture(placement)
-        XCTAssertEqual(Double(fitPicture.u0), 0, accuracy: 2e-4, "适应 must start at the picture's left edge")
-        XCTAssertEqual(Double(fitPicture.v0), 0, accuracy: 2e-4)
-        XCTAssertEqual(Double(fitPicture.du), 1, accuracy: 2e-4, "and span exactly [0, 1]")
-        XCTAssertEqual(Double(fitPicture.dv), 1, accuracy: 2e-4)
+        XCTAssertEqual(Double(fitPicture.u0), -1.0 / 18, accuracy: 2e-4,
+                       "适应 must start 1/18 of the picture left of its edge")
+        XCTAssertEqual(Double(fitPicture.v0), -1.0 / 18, accuracy: 2e-4)
+        XCTAssertEqual(Double(fitPicture.du), 1 + 2.0 / 18, accuracy: 2e-4,
+                       "and span −1/18 … 1 + 1/18 (width 1 + 2/18)")
+        XCTAssertEqual(Double(fitPicture.dv), 1 + 2.0 / 18, accuracy: 2e-4)
 
         // A covering frame reads inside the picture: every canvas corner is a real texel, so a backdrop
         // given to one (it never is — `backdropTexture(for:)` returns nil) could only repeat content.
@@ -456,13 +461,15 @@ final class BackdropTransformTests: XCTestCase {
         // become the matte instead of the picture's edge stretched sideways.
         let letterboxed = LoupeFraming(viewport: canvas, sourceWidth: 6000, sourceHeight: 4000)
         let box = letterboxed.framePlacement(of: letterboxed.mapping(of: LoupeViewState.fit))
-        XCTAssertEqual(Double(box.rect.u0), 20.0 / 640, accuracy: 1e-6, "a 20 px bar on each side")
-        XCTAssertEqual(Double(box.rect.du), 600.0 / 640, accuracy: 1e-6)
+        // 213: 90 % fit — the 1.5 picture is 540 × 360 in the 640 × 400 canvas, i.e. 50 px bars on
+        // each side and 20 px bands top/bottom.
+        XCTAssertEqual(Double(box.rect.u0), 50.0 / 640, accuracy: 1e-6, "a 50 px bar on each side")
+        XCTAssertEqual(Double(box.rect.du), 540.0 / 640, accuracy: 1e-6)
         let boxed = PresentWindow.whole.onWholePicture(box)
         XCTAssertLessThan(Double(boxed.u0), 0, "the canvas is wider than the picture — the bars fall outside")
         XCTAssertGreaterThan(Double(boxed.u0 + boxed.du), 1)
-        XCTAssertEqual(Double(boxed.v0), 0, accuracy: 1e-6)
-        XCTAssertEqual(Double(boxed.dv), 1, accuracy: 1e-6)
+        XCTAssertEqual(Double(boxed.v0), -20.0 / 360, accuracy: 1e-6)
+        XCTAssertEqual(Double(boxed.dv), 400.0 / 360, accuracy: 1e-6)
 
         print(String(format: "[058] 300 %% → 适应 (640×400 canvas, 6000×3750 picture)\n"
                      + "       frame window at 适应: u0 %.4f · du %.4f  (053 gave the backdrop this)\n"
@@ -492,11 +499,18 @@ final class BackdropTransformTests: XCTestCase {
         let presenter = try CanvasPresenter(device: device)
         let canvas = ImageSize(width: 640, height: 400)
         let framing = LoupeFraming(viewport: canvas, sourceWidth: 6000, sourceHeight: 3750)
+        // 213: the whole-picture composition is the 100 % framing (see the sibling test).
+        var fullViewport = LoupeViewState()
+        fullViewport.mode = .actual
+        // Bypass the 12.5 % floor: the 100 % framing of a 60 MP picture in a 640 px canvas is 10.7 %.
+        fullViewport.zoom = framing.fitZoom / LoupeFraming.fitMargin
+        fullViewport.centerX = 3000
+        fullViewport.centerY = 1875
         let from = LoupeViewState(mode: .actual, zoom: 3, centerX: 3000, centerY: 1875)
         let bridge = LoupeZoomBridge(fromContent: framing.contentPixels(of: from),
-                                     toContent: framing.contentPixels(of: LoupeViewState.fit),
+                                     toContent: framing.contentPixels(of: fullViewport),
                                      fromMapping: framing.mapping(of: from),
-                                     toMapping: framing.mapping(of: LoupeViewState.fit),
+                                     toMapping: framing.mapping(of: fullViewport),
                                      canvas: canvas, anchor: .center)
         let window = bridge.window(atProgress: 1, textureSize: canvas)
         let placement = framing.framePlacement(of: framing.mapping(of: from))
@@ -514,18 +528,24 @@ final class BackdropTransformTests: XCTestCase {
         func pictureU(_ x: Int) -> Double {
             Double(backdropWindow.u0) + (Double(x) + 0.5) / Double(canvas.width) * Double(backdropWindow.du)
         }
-        let left = Self.pixelAt(fixed, 2, 200)
-        let right = Self.pixelAt(fixed, 637, 200)
-        XCTAssertEqual(Double(left[0]), 0.1, accuracy: 0.012,
-                       "canvas x = 2 must be the picture's left edge (u \(pictureU(2))), not a band")
-        XCTAssertEqual(Double(right[0]), 0.9, accuracy: 0.012,
-                       "canvas x = 637 must be the picture's right edge (u \(pictureU(637)))")
+        // 213: at 90 % fit the picture occupies x 32…608 of the 640 px canvas; sample just inside
+        // its edges (the columns outside are the letterbox/matte, not the picture).
+        let left = Self.pixelAt(fixed, 32, 200)
+        let right = Self.pixelAt(fixed, 607, 200)
+        // 213: the composed picture covers −1/18 … 1 + 1/18 of the canvas, so these two columns are
+        // not u = 0/1; what matters is that the gradient follows the composed coordinate.
+        let leftU = min(max(pictureU(32), 0), 1)
+        let rightU = min(max(pictureU(607), 0), 1)
+        XCTAssertEqual(Double(left[0]), 0.1 + 0.8 * leftU, accuracy: 0.02,
+                       "canvas x = 32 must read the picture at u \(leftU), not a band")
+        XCTAssertEqual(Double(right[0]), 0.1 + 0.8 * rightU, accuracy: 0.02,
+                       "canvas x = 607 must read the picture at u \(rightU), not a band")
 
         // Every canvas column **outside the frame's own sliver** is the picture at that column's
         // coordinate, in order. (At progress 1 the 300 % texture is drawn at 1/28, so the sharp frame
         // still occupies the middle 3.5 % of the canvas; that sliver is the frame's, and the next
         // assertion is that it is.)
-        let probes = [2, 100, 200, 290, 350, 440, 540, 637]
+        let probes = [32, 100, 200, 290, 350, 440, 540, 607]
         var values: [Float] = []
         for x in probes {
             let px = Self.pixelAt(fixed, x, 200)
@@ -535,7 +555,7 @@ final class BackdropTransformTests: XCTestCase {
         }
         XCTAssertTrue(zip(values, values.dropFirst()).allSatisfy { $1 > $0 },
                       "the canvas must climb monotonically from the picture's left edge to its right: \(values)")
-        XCTAssertGreaterThan(Double(values.last! - values.first!), 0.7,
+        XCTAssertGreaterThan(Double(values.last! - values.first!), 0.5,
                              "the canvas spans \(values.last! - values.first!) — less than the picture's range")
         Self.assertColour(Self.pixelAt(fixed, 320, 200), [0.55, 0.55, 0.55, 1],
                           "the frame texture is still drawn where the window puts it — the middle sliver")
@@ -545,19 +565,19 @@ final class BackdropTransformTests: XCTestCase {
                                       [.shaderRead, .renderTarget])
         XCTAssertTrue(presenter.renderForTest(frame, window: window, backdrop: backdrop,
                                        backdropWindow: window, into: mutated, linearize: false))
-        let mutLeft = Self.pixelAt(mutated, 2, 200)
-        let mutRight = Self.pixelAt(mutated, 637, 200)
+        let mutLeft = Self.pixelAt(mutated, 32, 200)
+        let mutRight = Self.pixelAt(mutated, 607, 200)
         XCTAssertEqual(mutLeft[0], mutRight[0], accuracy: 1.0 / 255,
                        "053's window must read the SAME value at both canvas edges — one edge texel "
                        + "smeared across the canvas. Left \(mutLeft[0]), right \(mutRight[0])")
         XCTAssertGreaterThan(abs(Double(mutRight[0] - right[0])), 0.5,
                              "the fix and 053 must differ at the right edge: \(right[0]) vs \(mutRight[0])")
-        XCTAssertEqual(Double(window.u0), -13.56, accuracy: 0.05,
-                       "053's window starts 13.6 pictures left of the texture — that is the bug")
+        XCTAssertEqual(Double(window.u0), -11.5, accuracy: 0.05,
+                       "053's window starts 11.5 pictures left of the texture — that is the bug")
 
         print(String(format: "[058] 300 %% → 适应, gradient backdrop, canvas 640×400:\n"
                      + "       plant  left x2 %.3f (u %.4f) · x200 %.3f (u %.4f) · right x637 %.3f (u %.4f)\n"
-                     + "       053    left x2 %.3f · right x637 %.3f  — both edges read one texel, "
+                     + "       053    left x32 %.3f · right x607 %.3f  — both edges read one texel, "
                      + "Δ %.3f vs plant",
                      left[0], pictureU(2), values[2], pictureU(200), right[0], pictureU(637),
                      mutLeft[0], mutRight[0], right[0] - mutRight[0]))

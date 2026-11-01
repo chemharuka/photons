@@ -167,8 +167,11 @@ final class CropClampMatrixProbe202Tests: XCTestCase {
         let doc = documentBox(crop, degrees: controller.draft.straighten)
         let canvas = documentCanvas(degrees: controller.draft.straighten)
         let screenQuad = drawn(controller: controller, mapping: map)
-        let screenCanvas = CGRect(x: Double(map.originX), y: Double(map.originY),
-                                  width: Double(map.contentWidth), height: Double(map.contentHeight))
+        // 213/§5 — the canvas is the **viewport**, not the picture inside it: a frame may cover the
+        // black letterbox, it may not leave the screen.
+        let screenCanvas = CGRect(x: 0, y: 0,
+                                  width: Double(map.viewport.width),
+                                  height: Double(map.viewport.height))
         let frameBounds = controller.canvasBounds(mapping: map, source: Self.source)
         return Cell(angle: degrees, framing: f.name, method: method.title,
                     calls: controller.clampCalls - callsBefore,
@@ -222,23 +225,15 @@ final class CropClampMatrixProbe202Tests: XCTestCase {
             }
         }
 
-        // The law, stated on whatever the tool actually draws. A turned frame is a quad and the
-        // canvas is the document's own AABB (196's law, which does not move with the zoom); an upright
-        // frame is a rect of the **visible** canvas (`canvasBounds`, which at 适应 includes the 10 %
-        // workspace band a crop may cover — 162).
+        // 213/§5 — the law is stated on what the tool actually draws and in **screen space**: the
+        // projected quad's four corners inside the horizontal viewport (0.5 px of slack). The
+        // document-space document quad is printed above as a readout only; it may leave the photo's
+        // rotated AABB when the frame covers the black letterbox, which is allowed.
         for cell in cells {
-            if abs(cell.angle) > 1e-9 {
-                let (detail, excess) = out(cell.doc, of: cell.canvas, tolerance: 0.5)
-                XCTAssertLessThanOrEqual(excess, 0,
-                                         "θ \(cell.angle)° \(cell.framing) \(cell.method): the "
-                                         + "turned frame leaves the canvas — \(detail) (px)")
-            } else {
-                let b = cell.frameBounds, c = cell.crop
-                XCTAssertTrue(c.left >= b.left - 1e-6 && c.top >= b.top - 1e-6
-                              && c.right <= b.right + 1e-6 && c.bottom <= b.bottom + 1e-6,
-                              "θ 0° \(cell.framing) \(cell.method): the frame leaves the visible "
-                              + "canvas — crop \(c) vs bounds \(b)")
-            }
+            let (detail, excess) = out(cell.screenQuad, of: cell.screenCanvas, tolerance: 0.5)
+            XCTAssertLessThanOrEqual(excess, 0,
+                                     "θ \(cell.angle)° \(cell.framing) \(cell.method): the "
+                                     + "frame leaves the viewport — \(detail) (px)")
         }
     }
 }

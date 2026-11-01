@@ -96,19 +96,22 @@ final class CropPortraitFitDefect197ProbeTests: XCTestCase {
               + "· 右半采样 (\(rightBand),\(canvas.y + canvas.height / 2)) 亮? "
               + "\(lit(texture, rightBand, canvas.y + canvas.height / 2))")
 
-        // ① the defect: the picture stops at the canvas' midline instead of its right edge.
-        XCTAssertEqual(Double(maxX), Double(midX), accuracy: 8,
-                       "197 probe: the lit extent no longer stops at the canvas' midline "
-                       + "(maxX \(maxX) vs midline \(midX), canvas \(canvas.keyString)) — if this is "
-                       + "red because the picture now reaches \(canvas.maxX - 1), the defect is fixed: "
-                       + "flip this assertion to `maxX >= canvas.maxX - 1`.")
+        // ① the defect, stated without the pre-213 numbers: the picture does not reach the canvas'
+        // right edge (at 100 % fit it stopped exactly on the midline; at 213's 90 % fit the whole
+        // canvas is smaller, so pin the symptom rather than one scale-dependent coordinate).
+        XCTAssertLessThan(Double(maxX), Double(canvas.maxX) - 8,
+                          "197 probe: the lit extent now reaches the canvas' right edge "
+                          + "(maxX \(maxX) vs canvas.maxX \(canvas.maxX), canvas \(canvas.keyString)) "
+                          + "— if this is red, the defect is fixed: flip ①/② to the positive form.")
         // ② the visible symptom: the right half of the canvas is empty.
         XCTAssertFalse(lit(texture, rightBand, canvas.y + canvas.height / 2),
                        "197 probe: the right half of the canvas is no longer black — see ①.")
-        // ③ it is not the canvas: the canvas itself fills the viewport's height (that is the 「AABB 比
-        //    视口高」 shape) and reaches x = 171 … 528.
-        XCTAssertEqual(canvas.height, Self.viewport.height, "the canvas no longer fills the height")
-        XCTAssertEqual(canvas.maxX, 529, "the canvas rect moved")
+        // ③ it is not a missing canvas: the canvas is a real rect inside the viewport (213: it is
+        //    90 % of it, so the hard-coded 100 % edges no longer apply).
+        XCTAssertGreaterThan(canvas.width, 0)
+        XCTAssertGreaterThan(canvas.height, 0)
+        XCTAssertLessThanOrEqual(canvas.x + canvas.width, Self.viewport.width)
+        XCTAssertLessThanOrEqual(canvas.y + canvas.height, Self.viewport.height)
         XCTAssertGreaterThan(maxX, minX, "nothing was drawn at all")
     }
 }

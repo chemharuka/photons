@@ -317,6 +317,88 @@ public enum CropTool {
         return layout
     }
 
+    // MARK: the screen-space canvas clamp (213)
+
+    /// **The one containment arithmetic** for 213/§5: the frame may not leave the canvas, and the
+    /// canvas is the **viewport** — a horizontal rectangle that never turns. The candidate rect's
+    /// four corners are projected through the same projection `layout` draws with (including the
+    /// 088 quad rotation), and all four must land inside `(0, 0, viewport)`; half a device pixel of
+    /// slack absorbs the overlay's rounding.
+    ///
+    /// Moving is preferred: a frame whose projected box fits is translated the least amount that
+    /// brings it inside. Only a frame whose box is genuinely larger than the viewport is shrunk,
+    /// uniformly about its centre. The view-space translation is converted back through
+    /// `LoupeMapping.framePoint`'s affine, so the rect always moves with the mapping handed in.
+    ///
+    /// The document-space `CropWorkspaceLayout.canvasBounds` is deliberately **not** consulted: it is
+    /// the readout / red-warning rectangle, and clamping against it (with the frame's own document
+    /// quad) was the double rotation that let frames hang off the screen.
+    public static func clampToCanvas(_ rect: CropRect,
+                                     mapping: LoupeMapping,
+                                     source: ImageSize,
+                                     degrees: Double = 0,
+                                     tolerance: Double = 0.5) -> CropRect {
+        let c = rect.clamped(allowsOutsideSource: true)
+        let viewport = CGRect(x: 0, y: 0,
+                              width: Double(mapping.viewport.width),
+                              height: Double(mapping.viewport.height))
+        guard viewport.width > 1, viewport.height > 1 else { return c }
+
+        func projectedBox(_ rect: CropRect) -> CGRect {
+            let corners = layout(crop: rect, source: source, mapping: mapping,
+                                 pointScale: 1, showsGrid: false,
+                                 quadRotationDegrees: degrees).corners
+            let xs = corners.map(\.x), ys = corners.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(),
+                  let minY = ys.min(), let maxY = ys.max() else { return .zero }
+            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
+        func inside(_ box: CGRect) -> Bool {
+            box.minX >= viewport.minX - tolerance && box.minY >= viewport.minY - tolerance
+                && box.maxX <= viewport.maxX + tolerance && box.maxY <= viewport.maxY + tolerance
+        }
+
+        var result = c
+        var box = projectedBox(result)
+        guard !inside(box) else { return c }
+
+        // Shrink only when the frame is larger than the screen. Scaling the rect about its centre is
+        // a uniform scale in view space, so the ratio is untouched.
+        let shrink = min(1, viewport.width / max(box.width, 1e-9),
+                         viewport.height / max(box.height, 1e-9))
+        if shrink < 1 {
+            let width = result.width * shrink, height = result.height * shrink
+            result = CropRect(left: result.centerX - width / 2,
+                              top: result.centerY - height / 2,
+                              right: result.centerX + width / 2,
+                              bottom: result.centerY + height / 2)
+                .clamped(allowsOutsideSource: true)
+            box = projectedBox(result)
+        }
+
+        // Move the least amount that puts the projected box inside. A translation in view space is a
+        // translation in frame space (both `frameView` and its inverse are axis-aligned affines).
+        var dx = 0.0, dy = 0.0
+        if box.minX < viewport.minX - tolerance { dx = viewport.minX - box.minX }
+        else if box.maxX > viewport.maxX + tolerance { dx = viewport.maxX - box.maxX }
+        if box.minY < viewport.minY - tolerance { dy = viewport.minY - box.minY }
+        else if box.maxY > viewport.maxY + tolerance { dy = viewport.maxY - box.maxY }
+        guard dx != 0 || dy != 0 else { return result }
+
+        let frameDX = dx * mapping.cropWidth / max(mapping.contentWidth, 1e-9)
+        let frameDY = dy * mapping.cropHeight / max(mapping.contentHeight, 1e-9)
+        // `layout` turns the rect's **local** offset by R(−θ) before projecting, so a desired image
+        // translation has to be turned back by R(θ) to become a rect translation. At θ = 0 this is
+        // `(du, dv) = (frameDX/W, frameDY/H)`, the Upright path's old arithmetic.
+        let local = CropGeometry.RotationMatrix(degrees: degrees)
+            .apply(x: frameDX, y: frameDY)
+        let du = local.x / Double(max(source.width, 1))
+        let dv = local.y / Double(max(source.height, 1))
+        return CropRect(left: result.left + du, top: result.top + dv,
+                        right: result.right + du, bottom: result.bottom + dv)
+            .clamped(allowsOutsideSource: true)
+    }
+
     // MARK: hit test
 
     /// The grip a click landed on. Never `nil`: a click that misses every grip is still either

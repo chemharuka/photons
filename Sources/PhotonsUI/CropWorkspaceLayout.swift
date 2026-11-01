@@ -24,8 +24,11 @@ import PhotonsCore
 // quarter turn and a photo switch all call it.
 public struct CropWorkspaceLayout: Equatable, Sendable {
 
-    /// The crop workspace's entry framing: ordinary 适应 × 0.90 (132 §9).
-    public static let entryScale: Double = 0.90
+    /// The crop workspace's entry framing: the same 90 % as ordinary 适应 (213; formerly 132 §9's
+    /// `fit × 0.90`). The number lives in `LoupeFraming.fitMargin`; this is its historical alias for
+    /// callers that still spell `entryScale`.
+    public static let fitMargin: Double = LoupeFraming.fitMargin
+    public static let entryScale: Double = fitMargin
 
     /// One answer, all four numbers — what the overlay draws and what the bar prints.
     public struct Entry: Equatable, Sendable {
@@ -98,19 +101,22 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
         let ow = Double(max(oriented.width, 1)), oh = Double(max(oriented.height, 1))
 
         let rotatedSource = LoupeFraming.rotatedExtent(width: ow, height: oh, degrees: straighten)
-        var zoom = min(cw / max(rotatedSource.width, 1e-9),
-                       ch / max(rotatedSource.height, 1e-9)) * Self.entryScale
+        // 213 — exactly the same arithmetic (and the same single 90 %) as `LoupeFraming.fitZoom`:
+        // whole-frame fit × margin, with the turned crop's re-fit also × margin beyond 6°.
+        var zoom = min(1, min(cw / max(rotatedSource.width, 1e-9),
+                              ch / max(rotatedSource.height, 1e-9)) * Self.fitMargin)
         let rect = crop.clamped(allowsOutsideSource: true)
         if abs(straighten) > LoupeFraming.cropRefitDegrees {
             // Beyond 6° the workspace re-fits the **whole canvas** once instead of keeping the
-            // 90 % framing — the same rule `LoupeFraming.fitZoom` applies through `fitScale == 1`.
+            // 90 % framing — the same rule `LoupeFraming.fitZoom` applies.
             let rotatedCrop = LoupeFraming.rotatedExtent(width: rect.width * ow,
                                                          height: rect.height * oh,
                                                          degrees: straighten)
-            zoom = min(cw / max(rotatedCrop.width, 1e-9),
-                       ch / max(rotatedCrop.height, 1e-9))
+            let fit = min(cw / max(rotatedCrop.width, 1e-9),
+                          ch / max(rotatedCrop.height, 1e-9))
+            zoom = min(zoom, min(1, fit * Self.fitMargin))
         }
-        zoom = zoom.isFinite && zoom > 0 ? min(1, zoom) : 0
+        zoom = zoom.isFinite && zoom > 0 ? zoom : 0
 
         // The crop frame is a rectangle of the **turned** frame, so it stays axis-aligned on screen.
         let frameWidth = rect.width * ow * zoom

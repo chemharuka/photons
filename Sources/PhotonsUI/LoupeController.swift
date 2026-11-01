@@ -1944,7 +1944,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let canvas = viewportPixels
         let texture = ImageSize(width: onCanvas.texture.width, height: onCanvas.texture.height)
         let fromMapping = canvasContent?.mapping ?? framing.mapping(of: old)
-        let fromContent = canvasContent?.content ?? framing.contentPixels(of: old)
+        // 213: the render's `content` is the aspect-fit *box* (100 % of the viewport), which no
+        // longer equals the 90 % picture at 适应. The bridge's `fromContent` must describe the
+        // camera that is actually on screen, so take it from the projection, not the box.
+        let fromContent = framing.contentPixels(of: old)
         let toMapping = framing.mapping(of: new)
         // Where the composite already is: identity for a bridge armed from rest, and the running
         // bridge's own map for one that replaces it (read off the bridge, which is the value that was
@@ -3297,27 +3300,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if isShapeDragArmed { cancelShapeDrag() }
         session.pendingMaskShape = nil
         session.maskTool = .off
-        // 132 §9 — 裁切模式比普通适应小 10 %：这是为「拖动小角度不跳缩放」付的代价（拉直绝大多数是
-        // 轻微角度；按 45° 的最坏情况预留会让画面常年小 29 %，不成比例）。`framing()` 在本工具
-        // active 时给出 `fitScale = 0.90`，所以这一句同时把普通 fit 之外的那 10 % 留了出来。
+        // 213 — 适应 (and therefore the crop workspace's entry framing) is now `LoupeFraming.fitMargin`
+        // inside `fitZoom`, so entering 裁切 no longer rescales the camera a second time.
         zoomToFit()
         armCropFrame(.entered)
         requestEditRender()
         return true
     }
 
-    /// 132 §9: the crop workspace's 取景 = 普通 fit × 0.90 (see `LoupeFraming.fitScale`).
-    static let cropWorkspaceFitScale = 0.90
+    /// Historical alias (132 §9): the crop workspace used to ask for `fit × 0.90` through this
+    /// multiplier. 213 moved the single 90 % into `LoupeFraming.fitMargin` / `fitZoom`, so the
+    /// workspace no longer scales the camera a second time; kept as `1` so the call sites and the
+    /// render job keep one spelling.
+    static let cropWorkspaceFitScale: Double = 1
 
-    /// 169 §0 — the fit multiplier the **live** document calls for: 90 % for a small straighten, and
-    /// the whole-canvas refit (1) once the angle passes `CropRefitDegrees`, which is the rule
-    /// `LoupeFraming.fitZoom` documents. One property so the projection, the render job and the
-    /// public `makeFrame` spelling cannot disagree about it.
-    var currentCropWorkspaceFitScale: Double {
-        guard cropTool.isActive else { return 1 }
-        let angle = abs(session?.edit.geometry.straightenDegrees ?? 0)
-        return angle > LoupeFraming.cropRefitDegrees ? 1 : Self.cropWorkspaceFitScale
-    }
+    /// 213 — the camera is the same in and out of the crop workspace: `fitZoom` owns the 90 %. The
+    /// property stays so the projection, the render job and `makeFrame` read one name.
+    var currentCropWorkspaceFitScale: Double { Self.cropWorkspaceFitScale }
 
     /// 082 — the card's section resets (and its title) write the document; the frame on screen is the
     /// draft, so it is re-seeded from the new document and re-laid-out in the same turn.
