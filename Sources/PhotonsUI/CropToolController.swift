@@ -873,24 +873,26 @@ public final class CropToolController {
 
     /// Pull the draft's rect into the **screen-space canvas** — the model-layer floor of ⑦.
     ///
-    /// 213/§5 — the canvas is the **viewport**, a horizontal rectangle that never turns; the picture
-    /// and its black letterbox live inside it. The candidate frame's four corners are projected to
-    /// view points and every one of them must land in `(0, 0, viewport)`, so the check is made in the
-    /// same space the user sees. The old document-space test rotated both the frame and its bound,
-    /// which is why a frame could pass the test and still hang off the screen.
+    /// 213/§5 — the canvas is a horizontal rectangle that never turns. 219 fixed *which* rectangle:
+    /// the **picture at the current camera** (`LoupeMapping.canvasRect`), not the viewport. At 100 %
+    /// and above the canvas is larger than the screen — a full frame must stay full instead of being
+    /// shrunk to 22 % — and a frame may leave the screen, because the user pans it there on purpose.
+    /// The candidate frame's four corners are projected to view points and every one of them must
+    /// land in that rect, so the check is made in the same space the user sees.
     ///
     /// The document-space `canvasBounds` above is still what the readouts and the red warning use; it
     /// is no longer the clamp's criterion. Moving is preferred; only a frame whose projected box is
-    /// genuinely larger than the viewport is shrunk (about its centre, ratio kept).
+    /// genuinely larger than the canvas is shrunk (about its centre, ratio kept).
     ///
     /// Returns `true` when the draft moved.
     @discardableResult
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
         clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
-        // A canvas that has not been laid out yet (a zero-sized viewport in a headless test, or the
-        // first `layout` pass) is not an opinion about what fits: clamping against it would shrink the
-        // crop to a pixel. A real canvas is at least 560 pt wide by contract.
+        // A viewport that has not been laid out yet (a zero-sized one in a headless test, or the
+        // first `layout` pass) is not an opinion about what fits: the mapping would be degenerate and
+        // clamping against it would shrink the crop to a pixel. A real canvas is at least 560 pt wide
+        // by contract.
         guard mapping.viewport.width > 64, mapping.viewport.height > 64 else { return false }
         let src = source ?? sourceSize
         let before = draft.crop.clamped(allowsOutsideSource: true)
@@ -902,7 +904,7 @@ public final class CropToolController {
         let next = clampToCanvas(base, mapping: mapping, source: src)
 
         if next == base {
-            // The frame already sits inside the viewport: the only thing that may still have to be
+            // The frame already sits inside the canvas: the only thing that may still have to be
             // written back is the lock's reshape, never the opt-in photo shrink (`effectiveCrop` is
             // a view).
             guard shaped != before else { return false }
@@ -943,12 +945,12 @@ public final class CropToolController {
     }
 
     /// 213/§5 — **the one containment arithmetic**: the candidate frame's four corners projected to
-    /// view points, every one inside `(0, 0, viewport.width, viewport.height)` with half a point of
-    /// slack. The canvas is the screen, it never turns; the document-space quad and its rotated AABB
-    /// are readouts only.
+    /// view points, every one inside the picture at the current camera (`LoupeMapping.canvasRect`)
+    /// with half a point of slack. The canvas never turns; the document-space quad and its rotated
+    /// AABB are readouts only.
     ///
     /// A frame that fits is *moved* the least amount that brings its projected box inside; only a
-    /// frame whose box is larger than the viewport is shrunk (uniformly, about its centre). The view
+    /// frame whose box is larger than the canvas is shrunk (uniformly, about its centre). The view
     /// translation is converted back through the same `framePoint` affine, so the rect moves with the
     /// mapping it was projected through — never with a stale canvas.
     private func clampToCanvas(_ rect: CropRect, mapping: LoupeMapping,

@@ -191,6 +191,22 @@ final class CropCanvasClampTests: XCTestCase {
         CGRect(origin: .zero, size: loupe.canvasView.bounds.size)
     }
 
+    /// 219 — the canvas in view points: the whole picture at this camera, not the window. Built from
+    /// the same `LoupeFraming` the controller's crop mapping uses (crop `.full`, document 0° here).
+    private func cropMapping(_ loupe: LoupeController) -> LoupeMapping {
+        LoupeFraming(viewport: loupe.viewportPixels,
+                     sourceWidth: Double(loupe.cropSourceSize.width),
+                     sourceHeight: Double(loupe.cropSourceSize.height),
+                     crop: .full,
+                     straightenDegrees: 0).mapping(of: loupe.viewState)
+    }
+
+    private func canvasOnScreen(_ loupe: LoupeController) -> CGRect {
+        let r = cropMapping(loupe).canvasRect
+        let s = loupe.backingScale
+        return CGRect(x: r.minX / s, y: r.minY / s, width: r.width / s, height: r.height / s)
+    }
+
     /// The ceiling holds on the **real** camera: zoom in as far as the ladder allows, the frame lands
     /// flush inside the canvas, the pill prints the value it actually stopped at, and nothing moves on
     /// a second request.
@@ -345,9 +361,9 @@ final class CropCanvasClampTests: XCTestCase {
         XCTAssertEqual(loupe.cropTool.draft.crop.keyString, cropBefore.keyString,
                        "082: 缩放不许偷偷改裁切框")
 
-        // ② Camera clamp off, ⑦ (the older 「框太大就缩小框」 clamp) still on: the zoom runs to 400 % and
-        //    the frame is kept on the canvas by **shrinking the crop** — the silent re-crop the user
-        //    reported as 「框自己变小了」. Numbers: the draft rect before → after.
+        // ② Camera clamp off, ⑦ (the older 「框太大就缩小框」 clamp) still on: the zoom runs to 400 %.
+        //   219 — the frame is **not** shrunk any more: it is a crop of the source, and the canvas at
+        //   400 % is the whole picture, far larger than the window. The silent re-crop is gone.
         loupe.clampsCropCamera = false
         loupe.zoomToFit()
         loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
@@ -355,17 +371,18 @@ final class CropCanvasClampTests: XCTestCase {
         print("082 anti-proof · 只关相机钳位（⑦ 还在）：请求 400% → 实际 \(loupe.viewState.zoomLabel) "
               + "· 草稿框 \(cropBefore.keyString) → \(shrunk.keyString)")
         XCTAssertEqual(loupe.viewState.zoom, 4, accuracy: 1e-9, "082 反证：没有上限，请求原样通过")
-        XCTAssertNotEqual(shrunk.keyString, cropBefore.keyString,
-                          "082 反证：没有相机钳位时是**裁切框**被迫缩小（不是相机让路）")
+        XCTAssertEqual(shrunk.keyString, cropBefore.keyString,
+                       "219：画布在 400% 时比视口大，裁切框不再被迫缩小")
 
-        // ③ Both clamps off: nothing keeps the frame on the canvas any more — the failure the invariant
-        //    forbids, in pixels.
+        // ③ Both clamps off, and a frame the user moved past the canvas' right edge: nothing keeps it
+        //   on the canvas any more — the failure the invariant forbids, in pixels.
         loupe.cropTool.clampsFrameToView = false
         loupe.zoomToFit()
-        loupe.cropTool.draft = CropToolController.Draft(crop: cropBefore, straighten: 0, lock: .original)
+        let outside = CropRect(left: 1.2, top: 0.25, right: 1.7, bottom: 0.75)
+        loupe.cropTool.draft = CropToolController.Draft(crop: outside, straighten: 0, lock: .original)
         loupe.zoom(to: 4, aroundView: CGPoint(x: 450, y: 300))
         let unclamped = try frameOnScreen(loupe)
-        let canvasRect = canvas(loupe)
+        let canvasRect = canvasOnScreen(loupe)
         let over = max(canvasRect.minX - unclamped.minX,
                        max(unclamped.maxX - canvasRect.maxX,
                            max(canvasRect.minY - unclamped.minY, unclamped.maxY - canvasRect.maxY)))
@@ -375,6 +392,14 @@ final class CropCanvasClampTests: XCTestCase {
         XCTAssertFalse(CropCanvasClamp.contains(unclamped, in: canvasRect, tolerance: 0.5),
                        "082 反证：两个钳位都没有时，框必须跑出画布 —— 这正是被修掉的那一版")
         XCTAssertGreaterThan(over, 100, "082 反证：出界要量得出来（现在 \(over) px）")
+
+        // With the frame clamp back on the same seed is pulled inside (219's bound is the canvas).
+        loupe.cropTool.clampsFrameToView = true
+        loupe.cropTool.draft = CropToolController.Draft(crop: outside, straighten: 0, lock: .original)
+        _ = loupe.cropTool.clampToView(mapping: cropMapping(loupe), source: loupe.cropSourceSize)
+        XCTAssertTrue(CropCanvasClamp.contains(try frameOnScreen(loupe),
+                                               in: canvasRect, tolerance: 0.5),
+                      "219：同一个出画布的框在钳制打开时必须回到画布里")
         loupe.cropTool.clampsFrameToView = true
         loupe.clampsCropCamera = true
     }

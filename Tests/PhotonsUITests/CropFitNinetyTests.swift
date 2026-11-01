@@ -3,15 +3,16 @@ import CoreGraphics
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 213 — 适应统一 90 %，裁切入口不再二次乘 0.9，且裁切框不出**屏幕画布**.
+/// 213 — 适应统一 90 %，裁切入口不再二次乘 0.9；219 re-bases the clamp on the **canvas**.
 ///
 /// Three claims, each stated where the user sees it:
 ///
 ///  1. `LoupeFraming.fitZoom` is the viewport fit × one `fitMargin` (0.90), and
 ///     `CropWorkspaceLayout.entry` is **the same number** at entry (not 0.9 × 0.9 = 0.81);
-///  2. the clamp's canvas is the **viewport** — a horizontal rectangle that never turns — so the
-///     frame's projected corners stay inside it at every fit/100/200/400 % × angle × frame-size
-///     combination;
+///  2. the clamp's canvas is the **picture at the current camera** (`LoupeMapping.canvasRect`) — a
+///     horizontal rectangle that never turns — so the frame's projected corners stay inside it at
+///     every fit/100/200/400 % × angle × frame-size combination. At 100 % and above the canvas is
+///     larger than the viewport, so the frame is allowed to leave the screen;
 ///  3. with `clampsFrameToView` off the same combination is red, so the matrix is not passing for a
 ///     reason of its own.
 @MainActor
@@ -68,7 +69,7 @@ final class CropFitNinetyTests: XCTestCase {
         }
     }
 
-    // MARK: - acceptance 3: the frame never leaves the viewport
+    // MARK: - acceptance 3: the frame never leaves the canvas (219)
 
     private struct Case {
         let state: LoupeViewState
@@ -110,13 +111,15 @@ final class CropFitNinetyTests: XCTestCase {
                       height: (ys.max() ?? 0) - (ys.min() ?? 0))
     }
 
-    private func inside(_ box: CGRect, tolerance: Double = 0.5) -> Bool {
-        box.minX >= -tolerance && box.minY >= -tolerance
-            && box.maxX <= Double(Self.viewport.width) + tolerance
-            && box.maxY <= Double(Self.viewport.height) + tolerance
+    /// 219 — containment is measured against the **canvas**, not the viewport. The canvas is the
+    /// whole picture at this camera: at 100 %/200 %/400 % it is far larger than the 1400 × 1000
+    /// screen, which is exactly the point.
+    private func inside(_ box: CGRect, canvas: CGRect, tolerance: Double = 0.5) -> Bool {
+        box.minX >= canvas.minX - tolerance && box.minY >= canvas.minY - tolerance
+            && box.maxX <= canvas.maxX + tolerance && box.maxY <= canvas.maxY + tolerance
     }
 
-    func testEveryFramingAngleAndFrameSizeStaysInsideTheViewport() throws {
+    func testEveryFramingAngleAndFrameSizeStaysInsideTheCanvas() throws {
         let controller = try makeController()
         var failures: [String] = []
 
@@ -131,9 +134,11 @@ final class CropFitNinetyTests: XCTestCase {
                 for (name, crop) in Self.crops {
                     controller.draft.crop = crop
                     _ = controller.clampToView(mapping: mapping, source: Self.source)
+                    let canvas = mapping.canvasRect(rotatedBy: degrees)
                     let box = screenBox(controller, mapping: mapping)
-                    if !inside(box) {
-                        failures.append("\(state.name) · \(degrees)° · \(name) → \(box)")
+                    if !inside(box, canvas: canvas) {
+                        failures.append("\(state.name) · \(degrees)° · \(name) → \(box) "
+                                        + "vs canvas \(canvas)")
                     }
                 }
             }
@@ -143,13 +148,18 @@ final class CropFitNinetyTests: XCTestCase {
             for line in failures { print("213 OUT \(line)") }
         }
         XCTAssertTrue(failures.isEmpty,
-                      "the frame left the viewport in \(failures.count) combinations: \(failures)")
+                      "the frame left the canvas in \(failures.count) combinations: \(failures)")
     }
 
-    func testWithoutTheClampTheSameMatrixLeavesTheViewport() throws {
+    /// 219's anti-proof runs the **same 48 cells** with the frame's centre pushed two canvas widths to
+    /// the right first. That translation is the only way a cell can be out of the canvas now: a crop
+    /// rect is a part of the source, so once the canvas turns with the draft angle every untranslated
+    /// cell is inside it *by construction* — the red has to be a frame the user moved out.
+    func testWithoutTheClampTheSameMatrixLeavesTheCanvas() throws {
         let controller = try makeController()
-        controller.clampsFrameToView = false
-        var outside = 0
+        var unclampedOutside = 0
+        var clampedOutside = 0
+        var untranslatedOutside = 0
 
         for degrees in [0.0, 5, 7, 45] {
             controller.draft.straighten = degrees
@@ -159,16 +169,42 @@ final class CropFitNinetyTests: XCTestCase {
                                            sourceHeight: Double(Self.source.height),
                                            crop: .full,
                                            straightenDegrees: 0).mapping(of: state.state)
+                let canvas = mapping.canvasRect(rotatedBy: degrees)
                 for (_, crop) in Self.crops {
+                    // Untranslated: a rect of the source is a subset of the canvas that turns with
+                    // it, so 219 records 0/48 here — the red has to be a moved frame.
+                    controller.clampsFrameToView = false
                     controller.draft.crop = crop
                     _ = controller.clampToView(mapping: mapping, source: Self.source)
-                    if !inside(screenBox(controller, mapping: mapping)) { outside += 1 }
+                    if !inside(screenBox(controller, mapping: mapping), canvas: canvas) {
+                        untranslatedOutside += 1
+                    }
+
+                    let seed = CropRect(left: crop.left + 2, top: crop.top,
+                                        right: crop.right + 2, bottom: crop.bottom)
+                    controller.clampsFrameToView = false
+                    controller.draft.crop = seed
+                    _ = controller.clampToView(mapping: mapping, source: Self.source)
+                    if !inside(screenBox(controller, mapping: mapping), canvas: canvas) {
+                        unclampedOutside += 1
+                    }
+
+                    controller.clampsFrameToView = true
+                    controller.draft.crop = seed
+                    _ = controller.clampToView(mapping: mapping, source: Self.source)
+                    if !inside(screenBox(controller, mapping: mapping), canvas: canvas) {
+                        clampedOutside += 1
+                    }
                 }
             }
         }
 
-        print("213 · anti-proof · \(outside) combinations leave the viewport without the clamp")
-        XCTAssertGreaterThan(outside, 0,
-                             "with `clampsFrameToView` off the matrix must be red, or it proves nothing")
+        print("219 · anti-proof · 原 48 格（不动）关钳制出画布 \(untranslatedOutside)/48 → "
+              + "同一 48 格（框心右移两个画布宽）关钳制出画布 \(unclampedOutside)/48 · "
+              + "开钳制仍出画布 \(clampedOutside)/48")
+        XCTAssertEqual(unclampedOutside, 48,
+                       "with `clampsFrameToView` off every translated cell must be red")
+        XCTAssertEqual(clampedOutside, 0,
+                       "with the clamp on the same translated cells must be inside the canvas")
     }
 }

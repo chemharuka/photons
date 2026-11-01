@@ -168,6 +168,9 @@ final class CropZoomBound190Tests: XCTestCase {
         let centreInViewport: Bool
         let steps: Int
         let screen: CGRect
+        /// 219 — the canvas the frame was clamped to, in device pixels (the viewport at 适应; the
+        /// picture, possibly much larger than the screen, at 1:1 / 2×).
+        let canvas: CGRect
     }
 
     /// Drag the frame's interior right-and-down, one tick at a time, until the model stops moving
@@ -212,7 +215,8 @@ final class CropZoomBound190Tests: XCTestCase {
             && centre.y >= 0 && centre.y <= Double(framing.viewport.height)
         return Limit(crop: crop, overlap: overlapFraction(crop),
                      centreInViewport: inViewport, steps: steps,
-                     screen: screenBox(crop, mapping: mapping, degrees: Self.degrees))
+                     screen: screenBox(crop, mapping: mapping, degrees: Self.degrees),
+                     canvas: mapping.canvasRect(rotatedBy: Self.degrees))
     }
 
     // MARK: - the claim
@@ -240,42 +244,37 @@ final class CropZoomBound190Tests: XCTestCase {
         }
 
         // 213/§5 — the law is **screen-space**: the drawn frame's four corners stay inside the
-        // horizontal viewport (0.5 px of slack), at every framing. The document-space overlap /
+        // horizontal canvas (0.5 px of slack), at every framing. 219: at 1:1/2× the canvas is the
+        // picture, not the window, so the frame may leave the screen. The document-space overlap /
         // AABB numbers above are printed as readouts only.
         for (framing, l) in measured {
-            let viewport = CGRect(x: 0, y: 0,
-                                  width: Double(framing.viewport.width),
-                                  height: Double(framing.viewport.height))
-            XCTAssertGreaterThanOrEqual(l.screen.minX, -0.5,
-                                        "\(framing.name): the frame leaves the viewport on the left")
-            XCTAssertGreaterThanOrEqual(l.screen.minY, -0.5,
-                                        "\(framing.name): the frame leaves the viewport on the top")
-            XCTAssertLessThanOrEqual(l.screen.maxX, viewport.maxX + 0.5,
-                                     "\(framing.name): the frame leaves the viewport on the right")
-            XCTAssertLessThanOrEqual(l.screen.maxY, viewport.maxY + 0.5,
-                                     "\(framing.name): the frame leaves the viewport on the bottom")
+            XCTAssertGreaterThanOrEqual(l.screen.minX, l.canvas.minX - 0.5,
+                                        "\(framing.name): the frame leaves the canvas on the left")
+            XCTAssertGreaterThanOrEqual(l.screen.minY, l.canvas.minY - 0.5,
+                                        "\(framing.name): the frame leaves the canvas on the top")
+            XCTAssertLessThanOrEqual(l.screen.maxX, l.canvas.maxX + 0.5,
+                                     "\(framing.name): the frame leaves the canvas on the right")
+            XCTAssertLessThanOrEqual(l.screen.maxY, l.canvas.maxY + 0.5,
+                                     "\(framing.name): the frame leaves the canvas on the bottom")
             XCTAssertLessThanOrEqual(l.overlap, 1.0 + 1e-9)
         }
 
-        // The bound only ever *shrinks* a frame that is larger than the viewport. The 20 % fixture
-        // fits at 适应, so there it must be moved at its own size; at 1:1/2× it is bigger than the
-        // window and 213 shrinks it uniformly (the ratio is untouched).
+        // The bound only ever *shrinks* a frame that is larger than the canvas. The 20 % fixture
+        // fits at 适应, so there it must be moved at its own size; at 1:1/2× the canvas is the whole
+        // picture, so a 20 % frame still fits and is moved, never shrunk (219).
         for (framing, l) in measured {
-            let viewport = CGRect(x: 0, y: 0,
-                                  width: Double(framing.viewport.width),
-                                  height: Double(framing.viewport.height))
             let initial = screenBox(Self.frame, mapping: LoupeFraming(
                 viewport: framing.viewport,
                 sourceWidth: Double(Self.source.width),
                 sourceHeight: Double(Self.source.height),
                 crop: .full, straightenDegrees: Self.degrees).mapping(of: framing.state),
                                     degrees: Self.degrees)
-            if initial.width <= viewport.width + 0.5 && initial.height <= viewport.height + 0.5 {
+            if initial.width <= l.canvas.width + 0.5 && initial.height <= l.canvas.height + 0.5 {
                 XCTAssertEqual(l.crop.width, Self.frame.width, accuracy: 1e-9, framing.name)
                 XCTAssertEqual(l.crop.height, Self.frame.height, accuracy: 1e-9, framing.name)
             } else {
-                XCTAssertLessThanOrEqual(l.screen.width, viewport.width + 0.5, framing.name)
-                XCTAssertLessThanOrEqual(l.screen.height, viewport.height + 0.5, framing.name)
+                XCTAssertLessThanOrEqual(l.screen.width, l.canvas.width + 0.5, framing.name)
+                XCTAssertLessThanOrEqual(l.screen.height, l.canvas.height + 0.5, framing.name)
             }
         }
     }
@@ -310,18 +309,17 @@ final class CropZoomBound190Tests: XCTestCase {
                      crop.left, crop.top, crop.right, crop.bottom, overlapFraction(crop),
                      screen.minX, screen.minY, screen.maxX, screen.maxY,
                      b.minX, b.minY, b.maxX, b.maxY))
-        // 213/§5 — pinned on the **viewport's** edge: inside on all four sides, flush with two of
-        // them. The document box above may leave the rotated photo's AABB; that is allowed.
-        let viewport = CGRect(x: 0, y: 0,
-                              width: Double(Self.canvas.width),
-                              height: Double(Self.canvas.height))
-        XCTAssertGreaterThanOrEqual(screen.minX, viewport.minX - 0.5)
-        XCTAssertLessThanOrEqual(screen.maxX, viewport.maxX + 0.5)
-        XCTAssertGreaterThanOrEqual(screen.minY, viewport.minY - 0.5)
-        XCTAssertLessThanOrEqual(screen.maxY, viewport.maxY + 0.5)
-        XCTAssertEqual(min(viewport.maxX - screen.maxX, screen.minX - viewport.minX,
-                           viewport.maxY - screen.maxY, screen.minY - viewport.minY),
-                       0, accuracy: 0.5, "the far drag did not reach the viewport's edge")
+        // 213/§5 — pinned on the **canvas'** edge (219: at 适应 the canvas is the window, but the
+        // bound is the picture): inside on all four sides, flush with one of them. The document box
+        // above may leave the rotated photo's AABB; that is allowed.
+        let canvas = mapping.canvasRect(rotatedBy: Self.degrees)
+        XCTAssertGreaterThanOrEqual(screen.minX, canvas.minX - 0.5)
+        XCTAssertLessThanOrEqual(screen.maxX, canvas.maxX + 0.5)
+        XCTAssertGreaterThanOrEqual(screen.minY, canvas.minY - 0.5)
+        XCTAssertLessThanOrEqual(screen.maxY, canvas.maxY + 0.5)
+        XCTAssertEqual(min(canvas.maxX - screen.maxX, screen.minX - canvas.minX,
+                           canvas.maxY - screen.maxY, screen.minY - canvas.minY),
+                       0, accuracy: 0.5, "the far drag did not reach the canvas' edge")
         XCTAssertEqual(crop.width, Self.frame.width, accuracy: 1e-9, "never shrunk")
         XCTAssertEqual(crop.height, Self.frame.height, accuracy: 1e-9)
     }
@@ -411,37 +409,36 @@ final class CropZoomBound190Tests: XCTestCase {
                          after.bottom, coverage, best, reachable ? "yes" : "no"))
 
             // 213/§5 — the law, re-measured on the result **in screen space**: the drawn quad's
-            // four sides inside the viewport (0.5 px of slack), with the frame shrunk only when it
-            // is genuinely bigger than the viewport.
+            // four sides inside the **canvas** (0.5 px of slack), with the frame shrunk only when
+            // it is genuinely bigger than the canvas (219: at 适应 that is the window; a zoomed-in
+            // canvas is the picture and may be far larger).
             // The overlay draws `effectiveCrop` (the opt-in photo bound is a view, not a draft
             // write), so the screen law is measured on that rect.
             let drawn = controller.effectiveCrop(source: Self.source)
             let screen = screenBox(drawn, mapping: mapping, degrees: c.degrees)
-            let viewport = CGRect(x: 0, y: 0,
-                                  width: Double(Self.canvas.width),
-                                  height: Double(Self.canvas.height))
-            XCTAssertGreaterThanOrEqual(screen.minX, viewport.minX - 0.5,
-                                        "\(c.name): hangs off the viewport's left — \(screen)")
-            XCTAssertLessThanOrEqual(screen.maxX, viewport.maxX + 0.5,
-                                     "\(c.name): hangs off the viewport's right — \(screen)")
-            XCTAssertGreaterThanOrEqual(screen.minY, viewport.minY - 0.5,
-                                        "\(c.name): hangs off the viewport's top — \(screen)")
-            XCTAssertLessThanOrEqual(screen.maxY, viewport.maxY + 0.5,
-                                     "\(c.name): hangs off the viewport's bottom — \(screen)")
+            let canvas = mapping.canvasRect(rotatedBy: c.degrees)
+            XCTAssertGreaterThanOrEqual(screen.minX, canvas.minX - 0.5,
+                                        "\(c.name): hangs off the canvas' left — \(screen)")
+            XCTAssertLessThanOrEqual(screen.maxX, canvas.maxX + 0.5,
+                                     "\(c.name): hangs off the canvas' right — \(screen)")
+            XCTAssertGreaterThanOrEqual(screen.minY, canvas.minY - 0.5,
+                                        "\(c.name): hangs off the canvas' top — \(screen)")
+            XCTAssertLessThanOrEqual(screen.maxY, canvas.maxY + 0.5,
+                                     "\(c.name): hangs off the canvas' bottom — \(screen)")
             XCTAssertLessThanOrEqual(coverage, 1.0 + 1e-9)
 
-            // A clamp only ever *moves* a frame that fits; one bigger than the viewport is shrunk.
+            // A clamp only ever *moves* a frame that fits; one bigger than the canvas is shrunk.
             let beforeScreen = screenBox(before, mapping: mapping, degrees: c.degrees)
-            if beforeScreen.width <= viewport.width + 0.5,
-               beforeScreen.height <= viewport.height + 0.5,
+            if beforeScreen.width <= canvas.width + 0.5,
+               beforeScreen.height <= canvas.height + 0.5,
                c.lock.ratio == nil, !c.photoBound {
                 XCTAssertEqual(after.width, before.width, accuracy: 1e-9, c.name)
                 XCTAssertEqual(after.height, before.height, accuracy: 1e-9, c.name)
             } else {
-                XCTAssertLessThanOrEqual(screen.width, viewport.width + 0.5,
-                                         "\(c.name): not shrunk to the viewport")
-                XCTAssertLessThanOrEqual(screen.height, viewport.height + 0.5,
-                                         "\(c.name): not shrunk to the viewport")
+                XCTAssertLessThanOrEqual(screen.width, canvas.width + 0.5,
+                                         "\(c.name): not shrunk to the canvas")
+                XCTAssertLessThanOrEqual(screen.height, canvas.height + 0.5,
+                                         "\(c.name): not shrunk to the canvas")
             }
         }
         controller.clampsToRotatedFrame = false

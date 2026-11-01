@@ -95,9 +95,13 @@ final class CropFrameClampTests: XCTestCase {
         let draft = controller.draft.crop
         let ratio = (draft.width * Double(c.source.width))
             / max(draft.height * Double(c.source.height), 1e-9)
-        return Measured(frame: frame, canvas: NSRect(x: 0, y: 0,
-                                                     width: Self.canvas.width,
-                                                     height: Self.canvas.height),
+        // 219 — the bound is the **canvas** at the drafted angle, not the viewport: at 1:1 / 2:1 the
+        // picture is larger than the 900 × 600 window, so a frame that stays on the canvas is allowed
+        // to be off screen. At 适应 this is the window itself (the 90 % picture plus its margin).
+        let bound = mapping.canvasRect(rotatedBy: c.straighten)
+        return Measured(frame: frame,
+                        canvas: NSRect(x: bound.minX, y: bound.minY,
+                                       width: bound.width, height: bound.height),
                         photo: photo, crop: draft, samples: samples, pixelRatio: ratio)
     }
 
@@ -186,11 +190,14 @@ final class CropFrameClampTests: XCTestCase {
 
     /// The anti-proof: with `clampsFrameToView = false` the *same* criteria are red. Each case is run
     /// twice through the same function, so the assertion cannot be passing for a reason of its own.
+    /// 219 — the seed is a frame **translated past the canvas' right edge**. A crop rect that is a
+    /// part of the source is inside the canvas by construction, so only a moved-out frame can show
+    /// what the clamp is for.
     func testWithoutTheClampTheFrameLeavesTheCanvas() throws {
         let source = ImageSize(width: 3000, height: 2000)
-        let corner = LoupeViewState(mode: .actual, zoom: 2, centerX: 300, centerY: 240)
-        let c = Case(name: "2:1 平移顶到角落", source: source, state: corner, straighten: 0,
-                     lock: .original)
+        let c = Case(name: "适应 · 框挪到画布右外", source: source, state: .fit, straighten: 0,
+                     lock: .original,
+                     crop: CropRect(left: 1.1, top: 0.3, right: 1.5, bottom: 0.7))
 
         let clamped = try measure(c, clamped: true)
         let unclamped = try measure(c, clamped: false)

@@ -317,16 +317,25 @@ public enum CropTool {
         return layout
     }
 
-    // MARK: the screen-space canvas clamp (213)
+    // MARK: the screen-space canvas clamp (213, re-based on the canvas by 219)
 
-    /// **The one containment arithmetic** for 213/§5: the frame may not leave the canvas, and the
-    /// canvas is the **viewport** — a horizontal rectangle that never turns. The candidate rect's
-    /// four corners are projected through the same projection `layout` draws with (including the
-    /// 088 quad rotation), and all four must land inside `(0, 0, viewport)`; half a device pixel of
-    /// slack absorbs the overlay's rounding.
+    /// **The one containment arithmetic** for 213/§5 / 219: the frame may not leave the canvas, and
+    /// the canvas is the **picture** at the current camera (`LoupeMapping.canvasRect`) — a horizontal
+    /// rectangle that never turns. The candidate rect's four corners are projected through the same
+    /// projection `layout` draws with (including the 088 quad rotation), and all four must land inside
+    /// that rect; half a device pixel of slack absorbs the overlay's rounding.
+    ///
+    /// 219 — the bound is the canvas, **not the viewport**. At 100 % and above the picture is larger
+    /// than the screen: a frame that fills it must stay full (a full frame used to be shrunk to 22 %
+    /// at 100 %), and it may leave the screen, because the user pans it there on purpose.
+    ///
+    /// `degrees` is the draft-minus-document delta: the canvas is taken at the angle the release
+    /// will produce (`canvasRect(rotatedBy:)`), so a 拉直 tick turns the frame without shrinking it.
+    /// At 适应 that canvas is at least the viewport, which keeps the workspace's black margin legal
+    /// (162/⑦'s 1.04 frame); zoomed in it is the picture and contains the viewport.
     ///
     /// Moving is preferred: a frame whose projected box fits is translated the least amount that
-    /// brings it inside. Only a frame whose box is genuinely larger than the viewport is shrunk,
+    /// brings it inside. Only a frame whose box is genuinely larger than the canvas is shrunk,
     /// uniformly about its centre. The view-space translation is converted back through
     /// `LoupeMapping.framePoint`'s affine, so the rect always moves with the mapping handed in.
     ///
@@ -339,10 +348,8 @@ public enum CropTool {
                                      degrees: Double = 0,
                                      tolerance: Double = 0.5) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
-        let viewport = CGRect(x: 0, y: 0,
-                              width: Double(mapping.viewport.width),
-                              height: Double(mapping.viewport.height))
-        guard viewport.width > 1, viewport.height > 1 else { return c }
+        let canvas = mapping.canvasRect(rotatedBy: degrees)
+        guard canvas.width > 1, canvas.height > 1 else { return c }
 
         func projectedBox(_ rect: CropRect) -> CGRect {
             let corners = layout(crop: rect, source: source, mapping: mapping,
@@ -354,18 +361,18 @@ public enum CropTool {
             return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         }
         func inside(_ box: CGRect) -> Bool {
-            box.minX >= viewport.minX - tolerance && box.minY >= viewport.minY - tolerance
-                && box.maxX <= viewport.maxX + tolerance && box.maxY <= viewport.maxY + tolerance
+            box.minX >= canvas.minX - tolerance && box.minY >= canvas.minY - tolerance
+                && box.maxX <= canvas.maxX + tolerance && box.maxY <= canvas.maxY + tolerance
         }
 
         var result = c
         var box = projectedBox(result)
         guard !inside(box) else { return c }
 
-        // Shrink only when the frame is larger than the screen. Scaling the rect about its centre is
+        // Shrink only when the frame is larger than the canvas. Scaling the rect about its centre is
         // a uniform scale in view space, so the ratio is untouched.
-        let shrink = min(1, viewport.width / max(box.width, 1e-9),
-                         viewport.height / max(box.height, 1e-9))
+        let shrink = min(1, canvas.width / max(box.width, 1e-9),
+                         canvas.height / max(box.height, 1e-9))
         if shrink < 1 {
             let width = result.width * shrink, height = result.height * shrink
             result = CropRect(left: result.centerX - width / 2,
@@ -379,10 +386,10 @@ public enum CropTool {
         // Move the least amount that puts the projected box inside. A translation in view space is a
         // translation in frame space (both `frameView` and its inverse are axis-aligned affines).
         var dx = 0.0, dy = 0.0
-        if box.minX < viewport.minX - tolerance { dx = viewport.minX - box.minX }
-        else if box.maxX > viewport.maxX + tolerance { dx = viewport.maxX - box.maxX }
-        if box.minY < viewport.minY - tolerance { dy = viewport.minY - box.minY }
-        else if box.maxY > viewport.maxY + tolerance { dy = viewport.maxY - box.maxY }
+        if box.minX < canvas.minX - tolerance { dx = canvas.minX - box.minX }
+        else if box.maxX > canvas.maxX + tolerance { dx = canvas.maxX - box.maxX }
+        if box.minY < canvas.minY - tolerance { dy = canvas.minY - box.minY }
+        else if box.maxY > canvas.maxY + tolerance { dy = canvas.maxY - box.maxY }
         guard dx != 0 || dy != 0 else { return result }
 
         let frameDX = dx * mapping.cropWidth / max(mapping.contentWidth, 1e-9)
