@@ -1592,16 +1592,14 @@ public enum MaskBounds {
         let minSide = min(w, h)
         switch component.shape {
         case .linearGradient(let g):
-            // `alpha > 0` from `t' = lo` onwards. 102: the linear feather is a **symmetric** ramp of
-            // width `f` of the span, centred on `t' = ½` — the same `lo = ½ − f/2` the kernel uses.
-            // (079 A4 briefly made this the radial rule, `lo = ½ − featherPx/span`, which cut the
-            // atlas' own support in half once the kernel went back to the symmetric ramp.)
-            // `t' = t^(log ½ / log m)`, so `t_cut = lo^(log m / log ½)` — the exact inverse of the
-            // kernel's midpoint remap.
-            let lo = max(0.5 - 0.5 * min(max(component.feather, 0), 1), 0)
-            let m = min(max(g.midpoint, 0.02), 0.98)
-            let exponent = log(0.5) / log(m)
-            let tCut = lo <= 0 ? 0 : pow(lo, 1 / exponent)
+            // 215 — the ramp is linear across the whole span and the feather is a band **outside** the
+            // two lines: `alpha = clamp((t' + f/2)/(1 + f))`, so `alpha > 0 ⇔ t' > −f/2`. The kernel
+            // applies the midpoint remap only for `t > 0`, so below the start line `t' = t` and the cut
+            // is `t_cut = −f/2` **verbatim** — no exponent inverse, and *not* 0: writing 0 would leave
+            // the outward half of the band outside the bound, and a tiled pass would not draw it.
+            // (`−f/2 ≤ 0` always, so the cut never sits past the start line.)
+            let f = min(max(component.feather, 0), 1)
+            let tCut = -0.5 * f
             let quad = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
             let ax = g.start.x * w, ay = g.start.y * h
             let dx = g.end.x * w - ax, dy = g.end.y * h - ay
