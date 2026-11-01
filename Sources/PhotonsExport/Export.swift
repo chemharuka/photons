@@ -132,6 +132,29 @@ public enum ExportFormat: String, Sendable, CaseIterable {
         hdrKinds.contains(kind)
     }
 
+    /// 216 — the HDR kind a fresh export starts with for this container, and whether HDR is on by
+    /// default. One table: the sheet's default, `selectFormat`'s fallback and the tests all read it.
+    ///
+    /// The gain-map containers (JPEG/HEIC/AVIF) keep 163's SDR base + auxiliary image, which every
+    /// reader already understands. The lossless containers default to `pq`: the absolute-luminance
+    /// curve is the spelling downstream tools are least likely to misread, and 16-bit storage makes
+    /// it lossless. `hlg` stays selectable in the picker for both.
+    public var defaultHDRKind: HDRKind {
+        switch self {
+        case .jpeg, .heic, .avif: return .gainMap
+        case .tiff, .png: return .pq
+        }
+    }
+
+    /// 216 — HDR is on for every format when a fresh export starts (user's 2026-11-01 口径: 「hdr
+    /// 输出都是默认的」). Spelled out per container rather than as `true`, so a future container
+    /// without an HDR path has to answer the question instead of inheriting a lie.
+    public var hdrIsOnByDefault: Bool {
+        switch self {
+        case .jpeg, .heic, .tiff, .png, .avif: return true
+        }
+    }
+
     /// 163 — the only bit depth a `pq`/`hlg` primary item may carry: HEIF tops out at 10, the lossless
     /// containers are honest at 16. `nil` when the container cannot write that curve at all (JPEG).
     public func hdrTransferBitDepth(for kind: HDRKind) -> Int? {

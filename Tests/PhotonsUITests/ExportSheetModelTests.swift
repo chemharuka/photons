@@ -199,7 +199,8 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertNoThrow(try sheet.preset.validated())
     }
 
-    /// §1 / 108 — the depth row only offers legal values and clamps on a format switch.
+    /// §1 / 108 — the depth row only offers legal values and clamps on a format switch. 216 — TIFF/PNG
+    /// now start on PQ, whose depth is locked at 16; turning HDR off gives the container's menu back.
     func testBitDepthRowFollowsTheFormat() {
         let sheet = model()
         XCTAssertEqual(sheet.bitDepths, [8, 10])
@@ -209,11 +210,14 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.bitDepths, [8])
         XCTAssertEqual(sheet.preset.bitDepth, 8, "HEIC 10 → JPEG must not leave a hidden 10")
         sheet.selectFormat(.png)
-        XCTAssertEqual(sheet.bitDepths, [8, 16])
-        sheet.selectBitDepth(16)
+        XCTAssertEqual(sheet.bitDepths, [16], "216: PNG's default PQ locks the depth at 16")
         XCTAssertEqual(sheet.preset.bitDepth, 16)
+        sheet.setHDR(false)
+        XCTAssertEqual(sheet.bitDepths, [8, 16], "an SDR PNG keeps the container's own menu")
+        sheet.selectBitDepth(8)
+        XCTAssertEqual(sheet.preset.bitDepth, 8)
         sheet.selectBitDepth(10)
-        XCTAssertEqual(sheet.preset.bitDepth, 16, "10 is not a PNG depth")
+        XCTAssertEqual(sheet.preset.bitDepth, 8, "10 is not a PNG depth")
     }
 
     // MARK: summary
@@ -302,11 +306,12 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertNoThrow(try sheet.preset.validated())
     }
 
-    /// §A + 163: JPEG carries a gain map too, so HEIC ↔ JPEG keeps the switch and the gain-map
-    /// choices. A container that cannot carry the remembered kind (PNG/TIFF + gain map) turns HDR off
-    /// until the user picks a kind that container supports; an explicit "off" survives every trip.
-    func testHDRGainMapSurvivesHEICAndJPEGButNotAContainerWithoutAuxImages() {
-        let sheet = model()
+    /// §A + 163 + 216: JPEG carries a gain map too, so HEIC ↔ JPEG keeps the switch and the
+    /// gain-map choices. TIFF/PNG cannot carry one, and since 216 the switch stays **on**: the kind
+    /// drops to that container's default (PQ, 16-bit) instead of turning HDR off. An explicit "off"
+    /// still survives every trip.
+    func testHDRStaysOnAcrossEveryContainerAndItsKindFallsBackToTheFormatsDefault() {
+        let sheet = model(writableUTIs: Set(ExportFormat.allCases.map { $0.utType.identifier }))
         sheet.hdrGainMap = .apple
         sheet.hdrHalfSize = true
         XCTAssertTrue(sheet.hdrEnabled)
@@ -329,12 +334,18 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertTrue(sheet.hdrHalfSize)
         XCTAssertEqual(sheet.preset.exportOptions.hdr?.gainMap, .apple)
 
-        // PNG has no auxiliary-image container: the remembered gain map pauses, and coming back
-        // restores it because the user never turned HDR off.
+        // 216: PNG has no auxiliary-image container, so the kind falls back to PNG's own default —
+        // PQ at 16 bits — and HDR stays on instead of silently becoming an SDR export.
         sheet.selectFormat(.png)
-        XCTAssertFalse(sheet.hdrEnabled)
+        XCTAssertTrue(sheet.hdrEnabled, "216: HDR is on for every container")
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // HEIC remembers the gain map: coming back is not stuck on PQ.
         sheet.selectFormat(.heic)
         XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
         XCTAssertEqual(sheet.hdrGainMap, .apple)
 
         // The other order: the user turns HDR off, leaves HEIC, comes back — it stays off.
@@ -459,12 +470,138 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.hdrKind, .pq)
         XCTAssertEqual(sheet.preset.bitDepth, 10)
 
-        // JPEG has no PQ row at all: the format switch turns HDR off rather than leaving an illegal
-        // preset behind.
+        // JPEG has no PQ row: 216 keeps HDR on and drops to JPEG's own default (the gain map) at its
+        // 8-bit base, instead of leaving an illegal preset behind.
         sheet.selectFormat(.jpeg)
-        XCTAssertEqual(sheet.hdrKind, .none)
-        XCTAssertFalse(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.preset.bitDepth, 8)
         XCTAssertNoThrow(try sheet.preset.validated())
+    }
+
+    // MARK: - 216 default HDR per format
+
+    /// 216 §1 — every container starts HDR on with its own default kind: the gain-map containers keep
+    /// 163's auxiliary image, the lossless ones use PQ at 16 bits. The table is printed one row per
+    /// format so the five-format comparison is in the test log, not inferred.
+    func testEveryFormatStartsHDRWithItsOwnDefaultKind() {
+        let allUTIs = Set(ExportFormat.allCases.map { $0.utType.identifier })
+        var table: [String] = []
+        for format in ExportFormat.allCases {
+            let sheet = model(writableUTIs: allUTIs)
+            sheet.selectFormat(format)
+            XCTAssertEqual(sheet.preset.format, format)
+            XCTAssertTrue(sheet.hdrEnabled, "\(format.rawValue): HDR must be on by default")
+            XCTAssertEqual(sheet.hdrKind, format.defaultHDRKind, "\(format.rawValue) default kind")
+            XCTAssertTrue(format.hdrIsOnByDefault, "\(format.rawValue) table row")
+            if let locked = format.hdrTransferBitDepth(for: format.defaultHDRKind) {
+                XCTAssertEqual(sheet.preset.bitDepth, locked,
+                               "\(format.rawValue) default kind must lock its depth")
+            }
+            XCTAssertNoThrow(try sheet.preset.validated())
+            table.append("216 · \(format.rawValue) → \(sheet.preset.format.rawValue)"
+                         + ", kind \(sheet.hdrKind.rawValue), enabled \(sheet.hdrEnabled)"
+                         + ", bits \(sheet.preset.effectiveBitDepth)")
+        }
+        print(table.joined(separator: "\n"))
+
+        // The table itself, independent of the sheet: one place, every container named.
+        XCTAssertEqual(ExportFormat.jpeg.defaultHDRKind, .gainMap)
+        XCTAssertEqual(ExportFormat.heic.defaultHDRKind, .gainMap)
+        XCTAssertEqual(ExportFormat.avif.defaultHDRKind, .gainMap)
+        XCTAssertEqual(ExportFormat.tiff.defaultHDRKind, .pq)
+        XCTAssertEqual(ExportFormat.png.defaultHDRKind, .pq)
+        XCTAssertTrue(ExportFormat.allCases.allSatisfy(\.hdrIsOnByDefault))
+        XCTAssertEqual(ExportFormat.tiff.hdrTransferBitDepth(for: ExportFormat.tiff.defaultHDRKind),
+                       16)
+        XCTAssertEqual(ExportFormat.png.hdrTransferBitDepth(for: ExportFormat.png.defaultHDRKind),
+                       16)
+    }
+
+    /// 216 §2 — the degradation path is a *kind* change, never an off switch. The four-tuple is
+    /// printed for each of the three switches the spec names.
+    func testFormatSwitchDegradesToTheContainersOwnKindInsteadOfTurningHDROff() {
+        let allUTIs = Set(ExportFormat.allCases.map { $0.utType.identifier })
+        let sheet = model(writableUTIs: allUTIs)
+
+        func tuple(_ label: String) {
+            print("216 · \(label) → (\(sheet.preset.format.rawValue), \(sheet.hdrKind.rawValue),"
+                  + " \(sheet.hdrEnabled), \(sheet.preset.effectiveBitDepth))")
+        }
+
+        // HEIC picks PQ explicitly: that is HEIC's remembered kind, at HEIF's 10-bit depth.
+        sheet.setHDRKind(.pq)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+        tuple("before")
+
+        // HEIC(pq) → TIFF: still PQ, now lossless 16-bit — not off.
+        sheet.selectFormat(.tiff)
+        tuple("after selectFormat(.tiff)")
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // TIFF(pq) → JPEG: PQ is illegal there, so the kind drops to JPEG's own default (gain map)
+        // and HDR stays on.
+        sheet.selectFormat(.jpeg)
+        tuple("after selectFormat(.jpeg)")
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        XCTAssertEqual(sheet.preset.bitDepth, 8)
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // Back to HEIC: the container's own memory (PQ, the user's pick) wins over JPEG's gain map.
+        sheet.selectFormat(.heic)
+        tuple("after selectFormat(.heic)")
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 10)
+        XCTAssertNoThrow(try sheet.preset.validated())
+    }
+
+    /// 216 §2 — TIFF's automatic PQ is a fallback, not a choice: HEIC → TIFF → HEIC returns to HEIC's
+    /// remembered gain map instead of inheriting PQ.
+    func testTIFSsAutomaticPQDoesNotStickToHEIC() {
+        let allUTIs = Set(ExportFormat.allCases.map { $0.utType.identifier })
+        let sheet = model(writableUTIs: allUTIs)
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+
+        sheet.selectFormat(.tiff)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertTrue(sheet.hdrEnabled)
+
+        sheet.selectFormat(.heic)
+        XCTAssertEqual(sheet.hdrKind, .gainMap)
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.preset.bitDepth, 10,
+                       "TIFF's 16-bit storage clamps to HEIC's legal 10-bit gain-map base")
+    }
+
+    /// 216 §4 — a loaded preset replays its switch for every container, not only HEIC, and its kind
+    /// is remembered for that container. A saved TIFF+PQ preset comes back as TIFF+PQ.
+    func testLoadedPresetReplaysHDRForEveryFormat() {
+        let sheet = model()
+        sheet.preset = ExportPreset(name: "TIFF HDR", format: .tiff, bitDepth: 16,
+                                    hdr: HDRExport(kind: .pq))
+        XCTAssertTrue(sheet.savePreset(named: "TIFF HDR"))
+        sheet.loadPreset(named: "TIFF HDR")
+        XCTAssertEqual(sheet.preset.format, .tiff)
+        XCTAssertTrue(sheet.hdrEnabled)
+        XCTAssertEqual(sheet.hdrKind, .pq)
+        XCTAssertEqual(sheet.preset.bitDepth, 16)
+        XCTAssertNoThrow(try sheet.preset.validated())
+
+        // A TIFF preset with HDR explicitly off stays off on load, and switching to another
+        // container does not turn it back on.
+        sheet.preset = ExportPreset(name: "TIFF SDR", format: .tiff, bitDepth: 16,
+                                    hdr: HDRExport(enabled: false))
+        XCTAssertTrue(sheet.savePreset(named: "TIFF SDR"))
+        sheet.loadPreset(named: "TIFF SDR")
+        XCTAssertFalse(sheet.hdrEnabled)
+        sheet.selectFormat(.heic)
+        XCTAssertFalse(sheet.hdrEnabled)
     }
 
     // MARK: - 163 §1.6 half-size even-pixel hint

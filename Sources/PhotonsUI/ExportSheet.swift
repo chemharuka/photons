@@ -351,8 +351,15 @@ public final class ExportSheetModel {
 
         let startingPreset = preset ?? remembered?.preset ?? Self.defaultPreset
         self.preset = startingPreset
-        self.hdrPreferredEnabled = startingPreset.hdr?.enabled ?? true
-        self.hdrPreferredKind = startingPreset.hdrKind == .none ? .gainMap : startingPreset.hdrKind
+        self.hdrPreferredEnabled = startingPreset.hdr?.enabled
+            ?? startingPreset.format.hdrIsOnByDefault
+        // 216 — every container starts from its own table row. A starting preset that names a kind
+        // is that container's remembered choice; the others keep their defaults.
+        var kinds = Dictionary(uniqueKeysWithValues: ExportFormat.allCases.map {
+            ($0, $0.defaultHDRKind)
+        })
+        if startingPreset.hdrKind != .none { kinds[startingPreset.format] = startingPreset.hdrKind }
+        self.hdrPreferredKinds = kinds
         self.outputDirectory = outputDirectory ?? remembered?.directoryURL
             ?? Self.defaultOutputDirectory
         self.writableUTIs = writableUTIs ?? ExportFormat.writableUTIs
@@ -413,10 +420,16 @@ public final class ExportSheetModel {
     /// The user's last HDR checkbox choice. Kept here (not in a fresh `@State`) so a format round
     /// trip — HEIC → JPEG → HEIC — restores what they picked instead of resetting to `true`.
     public private(set) var hdrPreferredEnabled: Bool
-    /// The last HDR *kind* the user picked (163). A format switch that cannot carry it turns HDR off
-    /// without forgetting the choice, and coming back to a capable container restores that kind —
-    /// not a generic gain map.
-    public private(set) var hdrPreferredKind: HDRKind
+    /// 216 — the user's last HDR *kind* **per container**. Every entry starts at that container's
+    /// `defaultHDRKind`, and only an explicit pick (`setHDRKind`) rewrites it, so a format switch
+    /// falls back to the new container's own kind without overwriting (or inheriting) another one's.
+    public private(set) var hdrPreferredKinds: [ExportFormat: HDRKind]
+
+    /// 216 — the kind the current container will use: what the user last picked there, else its
+    /// default. Reading it never mutates the memory, so TIFF's automatic PQ cannot stick to HEIC.
+    public var hdrPreferredKind: HDRKind {
+        hdrPreferredKinds[preset.format] ?? preset.format.defaultHDRKind
+    }
 
     /// What the checkbox shows. Every writable container has at least one HDR kind (JPEG: gain map;
     /// PNG/TIFF: PQ/HLG; HEIC/AVIF: all), so the row is only off when the user turns it off.
@@ -430,8 +443,9 @@ public final class ExportSheetModel {
         set { updateHDR { $0.gainMap = newValue } }
     }
 
-    /// 163 §1.3 — which HDR path the sheet is offering (增益图 / HLG / PQ). `gainMap` is the default;
-    /// the row only shows while HDR is on.
+    /// 163 §1.3 — which HDR path the sheet is offering (增益图 / HLG / PQ). 216 — the default is the
+    /// current container's `defaultHDRKind` (gain map for JPEG/HEIC/AVIF, PQ for TIFF/PNG); the row
+    /// only shows while HDR is on.
     public var hdrKind: HDRKind {
         get { preset.hdrKind }
         set { setHDRKind(newValue) }
@@ -451,7 +465,7 @@ public final class ExportSheetModel {
             return
         }
         guard preset.format.supports(kind) else { return }
-        hdrPreferredKind = kind
+        hdrPreferredKinds[preset.format] = kind
         updateHDR { $0.kind = kind }
         if let locked = preset.format.hdrTransferBitDepth(for: kind) {
             preset.bitDepth = locked
@@ -524,19 +538,14 @@ public final class ExportSheetModel {
         preset.bitDepth = depth
     }
 
-    /// The 文件设置 picker's door: a format that cannot carry the current HDR kind turns HDR off
-    /// (and `validated()` would reject it anyway), coming back re-applies the remembered choice. A
-    /// depth the new container cannot store is clamped instead of left behind as an invisible
-    /// illegal value.
+    /// The 文件设置 picker's door. 216: HDR stays on across a format switch — the new container
+    /// falls back to its own remembered kind (TIFF/PNG from a gain map land on PQ) instead of turning
+    /// HDR off. A depth the new container cannot store is clamped, then locked by that kind.
     public func selectFormat(_ format: ExportFormat) {
         guard availableFormats.contains(format) else { return }
         preset.format = format
         preset.bitDepth = format.clampedBitDepth(preset.bitDepth)
-        let canKeep = hdrPreferredEnabled && format.supports(hdrPreferredKind)
-        applyHDR(enabled: canKeep)
-        if canKeep, let locked = format.hdrTransferBitDepth(for: hdrPreferredKind) {
-            preset.bitDepth = locked
-        }
+        applyHDR(enabled: hdrPreferredEnabled)
     }
 
     /// The HDR checkbox. Writes through to the preset the batch will use.
@@ -550,8 +559,11 @@ public final class ExportSheetModel {
             updateHDR { $0.enabled = false }
             return
         }
-        let kind = preset.format.supports(hdrPreferredKind)
-            ? hdrPreferredKind : (availableHDRKinds.first ?? .none)
+        // 216 — the container's remembered kind, else its table default. The fallback never writes
+        // back into the memory: another container's choice must not leak into this one.
+        let remembered = hdrPreferredKind
+        let kind = preset.format.supports(remembered)
+            ? remembered : preset.format.defaultHDRKind
         guard kind != .none else {
             updateHDR { $0.enabled = false }
             return
@@ -563,7 +575,10 @@ public final class ExportSheetModel {
     }
 
     private func updateHDR(_ body: (inout HDRExport) -> Void) {
-        var hdr = preset.hdr ?? HDRExport(enabled: preset.format == .heic)
+        // 216 — a preset without an HDR block (a legacy SDR draft) now starts HDR on, and its kind
+        // comes from the same table the sheet and the tests read.
+        var hdr = preset.hdr ?? HDRExport(enabled: preset.format.hdrIsOnByDefault,
+                                          kind: preset.format.defaultHDRKind)
         body(&hdr)
         preset.hdr = hdr
     }
@@ -941,20 +956,29 @@ public final class ExportSheetModel {
     public func loadPreset(named name: String) {
         do {
             preset = try presetStore.load(named: name)
-            hdrPreferredEnabled = preset.hdr?.enabled ?? true
-            if preset.format == .heic { applyHDR(enabled: hdrPreferredEnabled) }
+            replayHDRPreference()
             presetError = nil
             return
         } catch {
             // A built-in has no file; fall back to it by name before surfacing the file error.
             if let builtIn = Self.builtInPresets.first(where: { $0.name == name }) {
                 preset = builtIn
-                hdrPreferredEnabled = builtIn.hdr?.enabled ?? true
+                replayHDRPreference()
                 presetError = nil
                 return
             }
             presetError = error.localizedDescription
         }
+    }
+
+    /// 216 — a loaded preset is a choice for **its** container: remember its kind there, take its
+    /// on/off switch, and replay that switch for every format (it used to be HEIC only). An explicit
+    /// `enabled: false` therefore survives the load; so does an explicit PQ on a TIFF preset.
+    private func replayHDRPreference() {
+        hdrPreferredEnabled = preset.hdr?.enabled ?? preset.format.hdrIsOnByDefault
+        hdrPreferredKinds[preset.format] = preset.hdrKind == .none
+            ? preset.format.defaultHDRKind : preset.hdrKind
+        applyHDR(enabled: hdrPreferredEnabled)
     }
 
     @discardableResult
