@@ -532,7 +532,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         let written = try GainMapHEIC.write(
             sdr: sdr, linear: LinearPixels(linear), to: tmp,
             options: HDRGainMapOptions(gainMap: .iso, halfSize: true,
-                                       headroom: .manual(ThumbSpec.hd.gainMapHeadroom),
+                                       headroom: .manual(ThumbSpec.hd.gainMapHeadroomRatio),
                                        quality: ThumbSpec.hd.quality, bitDepth: 8,
                                        forceGainMap: true),
             format: .heic)

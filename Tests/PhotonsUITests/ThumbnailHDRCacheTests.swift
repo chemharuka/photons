@@ -140,15 +140,23 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertEqual(mapW, base.width / 2, "gain map width = base / 2")
         XCTAssertEqual(mapH, base.height / 2, "gain map height = base / 2")
 
-        // Headroom, read back the same way toGainMapHDR/the export tests do.
+        // Headroom: the spec pins 2.3 **EV**. The file's `contentHeadroom` is the linear ratio
+        // (2^2.3 ≈ 4.9246), and the private keys the writers emit are in stops, so read back
+        // `log2(contentHeadroom)` and compare that to the EV number.
         let read = try XCTUnwrap(GainMapHEIC.readHeadroom(at: path))
-        XCTAssertEqual(read, 2.3, accuracy: 0.12, "declared +2.3 EV headroom (read \(read))")
+        let stops = log2(read)
+        XCTAssertEqual(stops, 2.3, accuracy: 0.12,
+                       "declared +2.3 EV headroom (contentHeadroom \(read), \(stops) stops)")
+        XCTAssertEqual(read, pow(2, 2.3), accuracy: 0.25,
+                       "contentHeadroom is the linear ratio, not the EV value")
+        XCTAssertEqual(ThumbSpec.hd.gainMapHeadroom, 2.3, "the spec value stays in EV")
+        XCTAssertEqual(ThumbSpec.hd.gainMapHeadroomRatio, pow(2, 2.3), accuracy: 1e-9)
 
         // Acceptance 4: the file really carries extended-range light, not just a label.
         let peak = try linearPeak(at: path)
         XCTAssertGreaterThanOrEqual(peak, 1.05, "linear peak \(peak) must be ≥ 1.05 × SDR white")
         print("218 file: \(base.width)×\(base.height) depth \(base.bitsPerComponent) "
-              + "map \(mapW)×\(mapH) headroom \(read) peak \(peak) bytes \(data.count)")
+              + "map \(mapW)×\(mapH) contentHeadroom \(read) log2 \(stops) peak \(peak) bytes \(data.count)")
     }
 
     // MARK: - 4. edit → new key → new pixels; undo → old key → old file

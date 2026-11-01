@@ -72,8 +72,16 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     public var quality: Double { self == .hd ? 0.75 : ThumbnailJPEG.quality }
     /// Bumped when the meaning of a spec changes without changing its spelling.
     public var schemaVersion: Int { 1 }
-    /// The fixed gain-map headroom, in stops (+2.3 EV).
+    /// The fixed gain-map headroom, in **EV** (+2.3 stops), as the spec states it.
+    ///
+    /// `HDRExport.Headroom` — and therefore `HDRGainMapOptions.headroom` — is *not* in EV: it is the
+    /// linear ratio to SDR white (`resolvedHeadroom` only floors it at 1, and the writers take
+    /// `log2(headroom)` to get stops). Pass `gainMapHeadroomRatio` to the writer; keep this number
+    /// as the human/spec-facing value.
     public var gainMapHeadroom: Double { 2.3 }
+
+    /// The same headroom as the linear multiple the gain-map writer expects: `2^2.3 ≈ 4.9246`.
+    public var gainMapHeadroomRatio: Double { pow(2, gainMapHeadroom) }
 }
 
 /// The constants that decide pixels, plus the digest that enters the cache key.
