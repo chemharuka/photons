@@ -48,16 +48,24 @@ public struct HDRGainMapOptions: Sendable {
     /// 206 — the SDR base's 8-bit quantiser. `true` (the export default) matches `Exporter.write`;
     /// the gain map itself is 8-bit by construction but is a smooth ratio field, not a display ramp.
     public var dither8Bit: Bool
+    /// 218 — write the auxiliary map even when the measured peak is below `sdrThreshold`.
+    ///
+    /// The export path keeps `false` (an SDR photo must not grow a noise-amplifying map). A thumbnail
+    /// is different: three views decode it through one HDR-capable path, so the *container shape* is
+    /// fixed by its cache key (`hd1920q75gm23`, +2.3 EV) and must not vary with the photo's peak.
+    /// A genuinely SDR source simply gets an all-zero map under the declared headroom.
+    public var forceGainMap: Bool
 
     public init(gainMap: HDRExport.GainMap = .iso, halfSize: Bool = true,
                 headroom: HDRExport.Headroom = .auto, quality: Double = 0.95, bitDepth: Int = 8,
-                dither8Bit: Bool = true) {
+                dither8Bit: Bool = true, forceGainMap: Bool = false) {
         self.gainMap = gainMap
         self.halfSize = halfSize
         self.headroom = headroom
         self.quality = quality
         self.bitDepth = bitDepth
         self.dither8Bit = dither8Bit
+        self.forceGainMap = forceGainMap
     }
 }
 
@@ -172,8 +180,9 @@ public enum GainMapHEIC {
         let (fullPeak, used) = resolvedHeadroom(linear: linear, manual: options.headroom)
 
         // SDR source: write the file the pre-HDR path would have written and say so. The caller keeps
-        // the same filename; only the auxiliary image is missing.
-        if fullPeak < sdrThreshold {
+        // the same filename; only the auxiliary image is missing. A caller that pins the container
+        // (the 218 thumbnail) sets `forceGainMap` and gets the map regardless of the measurement.
+        if fullPeak < sdrThreshold && !options.forceGainMap {
             try Exporter.write(sdr, to: url,
                                options: ExportOptions(format: format, quality: options.quality,
                                                       bitDepth: options.bitDepth,

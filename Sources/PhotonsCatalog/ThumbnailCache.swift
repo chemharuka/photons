@@ -54,6 +54,28 @@ public enum ThumbPipeline: String, Sendable, CaseIterable, Codable {
     case graph
 }
 
+/// 218 — what an on-disk file *is*. The legacy spec is the pre-218 8-bit sRGB JPEG ladder; `hd` is
+/// the one thumbnail three views now share: 1920 long edge, q75, 8-bit SDR base + a half-size colour
+/// gain map, HEIC container, headroom +2.3 EV.
+///
+/// The spec is part of the key string, so the two families can never alias even when they land on
+/// the same `ThumbTier` sentinel (`.t2048`). The file extension is a property of the spec, not of
+/// the key, because the cache directory has to keep both kinds while the old files age out through
+/// the LRU.
+public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
+    case legacy = "v1"
+    case hd = "hd1920q75gm23"
+
+    /// The longest edge the spec promises. 0 means "the tier decides" (legacy).
+    public var longEdge: Int { self == .hd ? 1920 : 0 }
+    public var fileExtension: String { self == .hd ? "heic" : "jpg" }
+    public var quality: Double { self == .hd ? 0.75 : ThumbnailJPEG.quality }
+    /// Bumped when the meaning of a spec changes without changing its spelling.
+    public var schemaVersion: Int { 1 }
+    /// The fixed gain-map headroom, in stops (+2.3 EV).
+    public var gainMapHeadroom: Double { 2.3 }
+}
+
 /// The constants that decide pixels, plus the digest that enters the cache key.
 ///
 /// D1/D2′: the decode recipe is frozen. There is deliberately **no** decoder-version parameter
@@ -86,6 +108,24 @@ public enum ThumbRecipe {
         let canonical = canonicalJSON(developJSON) ?? developJSON
         return sha256Hex("\(canonical)|\(decoderRecipe)|\(graphVersion)")
     }
+
+    /// 218 — the edit half of an HD thumbnail key, derived from the **document's own stage keys**.
+    ///
+    /// `EditModel.keyMaterial(stage)` already spells the parameters a stage reads and appends the
+    /// stage's `;alg=N` generation token, so two documents that differ in any rendered pixel differ
+    /// here too. That is what makes "commit an edit ⇒ new key ⇒ cache miss ⇒ background rebuild" a
+    /// consequence of the render graph's own key chain rather than a second diffing mechanism.
+    /// `thumbSpec` and the stage-version material are appended again on purpose: the key must name
+    /// the file parameters (1920/q75/8-bit/half-size/HEIC/+2.3 EV) and the arithmetic generation
+    /// even if a future stage list forgets them.
+    public static func editFingerprint(_ document: EditModel) -> String {
+        let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
+        return sha256Hex("\(stageKeys)|\(StageAlgorithmVersion.material)|\(ThumbSpec.hd.rawValue)"
+                         + "|sv\(ThumbSpec.hd.schemaVersion)")
+    }
+
+    /// The neutral document's fingerprint, for callers that have no document (a missing row, a probe).
+    public static var neutralEditFingerprint: String { editFingerprint(.neutral) }
 
     static func canonicalJSON(_ s: String) -> String? {
         guard let data = s.data(using: .utf8),
@@ -139,10 +179,14 @@ public enum ThumbPolicy {
 public enum ThumbNamespace {
     public static let preview = "p"
     public static var graph: String { "g-" + StageAlgorithmVersion.fingerprint }
+    /// 218 — the HD/gain-map family. Its key already carries the edit fingerprint, so a superseded
+    /// edit is an unreachable key (reclaimed by the LRU, and by undo's old key becoming live again)
+    /// rather than a directory generation.
+    public static let hd = "hd"
     /// The namespaces a file written by *this* build may live in. Everything else under the cache root
     /// is a superseded generation (including the pre-P1f layout, whose shard directories sat directly
     /// under the root).
-    public static var current: Set<String> { [preview, graph] }
+    public static var current: Set<String> { [preview, graph, hd] }
 }
 
 /// Identity of one thumbnail file: content-addressed, never asset-addressed, so a moved or renamed
@@ -152,19 +196,30 @@ public struct ThumbKey: Hashable, Sendable {
     public let tier: ThumbTier
     public let pipeline: ThumbPipeline
     public let recipeDigest: String
+    /// 218 — which file family this key belongs to (`legacy` JPEG or the shared HD gain-map HEIC).
+    public let spec: ThumbSpec
+    /// 218 — `sha256` over the document's stage keys. For `legacy` keys it is the placeholder `-`
+    /// and the legacy key string is byte-identical to the pre-218 one (the tier ladder's cache is
+    /// not invalidated by this feature); for `hd` keys it is the edit identity.
+    public let editFingerprint: String
 
     /// `p` or `g-<fingerprint>`: the directory this key's file lives in (P1f).
     public var namespace: String {
-        pipeline == .preview ? ThumbNamespace.preview : ThumbNamespace.graph
+        if spec == .hd { return ThumbNamespace.hd }
+        return pipeline == .preview ? ThumbNamespace.preview : ThumbNamespace.graph
     }
 
     /// `preview` keys always carry `-`: a placeholder must not be invalidated by an edit, or the
     /// first frame after a commit would have nothing to draw.
-    public init(contentHash: String, tier: ThumbTier, pipeline: ThumbPipeline, recipeDigest: String) {
+    public init(contentHash: String, tier: ThumbTier, pipeline: ThumbPipeline, recipeDigest: String,
+                spec: ThumbSpec = .legacy,
+                editFingerprint: String = ThumbRecipe.placeholderDigest) {
         self.contentHash = contentHash
         self.tier = tier
         self.pipeline = pipeline
         self.recipeDigest = pipeline == .preview ? ThumbRecipe.placeholderDigest : recipeDigest
+        self.spec = spec
+        self.editFingerprint = spec == .hd ? editFingerprint : ThumbRecipe.placeholderDigest
     }
 
     public static func preview(contentHash: String, tier: ThumbTier) -> ThumbKey {
@@ -177,13 +232,29 @@ public struct ThumbKey: Hashable, Sendable {
                  recipeDigest: ThumbRecipe.recipeDigest(developJSON: developJSON))
     }
 
+    /// 218 — the one key the grid, the browser list and the filmstrip share.
+    ///
+    /// `.t2048` is a sentinel, not a size: the HD spec's own long edge is 1920 (see
+    /// `ThumbSpec.longEdge`) and using the existing top-but-one tier keeps the LRU's "large tier"
+    /// rule and `removeAll(contentHash:)` knowing about HD files without teaching `ThumbTier` a
+    /// non-power-of-two rung that the viewport tier ladder would then pick by accident.
+    public static func hd(contentHash: String, document: EditModel) -> ThumbKey {
+        ThumbKey(contentHash: contentHash, tier: .t2048, pipeline: .graph,
+                 recipeDigest: ThumbRecipe.placeholderDigest, spec: .hd,
+                 editFingerprint: ThumbRecipe.editFingerprint(document))
+    }
+
     /// The exact string that gets hashed. Kept public and stable so `grep` on a cache directory
     /// explains itself and so the format can be asserted in a unit test.
     public var keyString: String {
-        "thumb|v1|\(contentHash)|\(tier.rawValue)|\(pipeline.rawValue)|\(recipeDigest)"
+        if spec == .legacy {
+            return "thumb|v1|\(contentHash)|\(tier.rawValue)|\(pipeline.rawValue)|\(recipeDigest)"
+        }
+        return "thumb|v2|\(contentHash)|\(spec.rawValue)|sv\(spec.schemaVersion)"
+            + "|\(tier.rawValue)|\(pipeline.rawValue)|\(recipeDigest)|\(editFingerprint)"
     }
 
-    /// 64 hex chars; also the file name (minus `.jpg`).
+    /// 64 hex chars; also the file name (minus the spec's extension).
     public var digest: String { sha256Hex(keyString) }
 
     public var shard0: String { String(digest.prefix(2)) }
@@ -194,12 +265,12 @@ public struct ThumbKey: Hashable, Sendable {
         return String(s[start..<end])
     }
 
-    /// Path inside a cache root: `thumbs/<namespace>/xx/yy/<digest>.jpg` (§3; the namespace is P1f).
+    /// Path inside a cache root: `thumbs/<namespace>/xx/yy/<digest>.<ext>` (§3; the namespace is P1f).
     public func relativePath(in root: URL) -> URL {
         root.appendingPathComponent(namespace, isDirectory: true)
             .appendingPathComponent(shard0, isDirectory: true)
             .appendingPathComponent(shard1, isDirectory: true)
-            .appendingPathComponent("\(digest).jpg", isDirectory: false)
+            .appendingPathComponent("\(digest).\(spec.fileExtension)", isDirectory: false)
     }
 }
 
@@ -213,11 +284,14 @@ func sha256Hex(_ s: String) -> String {
 
 public enum ThumbCacheError: LocalizedError {
     case notJPEG(URL)
+    case notPayload(URL, String)
     case writeFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .notJPEG(let u): return "refusing to cache a non-JPEG payload at \(u.lastPathComponent)"
+        case .notPayload(let u, let why):
+            return "refusing to cache \(why) at \(u.lastPathComponent)"
         case .writeFailed(let m): return "thumbnail cache write failed: \(m)"
         }
     }
@@ -241,13 +315,17 @@ public final class ThumbnailCache {
         public var protectWindow: TimeInterval
         /// `t2048`/`t4096` untouched this long are evicted before the global LRU pass.
         public var staleAfter: TimeInterval
+        /// 218 — the second ceiling: 50 000 files, whichever the directory reaches first.
+        public var maxFiles: Int
 
         public init(budgetBytes: Int64 = 2_000_000_000,
                     protectWindow: TimeInterval = 600,
-                    staleAfter: TimeInterval = 30 * 86_400) {
+                    staleAfter: TimeInterval = 30 * 86_400,
+                    maxFiles: Int = 50_000) {
             self.budgetBytes = budgetBytes
             self.protectWindow = protectWindow
             self.staleAfter = staleAfter
+            self.maxFiles = max(0, maxFiles)
         }
     }
 
@@ -397,13 +475,13 @@ public final class ThumbnailCache {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: node.path, isDirectory: &isDir) else { return (0, 0) }
-        guard isDir.boolValue else { return (node.pathExtension.lowercased() == "jpg" ? 1 : 0, 0) }
+        guard isDir.boolValue else { return (ThumbnailCache.isThumbPayload(node.pathExtension) ? 1 : 0, 0) }
         var files = 0, dirs = 0
         guard let en = fm.enumerator(at: node, includingPropertiesForKeys: [.isDirectoryKey],
                                      options: [.skipsHiddenFiles]) else { return (0, 0) }
         for case let u as URL in en {
             let d = (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            if d { dirs += 1 } else if u.pathExtension.lowercased() == "jpg" { files += 1 }
+            if d { dirs += 1 } else if ThumbnailCache.isThumbPayload(u.pathExtension) { files += 1 }
         }
         return (files, dirs + 1)
     }
@@ -428,7 +506,7 @@ public final class ThumbnailCache {
             record(miss: "absent")
             return nil
         }
-        guard ThumbnailJPEGComplete(data) else {
+        guard ThumbnailCache.payloadLooksComplete(data, for: key) else {
             record(miss: "corrupt")
             try? fm.removeItem(at: path)
             return nil
@@ -436,6 +514,23 @@ public final class ThumbnailCache {
         record(hit: true)
         touchOnce(path.path, now: now)
         return data
+    }
+
+    /// 218 — the cache carries two containers now: the legacy 8-bit JPEG and the HD HEIC that holds
+    /// the gain map alongside its base. Completeness is per spec so a truncated HEIC is a miss too.
+    public static func payloadLooksComplete(_ data: Data, for key: ThumbKey) -> Bool {
+        key.spec == .hd ? looksLikeHEIC(data) : ThumbnailJPEG.looksComplete(data)
+    }
+
+    /// `ftyp` at offset 4 with a HEIF/HEIC major brand. Deliberately structural: the base image and
+    /// its auxiliary gain-map item are written by ImageIO in one finalize, so a file that has the
+    /// header either finalized or was never created under this name (atomic rename).
+    public static func looksLikeHEIC(_ data: Data) -> Bool {
+        guard data.count >= 16 else { return false }
+        let bytes = [UInt8](data.prefix(16))
+        guard bytes[4...7].elementsEqual("ftyp".utf8),
+              let brand = String(bytes: bytes[8..<12], encoding: .ascii) else { return false }
+        return ["heic", "heix", "heim", "heis", "mif1", "msf1"].contains(brand)
     }
 
     /// Hot path: file read + JPEG decode. Both happen off the main thread in the app (§1).
@@ -456,8 +551,9 @@ public final class ThumbnailCache {
     /// No `fsync`: derived data, regenerating is cheaper than an I/O barrier. A crash can lose the
     /// file, never a half file: the final name only ever appears after the bytes are all there.
     public func store(_ data: Data, for key: ThumbKey) throws {
-        guard ThumbnailJPEGComplete(data) else {
-            throw ThumbCacheError.notJPEG(url(for: key))
+        guard ThumbnailCache.payloadLooksComplete(data, for: key) else {
+            throw ThumbCacheError.notPayload(url(for: key),
+                                             key.spec == .hd ? "an incomplete HEIC" : "a non-JPEG payload")
         }
         let dest = url(for: key)
         try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -484,8 +580,9 @@ public final class ThumbnailCache {
         lock.unlock()
 
         // §0: once the faithful rendering exists at this tier, the placeholder is dead weight at
-        // *this* tier. Deleting it keeps "placeholder → refined" a one-way transition.
-        if key.pipeline == .graph {
+        // *this* tier. Deleting it keeps "placeholder → refined" a one-way transition. HD files have
+        // no placeholder sibling (they only exist after a graph render).
+        if key.pipeline == .graph && key.spec == .legacy {
             pruneShadowedPreview(for: key)
         }
     }
@@ -530,6 +627,21 @@ public final class ThumbnailCache {
                 if (try? fm.removeItem(at: path)) != nil { removed += 1 }
             }
         }
+        // 218 — the HD file is one per known document recipe, not per tier. Undo's older keys are
+        // deliberately not enumerable here: they are LRU fodder, exactly like every superseded edit.
+        var documents: [EditModel] = [.neutral]
+        for json in recipes where json != "{}" {
+            if let data = json.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
+                documents.append(decoded)
+            }
+        }
+        for document in documents {
+            let key = ThumbKey.hd(contentHash: contentHash, document: document)
+            let path = url(for: key)
+            guard fm.fileExists(atPath: path.path) else { continue }
+            if (try? fm.removeItem(at: path)) != nil { removed += 1 }
+        }
         lock.lock()
         touched = touched.filter { !$0.contains(contentHash) }
         lock.unlock()
@@ -556,12 +668,17 @@ public final class ThumbnailCache {
         guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
                                      options: [.skipsHiddenFiles]) else { return [] }
         var out: [(url: URL, bytes: Int64, modified: Date)] = []
-        for case let u as URL in en where u.pathExtension.lowercased() == "jpg" {
+        for case let u as URL in en where Self.isThumbPayload(u.pathExtension) {
             let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             out.append((url: u, bytes: Int64(v?.fileSize ?? 0),
                         modified: v?.contentModificationDate ?? .distantPast))
         }
         return out.sorted { $0.modified < $1.modified }
+    }
+
+    private static func isThumbPayload(_ ext: String) -> Bool {
+        let e = ext.lowercased()
+        return e == "jpg" || e == "heic"
     }
 
     public func totalBytes() -> Int64 { inventory().reduce(0) { $0 + $1.bytes } }
@@ -596,7 +713,8 @@ public final class ThumbnailCache {
             graphPresent.insert("\(key.contentHash)|\(key.tier.rawValue)")
         }
 
-        guard report.totalBefore > policy.budgetBytes else {
+        guard report.totalBefore > policy.budgetBytes
+                || (policy.maxFiles > 0 && items.count > policy.maxFiles) else {
             report.totalAfter = report.totalBefore
             cleanTempFiles(now: now, report: &report)
             return report
@@ -604,18 +722,25 @@ public final class ThumbnailCache {
 
         var remaining = report.totalBefore
         var removed: Set<String> = []
+        var remainingCount = items.count
 
         /// One eviction attempt. Returns the bytes freed (0 = refused), and mutates no `report`
         /// state: passing `&report.field` into a closure that also captures `report` is an
         /// overlapping exclusive access, which traps at runtime.
         func evict(_ item: (url: URL, bytes: Int64, modified: Date)) -> Int64 {
-            guard remaining > policy.budgetBytes else { return 0 }
+            guard remaining > policy.budgetBytes
+                    || (policy.maxFiles > 0 && remainingCount > policy.maxFiles) else { return 0 }
             guard now.timeIntervalSince(item.modified) >= policy.protectWindow else { return 0 }
             guard !removed.contains(item.url.path) else { return 0 }
             guard (try? fm.removeItem(at: item.url)) != nil else { return 0 }
             removed.insert(item.url.path)
             remaining -= item.bytes
+            remainingCount -= 1
             return item.bytes
+        }
+
+        func overBudget() -> Bool {
+            remaining > policy.budgetBytes || (policy.maxFiles > 0 && remainingCount > policy.maxFiles)
         }
 
         // ① a placeholder whose faithful rendering exists at the same tier. `store(graph:)` deletes
@@ -631,7 +756,7 @@ public final class ThumbnailCache {
         }
 
         // ② big tiers gone stale.
-        for item in items where remaining > policy.budgetBytes {
+        for item in items where overBudget() {
             let digest = item.url.deletingPathExtension().lastPathComponent
             guard let key = keyOf[digest], key.tier.rank >= ThumbTier.t2048.rank else { continue }
             guard now.timeIntervalSince(item.modified) > policy.staleAfter else { continue }
@@ -639,8 +764,9 @@ public final class ThumbnailCache {
             if freed > 0 { report.staleLarge += 1; report.evicted += 1; report.freedBytes += freed }
         }
 
-        // ③ global LRU (items are already mtime-ascending).
-        for item in items where remaining > policy.budgetBytes {
+        // ③ global LRU (items are already mtime-ascending). This is also the pass that enforces the
+        // 218 file-count ceiling once the byte ceiling is already satisfied.
+        for item in items where overBudget() {
             let freed = evict(item)
             if freed > 0 { report.lru += 1; report.evicted += 1; report.freedBytes += freed }
         }

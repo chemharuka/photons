@@ -327,4 +327,66 @@ final class ThumbnailCacheTests: XCTestCase {
         XCTAssertTrue(ThumbPolicy.previewAllowed(tier: .t512, sourceLongEdge: 8192, ext: "DNG"))
         XCTAssertFalse(ThumbPolicy.previewAllowed(tier: .t1024, sourceLongEdge: 8192, ext: "dng"))
     }
+
+    // MARK: 218 — HEIC inventory, file-count ceiling, edit keys
+
+    /// A structurally valid (not necessarily decodable) HEIF header: `ftyp` + `heic` brand. The
+    /// cache's completeness check is container-level on purpose — ImageIO wrote the base and its
+    /// auxiliary item in one finalize.
+    private func heic() -> Data {
+        var bytes = [UInt8](repeating: 0, count: 64)
+        bytes[0] = 0; bytes[1] = 0; bytes[2] = 0; bytes[3] = 24
+        bytes.replaceSubrange(4...7, with: Array("ftyp".utf8))
+        bytes.replaceSubrange(8...11, with: Array("heic".utf8))
+        return Data(bytes)
+    }
+
+    func testHDKeyIsHEICAndEditSensitive() throws {
+        let neutral = ThumbKey.hd(contentHash: hash("a"), document: .neutral)
+        var edited = EditModel.neutral
+        edited.light.exposure = 1
+        let changed = ThumbKey.hd(contentHash: hash("a"), document: edited)
+        XCTAssertNotEqual(neutral.digest, changed.digest, "the stage keys must move the cache key")
+        XCTAssertEqual(neutral.relativePath(in: root).pathExtension, "heic")
+        XCTAssertTrue(neutral.keyString.contains("hd1920q75gm23"))
+        XCTAssertTrue(neutral.keyString.contains("sv1"))
+    }
+
+    func testTrimEnforcesTheFileCountCeilingAndCountsHEIC() throws {
+        let limited = try ThumbnailCache(root: root, policy: .init(budgetBytes: 1_000_000_000,
+                                                                   protectWindow: 0,
+                                                                   staleAfter: 3600,
+                                                                   maxFiles: 3))
+        var keys: [ThumbKey] = []
+        for i in 0..<6 {
+            let key = ThumbKey.hd(contentHash: hash(Character(UnicodeScalar(97 + i)!)),
+                                  document: .neutral)
+            keys.append(key)
+            try limited.store(heic(), for: key)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: Double(i))],
+                ofItemAtPath: limited.url(for: key).path)
+        }
+        XCTAssertEqual(limited.inventory().count, 6)
+        let report = limited.trim(now: Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(report.totalBefore, 6 * 64)
+        XCTAssertLessThanOrEqual(limited.inventory().count, 3, "50k-file ceiling, test-sized")
+        XCTAssertEqual(report.evicted, 3)
+        XCTAssertTrue(limited.exists(keys[5]), "the newest file survives")
+        XCTAssertFalse(limited.exists(keys[0]), "the oldest file goes first")
+    }
+
+    func testAHEICFileSurvivesAReadAndATruncatedOneIsAMiss() throws {
+        let cache = try self.cache()
+        let key = ThumbKey.hd(contentHash: hash("a"), document: .neutral)
+        try cache.store(heic(), for: key)
+        XCTAssertNotNil(cache.data(for: key))
+        // Truncate the header away: a served truncated file would hand ImageIO half a container.
+        let path = cache.url(for: key)
+        try Data([0, 0]).write(to: path)
+        XCTAssertNil(cache.data(for: key))
+        XCTAssertEqual(cache.stats().missReasons["corrupt"], 1)
+    }
+
+    private func cache() throws -> ThumbnailCache { try ThumbnailCache(root: root) }
 }

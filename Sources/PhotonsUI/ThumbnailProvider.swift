@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
 import PhotonsCatalog
@@ -115,6 +116,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
         public var cancelled = 0
         /// Images actually handed to a cell.
         public var applied = 0
+        /// 218 — image decodes performed inside `deliver`. A 200-cell grid where every cell is served
+        /// from the memory LRU must leave this at 0; it is the measurement behind "全部命中时零解码".
+        public var decodes = 0
         /// Policy downgrades by reason (`dngCeiling`), 006 §6.1. Printed, not estimated.
         public var skipReasons: [String: Int] = [:]
 
@@ -130,8 +134,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
 
         public var summary: String {
-            String(format: "requests %d · applied %d · memory %d · disk %d · generated %d · failed %d · cancelled %d · hit %.3f",
-                   requests, applied, memoryHits, diskHits, generated, failures, cancelled, hitRatio)
+            String(format: "requests %d · applied %d · memory %d · disk %d · generated %d · failed %d · cancelled %d · decode %d · hit %.3f",
+                   requests, applied, memoryHits, diskHits, generated, failures, cancelled, decodes, hitRatio)
         }
     }
 
@@ -148,6 +152,13 @@ public final class ThumbnailProvider: @unchecked Sendable {
     public let service: ThumbnailService
 
     private let memory = NSCache<NSString, ImageBox>()
+    /// 218 — the last HD image delivered per content hash. A commit changes the key, so the new key
+    /// is a miss by definition; this is what the cell draws while the rebuild runs ("先显示旧缩略图").
+    /// Deliberately small: it is a placeholder cache, not a second thumbnail LRU.
+    private let recent = NSCache<NSString, ImageBox>()
+    /// The documents behind in-flight HD keys. `ThumbnailProducer` only receives a key and a source
+    /// URL, so the edit itself has to ride here from `request` to `produce`.
+    private var documentsByKey: [String: EditModel] = [:]
     /// `ThumbnailService` holds its producer strongly, so the adapter holds the provider weakly:
     /// that is what keeps provider ↔ service from being a retain cycle.
     private let adapter: ProducerAdapter
@@ -170,6 +181,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
                                         producer: adapter)
         memory.countLimit = ThumbnailProvider.memoryCountLimit
         memory.totalCostLimit = ThumbnailProvider.memoryByteLimit
+        recent.countLimit = 64
+        recent.totalCostLimit = 32 * 1024 * 1024
         adapter.provider = self
     }
 
@@ -246,9 +259,36 @@ public final class ThumbnailProvider: @unchecked Sendable {
         memoryImage(for: .preview(contentHash: contentHash, tier: tier))
     }
 
+    /// 218 — the previous rendering of a photo, for the one frame between a commit's cache miss and
+    /// the rebuilt file. Never counted as a cache hit: it is explicitly *not* the requested key.
+    public func placeholderImage(contentHash: String) -> CGImage? {
+        recent.object(forKey: contentHash as NSString)?.image
+    }
+
     private func remember(_ image: CGImage, for key: ThumbKey) {
         let cost = max(1, image.width * image.height * 4)
         memory.setObject(ImageBox(image), forKey: key.digest as NSString, cost: cost)
+        if key.spec == .hd {
+            recent.setObject(ImageBox(image), forKey: key.contentHash as NSString, cost: cost)
+        }
+    }
+
+    // MARK: - key selection (218)
+
+    /// The document a thumbnail must be rendered from: the live document for the anchor photo, the
+    /// persisted `develop_json` for every other row. A damaged blob reads as `.neutral`, exactly like
+    /// `Catalog.develop(forAsset:)` (never crash the grid on one bad row).
+    public static func document(from asset: Asset) -> EditModel {
+        guard let data = asset.developJson.data(using: .utf8),
+              let model = try? JSONDecoder().decode(EditModel.self, from: data) else { return .neutral }
+        return model
+    }
+
+    /// The shared HD key. The grid, the browser list and the filmstrip all call this, which is the
+    /// whole of "三处同源": same content hash + same document ⇒ same key ⇒ same cache file.
+    public static func hdKey(for asset: Asset, document: EditModel? = nil) -> ThumbKey {
+        .hd(contentHash: asset.contentHash,
+            document: document ?? ThumbnailProvider.document(from: asset))
     }
 
     // MARK: - loading
@@ -262,14 +302,23 @@ public final class ThumbnailProvider: @unchecked Sendable {
     public func request(index: Int,
                         asset: Asset,
                         fileURL: URL?,
+                        document: EditModel? = nil,
                         tier: ThumbTier,
+                        spec: ThumbSpec = .legacy,
                         priority: ThumbPriority = .onScreen,
                         completion: @escaping @MainActor (Int, ThumbKey, CGImage?) -> Void) -> ThumbnailRequest {
-        let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
-        if let reason = plan.skipReason {
-            note { $0.skipReasons[reason, default: 0] += 1 }
+        let key: ThumbKey
+        if spec == .hd {
+            let doc = document ?? ThumbnailProvider.document(from: asset)
+            key = ThumbKey.hd(contentHash: asset.contentHash, document: doc)
+            lock.lock(); documentsByKey[key.digest] = doc; lock.unlock()
+        } else {
+            let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
+            if let reason = plan.skipReason {
+                note { $0.skipReasons[reason, default: 0] += 1 }
+            }
+            key = ThumbKey.preview(contentHash: asset.contentHash, tier: plan.tier)
         }
-        let key = ThumbKey.preview(contentHash: asset.contentHash, tier: plan.tier)
 
         // 1. memory. Synchronous, so a cell that scrolls back into view draws in the same frame.
         if let hit = memoryImage(for: key) {
@@ -321,10 +370,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
         case .failed: note { $0.failures += 1 }
         case .cancelled: note { $0.cancelled += 1 }
         }
-        guard let data = result.data, let image = ThumbnailCache.decode(data) else {
+        guard let data = result.data else {
             DispatchQueue.main.async { completion(index, result.key, nil) }
             return
         }
+        guard let image = ThumbnailProvider.decode(data, for: result.key) else {
+            DispatchQueue.main.async { completion(index, result.key, nil) }
+            return
+        }
+        note { $0.decodes += 1 }
         remember(image, for: result.key)
         note { $0.applied += 1 }
         DispatchQueue.main.async { completion(index, result.key, image) }
@@ -334,6 +388,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
     /// The `ThumbnailProducer` the service calls. Several workers may call this at once.
     public func produce(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
+        if key.spec == .hd {
+            return try produceHD(key, source: source)
+        }
         let ext = source.pathExtension
         // Defensive second line of defence: the request path clamps first (`effectiveTier`), but a
         // producer must never write an over-ceiling file even if someone enqueues a raw key.
@@ -418,6 +475,109 @@ public final class ThumbnailProvider: @unchecked Sendable {
         guard let display = (try? graph.render(.neutral, options: options))?.display,
               let cg = try? Exporter.cgImage(display, bitDepth: 8) else { return nil }
         return cg
+    }
+
+    // MARK: - HD thumbnail (218)
+
+    /// Render one HD thumbnail: the **same** `RenderGraph` the loupe and the exporter use, at a
+    /// scale whose long edge is at most 1920, then `GainMapHEIC.write` with the four pinned
+    /// parameters (q0.75, 8-bit SDR base, half-size colour gain map, +2.3 EV).
+    ///
+    /// Two renders of one document, exactly as the exporter does it: the SDR base through
+    /// `s4_display`, then the extended-linear exit through `s4_display_linear`. Reusing this door is
+    /// what keeps "grid thumbnail == export preview" a fact instead of a claim.
+    private func produceHD(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            throw ThumbProviderError.unreadable(source)
+        }
+        guard let decoder = rawDecoder() else { throw ThumbProviderError.noRAWDecoder }
+        let document: EditModel
+        lock.lock(); document = documentsByKey[key.digest] ?? .neutral; lock.unlock()
+
+        let longEdge = ThumbSpec.hd.longEdge
+        // Decode no larger than needed for 1920 (a 60 MP RAW at 0.25 already covers it), and never
+        // so small that the thumbnail has to upscale.
+        let sourceEdge = ThumbnailProvider.sourceLongEdge(url: source) ?? longEdge
+        let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, sourceEdge))))
+        let decoded = try decoder.decode(source, options: DecodeOptions(
+            scale: Float(decodeScale), whiteBalance: document.decodeInputs.whiteBalance))
+        let w = decoded.width, h = decoded.height
+        let scale = min(1, Double(longEdge) / Double(max(w, h, 1)))
+
+        let graph = try RenderGraph(input: RenderInput(image: decoded,
+                                                       identity: "thumb-hd|\(key.digest)",
+                                                       sourceURL: source,
+                                                       whiteBalance: document.decodeInputs.whiteBalance),
+                                    textureRetention: .none)
+        defer { graph.releaseAllTextures() }
+
+        let sdrOptions = RenderOptions(canvas: nil, scale: scale,
+                                       display: DisplayOptions(primaries: .sRGB, bitDepth: 8,
+                                                               headroom: 1),
+                                       useCache: false, wantsPixels: true)
+        guard let sdr = try? graph.render(document, options: sdrOptions).display else {
+            throw ThumbProviderError.encodeFailed(source)
+        }
+        let linearOptions = RenderOptions(canvas: nil, scale: scale,
+                                          display: DisplayOptions(primaries: .sRGB, bitDepth: 16,
+                                                                  headroom: 1, linearOutput: true),
+                                          useCache: false, wantsPixels: true)
+        guard let linear = try? graph.render(document, options: linearOptions).display else {
+            throw ThumbProviderError.encodeFailed(source)
+        }
+
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "photons-hd-thumb-\(UUID().uuidString).heic")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let written = try GainMapHEIC.write(
+            sdr: sdr, linear: LinearPixels(linear), to: tmp,
+            options: HDRGainMapOptions(gainMap: .iso, halfSize: true,
+                                       headroom: .manual(ThumbSpec.hd.gainMapHeadroom),
+                                       quality: ThumbSpec.hd.quality, bitDepth: 8,
+                                       forceGainMap: true),
+            format: .heic)
+        let data = try Data(contentsOf: tmp)
+
+        lock.lock()
+        runsPerKey[key.digest, default: 0] += 1
+        runsPerContent[key.contentHash, default: 0] += 1
+        lock.unlock()
+        return ThumbPayload(data: data,
+                            source: written.isHDR ? "graph-hd" : "graph-sdr",
+                            sourceLongEdge: max(w, h))
+    }
+
+    /// Pixel size of the file's primary image without decoding it (ImageIO metadata only).
+    static func sourceLongEdge(url: URL) -> Int? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+        let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        return max(w, h) > 0 ? max(w, h) : nil
+    }
+
+    /// Decode a cached payload for display. HD files go through Core Image with
+    /// `expandToHDR`, so the gain map is applied in an extended linear working space; on an SDR
+    /// panel Core Graphics performs the tone map when the `CGImage` is drawn.
+    static func decode(_ data: Data, for key: ThumbKey) -> CGImage? {
+        guard key.spec == .hd else { return ThumbnailCache.decode(data) }
+        return decodeHD(data)
+    }
+
+    static func decodeHD(_ data: Data) -> CGImage? {
+        if #available(macOS 15.0, *) {
+            guard let ci = CIImage(data: data, options: [.expandToHDR: true]) else { return nil }
+            let options: [CIContextOption: Any] = [
+                .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) as Any,
+                .workingFormat: CIFormat.RGBAh,
+                .cacheIntermediates: false,
+            ]
+            let context = CIContext(options: options)
+            return context.createCGImage(ci, from: ci.extent)
+        }
+        return ThumbnailCache.decode(data)
     }
 
     private func rawDecoder() -> RAWDecoder? {
