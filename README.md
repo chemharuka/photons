@@ -176,6 +176,7 @@ local/                     不入库的会话工作区（笔记、探针、样�
 - [docs/architecture-decisions.md](docs/architecture-decisions.md) —— 每个选择为什么这样定，以及什么条件下它会是错的。
 - [docs/xmp-mapping.md](docs/xmp-mapping.md) —— `crs:*` / `photons:*` 的映射与往返。
 - [docs/collaboration.md](docs/collaboration.md) —— 这台机器怎么配置、工作怎么排队。
+- [tools/wb-calibrate/](tools/wb-calibrate/) —— 合成 RAW 图卡：用固定刺激体检 RAW 解码器的中性点/颜色/取向。
 - [docs/tasks/](docs/tasks/) —— 每个功能一份规格。
 
 ## 许可
