@@ -5320,7 +5320,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
             frozenFrame = nil
             // No frame of the *new* photo is on the canvas yet: a resize must ask for one instead of
             // matching the previous photo's canvas.
-            lastFrame = nil
+            //
+            // 277 — only the app's session-named switch drops `lastFrame` here. A controller driven
+            // through `frameSource` (the switch harness, the bench) names photos explicitly and reads
+            // `lastFrame` as "the new photo's first frame has reached the layer"; clearing it made
+            // that wait true at the instant of the switch, so the 065 acceptance ran before the
+            // first frame and saw neither the regenerated backdrop nor the present that follows it.
+            // The canvas is still covered and `presentedPhoto`/`canvasPicture`/`canvasContent` are
+            // still dropped on both paths, so the previous photo is never shown either way.
+            if frameSource == nil { lastFrame = nil }
         }
         // A picker is aimed at one picture; a different one is a cancellation, like the crop frame.
         if isEyedropperArmed { cancelEyedropper() }

@@ -36,7 +36,13 @@ public final class LoupeCanvasView: NSView {
     /// is in hand, so a cold cache left that drawable visible — the reported 「残留上一个照片的像素
     /// 缓存」. This sheet is synchronous, full-canvas and the same `#0F0F0F` as the matte, so the old
     /// photo can never be the first thing the new selection shows.
-    private let canvasCover = NSView()
+    ///
+    /// **277 — it is a sublayer of the canvas, not a third top-level layer.** The canvas' invariant is
+    /// "every layer composites the one matte constant", and a sibling `NSView` broke the count while
+    /// doing the same job. A sublayer of the backing `CAMetalLayer` still draws above its drawable
+    /// (children composite over their parent's contents) and below the stand-in and the brush ring,
+    /// so the visual order is unchanged and the layer count is the one the invariant describes.
+    private let canvasCover = CALayer()
 
     /// 247 — the 修复 brush-size ring. It is the **last** subview, so it composites above both the
     /// matte cover and the stand-in. `hitTest` is nil, so it never takes a click.
@@ -124,12 +130,13 @@ public final class LoupeCanvasView: NSView {
         //
         // 258 — the matte cover goes first: it must hide the layer's previous drawable at a photo
         // change, and the stand-in (when one is ready) is drawn on top of it.
-        canvasCover.wantsLayer = true
-        canvasCover.layer?.backgroundColor = NSColor.canvasMatte.cgColor
+        canvasCover.backgroundColor = metalLayer.backgroundColor
         canvasCover.isHidden = true
         canvasCover.frame = bounds
-        canvasCover.autoresizingMask = [.width, .height]
-        addSubview(canvasCover)
+        // Above the layer's own contents but below every view-backed sublayer (the stand-in, the
+        // brush ring): those are siblings at z = 0, this sheet composites first.
+        canvasCover.zPosition = -1
+        metalLayer.addSublayer(canvasCover)
         firstFramePlaceholder.isHidden = true
         firstFramePlaceholder.frame = .zero
         addSubview(firstFramePlaceholder)
@@ -155,6 +162,8 @@ public final class LoupeCanvasView: NSView {
         metalLayer.anchorPoint = .zero
         metalLayer.frame = bounds
         metalLayer.isGeometryFlipped = isFlipped
+        // 277 — the matte sheet is a sublayer of the canvas, so it follows the canvas' own frame.
+        canvasCover.frame = metalLayer.bounds
         // A stop change used to scale this layer (`CATransform3D`), and a scaled layer paints outside
         // its view: the drawable covered the browser pane mid-zoom. Nothing transforms the layer now —
         // a bridge re-presents the texture through a sampling window instead — and this makes the
