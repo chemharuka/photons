@@ -220,7 +220,26 @@ final class FrameTransformMatrixTests: XCTestCase {
              s3Window.y + (y - mapping.originY) / max(canvasPerSource, 1e-9))
         }
 
-        /// S1 source pixel → S5 device pixel, the first-principles composition the acceptance names.
+        /// The kernel's pivot: the **photograph's** centre, in turned source pixels (273 / 248).
+        private var photoCentre: (x: Double, y: Double) {
+            (Double(geometry.source.width) / 2, Double(geometry.source.height) / 2)
+        }
+
+        /// The photo centre in the crop frame's own pixels (`P − cropOrigin`).
+        private var photoCentreInFrame: (x: Double, y: Double) {
+            let p = photoCentre, o = geometry.frameOriginInPhoto
+            return (p.x - o.x, p.y - o.y)
+        }
+
+        /// The picture's place in the canvas: `inset + A + R(θ)(source − P)`, the walk S0 executes.
+        private var canvasInset: (x: Double, y: Double) { geometry.canvasInset }
+
+        /// S1 source pixel → S5 device pixel, the **prediction** that picks the nearest rendered blob.
+        ///
+        /// This stays the continuous crop-frame walk: ① is measured as `measured − plan` (PlanPhase),
+        /// so the prediction only has to be close enough to find the blob. Keeping it independent of
+        /// the pivot under test also keeps a 45° corner crop from selecting blobs that the photograph's
+        /// edge has already clipped (their centroid is biased, not the mapping).
         func view(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
             let cg = geometry
             let qx = x / max(Double(cg.source.width), 1e-9)
@@ -235,16 +254,12 @@ final class FrameTransformMatrixTests: XCTestCase {
         func source(viewX x: Double, viewY y: Double) -> (x: Double, y: Double) {
             let cg = geometry
             let s3 = canvas(viewX: x, viewY: y)
-            let f = cg.framePoint(canvasX: s3.x, canvasY: s3.y)
-            var rx = f.x / max(frameExtent.width, 1e-9)
-            var ry = f.y / max(frameExtent.height, 1e-9)
-            let c = cg.crop
-            rx = c.left + rx * c.width
-            ry = c.top + ry * c.height
-            if let perspective = cg.perspective, perspective.hasWarp {
-                (rx, ry) = perspective.inverse(x: rx, y: ry)
-            }
-            return (rx * Double(cg.source.width), ry * Double(cg.source.height))
+            let p = photoCentre
+            let a = photoCentreInFrame
+            let ux = s3.x - canvasInset.x - a.x
+            let uy = s3.y - canvasInset.y - a.y
+            let r = cg.rotation.invert(x: ux, y: uy)
+            return (r.0 + p.x, r.1 + p.y)
         }
     }
 
@@ -421,15 +436,20 @@ final class FrameTransformMatrixTests: XCTestCase {
         /// This is the **integer** walk the renderer actually executes.
         func view(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
             let p = (x * Double(decodedOriented.width), y * Double(decodedOriented.height))
-            var fx = (p.0 - cropOrigin.x) * frameContent.width / max(cropSpan.x, 1e-9)
-            var fy = (p.1 - cropOrigin.y) * frameContent.height / max(cropSpan.y, 1e-9)
+            // 273 — `s0_geometry.metal` turns the **photograph** about `orientedSource/2` and only
+            // then maps the photo into the crop frame (`(photo − cropOrigin) · frame/cropSpan`). The
+            // old model turned the already-cropped frame pixels about `frameContent/2`, i.e. about
+            // the crop's centre, which is `(I − R)(cropCentre − photoCentre)` off the kernel.
+            let photo: (x: Double, y: Double)
             if hasAngle {
-                let ox = fx - frameContent.width / 2, oy = fy - frameContent.height / 2
-                let rx = ox * cosine - oy * sine
-                let ry = ox * sine + oy * cosine
-                fx = rx + frameContent.width / 2
-                fy = ry + frameContent.height / 2
+                let cx = Double(decodedOriented.width) / 2, cy = Double(decodedOriented.height) / 2
+                let ox = p.0 - cx, oy = p.1 - cy
+                photo = (ox * cosine - oy * sine + cx, ox * sine + oy * cosine + cy)
+            } else {
+                photo = p
             }
+            let fx = (photo.x - cropOrigin.x) * frameContent.width / max(cropSpan.x, 1e-9)
+            let fy = (photo.y - cropOrigin.y) * frameContent.height / max(cropSpan.y, 1e-9)
             return (origin.x + fx - frameOrigin.x, origin.y + fy - frameOrigin.y)
         }
     }
