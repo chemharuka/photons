@@ -217,21 +217,32 @@ static inline void s0_body(texture2d<float, access::read> src,
     }
 
     float2 uv = framePx / max(p.f.xy, float2(1.0));
-    if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
-    if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 
     // ── the rotation, in **pixels** (see the header) ────────────────────────────────────────────
-    // `HAS_ROTATION == false` is a compile-time constant, so the `× frameSize` / `÷ frameSize`
-    // round trip is not in the emitted code at all and the mapping is the pre-cropfix one — bit-exact,
-    // which is what every cropped-but-not-straightened document depends on. The rotation itself stays
-    // a pure pixel-space turn: same body, one instantiation.
-    float2 r;
+    // 248 — the picture turns about the **photograph's** centre, not the crop's. The crop rect is a
+    // window on the turned picture (`CropTool.layout` draws that window axis-aligned and
+    // `LoupeMapping.sourcePoint` turns the photo about its own centre), so rotating the *crop* about
+    // its own centre would sample a region translated by `(I − R)·(cropCentre − photoCentre)`.
+    // At a full crop the two centres coincide, which is why the old spelling was invisible there.
+    //
+    // The source position is `P + R(photo − P)` in turned-photo pixels, `P = orientedSource / 2`.
+    // `orientedSource` swaps at an odd quarter turn because `p.c`/`uv` live in the turned frame
+    // (schema 9) while `p.b.zw` is the file's own size. `HAS_ROTATION == false` is a compile-time
+    // constant, so the non-rotating path still has no `× srcSize` / `÷ srcSize` and stays bit-exact.
+    float2 cropped;
     if (HAS_ROTATION) {
-        float2 o = (uv - 0.5) * p.f.xy;
-        float cs = p.d.x;
-        float sn = p.d.y;
-        float2 rotated = frame_turn_pixels(o, cs, sn);
-        r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
+        int turns = int(p.g.z + 0.5);
+        float2 oriented = float2((turns % 2 == 1) ? srcSize.yx : srcSize);
+        float2 photo = p.c.xy + uv * p.c.zw;
+        // The flip mirrors the **photograph** about its own centre, so it lives in photo space — the
+        // same space (and pivot) as `LoupeMapping`'s `sourcePoint`. With a full crop this is the old
+        // window-space flip; a smaller crop mirrors the picture, not the window's own numbers.
+        if (p.d.z > 0.5) { photo.x = 1.0 - photo.x; }
+        if (p.d.w > 0.5) { photo.y = 1.0 - photo.y; }
+        float2 px = photo * oriented;
+        float2 pivot = oriented * 0.5;
+        float2 rotated = frame_turn_pixels(px - pivot, p.d.x, p.d.y) + pivot;
+        cropped = rotated / max(oriented, float2(1.0));
     } else {
         // NOT `r = uv`: the recorded pixels are not the ones `uv` produces, they are the ones
         // `(uv − ½) + ½` produces — two roundings, not zero. Subtracting ½ rounds for |uv| < ¼ and
@@ -241,22 +252,12 @@ static inline void s0_body(texture2d<float, access::read> src,
         // separate rounding — the compiler's fast-math kernel will happily reassociate `o + ½` back
         // into `uv`, which is exactly the bug — while still keeping the *rotation* out of this
         // instantiation: no `× frameSize`, no `÷ frameSize`, no cos/sin.
+        if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
+        if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
         float2 o = uv - 0.5;
-        r = fma(o, float2(1.0), float2(0.5));
+        float2 r = fma(o, float2(1.0), float2(0.5));
+        cropped = p.c.xy + r * p.c.zw;
     }
-
-    // ── the 90° turn, between the straighten and the crop ────────────────────────────────────────
-    // Order, and why: `r` above is a position in the **turned** picture (that is the frame the user
-    // sees, so the flips and the straighten — applied to `r` — are the ones the user asked for), and
-    // `p.c` is the crop measured **in that same turned frame** (schema 9: a crop is a rectangle of
-    // the picture, so turning the picture turns the rectangle — `CropMath.turnedClockwise`). The file's
-    // pixels are *not* turned, so the position inside the crop is turned back here, and only then
-    // mapped through the crop rect into source pixels. Forgetting this step is the classic 90°
-    // rotation bug: the box keeps its numbers, the picture turns, and the crop starts selecting a
-    // different part of the photograph. `QuarterTurnTests.testCropSelectsTheSamePixelsAfterATurn`
-    // pins it, and its second half renders exactly that broken document (the frame turned, the rect
-    // not) to show the same assertion going red.
-    float2 cropped = p.c.xy + r * p.c.zw;
 
     // ── 183 · the keystone ──────────────────────────────────────────────────────────────────────
     // A 3×3 homography between the **canvas' normalized box** and the picture's own, applied to the

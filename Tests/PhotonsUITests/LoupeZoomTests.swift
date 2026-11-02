@@ -224,11 +224,11 @@ final class LoupeZoomTests: XCTestCase {
         let zoom = 4.0
         let state = actual(zoom: zoom)
         let whole = wholeFrameMapping(f, zoom: zoom, degrees: 7, flipH: false, flipV: false)
-        let centre = f.windowCenter(of: state)
-        let framePoint = whole.viewPoint(sourceX: centre.x, sourceY: centre.y)
-        let offset = (x: framePoint.x - Double(aspectMatched.width) / 2,
-                      y: framePoint.y - Double(aspectMatched.height) / 2)
         let win = f.mapping(of: state)
+        // The whole-frame mapping's viewport is `source × zoom`, the window's is `viewport`; the
+        // window's crop origin is the translation between the two (248: the pivot is the photo's
+        // centre in both, so the remainder is exactly this translation).
+        let offset = (x: win.cropLeft * zoom, y: win.cropTop * zoom)
         for gx in stride(from: 0.5, to: Double(aspectMatched.width), by: 317.0) {
             for gy in stride(from: 0.5, to: Double(aspectMatched.height), by: 211.0) {
                 let a = win.sourcePoint(viewX: gx, viewY: gy)
@@ -247,11 +247,10 @@ final class LoupeZoomTests: XCTestCase {
         let zoom = 2.0
         let state = actual(zoom: zoom, x: 2400, y: 2100)
         let whole = wholeFrameMapping(f, zoom: zoom, degrees: -9, flipH: true, flipV: true)
-        let centre = f.windowCenter(of: state)
-        let framePoint = whole.viewPoint(sourceX: centre.x, sourceY: centre.y)
-        let offset = (x: framePoint.x - Double(aspectMatched.width) / 2,
-                      y: framePoint.y - Double(aspectMatched.height) / 2)
         let win = f.mapping(of: state)
+        // 248 — the pivot is the photograph's centre in both mappings (the window is a crop), so the
+        // only difference is the window's crop origin, scaled into the whole mapping's viewport.
+        let offset = (x: win.cropLeft * zoom, y: win.cropTop * zoom)
         for gx in stride(from: 0.5, to: Double(aspectMatched.width), by: 401.0) {
             for gy in stride(from: 0.5, to: Double(aspectMatched.height), by: 193.0) {
                 let a = win.sourcePoint(viewX: gx, viewY: gy)

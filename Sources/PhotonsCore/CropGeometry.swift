@@ -45,6 +45,11 @@ public struct CropGeometry: Sendable, Equatable {
 
     /// The straighten angle in the document's own convention (positive = the angle stored by the
     /// picker before 123; the UI maps its positive slider through `TransformSession.setAngle`).
+    ///
+    /// **248 — the pivot.** Rotations act about the **photograph's** centre (`source / 2`), not the
+    /// crop's own centre: the crop is a window on the turned picture, exactly what the overlay draws
+    /// and what `s0_geometry.metal` / `LoupeMapping.sourcePoint` sample. A full crop hides the
+    /// difference because the two centres coincide; an off-centre crop must not.
     public let rotationDegrees: Double
     public let rotation: RotationMatrix
     /// The crop rectangle, measured in the **turned** frame — the same rect S0 receives (`p.c`).
