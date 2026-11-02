@@ -1975,12 +1975,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     /// **188b — the key is the *shape*, not the pixel count.** The canvas is
     /// `CropMath.canvasSize(crop, in: source, straighten, …)`, and `source` here is
-    /// `cropSourceSize`, which since 231 is the **whole file's** frame: `publishIngestedSource(_:decodeScale:)`
-    /// divides the resident rung by the scale it was decoded at, so a 0.5 rung reports the same
-    /// `1200 × 800` a full rung does. That division is load-bearing: without it the crop tool measured
-    /// the 600 × 400 buffer while `framing()` described the 1200 × 800 file, and a `.full` frame on the
-    /// 0.5 rung was drawn as the top-left 1/4 of the picture until the full rung landed (231's bug —
-    /// see `docs/tasks/231-crop-enter-flash.md`). Because the published size no longer moves with a
+    /// `cropSourceSize`, which since 231 is the **whole file's S1 source size**:
+    /// `publishIngestedSource(_:decodeScale:)` divides the resident rung by the scale it was decoded
+    /// at, so a 0.5 rung reports the same `1200 × 800` a full rung does. That division is
+    /// load-bearing: without it the crop tool measured the 600 × 400 buffer while `framing()`
+    /// described the 1200 × 800 file, and a `.full` frame on the 0.5 rung was drawn as the top-left
+    /// 1/4 of the picture until the full rung landed (231's bug — see
+    /// `docs/tasks/231-crop-enter-flash.md`). Because the published size no longer moves with a
     /// rung, comparing the *pixels* is safe for a rung change; it is only the first refresh after a
     /// present, when no size had been recorded yet, that used to drop a perfectly good frozen frame.
     /// Inside a live resize nothing re-renders by design, so nothing rebuilt it and the layer kept the
@@ -4023,8 +4024,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // (`LoupeFraming.sourceWidth`, i.e. the decode divided by its scale). `cropSourceSize` is
         // published the same way since 231 — `publishIngestedSource(_:decodeScale:)` divides the rung
         // by the scale it was decoded at, so the crop tool and the projection both describe the whole
-        // file. That division is required: without it the 0.5 rung's `.full` frame was drawn as the
-        // top-left 1/4 of the picture until the full rung landed (see
+        // file in **S1 source pixels**. That division is required: without it the 0.5 rung's `.full`
+        // frame was drawn as the top-left 1/4 of the picture until the full rung landed (see
         // `docs/tasks/231-crop-enter-flash.md`). The framing is still the authority the camera itself
         // is laid out with, so the swap reads its dimensions.
         let framingBeforeTurn = framing()
