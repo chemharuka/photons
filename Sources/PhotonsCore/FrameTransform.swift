@@ -341,8 +341,6 @@ public struct FrameTransform: Sendable, Equatable {
     public func sourceToView(_ point: Point) -> Point {
         var fx = point.x / Double(max(source.width, 1))
         var fy = point.y / Double(max(source.height, 1))
-        fx = crop.left + fx * crop.width
-        fy = crop.top + fy * crop.height
         let size = geometry.frameSize
         var frame = Point((fx - crop.left) / max(crop.width, 1e-9) * Double(size.width),
                           (fy - crop.top) / max(crop.height, 1e-9) * Double(size.height))

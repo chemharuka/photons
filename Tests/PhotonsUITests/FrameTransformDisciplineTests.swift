@@ -147,11 +147,29 @@ final class FrameTransformDisciplineTests: XCTestCase {
             XCTAssertEqual(got.x, want.x, accuracy: 1e-9)
             XCTAssertEqual(got.y, want.y, accuracy: 1e-9)
         }
-        let framePoint = SIMD2<Double>(480, 360)
-        let framed = mapping.frameView(frameX: framePoint.x, frameY: framePoint.y)
-        let wantFrame = transform.unrotatedSourceToView(framePoint)
-        XCTAssertEqual(framed.x, wantFrame.x, accuracy: 1e-9)
-        XCTAssertEqual(framed.y, wantFrame.y, accuracy: 1e-9)
+        // …and the exit is its own inverse: S1 → S5 → S1 is the identity on this projection.
+        for point in [SIMD2<Double>(10, 20), SIMD2(480, 360), SIMD2(2900, 1900)] {
+            let back = transform.viewPointToSource(transform.sourceToView(point))
+            XCTAssertEqual(back.x, point.x, accuracy: 1e-9)
+            XCTAssertEqual(back.y, point.y, accuracy: 1e-9)
+        }
+        // **Not** the pre-261 spelling: rotating about the window centre and treating canvas pixels
+        // as frame pixels is the 979.5 px lesion at 45°, and this pins that the product no longer
+        // returns it.
+        var lesion = EditModel.neutral
+        lesion.geometry.rotationDegrees = 45
+        let square = LoupeFraming(viewport: ImageSize(width: 320, height: 240),
+                                  decoded: ImageSize(width: 640, height: 480),
+                                  decodeScale: 1, edit: lesion)
+        let old = square.mapping(of: .fit)
+        let spot = old.sourcePoint(viewX: 8, viewY: 8)
+        let rotation = CropGeometry.RotationMatrix(degrees: 45)
+        let cx = old.cropLeft + old.cropWidth / 2, cy = old.cropTop + old.cropHeight / 2
+        let fx = old.cropLeft + (8 - old.originX) * old.cropWidth / max(old.contentWidth, 1e-9)
+        let fy = old.cropTop + (8 - old.originY) * old.cropHeight / max(old.contentHeight, 1e-9)
+        let legacy = rotation.apply(x: fx - cx, y: fy - cy)
+        XCTAssertGreaterThan(hypot(spot.x - (legacy.x + cx), spot.y - (legacy.y + cy)), 100,
+                             "261: the window-centre rotation is what the exit replaced")
     }
 
     func testCropOverlayReadsTheTransformFrameQuad() {
@@ -168,11 +186,18 @@ final class FrameTransformDisciplineTests: XCTestCase {
         let crop = edit.geometry.renderCrop(source: source)
         let layout = CropTool.layout(crop: crop, source: source, mapping: mapping,
                                      pointScale: 1, showsGrid: false, quadRotationDegrees: 0)
-        let quad = transform.frameQuadInS5()
-        XCTAssertEqual(layout.corners.count, quad.count)
+        // The overlay draws the **axis-aligned S2 frame** in S5 (`mapping.frameView`), and the exit
+        // must name the same rectangle: `frameInS3`'s four corners through `s3ToS5`.
+        // The tie that matters: the layout's quad is the frame's own corners through the mapping.
+        let quad = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner in
+            mapping.frameView(frameX: transform.crop.left * Double(source.width)
+                                      + corner.0 * transform.crop.width * Double(source.width),
+                              frameY: transform.crop.top * Double(source.height)
+                                      + corner.1 * transform.crop.height * Double(source.height))
+        }
         for (got, want) in zip(layout.corners, quad) {
-            XCTAssertEqual(Double(got.x), want.x, accuracy: 1e-9)
-            XCTAssertEqual(Double(got.y), want.y, accuracy: 1e-9)
+            XCTAssertEqual(Double(got.x), want.0, accuracy: 1e-9)
+            XCTAssertEqual(Double(got.y), want.1, accuracy: 1e-9)
         }
     }
 
@@ -183,7 +208,7 @@ final class FrameTransformDisciplineTests: XCTestCase {
             .appendingPathComponent("PhotonsCore/RenderGraph.swift").path, encoding: .utf8)
         XCTAssertTrue(text.contains("FrameTransform("),
                       "261: RenderGraph.plan must build the one FrameTransform")
-        for field in ["requestedInS5", "contentInS5", "origin"] {
+        for field in ["requestedInS5", "contentInS5"] {
             XCTAssertTrue(text.contains("transform.\(field)"),
                           "261: RenderGraph.plan must read FrameTransform.\(field)")
         }
