@@ -225,6 +225,13 @@ public struct RenderOptions: Sendable {
     /// never set by the app and never part of a key.
     public var healWithoutBoundaryMatch: Bool
 
+    /// **Tests only.** Dispatch S1.9's apply pass over the **whole canvas** instead of one bounding
+    /// box per spot — the pre-257 dispatch. The pixel math is the same kernel; only the grid the
+    /// threads start from changes (`HealParamsU.b.zw` is (0, 0) here, the bbox's origin there), and
+    /// that is what makes `HealDispatchTests` a proof of byte equivalence rather than a second
+    /// implementation to trust. Never set by the app, never part of a key.
+    public var healFullCanvasDispatch: Bool
+
     /// **Tests only.** Read the 1 × 1 airlight texture back to the CPU after the frame, into
     /// `RenderGraph.lastDehazeAirlight` (117's acceptance needs to compare the estimated `A` with the
     /// synthetic veil). The shipped path never reads it back: `s1_9_dehaze_apply` samples the texture
@@ -294,6 +301,7 @@ public struct RenderOptions: Sendable {
                 bwIndependentChannels: Bool = false,
                 gradeGlobalWeights: Bool = false,
                 healWithoutBoundaryMatch: Bool = false,
+                healFullCanvasDispatch: Bool = false,
                 probesDehazeAirlight: Bool = false,
                 legacyDehazePerChannel: Bool = false,
                 legacyDehazeBlockVeil: Bool = false,
@@ -316,6 +324,7 @@ public struct RenderOptions: Sendable {
         self.bwIndependentChannels = bwIndependentChannels
         self.gradeGlobalWeights = gradeGlobalWeights
         self.healWithoutBoundaryMatch = healWithoutBoundaryMatch
+        self.healFullCanvasDispatch = healFullCanvasDispatch
         self.probesDehazeAirlight = probesDehazeAirlight
         self.legacyDehazePerChannel = legacyDehazePerChannel
         self.legacyDehazeBlockVeil = legacyDehazeBlockVeil
@@ -1119,7 +1128,10 @@ private struct HealSpotU {
 
 private struct HealParamsU {
     var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    var b: SIMD4<Float>   // spotCount, boundaryMatch, 0, 0
+    // spotCount, boundaryMatch, dispatchOrigin.xy. The origin is (0, 0) on the pre-257 whole-canvas
+    // dispatch and the spot's bbox corner on the 257 per-spot one: the kernel adds it to
+    // `thread_position_in_grid`, so the pixel math below is untouched.
+    var b: SIMD4<Float>
 }
 
 /// The fitted boundary plane, one record per spot (`HealStatU` in the kernel).
@@ -3402,28 +3414,71 @@ public final class RenderGraph {
         }
     }
 
-    /// S1.9, two passes in one command buffer:
+    /// A spot's coverage in canvas pixels: `r·(1 + feather) + 1` around the centre, clamped to the
+    /// canvas. `nil` when it holds no pixel (a spot entirely outside the picture).
+    private struct HealBBox {
+        var x: Int
+        var y: Int
+        var width: Int
+        var height: Int
+        var size: ImageSize { ImageSize(width: width, height: height) }
+    }
+
+    private func healBBox(_ spot: HealSpotU, canvas: ImageSize) -> HealBBox? {
+        let r = Double(spot.a.z)
+        let half = r * (1 + Double(max(spot.a.w, 0))) + 1
+        let x0 = max(0, Int((Double(spot.a.x) - half).rounded(.down)))
+        let y0 = max(0, Int((Double(spot.a.y) - half).rounded(.down)))
+        let x1 = min(canvas.width, Int((Double(spot.a.x) + half).rounded(.up)))
+        let y1 = min(canvas.height, Int((Double(spot.a.y) + half).rounded(.up)))
+        guard x1 > x0, y1 > y0 else { return nil }
+        return HealBBox(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+
+    /// A blit of one canvas rectangle. The C2 apply path writes the input into the output once, then
+    /// only each spot's bbox; the C0 path uses it to fold a scratch bbox back after each spot.
+    private func blit(_ cb: MTLCommandBuffer, from: MTLTexture, to: MTLTexture,
+                      x: Int, y: Int, width: Int, height: Int) throws {
+        guard let b = cb.makeBlitCommandEncoder() else { throw RenderError.commandBufferFailed }
+        b.copy(from: from, sourceSlice: 0, sourceLevel: 0,
+               sourceOrigin: MTLOrigin(x: x, y: y, z: 0),
+               sourceSize: MTLSize(width: width, height: height, depth: 1),
+               to: to, destinationSlice: 0, destinationLevel: 0,
+               destinationOrigin: MTLOrigin(x: x, y: y, z: 0))
+        b.endEncoding()
+    }
+
+    /// `dispatchThreads`, not `dispatchThreadgroups`: a bbox is rarely a whole number of
+    /// threadgroups, and a partial group's spare threads would write their prefix into a *neighbour*
+    /// spot's bbox. This form has no spare threads.
+    private func dispatchThreads(_ enc: MTLComputeCommandEncoder, _ pipeline: MTLComputePipelineState,
+                                 _ size: ImageSize) {
+        let tw = pipeline.threadExecutionWidth
+        let th = max(1, pipeline.maxTotalThreadsPerThreadgroup / tw)
+        enc.dispatchThreads(MTLSize(width: size.width, height: size.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
+    }
+
+    /// S1.9 — the boundary ring, then the pixels.
     ///
-    ///   1. `s1_9_heal_stats` — one thread per spot walks the rim ring (`HealSpotU.a.xy` + `radius`)
-    ///      and fits the correction plane `a₀ + a₁u + b₁v` to `dst − src` there. 256 texel reads per
-    ///      spot, once per frame — the ring's mean and gradient is the whole of the Poisson step this
-    ///      build ships (`Kernels/s1_9_heal.metal` has the derivation and the truncation error).
-    ///   2. `s1_9_heal_apply` — every canvas pixel, every spot in document order, always reading the
-    ///      **input** texture as the source (so a spot's source is the picture S1.6 produced, never
-    ///      its own or a neighbour's output — that is what makes three spots independent).
-    ///
-    /// The two encoders are in one command buffer, so the stats are written before the apply reads
-    /// them (Metal orders encoders in a buffer); both bind the *same* pipeline texture, the first as
-    /// `access::read` for the identity copy and the second as `access::read` + `access::sample` for
-    /// the sub-texel source position.
+    /// **257 C2.** The apply pass is dispatched **once per spot, over that spot's bbox only**, after
+    /// one blit of the input into the output. The spots are still processed in document order and
+    /// still do not share a bbox (a later spot may overwrite an earlier one where they overlap); the
+    /// pixel formula is the pre-257 one, because a spot's source is always the **input** texture, so
+    /// a pixel inside spot *i* is fully determined by the spots `0…i` that reach it. Spot *i*'s
+    /// dispatch therefore runs the same loop over `0…i` (the prefix) and writes the accumulated
+    /// result; the last dispatch that reaches a pixel writes the whole answer. That is why the
+    /// output is byte-identical with the old whole-canvas pass, and why the cost is the sum of the
+    /// bboxes rather than the canvas. `RenderOptions.healFullCanvasDispatch` keeps the old dispatch
+    /// as a first-class A/B hook for `HealDispatchTests`.
     private func encodeHeal(cb: MTLCommandBuffer, into out: MTLTexture,
                             from src: MTLTexture, edit: EditModel, plan: Plan,
                             options: RenderOptions) throws {
         let spots = healSpotU(edit, plan: plan)
+        let boundary: Float = options.healWithoutBoundaryMatch ? 0 : 1
         var params = HealParamsU(a: SIMD4(plan.origin.x, plan.origin.y,
                                          Float(plan.content.width), Float(plan.content.height)),
-                                 b: SIMD4(Float(spots.count),
-                                          options.healWithoutBoundaryMatch ? 0 : 1, 0, 0))
+                                 b: SIMD4(Float(spots.count), boundary, 0, 0))
         let apply = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_apply")
         guard !spots.isEmpty else {
             // Not reachable through `pipeline(hasHeal:)` — a stage with no spot does not exist — but a
@@ -3441,7 +3496,7 @@ public final class RenderGraph {
                                                 options: .storageModeShared) else {
             throw RenderError.commandBufferFailed
         }
-        // 1 — the boundary ring.
+        // 1 — the boundary ring. Semantics unchanged: one thread per spot, fixed angle order.
         let stats = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_stats")
         var spotArray = spots
         guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3457,16 +3512,47 @@ public final class RenderGraph {
         e0.endEncoding()
 
         // 2 — the pixels.
-        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e1.setComputePipelineState(apply)
-        e1.setTexture(src, index: 0)
-        e1.setTexture(out, index: 1)
-        e1.setTexture(src, index: 2)
-        e1.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
-        e1.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
-        e1.setBuffer(statBuffer, offset: 0, index: 2)
-        dispatch(e1, apply, plan.canvas)
-        e1.endEncoding()
+
+        // The pre-257 dispatch, kept as the A/B reference. It is the *same* kernel and the same
+        // uniform; only the origin is (0, 0) and the grid is the whole canvas, so the kernel's own
+        // copy loop still fills the letterbox and every pixel no spot reaches.
+        if options.healFullCanvasDispatch {
+            guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e1.setComputePipelineState(apply)
+            e1.setTexture(src, index: 0)
+            e1.setTexture(out, index: 1)
+            e1.setTexture(src, index: 2)
+            e1.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
+            e1.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
+            e1.setBuffer(statBuffer, offset: 0, index: 2)
+            dispatch(e1, apply, plan.canvas)
+            e1.endEncoding()
+            return
+        }
+
+        // Everything outside the spots is the input verbatim.
+        try blit(cb, from: src, to: out, x: 0, y: 0,
+                 width: plan.canvas.width, height: plan.canvas.height)
+
+        // C2 — the same prefix of spots over each bbox; `out` is the destination, `src` both the
+        // target and the source (so no spot reads another's output). One encoder per spot: the
+        // dispatches overwrite each other's bboxes where spots overlap, and separate encoders make
+        // Metal order them (a later spot must see the earlier one's pixels).
+        for (i, spot) in spots.enumerated() {
+            guard let box = healBBox(spot, canvas: plan.canvas) else { continue }
+            var p = params
+            p.b = SIMD4(Float(i + 1), boundary, Float(box.x), Float(box.y))
+            guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+            e.setComputePipelineState(apply)
+            e.setTexture(src, index: 0)
+            e.setTexture(out, index: 1)
+            e.setTexture(src, index: 2)
+            e.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
+            e.setBytes(&p, length: MemoryLayout<HealParamsU>.stride, index: 1)
+            e.setBuffer(statBuffer, offset: 0, index: 2)
+            dispatchThreads(e, apply, box.size)
+            e.endEncoding()
+        }
     }
 
     // MARK: encoding

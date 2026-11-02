@@ -132,7 +132,10 @@ struct HealSpotU {
 
 struct HealParamsU {
     float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    float4 b;   // spotCount, boundaryMatch (1 = fit the plane), 0, 0
+    // spotCount, boundaryMatch (1 = fit the plane), dispatchOrigin.xy. 257 C2: the apply pass is
+    // dispatched once per spot over its bbox, and the kernel starts from `thread_position_in_grid +
+    // dispatchOrigin`; the pre-257 whole-canvas dispatch passes (0, 0), so its math is untouched.
+    float4 b;
 };
 
 /// The fitted correction, one record per spot. `cN` = (a₀, a₁, b₁, 0) for channel N (R, G, B).
@@ -218,7 +221,11 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
                             constant HealSpotU *spots [[buffer(0)]],
                             constant HealParamsU &p [[buffer(1)]],
                             constant HealStatU *stats [[buffer(2)]],
-                            uint2 gid [[thread_position_in_grid]]) {
+                            uint2 gid0 [[thread_position_in_grid]]) {
+    // 257 C2 — the only change to this kernel's coordinates: a per-spot dispatch starts at the
+    // spot's bbox corner. The whole-canvas dispatch passes (0, 0), so every line below is the
+    // pre-257 line with the same `gid`.
+    uint2 gid = gid0 + uint2(uint(round(p.b.z)), uint(round(p.b.w)));
     float4 v = src.read(gid);
     float2 size = float2(src.get_width(), src.get_height());
     float2 local = float2(gid) + 0.5 - p.a.xy;

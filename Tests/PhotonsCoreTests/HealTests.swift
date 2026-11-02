@@ -540,4 +540,56 @@ final class HealTests: XCTestCase {
         XCTAssertLessThan(with, 1000, "4.10 Mpx 一帧必须在秒的量级以内")
         XCTAssertLessThan(with, without * 3 + 20, "一个 spot 的 S1.9 不该让一帧翻倍")
     }
+
+    /// 257 C2 — the same panel for **1 / 3 / 8** spots. The baseline share was measured on the base
+    /// commit (pre-257 whole-canvas dispatch) with the one-shot probe:
+    /// **8 spot = 2.605 ms** (`with − without`, best of 7, 2560×1600). The bbox dispatch has to be
+    /// at most 40 % of it, with the dispatch's 15 % run-to-run allowance, and fewer than three
+    /// no-spot frames. Print the measured milliseconds; the assertion is the recorded number.
+    func testCostOfOneThreeAndEightSpots() throws {
+        let baseline8SpotShare = 2.605   // ms, base commit, 2560×1600, best of 7
+        let size = ImageSize(width: 2560, height: 1600)
+        let image = picture(size.width, size.height, identity: "cost-eight") { x, y in
+            let v = 0.2 + 0.3 * Self.hash01(x, y)
+            return (v, v, v)
+        }
+        let graph = try makeGraph(image, identity: "heal-cost-eight")
+        let options = RenderOptions(scale: 1, useCache: false, wantsPixels: false)
+
+        func spots(_ n: Int) -> [HealSpot] {
+            (0..<n).map { i in
+                HealSpot(id: "h-\(i)",
+                         center: NormalizedPoint(0.30 + 0.08 * Double(i % 5),
+                                                 0.35 + 0.12 * Double(i / 5)),
+                         radius: 0.02,
+                         sourceOffset: NormalizedPoint(0.04, 0),
+                         mode: .heal, feather: 0.35, opacity: 1)
+            }
+        }
+        func best(_ edit: EditModel) throws -> Double {
+            _ = try graph.render(edit, options: options)
+            var best = Double.infinity
+            for _ in 0..<7 {
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                _ = try graph.render(edit, options: options)
+                best = min(best, Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)
+            }
+            return best
+        }
+        let without = try best(EditModel.neutral)
+        var shares: [Int: Double] = [:]
+        for n in [1, 3, 8] {
+            var doc = EditModel.neutral
+            doc.healSpots = spots(n)
+            let with = try best(doc)
+            shares[n] = with - without
+            print("cost 4.10 Mpx: \(n) spot \(String(format: "%.1f", with)) ms "
+                  + "(best of 7), without \(String(format: "%.1f", without)) ms — "
+                  + "S1.9 share \(String(format: "%.3f", with - without)) ms")
+        }
+        let share8 = shares[8] ?? .infinity
+        XCTAssertLessThanOrEqual(share8, baseline8SpotShare * 0.40 * 1.15,
+                                 "8 spot 的 S1.9 share 必须 ≤ 基线 × 40 %（含 15 % 容差）")
+        XCTAssertLessThan(share8, without * 3, "8 个 spot 的 S1.9 不能超过无 spot 整帧的 3 倍")
+    }
 }
