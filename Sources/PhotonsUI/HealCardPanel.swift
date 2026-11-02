@@ -133,9 +133,10 @@ public struct HealCardPanel: View {
             HStack(spacing: 2) {
                 ForEach(HealToolMode.allCases, id: \.rawValue) { mode in
                     ToolSegmentButton(title: mode.label,
-                                      active: session.healToolMode == mode) {
+                                      active: session.healTool && session.healToolMode == mode) {
                         healToolModeBinding.wrappedValue = mode
                     }
+                    .accessibilityIdentifier("inspector.redeye.mode.\(mode.rawValue)")
                 }
             }
             .accessibilityIdentifier("inspector.redeye.mode")
