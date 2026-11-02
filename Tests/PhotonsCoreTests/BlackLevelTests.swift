@@ -546,11 +546,21 @@ final class BlackLevelTests: XCTestCase {
             .deletingLastPathComponent()   // package root
 
         /// Mirror of `S1Params` in `s1_scene_linear.metal`, field for field.
+        ///
+        /// 195 added the three calibrated white-balance rows (`w0…w2`) after `e`, so the struct is
+        /// **seven** float4 = 112 B. They must be mirrored even though this harness never drags a
+        /// slider: the kernel reads its struct by offset, and `e.z = 0` (the identity flag) is what
+        /// makes it skip them. A narrower mirror would pass 64 B to a kernel that reads 112 B — the
+        /// four fields this test does care about would still land correctly, which is exactly why a
+        /// missing row must fail here by width instead of showing up as a mystery pixel later.
         struct Params {
             var a: SIMD4<Float>   // gain, wbR, wbG, wbB
             var b: SIMD4<Float>   // recovery, identity, blacks, whites
             var c: SIMD4<Float>   // contentOrigin.xy, contentSize.xy
-            var e: SIMD4<Float>   // 071: blackOffset, pad, pad, pad
+            var e: SIMD4<Float>   // 071: blackOffset; 147: gain; 195: matrix flag in z
+            var w0: SIMD4<Float>  // 195: the calibrated WB matrix, identity rows here
+            var w1: SIMD4<Float>
+            var w2: SIMD4<Float>
         }
 
         let device: MTLDevice
@@ -638,7 +648,12 @@ final class BlackLevelTests: XCTestCase {
                 b: SIMD4(0, 0, 0, 0),
                 c: SIMD4(Float(content?.x ?? 0), 0,
                          Float(content?.width ?? width), Float(height)),
-                e: SIMD4(offset, 1, 0, 0))
+                e: SIMD4(offset, 1, 0, 0),
+                // 195: identity rows and `e.z = 0` — the kernel's matrix block is skipped, which is
+                // the same bytes every non-dragging frame writes.
+                w0: SIMD4(1, 0, 0, 0),
+                w1: SIMD4(0, 1, 0, 0),
+                w2: SIMD4(0, 0, 1, 0))
 
             guard let cb = queue.makeCommandBuffer(),
                   let enc = cb.makeComputeCommandEncoder() else { throw XCTSkip("no command buffer") }
