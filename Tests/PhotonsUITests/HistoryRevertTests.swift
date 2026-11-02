@@ -267,8 +267,11 @@ final class HistoryRevertTests: XCTestCase {
     }
 
     private func render(_ model: EditModel, tag: String) throws -> RenderResult {
+        // One identity for every render, as the app has for one photo: `RenderInput.identity` is part
+        // of every stage key, so a per-tag identity would make "the keys moved" true even for a
+        // document that never moved — the assertion would pass for the wrong reason.
         let graph = try RenderGraph(input: RenderInput(image: image(192, 128),
-                                                       identity: "263-revert-\(tag)"))
+                                                       identity: "263-revert"))
         return try graph.render(model, options: RenderOptions(scale: 1, useCache: false,
                                                              wantsPixels: true))
     }
