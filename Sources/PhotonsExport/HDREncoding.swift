@@ -112,21 +112,13 @@ public enum HDREncoding {
             return try hlgCGImage(linear, colorSpace: target)
         }
 
-        // `CIImage(bitmapData:)` reads row 0 as the bottom row; DisplayImage stores the top row
-        // first, so flip the rows once here (the alternative is a transform whose extent starts at
-        // a negative y, which then has to be cropped again).
+        // 238 — no row flip. `CIImage(bitmapData:)` maps row 0 to row 0 of the CGImage it later
+        // produces, exactly like the raw `CGImage` providers below, and DisplayImage is stored
+        // top-row-first. The flip that used to live here was based on the opposite assumption and
+        // made every PQ container (PNG/TIFF/HEIC/AVIF) upside down while SDR/HLG/gain map stayed
+        // upright. `ExportOrientationTests` pins all paths to the SDR row order.
         let w = image.width, h = image.height
-        var rows = [Float16](repeating: 0, count: w * h * 4)
-        linear.rgba.withUnsafeBufferPointer { src in
-            rows.withUnsafeMutableBufferPointer { dst in
-                for y in 0..<h {
-                    let from = y * w * 4
-                    let to = (h - 1 - y) * w * 4
-                    for i in 0..<(w * 4) { dst[to + i] = src[from + i] }
-                }
-            }
-        }
-        let data = rows.withUnsafeBufferPointer { Data(buffer: $0) }
+        let data = linear.rgba.withUnsafeBufferPointer { Data(buffer: $0) }
         let ci = CIImage(bitmapData: data, bytesPerRow: w * 8,
                          size: CGSize(width: w, height: h), format: .RGBAh, colorSpace: source)
         // Pin both working and output space: letting Core Image pick a working space would route a
