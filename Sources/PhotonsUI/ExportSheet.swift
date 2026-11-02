@@ -1040,6 +1040,9 @@ final class ExportSliderRowProbe: NSView {
         case slider
         case number
         case unit
+        /// 250 — a checkbox `Toggle`'s own frame. It is a locator, not a control: the window test
+        /// sends real mouse events at this rect (the box end, not the label).
+        case toggle
     }
 
     private(set) var kind: Kind = .slider
@@ -1766,6 +1769,7 @@ public struct ExportSheetView: View {
                 .toggleStyle(.checkbox).controlSize(.small)
                 .disabled(!enabled)
                 .accessibilityIdentifier(labelToggle.axID)
+                .background(ExportSliderRowProbeHost(kind: .toggle, rowID: labelToggle.axID))
             } else {
                 Text(label).font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -1814,6 +1818,7 @@ public struct ExportSheetView: View {
                 .toggleStyle(.checkbox).controlSize(.small)
                 .disabled(!enabled)
                 .accessibilityIdentifier(trailingToggle.axID)
+                .background(ExportSliderRowProbeHost(kind: .toggle, rowID: trailingToggle.axID))
                 .help(trailingToggle.help ?? "")
                 .frame(width: ExportSliderRowMetrics.accessoryWidth, alignment: .leading)
             } else {
