@@ -224,11 +224,8 @@ final class LoupeZoomTests: XCTestCase {
         let zoom = 4.0
         let state = actual(zoom: zoom)
         let whole = wholeFrameMapping(f, zoom: zoom, degrees: 7, flipH: false, flipV: false)
-        let centre = f.windowCenter(of: state)
-        let framePoint = whole.viewPoint(sourceX: centre.x, sourceY: centre.y)
-        let offset = (x: framePoint.x - Double(aspectMatched.width) / 2,
-                      y: framePoint.y - Double(aspectMatched.height) / 2)
         let win = f.mapping(of: state)
+        let offset = windowOffset(win, whole)
         for gx in stride(from: 0.5, to: Double(aspectMatched.width), by: 317.0) {
             for gy in stride(from: 0.5, to: Double(aspectMatched.height), by: 211.0) {
                 let a = win.sourcePoint(viewX: gx, viewY: gy)
@@ -247,11 +244,8 @@ final class LoupeZoomTests: XCTestCase {
         let zoom = 2.0
         let state = actual(zoom: zoom, x: 2400, y: 2100)
         let whole = wholeFrameMapping(f, zoom: zoom, degrees: -9, flipH: true, flipV: true)
-        let centre = f.windowCenter(of: state)
-        let framePoint = whole.viewPoint(sourceX: centre.x, sourceY: centre.y)
-        let offset = (x: framePoint.x - Double(aspectMatched.width) / 2,
-                      y: framePoint.y - Double(aspectMatched.height) / 2)
         let win = f.mapping(of: state)
+        let offset = windowOffset(win, whole)
         for gx in stride(from: 0.5, to: Double(aspectMatched.width), by: 401.0) {
             for gy in stride(from: 0.5, to: Double(aspectMatched.height), by: 193.0) {
                 let a = win.sourcePoint(viewX: gx, viewY: gy)
@@ -280,11 +274,8 @@ final class LoupeZoomTests: XCTestCase {
         let zoom = 2.0
         let state = actual(zoom: zoom)
         let whole = wholeFrameMapping(f, zoom: zoom, degrees: 9, flipH: false, flipV: false)
-        let centre = f.windowCenter(of: state)
-        let framePoint = whole.viewPoint(sourceX: centre.x, sourceY: centre.y)
-        let offset = (x: framePoint.x - Double(viewport.width) / 2,
-                      y: framePoint.y - Double(viewport.height) / 2)
         let win = f.mapping(of: state)
+        let offset = windowOffset(win, whole)
 
         var worst = 0.0
         for gx in stride(from: 0.5, to: Double(viewport.width), by: 61.0) {
@@ -308,26 +299,41 @@ final class LoupeZoomTests: XCTestCase {
         let flat = framing(degrees: 0)
         let flatWhole = wholeFrameMapping(flat, zoom: zoom, degrees: 0, flipH: false, flipV: false)
         let flatWin = flat.mapping(of: state)
+        let flatOffset = windowOffset(flatWin, flatWhole)
         let p = flatWin.sourcePoint(viewX: 123.0, viewY: 456.0)
-        let q = flatWhole.sourcePoint(viewX: 123.0 + offset.x, viewY: 456.0 + offset.y)
+        let q = flatWhole.sourcePoint(viewX: 123.0 + flatOffset.x, viewY: 456.0 + flatOffset.y)
         XCTAssertEqual(p.x, q.x, accuracy: 1e-9)
         XCTAssertEqual(p.y, q.y, accuracy: 1e-9)
     }
 
-    /// The whole crop rendered at `zoom` as one canvas: same math, no window.
+    /// 261 — where the window's first pixel sits in the whole-canvas view: the same canvas
+    /// coordinate, both through `FrameTransform`'s per-frame scale and letterbox origin. This is a
+    /// translation, not a re-derived rotation — which is exactly the property the three window
+    /// tests below assert.
+    private func windowOffset(_ win: LoupeMapping, _ whole: LoupeMapping) -> (x: Double, y: Double) {
+        guard let w = win.transform, let h = whole.transform else { return (0, 0) }
+        let canvasX = w.windowInS3.x
+        let canvasY = w.windowInS3.y
+        let wholeX = h.origin.x + (canvasX - h.windowInS3.x) * h.contentPerS3
+        let wholeY = h.origin.y + (canvasY - h.windowInS3.y) * h.contentPerS3
+        return (wholeX - w.origin.x, wholeY - w.origin.y)
+    }
+
+    /// The whole crop rendered at `zoom` as one canvas: same math, no window. 261 — this is the
+    /// same `FrameTransform` exit the product uses, with the whole canvas as the viewport, so the
+    /// comparison is about the *window*, not about two different assemblies.
     private func wholeFrameMapping(_ f: LoupeFraming, zoom: Double, degrees: Double,
                                   flipH: Bool, flipV: Bool) -> LoupeMapping {
-        LoupeMapping(
-            viewport: ImageSize(width: Int(source.width * zoom), height: Int(source.height * zoom)),
-            contentWidth: source.width * zoom, contentHeight: source.height * zoom,
-            cropLeft: f.cropOriginX, cropTop: f.cropOriginY,
-            cropWidth: f.cropWidthPixels, cropHeight: f.cropHeightPixels,
-            cosT: cos(degrees * .pi / 180), sinT: sin(degrees * .pi / 180),
-            flipH: flipH, flipV: flipV,
-            // The frame the rotation turns about. Without it `LoupeMapping` falls back to the *window*
-            // — a different centre once the window is a crop — and the two projections would disagree
-            // for a reason that has nothing to do with the mapping under test.
-            frameWidth: source.width, frameHeight: source.height)
+        let src = ImageSize(width: Int(source.width), height: Int(source.height))
+        let canvas = CropMath.canvasSize(crop: f.crop, in: src,
+                                         straightenDegrees: degrees, quarterTurns: 0)
+        let viewport = ImageSize(width: Int((Double(canvas.width) * zoom).rounded()),
+                                 height: Int((Double(canvas.height) * zoom).rounded()))
+        let transform = FrameTransform(source: src, crop: f.crop,
+                                       straightenDegrees: degrees, quarterTurns: 0,
+                                       flipHorizontal: flipH, flipVertical: flipV,
+                                       viewport: viewport, zoom: zoom)
+        return LoupeMapping(transform: transform)
     }
 
     // MARK: 6. pan
@@ -406,8 +412,12 @@ final class LoupeZoomTests: XCTestCase {
         let after = f.mapping(of: next).sourcePoint(viewX: 2000, viewY: 100)
         // The same source pixel under the cursor — no "unless": the camera may leave the frame, so the
         // anchor is honoured outright.
-        XCTAssertEqual(after.x, before.x, accuracy: 1e-6)
-        XCTAssertEqual(after.y, before.y, accuracy: 1e-6)
+        // 261 — the camera now names the renderer's integer window, so a 1:1 window can land the
+        // anchor up to half a device pixel away from the fit projection; one *source* pixel is the
+        // honest bound for that phase (the matrix's 0.5 px device tolerance is what the product
+        // asserts).
+        XCTAssertEqual(after.x, before.x, accuracy: 1.0)
+        XCTAssertEqual(after.y, before.y, accuracy: 1.0)
         XCTAssertEqual(f.windowCenter(of: next).x, next.centerX, accuracy: 1e-6,
                        "the window was never limited: the anchor is inside the picture")
     }

@@ -1878,40 +1878,41 @@ public final class RenderGraph {
             .map { backgroundOutside ? $0 : $0.clamped(in: baseline) }
             .flatMap { $0 == baselineRect ? nil : $0 }
 
-        let requested = window.map { ImageSize(width: $0.width, height: $0.height) } ?? baseline
-
-        let canvas: ImageSize
-        let content: ImageSize
-        let origin: SIMD2<Float>
+        // 261 — one assembly for the whole S1 → S3 → S5 chain. `plan` no longer re-derives the
+        // letterbox or the content scale: `FrameTransform` owns them, and the renderer reads the
+        // same struct the loupe and the hit test do.
+        let transform = FrameTransform(
+            source: orientedSource,
+            crop: crop,
+            straightenDegrees: edit.geometry.straightenDegrees,
+            quarterTurns: 0,
+            flipHorizontal: edit.geometry.flipHorizontal,
+            flipVertical: edit.geometry.flipVertical,
+            perspective: perspectiveMap,
+            contentScale: scale,
+            viewport: options.canvas,
+            zoom: scale,
+            cameraOffset: .zero,
+            cameraWindowSize: nil,
+            cameraWindow: nil,
+            cameraWindowInS5: window,
+            allowsUpscale: expandedCanvas == nil && !options.neverUpscalesContent)
+        let requested = transform.requestedInS5
+        let canvas = transform.viewport
+        // The renderer's own grid is integer: `FrameTransform` reports the letterbox continuously
+        // (that is what the overlay and the hit test need), and `plan` rounds it **once** here —
+        // the same `ImageSize.fit` rounding and the same integer `(canvas − content)/2` the
+        // pre-261 lines used, so every document's pixels are unchanged.
+        let content = ImageSize(width: max(1, Int(transform.contentInS5.width.rounded())),
+                                height: max(1, Int(transform.contentInS5.height.rounded())))
+        let origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
+                                  Float((canvas.height - content.height) / 2))
         let frameSize: SIMD2<Float>
         let frameOrigin: SIMD2<Float>
         let frameInCanvas: ImageSize
         let drawnRect: ImageRect
         /// 192 — the canvas' own rect in this texture (see `Plan.canvasRect`).
         let canvasRect: ImageRect
-
-        canvas = options.canvas ?? requested
-        if canvas == requested {
-            content = requested
-        } else if expandedCanvas != nil {
-            // 132: an angle's output never upscales into a caller's canvas — that canvas is a
-            // viewport, and a straightened picture inside it must keep one scale (the crop
-            // workspace's 90 % fit is the same rule, spelled `neverUpscalesContent` just below).
-            let fit = min(1, min(Double(canvas.width) / Double(max(requested.width, 1)),
-                                 Double(canvas.height) / Double(max(requested.height, 1))))
-            content = ImageSize(width: max(1, Int((Double(requested.width) * fit).rounded())),
-                                height: max(1, Int((Double(requested.height) * fit).rounded())))
-        } else if options.neverUpscalesContent {
-            // 132 §9: keep the requested size when it fits; only a genuinely smaller canvas
-            // shrinks the picture.
-            let fits = Double(canvas.width) >= Double(requested.width)
-                && Double(canvas.height) >= Double(requested.height)
-            content = fits ? requested : ImageSize.fit(requested, in: canvas)
-        } else {
-            content = ImageSize.fit(requested, in: canvas)
-        }
-        origin = SIMD2<Float>(Float((canvas.width - content.width) / 2),
-                              Float((canvas.height - content.height) / 2))
 
         // Content pixels per requested pixel: 1 unless letterboxing rescaled the content rect.
         // Pre-scaling the frame here is what lets the kernels stay one add and one divide per pixel.

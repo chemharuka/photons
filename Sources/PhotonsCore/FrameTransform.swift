@@ -154,7 +154,12 @@ public struct FrameTransform: Sendable, Equatable {
                                   perspectiveVertical: perspective?.vertical ?? 0,
                                   perspectiveHorizontal: perspective?.horizontal ?? 0)
         group.crop = crop.normalizedRect
-        let cg = CropGeometry(geometry: group, source: decoded)
+        // **The full-resolution S3.** The rung moves no geometry (231): the loupe's hit test, the
+        // overlay and the crop tool all speak the file's own pixel grid, and `decodeScale` only
+        // scales the renderer's allocation — which `RenderGraph.plan` does on its own decoded grid
+        // by passing it as `source` with `decodeScale == 1`. Building S3 on `decoded` here made the
+        // canvas' `ceil` and its inset drift by up to half a decoded pixel (× the zoom).
+        let cg = CropGeometry(geometry: group, source: source)
         self.geometry = cg
         self.canvasS3 = cg.canvas
         let frame = cg.frameSize
@@ -228,9 +233,9 @@ public struct FrameTransform: Sendable, Equatable {
             // **not** rotated: the window is a window onto the canvas, exactly what
             // `RenderOptions.outputWindow` indexes.
             let inset = cg.canvasInset
-            windowS3 = (Point((window.minX - cropOrigin.x) * sx + inset.x,
-                              (window.minY - cropOrigin.y) * sy + inset.y),
-                        SIMD2(Double(window.width) * sx, Double(window.height) * sy))
+            windowS3 = (Point((window.minX - cropOrigin.x) + inset.x,
+                              (window.minY - cropOrigin.y) + inset.y),
+                        SIMD2(Double(window.width), Double(window.height)))
         } else {
             windowS3 = (cameraOffset,
                         cameraWindowSize ?? SIMD2(Double(cg.canvas.width),
@@ -241,28 +246,32 @@ public struct FrameTransform: Sendable, Equatable {
             width: max(1, Int((safeWindow.x * z).rounded())),
             height: max(1, Int((safeWindow.y * z).rounded())))
         let canvasViewport = viewport ?? requested
-        var content = requested
+        // **Continuous** content, deliberately not an `ImageSize`: the picture is `window × zoom`
+        // device pixels sitting centred in the viewport, and rounding it here is what made the crop
+        // overlay's own scale disagree with the picture's by up to a pixel. The renderer rounds when
+        // it allocates a texture (`RenderGraph.plan`), which is its business.
+        var contentWidth = safeWindow.x * z, contentHeight = safeWindow.y * z
         if canvasViewport != requested {
-            if allowsUpscale {
-                content = ImageSize.fit(requested, in: canvasViewport)
-            } else if canvasViewport.width >= requested.width
-                        && canvasViewport.height >= requested.height {
-                content = requested
-            } else {
-                content = ImageSize.fit(requested, in: canvasViewport)
+            let fits = contentWidth <= Double(canvasViewport.width)
+                && contentHeight <= Double(canvasViewport.height)
+            let ratio = min(Double(canvasViewport.width) / max(contentWidth, 1e-9),
+                            Double(canvasViewport.height) / max(contentHeight, 1e-9))
+            if allowsUpscale || !fits {
+                contentWidth *= ratio
+                contentHeight *= ratio
             }
         }
         self.viewport = canvasViewport
         self.requestedInS5 = requested
-        self.contentInS5 = CGRect(x: (Double(canvasViewport.width) - Double(content.width)) / 2,
-                                  y: (Double(canvasViewport.height) - Double(content.height)) / 2,
-                                  width: Double(content.width), height: Double(content.height))
-        let origin = Point(Double((canvasViewport.width - content.width) / 2),
-                           Double((canvasViewport.height - content.height) / 2))
+        self.contentInS5 = CGRect(x: (Double(canvasViewport.width) - contentWidth) / 2,
+                                  y: (Double(canvasViewport.height) - contentHeight) / 2,
+                                  width: contentWidth, height: contentHeight)
+        let origin = Point((Double(canvasViewport.width) - contentWidth) / 2,
+                           (Double(canvasViewport.height) - contentHeight) / 2)
         self.origin = origin
         self.windowInS3 = windowS3.offset
         self.windowInS3Size = safeWindow
-        let perS3 = Double(content.width) / safeWindow.x
+        let perS3 = contentWidth / safeWindow.x
         self.contentPerS3 = perS3
         let translate = Matrix3(rows: [[perS3, 0, origin.x - windowS3.offset.x * perS3],
                                        [0, perS3, origin.y - windowS3.offset.y * perS3],
@@ -271,8 +280,8 @@ public struct FrameTransform: Sendable, Equatable {
         self.s5ToS3 = Self.inverse(translate)
         self.renderBaseline = ImageSize(width: max(1, Int((Double(cg.canvas.width) * z).rounded())),
                                         height: max(1, Int((Double(cg.canvas.height) * z).rounded())))
-        let kx = Double(content.width) / Double(max(requested.width, 1))
-        let ky = Double(content.height) / Double(max(requested.height, 1))
+        let kx = contentWidth / Double(max(requested.width, 1))
+        let ky = contentHeight / Double(max(requested.height, 1))
         self.contentPerRequested = kx
         // Content pixels — the grid S0's `frameSize` / `frameOrigin` are in.
         let frameBaselineW = max(1, Int((Double(frame.width) * z).rounded()))
@@ -309,29 +318,22 @@ public struct FrameTransform: Sendable, Equatable {
 
     // MARK: - convenience
 
-    /// S5 device pixel → S1 source pixel — the exact inverse of S0's walk, on the renderer's
-    /// integer frame/inset grid, so a hit test lands on the pixel the user sees.
+    /// S5 device pixel → S1 source pixel — the exact inverse of S0's walk.
+    ///
+    /// Continuous, on the same S3 the rest of this type assembles: the canvas half-pixel the
+    /// renderer's integer grid adds (`renderInset`'s truncation) is **not** reproduced here, because
+    /// a hit test is a continuous question ("which source pixel is under the cursor"); the test
+    /// matrix measures that difference separately rather than folding it into the projection.
     public func viewPointToSource(_ point: Point) -> Point {
-        let localX = point.x - origin.x
-        let localY = point.y - origin.y
-        var x = localX + renderWindowOrigin.x - renderInset.x
-        var y = localY + renderWindowOrigin.y - renderInset.y
-        if perspective == nil {
-            let rotation = CropGeometry.RotationMatrix(degrees: straightenDegrees)
-            let cx = renderFrame.x / 2, cy = renderFrame.y / 2
-            let turned = rotation.invert(x: x - cx, y: y - cy)
-            x = turned.x + cx
-            y = turned.y + cy
-        }
-        if flipHorizontal { x = renderFrame.x - x }
-        if flipVertical { y = renderFrame.y - y }
-        var fx = x / max(renderFrame.x, 1e-9)
-        var fy = y / max(renderFrame.y, 1e-9)
-        fx = crop.left + fx * crop.width
-        fy = crop.top + fy * crop.height
-        if let perspective {
-            (fx, fy) = perspective.inverse(x: fx, y: fy)
-        }
+        let canvas = Self.apply(s5ToS3, point)
+        var frame = geometry.framePoint(canvasX: canvas.x, canvasY: canvas.y)
+        let size = geometry.frameSize
+        // The kernel flips in crop-normalized space, i.e. about the frame's own centre.
+        if flipHorizontal { frame.x = Double(size.width) - frame.x }
+        if flipVertical { frame.y = Double(size.height) - frame.y }
+        var fx = crop.left + frame.x / Double(max(size.width, 1)) * crop.width
+        var fy = crop.top + frame.y / Double(max(size.height, 1)) * crop.height
+        // `frameSize` already carries the keystone (246), so perspective needs no second step here.
         return Point(fx * Double(source.width), fy * Double(source.height))
     }
 
@@ -339,23 +341,15 @@ public struct FrameTransform: Sendable, Equatable {
     public func sourceToView(_ point: Point) -> Point {
         var fx = point.x / Double(max(source.width, 1))
         var fy = point.y / Double(max(source.height, 1))
-        if let perspective {
-            (fx, fy) = perspective.forward(x: fx, y: fy)
-        }
-        var x = (fx - crop.left) / max(crop.width, 1e-9) * renderFrame.x
-        var y = (fy - crop.top) / max(crop.height, 1e-9) * renderFrame.y
-        if flipHorizontal { x = renderFrame.x - x }
-        if flipVertical { y = renderFrame.y - y }
-        if perspective == nil {
-            let rotation = CropGeometry.RotationMatrix(degrees: straightenDegrees)
-            let cx = renderFrame.x / 2, cy = renderFrame.y / 2
-            let turned = rotation.apply(x: x - cx, y: y - cy)
-            x = turned.x + cx
-            y = turned.y + cy
-        }
-        let localX = x - renderWindowOrigin.x + renderInset.x
-        let localY = y - renderWindowOrigin.y + renderInset.y
-        return Point(origin.x + localX, origin.y + localY)
+        fx = crop.left + fx * crop.width
+        fy = crop.top + fy * crop.height
+        let size = geometry.frameSize
+        var frame = Point((fx - crop.left) / max(crop.width, 1e-9) * Double(size.width),
+                          (fy - crop.top) / max(crop.height, 1e-9) * Double(size.height))
+        if flipHorizontal { frame.x = Double(size.width) - frame.x }
+        if flipVertical { frame.y = Double(size.height) - frame.y }
+        let canvas = geometry.canvasPoint(frameX: frame.x, frameY: frame.y)
+        return Self.apply(s3ToS5, Point(canvas.x, canvas.y))
     }
 
     /// S5 → S2 **without** the picture rotation: the frame space the crop overlay draws in (its
