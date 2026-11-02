@@ -152,7 +152,7 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     public var id: String
     /// Centre, normalised to the **cropped frame** (`0…1` of width, height).
     public var center: NormalizedPoint
-    /// Radius, in **short-edge units** of the frame (0.005…0.5). `0.02` is 2 % of the short edge —
+    /// Radius, in **short-edge units** of the frame (`HealSpot.radiusRange`). `0.02` is 2 % of the short edge —
     /// about 32 px on a 4.1 Mpx frame, which is a blemish and not a subject.
     public var radius: Double
     /// Where the texture comes from, as a **pixel offset in short-edge units** (the same unit as
@@ -211,6 +211,11 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
             hasher.combine(redSoftness)
         }
     }
+
+    /// The legal radius travel, in short-edge units. One definition for the model, the canvas and
+    /// the card's slider: a spot of radius 0 writes nothing (and would divide by zero in the
+    /// kernel's `t = |p − c| / r`), and `0.5` is the ceiling of "this is still a *spot*".
+    public static let radiusRange: ClosedRange<Double> = 0.002 ... 0.5
 
     public static let defaultRadius = 0.02
     public static let defaultFeather = 0.35
@@ -281,10 +286,11 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
 
     // MARK: - clamping
 
-    /// `0.002…0.5`. A spot of radius 0 is a spot that writes nothing (and would divide by zero in
-    /// the kernel's `t = |p − c| / r`); a spot of radius 0.5 is most of the frame, which is the
-    /// ceiling of "this is still a *spot*".
-    public var clampedRadius: Double { min(max(radius, 0.002), 0.5) }
+    /// `HealSpot.radiusRange` (`0.002…0.5`) — the same travel the card's slider and the canvas'
+    /// wheel/keys use.
+    public var clampedRadius: Double {
+        min(max(radius, Self.radiusRange.lowerBound), Self.radiusRange.upperBound)
+    }
 
     /// The spot with every out-of-range number brought inside its travel. `EditModel.addHealSpot`
     /// applies it, and so does a document read back from disk — a hand-edited `radius: 9` must not

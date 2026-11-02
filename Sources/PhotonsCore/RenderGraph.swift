@@ -2538,7 +2538,10 @@ public final class RenderGraph {
                 enc.setTexture(atlas.texture, index: 1)
                 enc.setTexture(overlay, index: 2)
                 var params = ShowMaskParams(a: SIMD4(Int32(slice), 0, 0, 0),
-                                            b: SIMD4(0.5, 1, 0, 0))
+                                            b: SIMD4(MaskOverlay.strength,
+                                                     MaskOverlay.red.x,
+                                                     MaskOverlay.red.y,
+                                                     MaskOverlay.red.z))
                 enc.setBytes(&params, length: MemoryLayout<ShowMaskParams>.stride, index: 0)
                 dispatch(enc, p, plan.canvas)
                 enc.endEncoding()
