@@ -35,9 +35,12 @@ public extension CropGeometry {
     /// The same `CropMath.frameSize` the renderer's `plan` uses, so a loupe window and an export
     /// cannot disagree about how many pixels the crop has.
     var frameSize: ImageSize {
-        CropMath.frameSize(crop, in: source,
-                           allowsOutsideSource: true,
-                           perspective: perspective)
+        // 246: the frame and the canvas are the same thing once the keystone is folded in — the
+        // canvas is the AABB of the warped-and-turned picture, so there is no separate inset.
+        if let perspective, perspective.hasWarp { return canvas }
+        return CropMath.frameSize(crop, in: source,
+                                  allowsOutsideSource: true,
+                                  perspective: perspective)
     }
 
     /// The frame's size in continuous pixels (the crop's normalized span × the photo's pixels).
@@ -52,6 +55,9 @@ public extension CropGeometry {
     /// rotate the rectangle (user rule 162, `CropMath.canvasSize`'s early return).
     var frameExtent: DSize {
         let f = frameExtentPixels
+        // 246: a keystoned frame's AABB already contains P and R; rotating it again would be the
+        // double-turn 183's canvas arithmetic used to make.
+        if perspective?.hasWarp == true { return f }
         guard hasAngle else { return f }
         return Self.rotatedExtent(width: f.width, height: f.height, degrees: rotationDegrees)
     }
@@ -185,7 +191,8 @@ public extension CropGeometry {
     /// at every right angle, so this is the identity there.
     func canvasPoint(frameX: Double, frameY: Double) -> (x: Double, y: Double) {
         let f = frameExtentPixels
-        guard hasAngle else { return (frameX, frameY) }
+        // 246: frame pixels *are* canvas pixels — the perspective+rotation is already in `canvas`.
+        guard perspective?.hasWarp != true, hasAngle else { return (frameX, frameY) }
         let p = rotation.apply(x: frameX - f.width / 2, y: frameY - f.height / 2)
         return (Double(canvas.width) / 2 + p.x, Double(canvas.height) / 2 + p.y)
     }
@@ -193,7 +200,7 @@ public extension CropGeometry {
     /// The inverse of `canvasPoint` — the walk a click on the canvas does to reach the frame.
     func framePoint(canvasX: Double, canvasY: Double) -> (x: Double, y: Double) {
         let f = frameExtentPixels
-        guard hasAngle else { return (canvasX, canvasY) }
+        guard perspective?.hasWarp != true, hasAngle else { return (canvasX, canvasY) }
         let p = rotation.invert(x: canvasX - Double(canvas.width) / 2,
                                 y: canvasY - Double(canvas.height) / 2)
         return (p.x + f.width / 2, p.y + f.height / 2)
@@ -243,7 +250,19 @@ public extension CropGeometry {
     }
 
     /// The photograph's four corners in canvas pixels — the turned picture's quad.
+    ///
+    /// 246: with a keystone this is the **perspective quadrilateral**, from the one definition in
+    /// `CropMath.perspectivePhotoQuad` (also read by the red-frame predicate). Without one it stays
+    /// the turned rectangle, bit for bit.
     var photoQuadInCanvas: [(x: Double, y: Double)] {
+        if let perspective, perspective.hasWarp {
+            let pc = CropMath.perspectiveCanvas(crop: crop, in: source,
+                                                straightenDegrees: rotationDegrees,
+                                                perspective: perspective)
+            return CropMath.perspectivePhotoQuad(crop: crop, canvas: pc).map {
+                (x: $0.x * Double(canvas.width), y: $0.y * Double(canvas.height))
+            }
+        }
         let w = Double(source.width), h = Double(source.height)
         return [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]
             .map { canvasPoint(photoX: $0.0, photoY: $0.1) }

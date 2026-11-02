@@ -1800,14 +1800,28 @@ public final class RenderGraph {
         // 183: the picture's own pixel size is that rect **after the keystone** — the largest
         // axis-aligned rectangle inside the warped quad, from `CropMath`. At 0/0 the optional is nil
         // and this is `outputSize` itself, so every pre-183 document is byte-identical.
+        let scale = max(0.01, options.scale)
+        // ── 246: P → R → AABB ────────────────────────────────────────────────────────────────────
+        // A keystoned document's canvas is the bounding box of the **warped and turned** picture, so
+        // the frame the renderer walks is the canvas itself (no separate inset). The continuous
+        // extent is what normalizes the sampling map; the integer `ceil` is the texture size.
+        let perspectiveMap = edit.geometry.perspective
+        let perspectiveCanvas: PerspectiveCanvas? = perspectiveMap.flatMap { map in
+            guard map.hasWarp else { return nil }
+            return CropMath.perspectiveCanvas(crop: crop, in: orientedSource,
+                                              straightenDegrees: edit.geometry.straightenDegrees,
+                                              perspective: map)
+        }
         let cropPixels = CropMath.frameSize(crop, in: orientedSource,
                                             allowsOutsideSource: true,
-                                            perspective: edit.geometry.perspective)
-        let scale = max(0.01, options.scale)
+                                            perspective: nil)
         // The frame: the full cropped picture at this scale. Its pixel grid is what a window indexes,
         // which is why the window is resolved after it and not before.
-        let frame = ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
-                              height: Int((Double(cropPixels.height) * scale).rounded()))
+        let frame = perspectiveCanvas.map { pc in
+            ImageSize(width: CropGeometry.canvasPixels(pc.extent.width * scale),
+                      height: CropGeometry.canvasPixels(pc.extent.height * scale))
+        } ?? ImageSize(width: Int((Double(cropPixels.width) * scale).rounded()),
+                       height: Int((Double(cropPixels.height) * scale).rounded()))
         // ── 132 / 176: the canvas is the bounding box of the rotated crop, window or not ──────────
         //
         // With no window this render *is* the output picture, so an angle grows the canvas instead of
@@ -1827,12 +1841,13 @@ public final class RenderGraph {
         // `window == nil`, so a zoomed crop workspace composed its full-size frame on the
         // photograph's own canvas — the crop's pivot instead of the AABB' — and the two pictures
         // disagreed by up to 59 code values (24.8 % of pixels by more than 2).
-        let expandedCanvas: ImageSize? = edit.geometry.straightenDegrees != 0
+        let expandedCanvas: ImageSize? = perspectiveCanvas == nil
+            && edit.geometry.straightenDegrees != 0
             ? CropMath.canvasSize(crop: crop, in: sourceSize,
                                   straightenDegrees: edit.geometry.straightenDegrees,
                                   quarterTurns: edit.geometry.quarterTurns,
                                   allowsOutsideSource: true,
-                                  perspective: edit.geometry.perspective)
+                                  perspective: nil)
             : nil
         // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
         let baseline = expandedCanvas.map {
@@ -3410,11 +3425,15 @@ public final class RenderGraph {
             // A rotate press therefore never resamples: at 1:1 it is the pure-turn branch below, and
             // everywhere else the un-turn is exact coordinate arithmetic.
             let turns = edit.geometry.quarterTurns
+            // 246: the straighten is folded into the keystone's composed matrix (`M = R · P`), so a
+            // perspective document always takes the non-rotating instantiation — one 3×3, one
+            // sample. Without a keystone the dispatch is the pre-246 table, bit for bit.
+            let s0TurnsPixels = s0Rotates(edit) && edit.geometry.perspective == nil
             // 097: the four `_lens` entries are the same bodies with `HAS_LENS_WARP == true`; the
             // default entries never contain that block, so a file without three distinct planes
             // keeps the pre-097 machine code (and bytes).
             let function: String
-            switch (turns != 0, s0Rotates(edit), plan.s0LensWarp) {
+            switch (turns != 0, s0TurnsPixels, plan.s0LensWarp) {
             case (false, false, false): function = "s0_geometry"
             case (false, true, false): function = "s0_geometry_rot"
             case (true, false, false): function = "s0_geometry_turn"
@@ -3433,20 +3452,44 @@ public final class RenderGraph {
             // kernel can carry the flag without moving any recorded byte.
             let outsideCrop = plan.crop.left < 0 || plan.crop.top < 0
                 || plan.crop.right > 1 || plan.crop.bottom > 1
-            // ── 183: the keystone's sampling map ────────────────────────────────────────────────
-            // The canvas is `inscribedRect()` of the warped quad, i.e. only that fraction of the
-            // warped picture, so S0's `uv` (0…1 over the canvas) has to be stretched by the rect's
-            // own extent before the homography — which is exactly a column scaling of the inverse
-            // matrix, done here so the kernel stays a plain 3×3.
+            // ── 246: the keystone's sampling map ────────────────────────────────────────────────
+            // One composed 3×3, `canvas-normalized → turned-photo-normalized`: the perspective, the
+            // straighten (about the crop's centre), the crop's own placement and the canvas' AABB
+            // origin are all baked into it on the CPU (`CropMath.perspectiveCanvas`). The kernel
+            // only evaluates it — no second pass, no second texture.
             let perspective = edit.geometry.perspective
-            let keystone = RenderGraph.keystoneMatrix(perspective)
+            let perspectivePixels: PerspectiveCanvas? = perspective.flatMap { map in
+                guard map.hasWarp else { return nil }
+                let crop = edit.geometry.renderCrop(source: sourceSize)
+                return CropMath.perspectiveCanvas(
+                    crop: crop, in: edit.geometry.orientedSource(sourceSize),
+                    straightenDegrees: edit.geometry.straightenDegrees, perspective: map)
+            }
+            let keystone = perspectivePixels.map {
+                RenderGraph.matrixRows($0.sampling, flag: 1)
+            } ?? RenderGraph.keystoneMatrix(nil)
+            // The shader's `uv` must be the continuous canvas coordinate: `f.xy` is the extent the
+            // composed matrix was normalized by, not the integer texture size (the one-pixel `ceil`
+            // is padding, not a scale). With no keystone this is the old `plan.frameSize` verbatim.
+            let s0Frame = perspectivePixels.map { pc in
+                SIMD4<Float>(Float(pc.extent.width * plan.imageScale),
+                             Float(pc.extent.height * plan.imageScale),
+                             plan.frameOrigin.x, plan.frameOrigin.y)
+            } ?? SIMD4<Float>(plan.frameSize.x, plan.frameSize.y,
+                              plan.frameOrigin.x, plan.frameOrigin.y)
             var params = S0Params(
                 a: SIMD4(Float(plan.canvas.width), Float(plan.canvas.height), plan.origin.x, plan.origin.y),
                 b: SIMD4(Float(plan.content.width), Float(plan.content.height),
                          Float(sourceSize.width), Float(sourceSize.height)),
-                c: SIMD4(Float(plan.crop.left), Float(plan.crop.top),
-                         Float(plan.crop.width), Float(plan.crop.height)),
-                d: SIMD4(costheta(edit), sintheta(edit),
+                // A perspective document's crop is already inside the composed matrix, so S0's own
+                // crop affine is the identity; every pre-246 document keeps its rect.
+                c: perspectivePixels != nil
+                    ? SIMD4(0, 0, 1, 1)
+                    : SIMD4(Float(plan.crop.left), Float(plan.crop.top),
+                            Float(plan.crop.width), Float(plan.crop.height)),
+                // The straighten is in `h`, so the shader's own rotation is the identity there.
+                d: SIMD4(perspectivePixels != nil ? 1 : costheta(edit),
+                         perspectivePixels != nil ? 0 : sintheta(edit),
                          edit.geometry.flipHorizontal ? 1 : 0, edit.geometry.flipVertical ? 1 : 0),
                 // e.y: the window reaches past the frame, so the miss renders as background. Zero on
                 // every in-frame render, which is why this changes no existing pixel.
@@ -3454,12 +3497,15 @@ public final class RenderGraph {
                 // directly and green stays a texel copy.
                 e: SIMD4(identity ? 1 : 0, plan.backgroundOutside ? 1 : 0,
                          plan.s0PureCA ? 1 : 0, plan.s0PureTurn ? 1 : 0),
-                f: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
+                f: s0Frame,
                 // g: the two dimensionless radial ratios, then the document's quarter turn, then
                 // 132's "this crop extends past the photograph" flag (0 for every document that
                 // predates it). 0/0/0/0 for the CA-off, un-turned path, byte-identical.
+                // 246: a keystoned canvas contains black by construction, and its out-of-photo
+                // samples must be the deterministic background — the flag is on.
                 g: SIMD4(Float(edit.optics.caRed), Float(edit.optics.caBlue),
-                         Float(edit.geometry.quarterTurns), outsideCrop ? 1 : 0),
+                         Float(edit.geometry.quarterTurns),
+                         (outsideCrop || perspectivePixels != nil) ? 1 : 0),
                 lens: Self.lensMatrix(plan.s0LensWarp ? input.lensProfile : nil),
                 h0: keystone.0, h1: keystone.1, h2: keystone.2)
             let enc = try encoder(cb, p, in: src, out: out)
@@ -6555,6 +6601,16 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
                   flag)
         }
         return (row(0, 1), row(1, 0), row(2, 0))
+    }
+
+    /// 246 — a row-major 3×3 into the three `float4` rows `S0Params` carries. `flag` is set on the
+    /// first row only (`h0.w` is the enable bit); the other two are 0, byte for byte what 183 did.
+    static func matrixRows(_ m: [[Double]], flag: Float)
+        -> (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>) {
+        func row(_ i: Int, _ w: Float) -> SIMD4<Float> {
+            SIMD4(Float(m[i][0]), Float(m[i][1]), Float(m[i][2]), w)
+        }
+        return (row(0, flag), row(1, 0), row(2, 0))
     }
 }
 

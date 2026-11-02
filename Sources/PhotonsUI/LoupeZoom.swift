@@ -592,6 +592,10 @@ public struct LoupeFraming: Equatable, Sendable {
     public var straightenDegrees: Double
     public var flipH: Bool
     public var flipV: Bool
+    /// 246 — the document's keystone. When set, the fit/crop extents are the **P → R → AABB**
+    /// canvas (`CropMath.perspectiveCanvas`) instead of the turned rectangle, so entering 裁切 frames
+    /// the same canvas the renderer allocates. `nil` is every pre-246 document, bit for bit.
+    public var perspective: PerspectiveMap?
     /// 213 (D13, user 2026-11-01) — **the one fit margin.** Ordinary 适应 is this fraction of the
     /// viewport fit, and the crop workspace uses the same number (it no longer multiplies by a second
     /// 0.90 on entry, which produced 0.81). One constant, read by `fitZoom` and by
@@ -607,7 +611,8 @@ public struct LoupeFraming: Equatable, Sendable {
 
     public init(viewport: ImageSize, sourceWidth: Double, sourceHeight: Double,
                 crop: CropRect = .full, straightenDegrees: Double = 0,
-                flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1) {
+                flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1,
+                perspective: PerspectiveMap? = nil) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
@@ -617,6 +622,7 @@ public struct LoupeFraming: Equatable, Sendable {
         self.flipH = flipH
         self.flipV = flipV
         self.fitScale = fitScale.isFinite ? min(max(fitScale, 0.1), 1) : 1
+        self.perspective = perspective.flatMap { $0.hasWarp ? $0 : nil }
     }
 
     /// The constructor the loupe uses: the same `lockedCrop` call — in the same *decoded* pixel
@@ -640,7 +646,8 @@ public struct LoupeFraming: Equatable, Sendable {
                   straightenDegrees: edit.geometry.straightenDegrees,
                   flipH: edit.geometry.flipHorizontal,
                   flipV: edit.geometry.flipVertical,
-                  fitScale: fitScale)
+                  fitScale: fitScale,
+                  perspective: edit.geometry.perspective)
     }
 
     // MARK: crop metrics
@@ -671,17 +678,41 @@ public struct LoupeFraming: Equatable, Sendable {
                 cropOriginY - max(extent.height - cropHeightPixels, 0) / 2)
     }
 
+    /// The image grid `CropMath.perspectiveCanvas` works in, in whole pixels.
+    private var sourceSizeForPerspective: ImageSize {
+        ImageSize(width: max(1, Int(sourceWidth.rounded())),
+                  height: max(1, Int(sourceHeight.rounded())))
+    }
+
     /// The whole source turned by the document's angle — what ordinary 适应 frames.
+    ///
+    /// 246: with a keystone this is the **P → R → AABB** of the whole picture, the same canvas the
+    /// renderer allocates. Without one it is `rotatedExtent`, bit for bit.
     public var rotatedSourceExtent: (width: Double, height: Double) {
-        Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
-                           degrees: straightenDegrees)
+        if let perspective {
+            let pc = CropMath.perspectiveCanvas(crop: .full, in: sourceSizeForPerspective,
+                                                straightenDegrees: straightenDegrees,
+                                                perspective: perspective)
+            return (pc.extent.width, pc.extent.height)
+        }
+        return Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
+                                  degrees: straightenDegrees)
     }
 
     /// The crop turned by the document's angle — the canvas 132 renders, and therefore the window
     /// 适应 shows (the empty corners are part of the output, black).
+    ///
+    /// 246: with a keystone the canvas is the AABB of the warped-and-turned crop, not the turned
+    /// rectangle; that is what entering 裁切 must frame.
     public var rotatedCropExtent: (width: Double, height: Double) {
-        Self.rotatedExtent(width: cropWidthPixels, height: cropHeightPixels,
-                           degrees: straightenDegrees)
+        if let perspective {
+            let pc = CropMath.perspectiveCanvas(crop: crop, in: sourceSizeForPerspective,
+                                                straightenDegrees: straightenDegrees,
+                                                perspective: perspective)
+            return (pc.extent.width, pc.extent.height)
+        }
+        return Self.rotatedExtent(width: cropWidthPixels, height: cropHeightPixels,
+                                  degrees: straightenDegrees)
     }
 
     /// Canvas pixels per source pixel when the **whole source frame** is fitted into the viewport.
@@ -883,7 +914,9 @@ public struct LoupeFraming: Equatable, Sendable {
     /// quantity `RenderGraph.plan` subtracts from the window (`inset`), so the loupe never grows a
     /// second copy of the canvas arithmetic.
     private func canvasOrigin(decodeScale: Double, zoom: Double) -> (x: Int, y: Int) {
-        guard straightenDegrees != 0 else { return (0, 0) }
+        // 246: the canvas *is* the picture's AABB (perspective + rotation already folded), so the
+        // picture starts at the canvas' origin — no inset, exactly like `CropMath.canvasOrigin`.
+        guard perspective == nil, straightenDegrees != 0 else { return (0, 0) }
         let ds = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
         let decoded = ImageSize(width: max(1, Int((sourceWidth * ds).rounded())),
                                 height: max(1, Int((sourceHeight * ds).rounded())))
