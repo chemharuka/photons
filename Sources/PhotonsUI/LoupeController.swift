@@ -3589,6 +3589,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // so the frame on screen keeps covering the pixels it covered before the press.
         let inSession = session.isToolSessionActive
         if inSession { session.endToolSession(label: "裁切与旋转") }
+        // The frame the camera is measured in, **before** the turn — the picture is about to swap its
+        // two dimensions, so a window centre in the old frame means something else in the new one.
+        //
+        // The unit matters: `viewState.centerX/Y` are **full-resolution turned-frame pixels**
+        // (`LoupeFraming.sourceWidth`, i.e. the decode divided by its scale), while `cropSourceSize`
+        // is the *decoded* grid — at the 0.5 rung it is half the numbers. The framing is the authority
+        // the camera itself is laid out with, so the swap reads its dimensions.
+        let framingBeforeTurn = framing()
+        let frameBeforeTurn = ImageSize(width: Int((framingBeforeTurn?.sourceWidth ?? 1).rounded()),
+                                        height: Int((framingBeforeTurn?.sourceHeight ?? 1).rounded()))
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
         guard turned else {
@@ -3603,6 +3613,27 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // one snapshot, with or without the frame up.
         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
                                            coalesce: false)
+        // **The picture turned, so the camera turns with it** (2026-11-02). The window centre is stored
+        // in the photograph's own (turned) pixels; a quarter turn renames those axes, so leaving the
+        // number alone points the window at another part of the photograph — the picture jumps to one
+        // side and, at a zoom where the canvas is smaller than the viewport, the rest of the canvas is
+        // the matte. 「旋转后照片被推到左边、右边纯黑，缩放一下才对」 was exactly this: `⌘0` recomputes
+        // the centre from the crop, so it looked like the zoom 「fixed」 the render.
+        //
+        // Clockwise: `(x, y) ↦ (H − y, x)`; counter-clockwise: `(x, y) ↦ (y, W − x)`, with `W × H` the
+        // frame the camera was measured in before the press. `.fit` derives its centre from the crop,
+        // so nothing is stored there to move.
+        if viewState.mode == .actual {
+            var next = viewState
+            if clockwise {
+                next.centerX = Double(frameBeforeTurn.height) - viewState.centerY
+                next.centerY = viewState.centerX
+            } else {
+                next.centerX = viewState.centerY
+                next.centerY = Double(frameBeforeTurn.width) - viewState.centerX
+            }
+            setViewState(next)
+        }
         if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
@@ -4470,14 +4501,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the decode key (`DecodeInputs` has no crop), so the rung is the same one as before — only
         // the render key moves, which is what a canvas change should do.
         let edit = cropTool.canvasEdit(from: session.edit)
-        if ProcessInfo.processInfo.environment["PHOTONS_DIAG"] != nil {
-            print("DIAG job kind=\(kind) viewport=\(viewport) angle=\(edit.geometry.straightenDegrees) "
-                  + "quarter=\(edit.geometry.quarterTurns) crop=\(edit.geometry.cropRect) "
-                  + "state=(mode \(viewState.mode) zoom \(viewState.zoom) centre \(viewState.centerX),\(viewState.centerY)) "
-                  + "windowPx=\(jobViewport() ?? ImageSize(width: 0, height: 0)) "
-                  + "framing=\(framing().map { "fit \($0.fitZoom) win \($0.windowSize(of: viewState)) crop \($0.crop)" } ?? "nil") "
-                  + "outWindow=\(String(describing: framing().flatMap { $0.outputWindow(of: viewState, decodeScale: Double(detailPreview ? 0.5 : 1)) }))")
-        }
         var job = RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                             edit: edit, state: viewState, target: target, generation: gen,
                             changedAt: changedAt)
@@ -5889,14 +5912,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let request = PresentRequest(picture: texture, photoRect: photoRect, window: window,
                                      canvas: canvas, backdrop: backdrop,
                                      backdropWindow: backdropWindow)
-        if ProcessInfo.processInfo.environment["PHOTONS_DIAG"] != nil {
-            print("DIAG present tex=\(texture.width)×\(texture.height) canvas=\(canvas) "
-                  + "drawable=\(canvasView.metalLayer.drawableSize) bounds=\(canvasView.bounds) "
-                  + "frameCanvas=\(frameCanvas) photoRect=\(photoRect) pictureRect=\(String(describing: pictureRect)) "
-                  + "quad=\(request.pictureQuad) window=(u0 \(window.u0) v0 \(window.v0) du \(window.du) dv \(window.dv)) "
-                  + "backdropQuad=\(String(describing: request.backdropQuad)) frozen=\(frozen) zoom=\(zoom) "
-                  + "state=(mode \(viewState.mode) zoom \(viewState.zoom) centre \(viewState.centerX),\(viewState.centerY))")
-        }
         // The request is the exact thing the layer is asked to draw (geometry), kept
         // for tests that cannot read a `framebufferOnly` drawable back — and for the failure path,
         // which needs the geometry it tried.

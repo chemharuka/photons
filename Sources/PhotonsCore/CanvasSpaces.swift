@@ -120,8 +120,20 @@ public extension CropGeometry {
     // MARK: the document canvas (space 4)
 
     /// The turned **whole photograph**'s continuous bounding box, in photo pixels.
+    ///
+    /// 2026-11-02 — a **right angle is the photograph itself**, not the swapped AABB. `rotatedExtent`
+    /// answers "what box holds a `w × h` rect turned by θ", which at 90° is `h × w`; but the canvas a
+    /// document's crop is measured against is the region the photograph *covers*, and at a right angle
+    /// the turned photograph covers exactly its own rect (its corners are the same four corners). This
+    /// is the guard the whole file's "at every right angle the canvas is the frame" claim needs, and it
+    /// is what keeps `documentCanvasCropRect` meaningful at 90°/270° (it is `[0,1]²` there — anything
+    /// narrower would forbid the full-frame crop a quarter turn obviously allows). The straighten
+    /// itself is clamped to ±45°, so the branch is a contract statement, not a reachable document.
     var photoExtent: DSize {
-        Self.rotatedExtent(of: source, degrees: rotationDegrees)
+        guard hasAngle else {
+            return DSize(width: Double(max(source.width, 1)), height: Double(max(source.height, 1)))
+        }
+        return Self.rotatedExtent(of: source, degrees: rotationDegrees)
     }
 
     /// The document canvas: the smallest axis-aligned box holding every pixel of the whole photograph
@@ -154,6 +166,12 @@ public extension CropGeometry {
     /// size but no `CropGeometry` (the crop drag's every tick).
     static func documentCanvasCropRect(in source: ImageSize,
                                        degrees: Double) -> CropRect {
+        // A right angle (0/90/180/270) covers exactly the photograph, so the legal area is the frame
+        // itself — `[0,1]²`, not the swapped AABB `rotatedExtent` would answer with. See
+        // `photoExtent`: the two have to agree, or a 90° document would be told its own full crop is
+        // illegal.
+        let quarter = degrees.isFinite ? degrees / 90 : 0
+        if abs(quarter - quarter.rounded()) < 1e-9 { return .full }
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
         let e = rotatedExtent(width: w, height: h, degrees: degrees)
         let left = (w - e.width) / 2, top = (h - e.height) / 2
