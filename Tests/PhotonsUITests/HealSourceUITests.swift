@@ -74,7 +74,7 @@ final class HealSourceUITests: XCTestCase {
             .deletingLastPathComponent()      // PhotonsUITests
             .deletingLastPathComponent()      // Tests
             .deletingLastPathComponent()      // repo
-            .appendingPathComponent("Sources/PhotonsUI/MaskListPanel.swift")
+            .appendingPathComponent("Sources/PhotonsUI/HealCardPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("inspector.heal.autoSource"))
         XCTAssertTrue(source.contains("自动取源"))

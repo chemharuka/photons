@@ -409,7 +409,12 @@ public struct InspectorView: View {
             // 087: 变换工作区的第二张卡 —— 转动 / 旋转 / 镜像，放在裁切卡之后。
             angleTransformCard
         case .masks:
-            MaskListPanel(session: session, loupe: loupe)
+            // 221: two cards, one under the other — 蒙版 (what exists / what is selected) and 修复
+            // (the spot tool and its rows). Both are always mounted, empty or not.
+            VStack(spacing: 8) {
+                MaskListPanel(session: session, loupe: loupe)
+                HealCardPanel(session: session, loupe: loupe)
+            }
         case .history:
             // 077: the timeline draws its own header and card chrome (the mask list does the same):
             // it needs a count line, and it is not a parameter card with a reset.
@@ -2679,16 +2684,21 @@ struct InspectorCardShell<Accessory: View, Content: View>: View {
 
     let title: String
     var reset: (() -> Void)?
+    /// 221: a card whose title is not a `Section` (the 修复 card) can name its AX node without
+    /// inventing a second header row. Empty for every existing card.
+    var titleAccessibilityID: String?
 
     private let accessory: () -> Accessory
     private let content: () -> Content
 
     init(title: String,
          reset: (() -> Void)? = nil,
+         titleAccessibilityID: String? = nil,
          @ViewBuilder accessory: @escaping () -> Accessory,
          @ViewBuilder content: @escaping () -> Content) {
         self.title = title
         self.reset = reset
+        self.titleAccessibilityID = titleAccessibilityID
         self.accessory = accessory
         self.content = content
     }
@@ -2699,6 +2709,7 @@ struct InspectorCardShell<Accessory: View, Content: View>: View {
                 Text(title)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.primary)
+                    .accessibilityIdentifier(titleAccessibilityID ?? "")
                     .modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))
                 Spacer(minLength: 0)
                 accessory()
