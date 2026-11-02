@@ -35,6 +35,8 @@ dnglab convert -c lossless -f /tmp/wbc/chart256-raw.dng /tmp/wbc/chart256.dng
 # 2. 用 Apple 的解码器解出来（6500 K、tint 0），落一张 8-bit sRGB PNG
 swift tools/wb-calibrate/probe2.swift /tmp/wbc/chart256.dng 6500 /tmp/wbc/decoded.png
 
+# 3. 机器判据：全绿 exit 0，任一违反打印违反项并 exit 1
+$PY tools/wb-calibrate/verify_chart.py /tmp/wbc/decoded.png
 ```
 
 只想复核当前 macOS 解码器、不想重建：直接跳到第 2 步，把文件换成仓库里的
@@ -135,13 +137,49 @@ spread 140.0 125.0  89.0  65.0  44.0  27.0  12.0   1.0  11.0  27.0  39.0   48.0
 图卡本身也钉同一件事：中性坡必须行优先，当前夹具实测
 `TL 0 < TR 94 < BL 108 < BR 244`，最暗格 `(0,0)` —— x 镜像、y 翻转、转置、整格 crop 偏移
 都会破其中至少一条。每格中心 8×8 的 σ = 0.00；格宽 32 px，偏移超过约 12 px 就会让 8×8 采样跨到邻格，
-σ 立刻变大。
+σ 立刻变大。`verify_chart.py` 把这两条都做成断言。
+
+## 机器判据（`verify_chart.py`）
+
+```
+usage: verify_chart.py <decoded.png> [--grid 16] [--inner 8] [--quiet]
+```
+
+只看 PNG，不看元数据。七条断言，任一失败 exit 1 并打印违反项：
+
+1. 256 格全部找到（网格整除、格大于采样窗）；
+2. 中性 32 格：`max(R,G,B) − min(R,G,B) ≤ 8`，亮度单调不减（允许 −1 抖动）；
+3. 224 个色块量化到 8-bit 三元组后 ≥200 个互不相同；
+4. 每格中心 8×8 的 σ ≤ 2；
+5. 任一通道 =255 的格 ≤ 2；
+6. 取向：`TL < TR < BL < BR`、最暗格 `(0,0)`、最亮中性格是第 32 格；
+7. 色相顺序：224 格分成 8 组 × 28 格，组间色相严格前进且 8 步绕满 360°（只判顺序，不判绝对值——
+   相机矩阵会把设计 135° 转到实测 93°）。
+
+当前夹具全绿：色偏 max 1（patch 16）、亮度 `0 → 244` 零下降、色块 **219/224** 互异、σ 0.00、过曝 0、
+色相步长 `43/37/22/78/52/18/46/64`（和 360°，组内离散 ≤18°）。
+
+**反证**（同一命令必须能判红）：
+
+```bash
+$PY - <<'PY'
+from PIL import Image
+im = Image.open("/tmp/wbc/decoded.png")
+for name, t in [("flipud", Image.FLIP_TOP_BOTTOM), ("fliplr", Image.FLIP_LEFT_RIGHT),
+                ("rot90", Image.ROTATE_90)]:
+    im.transpose(t).save(f"/tmp/wbc/{name}.png")
+PY
+$PY tools/wb-calibrate/verify_chart.py /tmp/wbc/flipud.png --quiet; echo $?   # 1
+```
+
+实测三张都 exit 1：y 翻转 → 最暗格跑到 `(3,7)`、色偏 max 150；x 镜像 → 最暗格 `(0,14)`、
+29 个负台阶；转置 → 色相步长和 `2160°`。
 
 ## 夹具与重建
 
 `tools/wb-calibrate/chart256.dng`（152,178 B）是用 `L1030433.dng`（LEICA SL3）经
 `make_chart256.py` → `dnglab convert -c lossless` 生成的成品，直接提交当夹具；
-测试与判据脚本只读它，**不依赖 `dnglab`、不依赖真机 DNG**。
+测试与 `verify_chart.py` 只读它，**不依赖 `dnglab`、不依赖真机 DNG**。
 
 重建会用到真机 DNG 里的 `Make/Model/ColorMatrix1/ColorMatrix2/CalibrationIlluminant1/2/AsShotNeutral`，
 所以真机 DNG 不入库（`.gitignore` 里 `*.dng`，本夹具用一条 negation 例外）。换机身重建时，
@@ -159,4 +197,5 @@ spread 140.0 125.0  89.0  65.0  44.0  27.0  12.0   1.0  11.0  27.0  39.0   48.0
 | `inject_raw_ifd.py` | 在 `dnglab -c uncompressed` 容器里替换 raw strip 字节（旧的 18 档灰阶 + 24 色块探针） |
 | `make_patch_dng.py` | 48 色块 + 21 级灰阶的 raw（另一个探针图） |
 | `probe.swift` | `CIRAWFilter` 接受性 + 3500…9000 K 的 R/G/B 均值 |
-| `probe2.swift` | 解码后采样 + 落盘 PNG（判据脚本的输入） |
+| `probe2.swift` | 解码后采样 + 落盘 PNG（`verify_chart.py` 的输入） |
+| `verify_chart.py` | 机器验收：色偏/单调/去重/σ/过曝/取向/色相，exit code 可判 |
