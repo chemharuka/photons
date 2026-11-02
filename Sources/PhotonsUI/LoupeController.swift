@@ -282,6 +282,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// photo could render **A's pixels through B's edit** and file the result under B's key: a backdrop
     /// that claims to be the new photo and is the old one. `renderBackdrop` compares this with the key.
     private var graphPhoto: String?
+    /// The decoder version / detail amounts `graph`'s buffer was developed with. The backdrop key
+    /// carries them too (`DecodeInputs.key`), so a request that lands between a decoder switch and the
+    /// new frame must not render the old buffer under the new key. White balance is deliberately not
+    /// compared: the drag preview is an S1 gain on the resident buffer, not a new development.
+    private var graphDecodeVersion: String?
+    private var graphDetail: DetailSettings = .identity
 
     /// 037 ② / 039 — the low-resolution **whole picture** the canvas draws outside a shrinking frame.
     ///
@@ -1176,6 +1182,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     deinit {
         for token in screenTokens { NotificationCenter.default.removeObserver(token) }
+        // A monitor is a block the event loop holds; without this the loupe would be kept alive by it.
+        if let monitor = cropReturnMonitor { NSEvent.removeMonitor(monitor) }
     }
 
     // MARK: lifecycle
@@ -3305,7 +3313,60 @@ public final class LoupeController: NSViewController, HeadroomSource {
         zoomToFit()
         armCropFrame(.entered)
         requestEditRender()
+        focusCanvasForCrop()
+        installCropReturnMonitor()
         return true
+    }
+
+    // MARK: ↵ applies the frame (2026-11-02)
+
+    /// The frame is a canvas tool, so entering it gives the **canvas** the keyboard: `↵` / `Esc` then
+    /// reach `LoupeCanvasView.keyDown`, which is where they have always been handled.
+    ///
+    /// The user's report was that `↵` did nothing: the workspace tab and the 裁切 card are AppKit/
+    /// SwiftUI controls *beside* the canvas, and a click on one of them (or the card's own re-layout)
+    /// can leave the first responder somewhere that is not the canvas — then the key is swallowed by a
+    /// view that has no idea what a crop frame is. Focus is restored here, and [`cropReturnMonitor`]
+    /// covers the case where the hand went back to a control list afterwards.
+    private func focusCanvasForCrop() {
+        guard cropTool.isActive, let window = canvasView.window else { return }
+        if window.firstResponder is NSTextView { return }   // don't steal a field being typed in
+        window.makeFirstResponder(canvasView)
+    }
+
+    /// The window-level `↵` (and keypad Enter) while the frame is up — the second half of
+    /// `focusCanvasForCrop`.
+    ///
+    /// A local monitor sees the event **before** it is dispatched, so `↵` applies the frame whichever
+    /// control happens to hold the focus, and the answer does not depend on AppKit's responder chain
+    /// being rebuilt after every card redraw. It is removed the moment the tool closes, and it stands
+    /// aside for a field editor (`NSTextView`) so the card's `W:H` field still commits itself.
+    private var cropReturnMonitor: Any?
+
+    private func installCropReturnMonitor() {
+        guard cropReturnMonitor == nil else { return }
+        cropReturnMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.handleCropReturn(event) else { return event }
+            return nil
+        }
+    }
+
+    private func removeCropReturnMonitor() {
+        if let monitor = cropReturnMonitor { NSEvent.removeMonitor(monitor) }
+        cropReturnMonitor = nil
+    }
+
+    /// `↵` applies the draft when the crop frame is up in this view's window. Internal for the test
+    /// that pins the key binding without synthesising a whole event loop.
+    func handleCropReturn(_ event: NSEvent) -> Bool {
+        guard cropTool.isActive, event.type == .keyDown else { return false }
+        guard event.window == nil || event.window === canvasView.window else { return false }
+        let key = event.charactersIgnoringModifiers ?? ""
+        guard key == "\r" || key == "\u{3}" else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.isEmpty || flags == .numericPad else { return false }
+        if canvasView.window?.firstResponder is NSTextView { return false }
+        return applyCropTool()
     }
 
     /// Historical alias (132 §9): the crop workspace used to ask for `fit × 0.90` through this
@@ -3402,6 +3463,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     private func leaveCropTool() {
+        removeCropReturnMonitor()
         if let previous = cropEntryState {
             // 072 §A1 — **动画**回到进入前 framing, not a cut. The endpoint is the entry camera
             // itself (`previous`, restored verbatim: same rung, same pan — nothing is re-fitted or
@@ -4875,6 +4937,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
         backdropTexture(for: window)
     }
 
+    /// A decoder-version command (解码模型) is not a slider tick: the user is looking at the result,
+    /// there is no pointer entry, and the frame that follows is a new development. Ask for the
+    /// replacement now so the next landed frame serves it, instead of leaving the old version's
+    /// bottom image until the pointer happens to leave and come back.
+    ///
+    /// It only arms `backdropWanted`; the render itself waits for that frame (`serveWantedBackdrop`
+    /// is called from `present`), so the backdrop is made from the new buffer, never the old one.
+    func refreshLowResFullFrameForDecodeInputs() {
+        guard presenter != nil else { return }
+        guard let key = backdropKey else { return }
+        guard backdrop.key != key || backdrop.inFlight != nil else { return }
+        backdropWanted = true
+    }
+
     /// ④ — the low-resolution whole picture is made from the **effective** edit, so when that edit
     /// moves (the draft's 拉直 / 裁切 / 翻转 in 裁切 mode) the cached texture is retired instead of
     /// drawn at the old angle. `backdropWanted` hands the replacement to the next landed frame
@@ -5102,6 +5178,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.backdrop.fail(key, error: "\(reason), not \(key.photo)")
+                self.backdropStaleGraphRefusals += 1
+                self.backdropWanted = true
+            }
+            return
+        }
+        // The same refusal for a decode input: between a decoder switch and its frame, the graph is
+        // still the old version's buffer. Rendering it through the new document and filing it under
+        // the new key would be a backdrop that says v9 and shows v8. Wait for the frame (the guard
+        // re-arms `backdropWanted`, and `present` serves it once the graph has developed).
+        let requested = job.edit.decodeInputs
+        guard graphDecodeVersion == requested.decoderVersion, graphDetail == requested.detail else {
+            let reason = "the frame graph is still"
+                + " \(graphDecodeVersion ?? "auto")/\(graphDetail.summary)"
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.backdrop.fail(key, error: "\(reason), not the requested decode")
                 self.backdropStaleGraphRefusals += 1
                 self.backdropWanted = true
             }
@@ -5368,6 +5460,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             graph = nil                      // a new source needs a new graph
             graphIdentity = nil
             graphPhoto = nil
+            graphDecodeVersion = nil
+            graphDetail = .identity
         }
         decoded = image
         decodedIdentity = baseIdentity
@@ -5388,6 +5482,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
             graphIdentity = identity
             graphPhoto = baseIdentity
+            graphDecodeVersion = inputs.decoderVersion
+            graphDetail = inputs.detail
             // A new photo (or a new rung of it): its key is a different picture, so the measurement
             // armed below is a fresh one — the card must not keep the previous picture's numbers.
             lastFrameState = nil

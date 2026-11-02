@@ -3290,7 +3290,12 @@ public struct PanelResets {
             $0.detailSettings = .identity
         }
         // 077: 换解码版本是**一个命令**，不参与"同参数连续拖动"的合并。
-        return session.commitEdit(label: "解码模型", coalesce: false)
+        let committed = session.commitEdit(label: "解码模型", coalesce: false)
+        // A command, not a slider tick: the user is already looking at the result and will not move
+        // the pointer to make the low-resolution whole picture follow. Arm its rebuild now; the next
+        // landed frame (the new development) is what actually renders it.
+        if committed { loupe?.refreshLowResFullFrameForDecodeInputs() }
+        return committed
     }
 
     // MARK: one parameter

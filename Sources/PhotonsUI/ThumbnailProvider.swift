@@ -598,15 +598,22 @@ public final class ThumbnailProvider: @unchecked Sendable {
         // so small that the thumbnail has to upscale.
         let sourceEdge = ThumbnailProvider.sourceLongEdge(url: source) ?? longEdge
         let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, sourceEdge))))
+        // The HD thumbnail is our own graph, so it must ask for the document's whole development:
+        // version and detail are decode inputs too (the key's `editFingerprint` carries them, and
+        // omitting them here would file a v8 picture under a v9 key).
+        let inputs = document.decodeInputs
         let decoded = try decoder.decode(source, options: DecodeOptions(
-            scale: Float(decodeScale), whiteBalance: document.decodeInputs.whiteBalance))
+            decoderVersion: inputs.decoderVersion,
+            scale: Float(decodeScale),
+            whiteBalance: inputs.whiteBalance,
+            detail: inputs.detail))
         let w = decoded.width, h = decoded.height
         let scale = min(1, Double(longEdge) / Double(max(w, h, 1)))
 
         let graph = try RenderGraph(input: RenderInput(image: decoded,
                                                        identity: "thumb-hd|\(key.digest)",
                                                        sourceURL: source,
-                                                       whiteBalance: document.decodeInputs.whiteBalance),
+                                                       whiteBalance: inputs.whiteBalance),
                                     textureRetention: .none)
         defer { graph.releaseAllTextures() }
 

@@ -131,6 +131,50 @@ final class DecoderSwitchTests: XCTestCase {
         XCTAssertEqual(loupe.lastPresentedScale, scale8, "a decoder switch must not move the camera")
     }
 
+    // MARK: - A2. 低清全尺寸预览图跟着版本走（不需要鼠标进画布）
+
+    /// The user's second report: the pick re-develops the sharp frame, but the **low-resolution whole
+    /// picture** (the backdrop behind a shrinking canvas) keeps the default decoder's pixels. The
+    /// backdrop key already carried `ver=…`; what was missing was asking for the replacement — an
+    /// ordinary edit only marks the texture stale until the pointer re-enters, and a decoder pick is a
+    /// command with the pointer still on the inspector.
+    ///
+    /// Nothing here touches the pointer. The assertions are the picture the cache actually holds:
+    /// `develop` names the document's new decode inputs, the texture is a different generation, and
+    /// exactly one render produced it.
+    func testPickingAVersionAlsoRebuildsTheLowResWholePicture() throws {
+        let url = try fixtureURL()
+        let harness = try makeHarness(url: url, startingVersion: nil)
+        let session = harness.session, loupe = harness.loupe, resets = harness.resets
+        let offered = try RAWDecoder.availableVersions(for: url)
+        try XCTSkipUnless(offered.contains("9.dng"), "this fixture offers no v9.dng: \(offered)")
+
+        _ = try settle(loupe, session: session)
+        XCTAssertTrue(waitUntil { loupe.backdrop.texture != nil && loupe.backdrop.isIdle },
+                      "the open never produced a low-res whole picture")
+        let before = try XCTUnwrap(loupe.lowResFullFrame)
+        XCTAssertEqual(before.develop, session.edit.decodeInputs.key)
+        XCTAssertFalse(before.develop.contains("ver=9.dng"))
+        let generations = loupe.backdrop.generationCount
+
+        XCTAssertTrue(resets.decoderVersion("9.dng", offered: offered))
+        _ = try settle(loupe, session: session)
+        let expected = session.edit.decodeInputs.key
+        XCTAssertTrue(expected.contains("ver=9.dng"))
+        XCTAssertTrue(waitUntil {
+            loupe.backdrop.isIdle && loupe.lowResFullFrame?.develop == expected
+        }, "the low-res whole picture never caught up with v9")
+
+        let after = try XCTUnwrap(loupe.lowResFullFrame)
+        print("SWITCH backdrop · \(before.develop) → \(after.develop)"
+              + " · generations \(generations) → \(loupe.backdrop.generationCount)")
+        XCTAssertEqual(after.develop, expected)
+        XCTAssertFalse(after.texture === before.texture, "the backdrop must be a new render")
+        XCTAssertEqual(loupe.backdrop.generationCount, generations + 1,
+                       "one version pick = one replacement, not one per frame")
+        XCTAssertEqual(after.photo, session.anchorAsset.map { "\($0.contentHash)|\($0.id)" })
+    }
+
     // MARK: - B. 四轴强制回默认，一条历史
 
     /// The acceptance, second half: **the four amounts do not survive a version switch**, and they go
@@ -415,6 +459,17 @@ final class DecoderSwitchTests: XCTestCase {
         let axes = InspectorView.detailAxes(capabilities: session.capabilities,
                                             requested: requested, document: document)
         return Dictionary(uniqueKeysWithValues: DetailAxis.panelOrder.map { ($0.title, axes.isEnabled($0)) })
+    }
+
+    /// Pump the main run loop until `condition` holds. A deadline, not a budget: the first v9
+    /// development of the 60 MP fixture is seconds on a quiet machine.
+    private func waitUntil(_ timeout: TimeInterval = 120, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            CropUITestSupport.pump(0.05)
+        }
+        return condition()
     }
 
     private func fixtureURL() throws -> URL {

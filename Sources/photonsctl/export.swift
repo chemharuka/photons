@@ -120,10 +120,15 @@ func cmdExportBatch(_ a: Args) throws {
         let scale = preset.renderScale(content: content)
         let decodeScale = decodeScaleLadder(scale)
         // 194: develop at the document's own balance — the export is the settled picture, not a
-        // prediction of it.
-        let exportWhiteBalance = edit.decodeInputs.whiteBalance
-        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale,
-                                                                    whiteBalance: exportWhiteBalance))
+        // prediction of it. The decoder version and the four detail amounts are decode inputs too:
+        // exporting without them silently developed at Apple's default even when the document named
+        // v9, and shipped the untouched NR/detail amounts while the screen showed the adjusted ones.
+        let inputs = edit.decodeInputs
+        let exportWhiteBalance = inputs.whiteBalance
+        let decoded = try decoder.decode(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
+                                                                    scale: decodeScale,
+                                                                    whiteBalance: exportWhiteBalance,
+                                                                    detail: inputs.detail))
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)

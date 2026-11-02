@@ -67,9 +67,17 @@ public enum UIExportRenderer {
         // the same development the loupe settles on — and the graph is told the buffer already carries
         // it (S1 identity below). Exporting the as-shot buffer with an S1 gain instead would ship the
         // drag's approximation as the file.
-        let exportWhiteBalance = edit.decodeInputs.whiteBalance
-        let decoded = try decoder.decode(url, options: DecodeOptions(scale: decodeScale,
-                                                                    whiteBalance: exportWhiteBalance))
+        //
+        // The rest of `decodeInputs` follows the same rule: leaving out `decoderVersion` made 导出
+        // always develop at Apple's default even when the user had picked v9 in 「解码模型」, and
+        // leaving out `detail` shipped the untouched noise-reduction/detail amounts while the screen
+        // showed the adjusted ones. The export must ask for the document's development, not a subset.
+        let inputs = edit.decodeInputs
+        let exportWhiteBalance = inputs.whiteBalance
+        let decoded = try decoder.decode(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
+                                                                    scale: decodeScale,
+                                                                    whiteBalance: exportWhiteBalance,
+                                                                    detail: inputs.detail))
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)

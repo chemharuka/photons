@@ -131,6 +131,56 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertFalse(base.keyString.contains("gm23"))
     }
 
+    /// The HD thumbnail is our graph, not the camera's JPEG: its key must follow the decoder version
+    /// and the four NR/detail amounts, or a switch would keep serving the default decoder's picture.
+    func testHDKeyMovesWithTheDocumentsDecoderVersionAndDetail() {
+        let neutral = ThumbKey.hd(contentHash: "abc", document: .neutral)
+        var versioned = EditModel.neutral
+        versioned.decoderVersion = "9.dng"
+        var detailed = EditModel.neutral
+        detailed.detailSettings = DetailSettings(luminanceNR: 30, colorNR: 70,
+                                                  sharpness: 20, detail: 60)
+        let v9 = ThumbKey.hd(contentHash: "abc", document: versioned)
+        let nr = ThumbKey.hd(contentHash: "abc", document: detailed)
+
+        XCTAssertNotEqual(neutral.digest, v9.digest, "v9 must be a different HD thumbnail")
+        XCTAssertNotEqual(neutral.digest, nr.digest, "the detail amounts must move the HD thumbnail")
+        XCTAssertNotEqual(v9.digest, nr.digest, "version and detail are independent inputs")
+        XCTAssertNotEqual(ThumbRecipe.editFingerprint(.neutral),
+                          ThumbRecipe.editFingerprint(versioned))
+        XCTAssertNotEqual(ThumbRecipe.editFingerprint(.neutral),
+                          ThumbRecipe.editFingerprint(detailed))
+        // The default document is unchanged, so every pre-change HD key still hits.
+        XCTAssertEqual(neutral, ThumbKey.hd(contentHash: "abc", document: EditModel.neutral))
+    }
+
+    /// The measured half: two HD files for the same RAW and the same exposure, one document asking
+    /// for `9.dng`. The key must move **and** the bytes must differ — the producer must pass the
+    /// version into `DecodeOptions`, not just name it in the key.
+    func testHDThumbnailPixelsFollowTheDocumentsDecoderVersion() throws {
+        let url = try rawURL()
+        let offered = try RAWDecoder.availableVersions(for: url)
+        try XCTSkipUnless(offered.contains("9.dng"), "this fixture offers no v9.dng: \(offered)")
+
+        var v8 = EditModel.neutral
+        v8.light.exposure = 0.5
+        var v9 = v8
+        v9.decoderVersion = "9.dng"
+
+        let provider = try ThumbnailProvider(cache: cache())
+        let first = try generateHD(display: ImageSize(width: 326, height: 242),
+                                   document: v8, provider: provider)
+        let second = try generateHD(display: ImageSize(width: 326, height: 242),
+                                    document: v9, provider: provider)
+
+        print("THUMB decoder · v8 \(first.key.digest.prefix(16)) \(first.data.count) bytes"
+              + " · v9 \(second.key.digest.prefix(16)) \(second.data.count) bytes")
+        XCTAssertNotEqual(first.key.digest, second.key.digest,
+                          "the HD key must move with decoderVersion")
+        XCTAssertNotEqual(first.data, second.data,
+                          "the HD file is still the default decoder's picture")
+    }
+
     /// 2 — three views, one file: the HD key ignores the per-cell tier, so a 256 px grid cell, a
     /// 34 pt list row and a filmstrip cell all resolve to the same path.
     func testTheThreeViewsResolveToOneCacheFilePath() throws {

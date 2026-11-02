@@ -83,10 +83,10 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
 
 /// The constants that decide pixels, plus the digest that enters the cache key.
 ///
-/// D1/D2′: the decode recipe is frozen. There is deliberately **no** decoder-version parameter
-/// anywhere in this type or in `ThumbKey` — a thumbnail may never be produced by `9` or `9.dng`,
-/// so "the same file renders differently after a decoder switch" cannot leak into the grid
-/// (006 §6.3, §8 #8).
+/// D1/D2′ froze the **legacy preview** recipe: its placeholder/preview keys carry no document at all,
+/// so a decoder switch cannot invalidate the camera's embedded JPEG. The HD family is different — it
+/// is our render graph at 1920, and its `editFingerprint` follows the document's decode inputs
+/// (`decoderVersion` / `detailSettings`) so the grid shows what the loupe and the exporter show.
 public enum ThumbRecipe {
     public static let decoderRecipe = "v8/boost0/gamutOff"
     /// Kernel semantics version. Part of every `graph` key.
@@ -123,10 +123,19 @@ public enum ThumbRecipe {
     /// `thumbSpec` and the stage-version material are appended again on purpose: the key must name
     /// the file parameters (1920/q75/10-bit/Display P3 PQ/HEIC) and the arithmetic generation
     /// even if a future stage list forgets them.
+    ///
+    /// The decode inputs that are **not** render stages — the decoder version and the four
+    /// NR/detail amounts — are appended last, and only when non-default. A neutral document keeps
+    /// every pre-change HD key byte for byte; a `9.dng` / adjusted-detail document gets a new key,
+    /// which is what makes the grid rebuild instead of serving the default decoder's picture.
     public static func editFingerprint(_ document: EditModel) -> String {
         let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
-        return sha256Hex("\(stageKeys)|\(StageAlgorithmVersion.material)|\(ThumbSpec.hd.rawValue)"
-                         + "|sv\(ThumbSpec.hd.schemaVersion)")
+        var material = "\(stageKeys)|\(StageAlgorithmVersion.material)|\(ThumbSpec.hd.rawValue)"
+            + "|sv\(ThumbSpec.hd.schemaVersion)"
+        let inputs = document.decodeInputs
+        if let version = inputs.versionComponent { material += "|\(version)" }
+        if let detail = inputs.detailComponent { material += "|\(detail)" }
+        return sha256Hex(material)
     }
 
     /// The neutral document's fingerprint, for callers that have no document (a missing row, a probe).
