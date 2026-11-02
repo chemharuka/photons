@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import CoreGraphics
 import ImageIO
+import QuartzCore
 import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
@@ -21,11 +22,16 @@ import PhotonsCore
 ///
 /// A real RAW (the same fixture the loupe suites use) is referenced, and a thumbnail for the row is
 /// written into the library's cache — that is the state a cold app start finds: no memory, warm disk.
+/// 251 adds the other half: a brand-new library with **no** thumbnail on disk, where the stand-in has
+/// to be generated from the embedded preview while the canvas is still the matte.
 @MainActor
 final class ColdStartLoupeTests: XCTestCase {
 
     private var workDir: URL!
     private var windows: [NSWindow] = []
+    /// Cache directories derived from this test's unique temporary library paths. They live outside
+    /// the package (`~/Library/Caches/Photons/<hash>`), so `workDir` alone does not clean them up.
+    private var cacheDirs: [URL] = []
 
     override func setUpWithError() throws {
         workDir = FileManager.default.temporaryDirectory
@@ -36,6 +42,8 @@ final class ColdStartLoupeTests: XCTestCase {
     override func tearDownWithError() throws {
         for window in windows { window.orderOut(nil) }
         windows.removeAll()
+        for dir in cacheDirs { try? FileManager.default.removeItem(at: dir) }
+        cacheDirs.removeAll()
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
         workDir = nil
     }
@@ -104,6 +112,67 @@ final class ColdStartLoupeTests: XCTestCase {
                      placeholderMs,
                      loupe.lastPhotoSwitchFirstFrameMilliseconds,
                      loupe.lastPhotoSwitchBackdropMilliseconds,
+                     loupe.firstFrameContent.rawValue))
+    }
+
+    /// 251 — the genuinely cold path: a brand-new library whose thumbnail cache has never been
+    /// written. The tests above seed a preview JPEG, so `armFirstFramePlaceholder` finds its stand-in
+    /// synchronously; here it must ask the thumbnail service for the RAW's embedded preview, and the
+    /// canvas waits on the matte until that lands.
+    ///
+    /// What is pinned:
+    ///   · the cache really is empty at the moment the loupe opens (otherwise this is 235 again);
+    ///   · the wait is the **matte**, never stale pixels;
+    ///   · the first real frame still replaces `displayThumbnail`, not `blank`;
+    ///   · the matte window is measured and bounded (≤ 250 ms), not merely "something showed up".
+    func testColdOpenWithAnEmptyCacheStandsInTheGeneratedPreview() throws {
+        let raw = try fixture("L1030433.dng")
+        let (editor, assets) = try makeEmptyCacheEditor(files: [raw])
+        let loupe = editor.rootView.loupeController
+        let cache = try XCTUnwrap(editor.session.thumbnailCache)
+        let provider = ThumbnailProvider.shared(for: cache)
+        XCTAssertNil(provider.cachedCanvasPlaceholder(for: assets[0], document: editor.session.edit),
+                     "the test is not cold: the stand-in was already cached")
+
+        // The grid has not been laid out with this asset (see `makeEmptyCacheEditor`), so entering the
+        // loupe is the first thing that can ask for a thumbnail.
+        editor.session.selectOnly(assets[0].id)
+        let started = CACurrentMediaTime()
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+
+        // With nothing on disk the stand-in cannot be synchronous: the only thing on the canvas is
+        // the matte cover (never the previous photo, never a stale drawable).
+        XCTAssertFalse(loupe.firstFramePlaceholderVisible,
+                       "an empty cache installed a thumbnail synchronously")
+        XCTAssertTrue(loupe.isCanvasCoveredForTesting,
+                      "the empty-cache window was not the matte")
+        XCTAssertNil(loupe.lastFrame, "the empty-cache window already had a real frame")
+
+        XCTAssertTrue(waitFor(10, { loupe.firstFramePlaceholderVisible }),
+                      "the generated embedded-preview stand-in never arrived")
+        let matteMs = (CACurrentMediaTime() - started) * 1000
+        let generationMs = loupe.firstFramePlaceholderMilliseconds
+
+        guard waitFor(90, { loupe.lastFrame != nil }) else {
+            return XCTFail("no first frame (last error: \(loupe.lastPresentError ?? "—"))")
+        }
+        XCTAssertEqual(loupe.firstFrameContent, .displayThumbnail,
+                       "the first real frame did not replace the generated stand-in")
+        XCTAssertFalse(loupe.firstFramePlaceholderVisible, "the stand-in outlived the real frame")
+        XCTAssertFalse(loupe.isCanvasCoveredForTesting, "the matte cover outlived the real frame")
+
+        // 251's budget: the empty-cache wait is allowed to exist, but it is a measured, bounded
+        // state — not "whatever it takes". 250 ms leaves the measured 120–190 ms generation path
+        // at least ~1.3× of headroom without turning the assertion into "it eventually shows".
+        XCTAssertLessThanOrEqual(matteMs, 250,
+                                 "empty-cache matte window \(matteMs) ms exceeds the 250 ms budget")
+        XCTAssertLessThanOrEqual(generationMs, 250,
+                                 "stand-in generation \(generationMs) ms exceeds the 250 ms budget")
+        print(String(format: "251 empty cache: matte %.1f ms · stand-in generation %.1f ms"
+                     + " · first real frame %.1f ms · first content %@",
+                     matteMs, generationMs,
+                     loupe.lastPhotoSwitchFirstFrameMilliseconds,
                      loupe.firstFrameContent.rawValue))
     }
 
@@ -180,7 +249,7 @@ final class ColdStartLoupeTests: XCTestCase {
         let assets: [Asset]
     }
 
-    private func makeLibrary(files: [URL]) throws -> ColdLibrary {
+    private func makeLibrary(files: [URL], physicalSize: Bool = false) throws -> ColdLibrary {
         _ = NSApplication.shared
         let package = workDir.appendingPathComponent("Cold.\(LibraryLayout.packageExtension)")
         let catalog = try Catalog.create(at: package)
@@ -195,6 +264,12 @@ final class ColdStartLoupeTests: XCTestCase {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: file)
             let size = try pixelSize(of: file)
+            // 251's empty-cache path is gated on `asset.size > 1024` (a one-byte synthetic row cannot
+            // carry an embedded preview). The older fixtures deliberately use 1; the new test opts
+            // into the real file size so the stand-in's generation path is the one under test.
+            let byteSize = physicalSize
+                ? ((try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 1)
+                : 1
             let id = UUID().uuidString
             ids.append(id)
             try catalog.dbQueue.write { db in
@@ -202,7 +277,7 @@ final class ColdStartLoupeTests: XCTestCase {
                     INSERT INTO assets (id, source_root_id, rel_path, filename, ext, kind, size, mtime,
                                         content_hash, width, height, camera_make, camera_model, lens,
                                         imported_at, missing)
-                    VALUES ('\(id)', '\(root.id)', '\(name)', '\(name)', 'dng', 'raw', 1, 0,
+                    VALUES ('\(id)', '\(root.id)', '\(name)', '\(name)', 'dng', 'raw', \(byteSize), 0,
                             '\(UUID().uuidString)',
                             \(size.width), \(size.height),
                             'Leica Camera AG', 'Leica SL3', 'Vario-Elmarit-SL 24-90',
@@ -212,6 +287,36 @@ final class ColdStartLoupeTests: XCTestCase {
         }
         let assets = try ids.map { try XCTUnwrap(try catalog.asset(id: $0)) }
         return ColdLibrary(package: package, assets: assets)
+    }
+
+    /// 251 — a library whose thumbnail cache is empty **and stays empty until the loupe opens**.
+    ///
+    /// `makeEditor` seeds the preview and then lays the grid out, which is the warm state. Here the
+    /// loupe is entered and laid out **before** the library exists, so the grid never gets a layout
+    /// pass with the asset in it (the one thing that would warm the cache). The library opens with
+    /// the loupe already the visible module; the caller's `showModule(for: .loupe)` is then the actual
+    /// open, with settled canvas geometry and no measurement-inflating layout work in the window.
+    private func makeEmptyCacheEditor(files: [URL]) throws -> (EditorWindowController, [Asset]) {
+        let library = try makeLibrary(files: files, physicalSize: true)
+        // The cache directory is derived from the package path (`~/Library/Caches/Photons/<hash>`).
+        // The package is under this test's UUID temp dir, so the derivation is already unique; the
+        // removal makes "empty" a fact even if a previous process used the same path.
+        let cacheDirectory = LibraryLayout(packageURL: library.package).cacheDirectory
+        try? FileManager.default.removeItem(at: cacheDirectory)
+        cacheDirs.append(cacheDirectory)
+
+        let editor = EditorWindowController(size: NSSize(width: 1200, height: 800))
+        let window = try XCTUnwrap(editor.window)
+        windows.append(window)
+        // No library yet: this only settles the loupe's canvas geometry (and cannot ask for a
+        // thumbnail, because there is no anchor).
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+        window.orderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        try editor.openLibrary(at: library.package)
+        return (editor, library.assets)
     }
 
     private func makeEditor(files: [URL]) throws -> (EditorWindowController, [Asset]) {
