@@ -3,7 +3,7 @@ import CoreGraphics
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 224 — **the crop frame's boundary is the document space**: `[0,1]²`, not the viewport and not the
+/// 224 — **the crop frame's boundary is the document's canvas**, not the viewport and not the
 /// straightened picture's AABB.
 ///
 /// 213 measured the frame in the viewport (a full frame was squeezed to 22 % at 100 %); 219 moved the
@@ -12,10 +12,20 @@ import PhotonsCore
 /// the simple one:
 ///
 ///   · **allowed** outside the photograph — the black corners a straighten cuts off (`frameExceedsPicture`);
-///   · **not allowed** outside the document canvas — the frame rectangle `[0,1]²`;
+///   · **not allowed** outside the **document canvas** — the smallest axis-aligned box holding every
+///     pixel of the whole photograph once it is turned (its AABB), expressed in the crop rect's own
+///     normalized coordinates;
 ///   · the screen, the zoom and the window size do not participate.
 ///
-/// This file pins the six acceptance numbers of 224.
+/// **2026-11-02 the user replaced 224's `[0,1]²` with that canvas** (「旋转之后裁剪框能移动的范围应该是
+/// 画布，不是原始图片」). At 0°/180° the AABB is the photograph itself, so every upright number in this
+/// file is byte-for-byte the one 224 pinned; at 8°/45° the canvas is wider than the photograph and the
+/// legal rect is `-0.1187…1.1187 × -0.325…1.325` (6000 × 4500, 45°) instead of `0…1`. `[0,1]²` is only
+/// the right-angle answer, not the rule.
+///
+/// Every expectation below is derived by `legalRect(degrees:source:)` — the AABB formula re-derived in
+/// this file, never `CropGeometry.documentCanvasCropRect` — so a regression in either side shows up as a
+/// disagreement instead of cancelling out.
 @MainActor
 final class CropClampDocument224Tests: XCTestCase {
 
@@ -52,24 +62,54 @@ final class CropClampDocument224Tests: XCTestCase {
                      straightenDegrees: degrees).mapping(of: state)
     }
 
-    private func assertInsideDocument(_ crop: CropRect, accuracy: Double = 1e-12,
+    /// The legal area of a crop frame: the **document canvas** — the smallest axis-aligned box that
+    /// holds every pixel of the whole photograph once it is turned by `degrees`.
+    ///
+    /// Derived here from the AABB formula (`e = |w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, centred on the
+    /// photograph) instead of calling `CropGeometry.documentCanvasCropRect`, so the assertion has an
+    /// independent source. At 0°/180° it is exactly `0…1`; at a right angle the extent is an axis swap.
+    private func legalRect(degrees: Double, source: ImageSize) -> CropRect {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let quarter = degrees / 90
+        let extent: (width: Double, height: Double)
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            extent = Int(quarter.rounded()) % 2 != 0 ? (h, w) : (w, h)
+        } else {
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            extent = (w * c + h * s, w * s + h * c)
+        }
+        let left = (w - extent.width) / 2, top = (h - extent.height) / 2
+        return CropRect(left: left / w, top: top / h,
+                        right: (left + extent.width) / w, bottom: (top + extent.height) / h)
+    }
+
+    private func assertInsideDocument(_ crop: CropRect, degrees: Double, accuracy: Double = 1e-12,
                                       _ message: String = "") {
-        XCTAssertGreaterThanOrEqual(crop.left, 0 - accuracy, "\(message) left")
-        XCTAssertGreaterThanOrEqual(crop.top, 0 - accuracy, "\(message) top")
-        XCTAssertLessThanOrEqual(crop.right, 1 + accuracy, "\(message) right")
-        XCTAssertLessThanOrEqual(crop.bottom, 1 + accuracy, "\(message) bottom")
+        let legal = legalRect(degrees: degrees, source: Self.source)
+        XCTAssertGreaterThanOrEqual(crop.left, legal.left - accuracy, "\(message) left")
+        XCTAssertGreaterThanOrEqual(crop.top, legal.top - accuracy, "\(message) top")
+        XCTAssertLessThanOrEqual(crop.right, legal.right + accuracy, "\(message) right")
+        XCTAssertLessThanOrEqual(crop.bottom, legal.bottom + accuracy, "\(message) bottom")
     }
 
     // MARK: - 224 §3.1 — the infinite excursion is gone
 
     /// The frame's centre is put **ten document widths** outside each edge, the shipped clamp runs,
-    /// and the rect comes back inside `[0,1]²` flush with the edge it crossed — zero error, not a
-    /// tolerance. (219's bound was the view AABB, so at 45° these four seeds travelled for ever.)
+    /// and the rect comes back inside the document canvas flush with the edge it crossed — an error of
+    /// 1e-12, i.e. the slide's own rounding and nothing more (the upright case lands on exactly 0/1,
+    /// because the numbers there are addition and subtraction of the same integers).
+    /// (219's bound was the view AABB, so at 45° these four seeds travelled for ever.)
+    ///
+    /// 2026-11-02 — the flush edges moved from `0` / `1` to the canvas' own edges (6000 × 4500 at 45°:
+    /// `-0.118718433538` / `1.118718433538` horizontally, `-0.324957911384` / `1.324957911384`
+    /// vertically), recomputed here from the AABB formula rather than hard-coded.
     func testAFrameTenCanvasWidthsAwayIsPulledBackWithZeroError() throws {
         let controller = try makeController()
         let state = LoupeViewState(mode: .actual, zoom: 4, centerX: 3000, centerY: 2250)
         let map = mapping(state, degrees: 45)
         controller.draft.straighten = 45
+        let legal = legalRect(degrees: 45, source: Self.source)
 
         let span = 0.2
         let ten = 10.0
@@ -87,12 +127,13 @@ final class CropClampDocument224Tests: XCTestCase {
             XCTAssertTrue(controller.clampToView(mapping: map, source: Self.source),
                           "224 §1 \(name): the clamp must move a frame that is off the document")
             let crop = controller.draft.crop
-            assertInsideDocument(crop, accuracy: 0, "224 §1 \(name):")
+            assertInsideDocument(crop, degrees: 45, accuracy: 1e-12, "224 §1 \(name):")
+            // Flush against the canvas' edge, not against the photograph's.
             switch edge {
-            case "left": XCTAssertEqual(crop.left, 0, accuracy: 0)
-            case "right": XCTAssertEqual(crop.right, 1, accuracy: 0)
-            case "top": XCTAssertEqual(crop.top, 0, accuracy: 0)
-            default: XCTAssertEqual(crop.bottom, 1, accuracy: 0)
+            case "left": XCTAssertEqual(crop.left, legal.left, accuracy: 1e-12)
+            case "right": XCTAssertEqual(crop.right, legal.right, accuracy: 1e-12)
+            case "top": XCTAssertEqual(crop.top, legal.top, accuracy: 1e-12)
+            default: XCTAssertEqual(crop.bottom, legal.bottom, accuracy: 1e-12)
             }
             // Moving, never reshaping: the seed's 0.2 × 0.2 span survives.
             XCTAssertEqual(crop.width, span, accuracy: 1e-12)
@@ -105,33 +146,42 @@ final class CropClampDocument224Tests: XCTestCase {
 
     // MARK: - 224 §3.2 — the photograph's edge is a warning, not a clamp
 
-    /// At 45°, the full frame `[0,1]²` is **legal** — it covers the turned-out black corners — and the
-    /// overlay is told to paint it red. The "改前" column is what the old `clampedToRotatedFrame`
-    /// shrink produced on the same full frame.
+    /// At 45°, the full frame `[0,1]²` is **legal** — it covers the turned-out black corners and sits
+    /// well inside the document canvas (`-0.1187…1.1187 × -0.325…1.325`) — and the overlay is told to
+    /// paint it red. The "改前" column is what the old `clampedToRotatedFrame` shrink produced on the
+    /// same full frame.
     func testAtFortyFiveDegreesTheFullFrameIsAllowedAndWarns() throws {
         let controller = try makeController()
         let map = mapping(.fit, degrees: 45)
         controller.draft = CropToolController.Draft(crop: .full, straighten: 45, lock: .original)
+        let legal = legalRect(degrees: 45, source: Self.source)
 
         let drawn = controller.effectiveCrop(source: Self.source)
         let oldShrink = CropMath.clampedToRotatedFrame(.full, in: Self.source, degrees: 45,
                                                        keepsInsideRotatedFrame: true)
         let w = Double(Self.source.width), h = Double(Self.source.height)
         print(String(format: "224 §2 · 45° 满幅框 · 改前 %.1f×%.1f px → 改后 %.1f×%.1f px · "
-                     + "frameExceedsPicture %@",
+                     + "frameExceedsPicture %@ · 合法区 l %.6f t %.6f r %.6f b %.6f",
                      oldShrink.width * w, oldShrink.height * h,
                      drawn.width * w, drawn.height * h,
-                     controller.frameExceedsPicture(source: Self.source) ? "true" : "false"))
+                     controller.frameExceedsPicture(source: Self.source) ? "true" : "false",
+                     legal.left, legal.top, legal.right, legal.bottom))
 
         XCTAssertEqual(drawn, .full, "224 §2: 45° must not shrink the full frame back inside the picture")
         XCTAssertEqual(drawn.width, 1, accuracy: 0)
         XCTAssertEqual(drawn.height, 1, accuracy: 0)
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
                       "224 §2: the full frame at 45° covers the black corner — it must be red")
+        // The photograph is, by construction, inside its own canvas: `[0,1]² ⊆ legal` at 45°, with the
+        // black corners a straighten opens making up the difference.
+        XCTAssertLessThanOrEqual(legal.left, 0 + 1e-12)
+        XCTAssertLessThanOrEqual(legal.top, 0 + 1e-12)
+        XCTAssertGreaterThanOrEqual(legal.right, 1 - 1e-12)
+        XCTAssertGreaterThanOrEqual(legal.bottom, 1 - 1e-12)
         // Running the clamp on the legal full frame is an identity: the clamp is the document, not
         // the picture's turned quad.
         XCTAssertFalse(controller.clampToView(mapping: map, source: Self.source),
-                       "224 §2: a full frame is already inside [0,1]²")
+                       "224 §2: a full frame is already inside the document canvas")
         XCTAssertEqual(controller.draft.crop, .full)
     }
 
@@ -140,6 +190,10 @@ final class CropClampDocument224Tests: XCTestCase {
     /// The same document and the same angle, clamped with an 800 × 600 and a 2560 × 1600 viewport:
     /// the two results are equal **value for value**. The seed that is already legal is included, so
     /// the identity path is covered as well as the pull-back.
+    ///
+    /// 2026-11-02 — the legality check is the document canvas (`-0.1187…1.1187 × -0.325…1.325` at 45°),
+    /// not `[0,1]²`; the seeds and the equality are unchanged, and the second seed now stops on the
+    /// canvas' right edge instead of the photograph's.
     func testTheClampIsIdenticalAtTwoViewports() throws {
         let controller = try makeController()
         let seeds: [CropRect] = [
@@ -149,6 +203,7 @@ final class CropClampDocument224Tests: XCTestCase {
         ]
         let small = mapping(.fit, viewport: ImageSize(width: 800, height: 600), degrees: 45)
         let large = mapping(.fit, viewport: ImageSize(width: 2560, height: 1600), degrees: 45)
+        let legal = legalRect(degrees: 45, source: Self.source)
 
         var reports: [String] = []
         for seed in seeds {
@@ -163,10 +218,15 @@ final class CropClampDocument224Tests: XCTestCase {
             XCTAssertEqual(a.top, b.top, accuracy: 0, "small vs large viewport: top")
             XCTAssertEqual(a.right, b.right, accuracy: 0, "small vs large viewport: right")
             XCTAssertEqual(a.bottom, b.bottom, accuracy: 0, "small vs large viewport: bottom")
-            assertInsideDocument(a, accuracy: 1e-12, "800×600:")
+            assertInsideDocument(a, degrees: 45, accuracy: 1e-12, "800×600:")
+            assertInsideDocument(b, degrees: 45, accuracy: 1e-12, "2560×1600:")
+            XCTAssertEqual(a.width, seed.width, accuracy: 1e-12, "never reshaped: width")
+            XCTAssertEqual(a.height, seed.height, accuracy: 1e-12, "never reshaped: height")
             reports.append("800×600 " + a.keyString + " == 2560×1600 " + b.keyString)
         }
-        print("224 §3 · 与屏幕无关 · " + reports.joined(separator: " ‖ "))
+        print(String(format: "224 §3 · 与屏幕无关（合法区 l %.6f t %.6f r %.6f b %.6f）· ",
+                     legal.left, legal.top, legal.right, legal.bottom)
+              + reports.joined(separator: " ‖ "))
     }
 
     // MARK: - 224 §3.4 — no 219 regression: a full frame survives every zoom
@@ -194,12 +254,16 @@ final class CropClampDocument224Tests: XCTestCase {
     // MARK: - 224 §3.5 — 45° + 400 % + pan, then a real drag tick
 
     /// The shipped drag path at 45°, 400 % and an off-centre camera: after a far tick the stored rect
-    /// is still inside `[0,1]²`. The camera is deliberately not centred, so the old view-AABB bound
-    /// would have moved with it.
+    /// is still inside the **document canvas**, flush with one of its edges. The camera is deliberately
+    /// not centred, so the old view-AABB bound would have moved with it.
+    ///
+    /// 2026-11-02 — "flush" is measured against the canvas' edges (`-0.1187` left, `-0.325` top,
+    /// `1.1187` right, `1.325` bottom on 6000 × 4500), not against `0` / `1`.
     func testFortyFiveDegreesAtFourHundredPercentAPanAndDragStayInTheDocument() throws {
         let controller = try makeController()
         let state = LoupeViewState(mode: .actual, zoom: 4, centerX: 1200, centerY: 800)
         let map = mapping(state, degrees: 45)
+        let legal = legalRect(degrees: 45, source: Self.source)
         controller.draft = CropToolController.Draft(
             crop: CropRect(left: 0.3, top: 0.3, right: 0.5, bottom: 0.5),
             straighten: 45, lock: .original)
@@ -216,11 +280,13 @@ final class CropClampDocument224Tests: XCTestCase {
 
         let after = controller.draft.crop
         print(String(format: "224 §5 · 45° 400%% 平移后拖动 · crop l %.12f t %.12f r %.12f b %.12f "
-                     + "· clampMoves %d",
-                     after.left, after.top, after.right, after.bottom, controller.clampMoves))
-        assertInsideDocument(after, accuracy: 1e-12, "224 §5:")
-        XCTAssertEqual(min(after.left, after.top, 1 - after.right, 1 - after.bottom), 0,
-                       accuracy: 1e-12, "the far drag must stop on the document's edge")
+                     + "· clampMoves %d · 合法区 l %.12f t %.12f r %.12f b %.12f",
+                     after.left, after.top, after.right, after.bottom, controller.clampMoves,
+                     legal.left, legal.top, legal.right, legal.bottom))
+        assertInsideDocument(after, degrees: 45, accuracy: 1e-12, "224 §5:")
+        XCTAssertEqual(min(after.left - legal.left, after.top - legal.top,
+                           legal.right - after.right, legal.bottom - after.bottom),
+                       0, accuracy: 1e-12, "the far drag must stop on the canvas' edge")
         XCTAssertGreaterThan(controller.clampMoves, 0, "the drag must have gone through the clamp")
     }
 
@@ -238,8 +304,12 @@ final class CropClampDocument224Tests: XCTestCase {
 // MARK: - 224 补充契约：框不允许在**任何时刻**移出画布
 
 /// The user's follow-up is a hard boundary, not a pull-back: every observable `draft.crop` is inside
-/// `[0,1]²`. These tests watch the drag **tick by tick** (not only its last value), and then prove
-/// that a pinned edge stops dead when the hand keeps going.
+/// the **document canvas**. These tests watch the drag **tick by tick** (not only its last value), and
+/// then prove that a pinned edge stops dead when the hand keeps going.
+///
+/// 2026-11-02 — 「画布」 here means the AABB of the whole turned photograph, not `[0,1]²`
+/// (「旋转之后裁剪框能移动的范围应该是画布，不是原始图片」). At 45° on 6000 × 4500 that is
+/// `-0.1187…1.1187 × -0.325…1.325`; `[0,1]²` survives only as the 0°/180° case of the same formula.
 @MainActor
 final class CropClampDocument224TickTests: XCTestCase {
 
@@ -283,9 +353,31 @@ final class CropClampDocument224TickTests: XCTestCase {
         return CGPoint(x: p.x, y: p.y)
     }
 
-    private func isOutsideDocument(_ crop: CropRect, tolerance: Double = 1e-12) -> Bool {
-        crop.left < -tolerance || crop.top < -tolerance
-            || crop.right > 1 + tolerance || crop.bottom > 1 + tolerance
+    /// The document canvas — the smallest axis-aligned box holding every pixel of the whole photograph
+    /// after the turn — re-derived here from the AABB formula rather than read from `CropGeometry`, so
+    /// the assertion cannot be satisfied by the implementation agreeing with itself. At 0°/180° this is
+    /// exactly `0…1`.
+    private func legalRect(degrees: Double) -> CropRect {
+        let w = Double(max(Self.source.width, 1)), h = Double(max(Self.source.height, 1))
+        let quarter = degrees / 90
+        let extent: (width: Double, height: Double)
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            extent = Int(quarter.rounded()) % 2 != 0 ? (h, w) : (w, h)
+        } else {
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            extent = (w * c + h * s, w * s + h * c)
+        }
+        let left = (w - extent.width) / 2, top = (h - extent.height) / 2
+        return CropRect(left: left / w, top: top / h,
+                        right: (left + extent.width) / w, bottom: (top + extent.height) / h)
+    }
+
+    private func isOutsideDocument(_ crop: CropRect, degrees: Double,
+                                   tolerance: Double = 1e-12) -> Bool {
+        let legal = legalRect(degrees: degrees)
+        return crop.left < legal.left - tolerance || crop.top < legal.top - tolerance
+            || crop.right > legal.right + tolerance || crop.bottom > legal.bottom + tolerance
     }
 
     /// 224 补充 §3 — drag the hand far outside (30 document widths) in 140 ticks and check **every**
@@ -317,7 +409,7 @@ final class CropClampDocument224TickTests: XCTestCase {
                                                            degrees: degrees),
                                     mapping: map, source: Self.source)
             let crop = controller.draft.crop
-            if isOutsideDocument(crop) {
+            if isOutsideDocument(crop, degrees: degrees) {
                 outsideTicks += 1
                 if firstOutside.isEmpty { firstOutside = "tick \(i): \(crop.keyString)" }
             }
@@ -359,7 +451,7 @@ final class CropClampDocument224TickTests: XCTestCase {
         for _ in 0..<24 {
             controller.continueDrag(atViewPoint: far, mapping: map, source: Self.source)
             let now = controller.draft.crop
-            if isOutsideDocument(now) { XCTFail("224 补充 §5: a pinned tick left the document") }
+            if isOutsideDocument(now, degrees: degrees) { XCTFail("224 补充 §5: a pinned tick left the document") }
             if now != pinned { rectChanged = true }
             let corners = controller.layout(mapping: map, source: Self.source, pointScale: 1).corners
             for (a, b) in zip(pinnedCorners, corners) {
@@ -375,7 +467,9 @@ final class CropClampDocument224TickTests: XCTestCase {
     }
 
     /// 224 补充 §1 — the other write paths (ratio presets, custom ratio, 拉直, zoom/pan) also leave
-    /// `draft.crop` inside `[0,1]²` immediately, with no follow-up clamp needed to observe it.
+    /// `draft.crop` inside the **document canvas** immediately, with no follow-up clamp needed to
+    /// observe it. Each write is checked against the canvas of the angle the draft then holds
+    /// (2026-11-02: `0…1` upright, the turned AABB after 拉直), never against a hard-coded `[0,1]²`.
     func testRatioStraightenAndCameraWritesStayInsideTheDocument() throws {
         let controller = try makeController()
         controller.draft = CropToolController.Draft(
@@ -386,21 +480,25 @@ final class CropClampDocument224TickTests: XCTestCase {
         for preset in [CropAspectPreset.square, .fourThree, .threeTwo, .sixteenNine, .free] {
             controller.setAspect(preset, source: Self.source)
             writes += 1
-            XCTAssertFalse(isOutsideDocument(controller.draft.crop), "setAspect(\(preset)) left [0,1]²")
+            XCTAssertFalse(isOutsideDocument(controller.draft.crop, degrees: controller.draft.straighten),
+                           "setAspect(\(preset)) left the document canvas")
         }
         controller.setCustomRatio(0.77, source: Self.source)
         writes += 1
-        XCTAssertFalse(isOutsideDocument(controller.draft.crop), "setCustomRatio left [0,1]²")
+        XCTAssertFalse(isOutsideDocument(controller.draft.crop, degrees: controller.draft.straighten),
+                       "setCustomRatio left the document canvas")
 
         controller.setStraighten(45)
         writes += 1
-        XCTAssertFalse(isOutsideDocument(controller.draft.crop), "拉直 left [0,1]²")
+        XCTAssertFalse(isOutsideDocument(controller.draft.crop, degrees: controller.draft.straighten),
+                       "拉直 left the document canvas")
 
         for state in [LoupeViewState.fit,
                       LoupeViewState(mode: .actual, zoom: 4, centerX: 900, centerY: 700)] {
             _ = controller.clampToView(mapping: mapping(state, degrees: 45), source: Self.source)
             writes += 1
-            XCTAssertFalse(isOutsideDocument(controller.draft.crop), "camera write left [0,1]²")
+            XCTAssertFalse(isOutsideDocument(controller.draft.crop, degrees: controller.draft.straighten),
+                           "camera write left the document canvas")
         }
         print("224 补充 §1 · 比例/拉直/相机写入 \(writes) 次 · 越界次数 = 0")
         XCTAssertGreaterThan(writes, 0)

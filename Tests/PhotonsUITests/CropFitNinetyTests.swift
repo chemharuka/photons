@@ -9,12 +9,18 @@ import PhotonsCore
 ///
 ///  1. `LoupeFraming.fitZoom` is the viewport fit × one `fitMargin` (0.90), and
 ///     `CropWorkspaceLayout.entry` is **the same number** at entry (not 0.9 × 0.9 = 0.81);
-///  2. the clamp's canvas is the **picture at the current camera** (`LoupeMapping.canvasRect`) — a
-///     horizontal rectangle that never turns — so the frame's projected corners stay inside it at
-///     every fit/100/200/400 % × angle × frame-size combination. At 100 % and above the canvas is
-///     larger than the viewport, so the frame is allowed to leave the screen;
+///  2. the clamp's canvas is the **document canvas** — the smallest axis-aligned box holding every pixel
+///     of the whole photograph after the turn (2026-11-02, 「旋转之后裁剪框能移动的范围应该是画布，不是
+///     原始图片」; it is `[0,1]²` at 0°/180° and wider than the photograph in between) — so the frame's
+///     projected corners stay inside the *drawn* canvas at every fit/100/200/400 % × angle × frame-size
+///     combination. The box does not know about the viewport: at 100 % and above the frame is allowed to
+///     leave the screen;
 ///  3. with `clampsFrameToView` off the same combination is red, so the matrix is not passing for a
 ///     reason of its own.
+///
+/// `legalRect(degrees:)` re-derives that box from the AABB formula, and `canvasBox(_:mapping:)` pushes it
+/// through the same `CropTool.layout` projection the frame is drawn with; the containment checks compare
+/// those two, so nothing here is measured against `mapping.canvasRect` (219's picture-at-the-camera).
 @MainActor
 final class CropFitNinetyTests: XCTestCase {
 
@@ -111,9 +117,48 @@ final class CropFitNinetyTests: XCTestCase {
                       height: (ys.max() ?? 0) - (ys.min() ?? 0))
     }
 
-    /// 219 — containment is measured against the **canvas**, not the viewport. The canvas is the
-    /// whole picture at this camera: at 100 %/200 %/400 % it is far larger than the 1400 × 1000
-    /// screen, which is exactly the point.
+    /// The legal area of a crop frame — the **document canvas**: the smallest axis-aligned box holding
+    /// every pixel of the whole photograph once it is turned, in normalized crop coordinates.
+    ///
+    /// Derived here from the AABB formula (`e = |w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, centred on the
+    /// photograph) instead of `CropGeometry.documentCanvasCropRect`, so the test owns its own bound.
+    /// `[0,1]²` at 0°/180°; 5° on 6000 × 4500 is `-0.030781…1.030781 × -0.056201…1.056201`; 45° is
+    /// `-0.118718…1.118718 × -0.324958…1.324958`.
+    private func legalRect(degrees: Double) -> CropRect {
+        let w = Double(max(Self.source.width, 1)), h = Double(max(Self.source.height, 1))
+        let quarter = degrees / 90
+        let extent: (width: Double, height: Double)
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            extent = Int(quarter.rounded()) % 2 != 0 ? (h, w) : (w, h)
+        } else {
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            extent = (w * c + h * s, w * s + h * c)
+        }
+        let left = (w - extent.width) / 2, top = (h - extent.height) / 2
+        return CropRect(left: left / w, top: top / h,
+                        right: (left + extent.width) / w, bottom: (top + extent.height) / h)
+    }
+
+    /// The canvas **as drawn**: the legal rect through the very projection the frame goes through
+    /// (`CropTool.layout` with the draft's rotation), so the containment comparison is one space.
+    ///
+    /// 2026-11-02 — this replaced `mapping.canvasRect(rotatedBy:)` as the judgement source: that one is
+    /// 219's picture-at-the-camera, and it cannot be the bound of a clamp whose law is the document.
+    private func canvasBox(_ mapping: LoupeMapping, degrees: Double) -> CGRect {
+        let legal = legalRect(degrees: degrees)
+        let corners = CropTool.layout(crop: legal, source: Self.source, mapping: mapping,
+                                      pointScale: 1, showsGrid: false,
+                                      quadRotationDegrees: degrees).corners
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                      width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                      height: (ys.max() ?? 0) - (ys.min() ?? 0))
+    }
+
+    /// 2026-11-02 — containment is measured against the **drawn document canvas** (the legal rect), not
+    /// the viewport and no longer 219's picture-at-the-camera. At 100 %/200 %/400 % the box is far larger
+    /// than the 1400 × 1000 screen, which is exactly the point.
     private func inside(_ box: CGRect, canvas: CGRect, tolerance: Double = 0.5) -> Bool {
         box.minX >= canvas.minX - tolerance && box.minY >= canvas.minY - tolerance
             && box.maxX <= canvas.maxX + tolerance && box.maxY <= canvas.maxY + tolerance
@@ -134,7 +179,7 @@ final class CropFitNinetyTests: XCTestCase {
                 for (name, crop) in Self.crops {
                     controller.draft.crop = crop
                     _ = controller.clampToView(mapping: mapping, source: Self.source)
-                    let canvas = mapping.canvasRect(rotatedBy: degrees)
+                    let canvas = canvasBox(mapping, degrees: degrees)
                     let box = screenBox(controller, mapping: mapping)
                     if !inside(box, canvas: canvas) {
                         failures.append("\(state.name) · \(degrees)° · \(name) → \(box) "
@@ -155,6 +200,10 @@ final class CropFitNinetyTests: XCTestCase {
     /// the right first. That translation is the only way a cell can be out of the canvas now: a crop
     /// rect is a part of the source, so once the canvas turns with the draft angle every untranslated
     /// cell is inside it *by construction* — the red has to be a frame the user moved out.
+    ///
+    /// 2026-11-02 — the canvas is the **drawn legal rect** (`canvasBox`), not 219's
+    /// `mapping.canvasRect`. The claim is unchanged: with the clamp on, all 48 translated cells come
+    /// back inside the document canvas; with it off, all 48 are out.
     func testWithoutTheClampTheSameMatrixLeavesTheCanvas() throws {
         let controller = try makeController()
         var unclampedOutside = 0
@@ -169,7 +218,7 @@ final class CropFitNinetyTests: XCTestCase {
                                            sourceHeight: Double(Self.source.height),
                                            crop: .full,
                                            straightenDegrees: 0).mapping(of: state.state)
-                let canvas = mapping.canvasRect(rotatedBy: degrees)
+                let canvas = canvasBox(mapping, degrees: degrees)
                 for (_, crop) in Self.crops {
                     // Untranslated: a rect of the source is a subset of the canvas that turns with
                     // it, so 219 records 0/48 here — the red has to be a moved frame.
