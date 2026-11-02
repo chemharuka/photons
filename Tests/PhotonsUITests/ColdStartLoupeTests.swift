@@ -154,13 +154,39 @@ final class ColdStartLoupeTests: XCTestCase {
         let matteMs = (CACurrentMediaTime() - started) * 1000
         let generationMs = loupe.firstFramePlaceholderMilliseconds
 
+        // 251 round 2 (A) — the stand-in and the real frame must occupy **the same** 0.90 content
+        // rectangle. Read the stand-in's rect while it is on screen (canvas points), then convert it
+        // to device pixels exactly as `PhotoSwitchFlashTests` does.
+        let scale = max(1, loupe.backingScale)
+        let placeholderRect = loupe.placeholderRectForTesting
+        let placeholderPixels = ImageSize(
+            width: max(1, Int((placeholderRect.width * scale).rounded())),
+            height: max(1, Int((placeholderRect.height * scale).rounded())))
+        let canvasPoints = loupe.canvasView.bounds.size
+
         guard waitFor(90, { loupe.lastFrame != nil }) else {
             return XCTFail("no first frame (last error: \(loupe.lastPresentError ?? "—"))")
         }
+        let frame = try XCTUnwrap(loupe.lastFrame)
         XCTAssertEqual(loupe.firstFrameContent, .displayThumbnail,
                        "the first real frame did not replace the generated stand-in")
         XCTAssertFalse(loupe.firstFramePlaceholderVisible, "the stand-in outlived the real frame")
         XCTAssertFalse(loupe.isCanvasCoveredForTesting, "the matte cover outlived the real frame")
+
+        // Exact equality first: both rects come from the same `LoupeFraming.contentPixels`, and the
+        // stand-in's points × backingScale recovers those pixels without a second rounding rule.
+        XCTAssertEqual(placeholderPixels.width, frame.content.width,
+                       "stand-in \(placeholderPixels.width) px vs real content \(frame.content.width) px"
+                       + " (rect \(placeholderRect), scale \(scale))")
+        XCTAssertEqual(placeholderPixels.height, frame.content.height,
+                       "stand-in \(placeholderPixels.height) px vs real content \(frame.content.height) px"
+                       + " (rect \(placeholderRect), scale \(scale))")
+        XCTAssertLessThanOrEqual(abs(placeholderRect.midX - canvasPoints.width / 2), 1,
+                                 "the stand-in is not centred: midX \(placeholderRect.midX)"
+                                 + " vs canvas midX \(canvasPoints.width / 2)")
+        XCTAssertLessThanOrEqual(abs(placeholderRect.midY - canvasPoints.height / 2), 1,
+                                 "the stand-in is not centred: midY \(placeholderRect.midY)"
+                                 + " vs canvas midY \(canvasPoints.height / 2)")
 
         // 251's budget: the empty-cache wait is allowed to exist, but it is a measured, bounded
         // state — not "whatever it takes". 250 ms leaves the measured 120–190 ms generation path
@@ -170,8 +196,64 @@ final class ColdStartLoupeTests: XCTestCase {
         XCTAssertLessThanOrEqual(generationMs, 250,
                                  "stand-in generation \(generationMs) ms exceeds the 250 ms budget")
         print(String(format: "251 empty cache: matte %.1f ms · stand-in generation %.1f ms"
-                     + " · first real frame %.1f ms · first content %@",
+                     + " · first real frame %.1f ms · first content %@"
+                     + " · placeholder %dx%d px · real content %dx%d px"
+                     + " · rect origin %.2f,%.2f · rect size %.2f×%.2f pt",
                      matteMs, generationMs,
+                     loupe.lastPhotoSwitchFirstFrameMilliseconds,
+                     loupe.firstFrameContent.rawValue,
+                     placeholderPixels.width, placeholderPixels.height,
+                     frame.content.width, frame.content.height,
+                     placeholderRect.origin.x, placeholderRect.origin.y,
+                     placeholderRect.width, placeholderRect.height))
+    }
+
+    /// 251 round 2 (B) — the empty-cache path's own reverse gate.
+    ///
+    /// 235's reverse gate disables the arm on a **seeded** library; here the cache is genuinely empty,
+    /// so this pins the mechanism on the path that actually has to generate a stand-in. With the arm
+    /// off the canvas must stay on the matte (never stale pixels, never a stand-in), and the first real
+    /// frame must record `blank` — if the arm were wired in somewhere other than `armFirstFramePlaceholder`,
+    /// the positive test could still pass while this one stays red.
+    func testEmptyCacheWithoutTheStandInStaysOnTheMatte() throws {
+        let raw = try fixture("L1030433.dng")
+        let (editor, assets) = try makeEmptyCacheEditor(files: [raw])
+        let loupe = editor.rootView.loupeController
+        loupe.armsColdStartPlaceholder = false
+
+        editor.session.selectOnly(assets[0].id)
+        let started = CACurrentMediaTime()
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+
+        // The matte is synchronous and is the only thing on the canvas: not the previous photo, not
+        // a stand-in.
+        XCTAssertTrue(loupe.isCanvasCoveredForTesting,
+                      "without the arm the empty-cache window was not the matte")
+        XCTAssertNil(loupe.lastFrame, "the empty-cache window already had a real frame")
+
+        // The preview request is asynchronous, so sample the whole first second instead of trusting
+        // one instant: a stand-in installed 50 ms later would still be a failure.
+        let deadline = started + 1.0
+        var placeholderSeen = false
+        while CACurrentMediaTime() < deadline {
+            if loupe.firstFramePlaceholderVisible { placeholderSeen = true; break }
+            pump()
+        }
+        let matteWindowMs = (CACurrentMediaTime() - started) * 1000
+        XCTAssertFalse(placeholderSeen,
+                       "the stand-in appeared although `armsColdStartPlaceholder` was off")
+
+        guard waitFor(90, { loupe.lastFrame != nil }) else {
+            return XCTFail("no first frame (last error: \(loupe.lastPresentError ?? "—"))")
+        }
+        XCTAssertEqual(loupe.firstFrameContent, .blank,
+                       "without the arm the empty-cache first frame had nothing to stand in")
+        XCTAssertFalse(loupe.firstFramePlaceholderVisible, "the stand-in outlived the real frame")
+        XCTAssertFalse(loupe.isCanvasCoveredForTesting, "the matte cover outlived the real frame")
+        print(String(format: "251 reverse (empty cache): matte window %.1f ms"
+                     + " · first real frame %.1f ms · first content %@",
+                     matteWindowMs,
                      loupe.lastPhotoSwitchFirstFrameMilliseconds,
                      loupe.firstFrameContent.rawValue))
     }
