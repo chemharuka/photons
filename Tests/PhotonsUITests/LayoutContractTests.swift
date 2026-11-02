@@ -55,14 +55,17 @@ final class LayoutContractTests: XCTestCase {
         }
     }
 
-    func testFilmstripTakes83PointsAndSpansCanvasWidth() throws {
+    func testFilmstripTakes86PointsAndSpansCanvasWidth() throws {
         let list = WorkspaceLayout.resolve(window: CGSize(width: 1600, height: 900), mode: .list)
         XCTAssertNil(list.filmstrip)
 
         let strip = WorkspaceLayout.resolve(window: CGSize(width: 1600, height: 900), mode: .filmstrip)
         let filmstrip = try XCTUnwrap(strip.filmstrip)
-        XCTAssertEqual(filmstrip.height, 83, accuracy: 0.001, "8 inset + 69 cell + 6 inset = one row")
         XCTAssertEqual(filmstrip.height, WorkspaceLayout.filmstripHeight, accuracy: 0.001)
+        XCTAssertEqual(filmstrip.height,
+                       WorkspaceLayout.filmstripInsetTop + WorkspaceLayout.filmstripCell.height
+                           + WorkspaceLayout.filmstripInsetBottom,
+                       accuracy: 0.001, "8 inset + 72 cell + 6 inset = one row")
         XCTAssertGreaterThanOrEqual(strip.canvas.height, 420, "canvas lost its safe height to the strip")
         // The strip stops at the inspector; the inspector runs full height beside it.
         XCTAssertLessThanOrEqual(strip.filmstrip?.maxX ?? 0, strip.inspector.minX + 0.001)
@@ -76,21 +79,27 @@ final class LayoutContractTests: XCTestCase {
     /// old 122 pt strip (8 + 50 + 8 + 50 + 6 = 122) was exactly two 50 pt cells and one gap, which
     /// is why it rendered two rows while `scrollDirection` was already `.horizontal`.
     func testFilmstripCellIsHalfAgainAsTallAndOneFitsPerColumn() {
-        XCTAssertEqual(WorkspaceLayout.filmstripCell.width, 111, accuracy: 0.001, "74 × 1.5")
-        XCTAssertEqual(WorkspaceLayout.filmstripCell.height, 69, accuracy: 0.001, "57 image + 12 caption")
-        XCTAssertEqual(WorkspaceLayout.filmstripCell.height - WorkspaceLayout.filmstripCaptionHeight,
-                       57, accuracy: 0.001, "old image area 50 − 12 = 38, × 1.5")
+        let cell = WorkspaceLayout.filmstripCell(forContainerHeight: 86)
+        XCTAssertEqual(cell.width, 90, accuracy: 0.001, "60 image × 1.5 (3:2)")
+        XCTAssertEqual(cell.height, 72, accuracy: 0.001, "60 image + 12 caption")
+        XCTAssertEqual(cell.height - WorkspaceLayout.filmstripCaptionHeight,
+                       60, accuracy: 0.001)
+        XCTAssertEqual(cell.width / (cell.height - WorkspaceLayout.filmstripCaptionHeight),
+                       WorkspaceLayout.filmstripAspect, accuracy: 0.001, "the image area is 3:2")
         XCTAssertEqual(WorkspaceLayout.filmstripCaptionHeight, 12, accuracy: 0.001)
+        XCTAssertEqual(WorkspaceLayout.filmstripCell.width, cell.width, accuracy: 0.001)
+        XCTAssertEqual(WorkspaceLayout.filmstripCell.height, cell.height, accuracy: 0.001)
 
         let column = WorkspaceLayout.filmstripHeight
             - WorkspaceLayout.filmstripInsetTop - WorkspaceLayout.filmstripInsetBottom
         XCTAssertEqual(column, WorkspaceLayout.filmstripCell.height, accuracy: 0.001,
-                       "83 − 8 − 6 = 69: the column holds the cell exactly")
+                       "86 − 8 − 6 = 72: the column holds the cell exactly")
         XCTAssertGreaterThan(2 * WorkspaceLayout.filmstripCell.height + WorkspaceLayout.filmstripSpacing,
                              column, "a second cell must not fit — that is what made two rows at 122")
 
-        XCTAssertEqual(WorkspaceLayout.filmstripItemsPerColumn(containerHeight: 83), 1)
-        XCTAssertEqual(WorkspaceLayout.filmstripItemHeight(for: 83), 69, accuracy: 0.001)
+        XCTAssertEqual(WorkspaceLayout.filmstripItemsPerColumn(containerHeight: WorkspaceLayout.filmstripHeight), 1)
+        XCTAssertEqual(WorkspaceLayout.filmstripItemHeight(for: WorkspaceLayout.filmstripHeight), 72,
+                       accuracy: 0.001)
         // The old geometry, reproduced: a 50 pt cell in the 108 pt column of the 122 pt strip → 2 rows.
         XCTAssertEqual(WorkspaceLayout.filmstripItemsPerColumn(containerHeight: 122,
                                                                cellHeight: 50), 2)
@@ -98,6 +107,58 @@ final class LayoutContractTests: XCTestCase {
         XCTAssertEqual(WorkspaceLayout.filmstripItemHeight(for: 200), 186, accuracy: 0.001)
         XCTAssertEqual(WorkspaceLayout.filmstripItemsPerColumn(containerHeight: 200), 1)
     }
+
+    /// **The 3:2 guard**: whatever the strip height, the image area's width / height stays 1.5 —
+    /// and the current default (86 pt strip) is the user's 90 × 60 pt image area, derived not pinned.
+    func testFilmstripCellsKeepThreeToTwoAtAnyStripHeight() {
+        for stripHeight: CGFloat in [83, 86, 100, 120] {
+            let cell = WorkspaceLayout.filmstripCell(forContainerHeight: stripHeight)
+            let imageHeight = cell.height - WorkspaceLayout.filmstripCaptionHeight
+            XCTAssertEqual(cell.width / imageHeight, 1.5, accuracy: 0.001,
+                           "3:2 must hold at strip height \(stripHeight)")
+            XCTAssertEqual(WorkspaceLayout.filmstripItemHeight(for: stripHeight), cell.height,
+                           accuracy: 0.001)
+        }
+
+        // Current default readout (90 × 60), not a constant of the layout.
+        let cell = WorkspaceLayout.filmstripCell
+        XCTAssertEqual(cell.height, 72, accuracy: 0.001)
+        XCTAssertEqual(cell.width, 90, accuracy: 0.001)
+        XCTAssertEqual(cell.height - WorkspaceLayout.filmstripCaptionHeight, 60, accuracy: 0.001)
+        XCTAssertEqual(WorkspaceLayout.filmstripHeight,
+                       WorkspaceLayout.filmstripInsetTop + cell.height
+                           + WorkspaceLayout.filmstripInsetBottom,
+                       accuracy: 0.001)
+
+        // Adaptability: taller strip ⇒ wider cell, same ratio.
+        XCTAssertEqual(WorkspaceLayout.filmstripCell(forContainerHeight: 100).width, 111,
+                       accuracy: 0.001)
+
+        // 1440 pt window: 11 columns at the old 111 pt cell, 14 at the 90 pt one.
+        func columns(_ width: CGFloat) -> Int {
+            Int(((1440 - 2 * WorkspaceLayout.filmstripInsetH + WorkspaceLayout.filmstripSpacing)
+                 / (width + WorkspaceLayout.filmstripSpacing)).rounded(.down))
+        }
+        XCTAssertEqual(columns(111), 11)
+        XCTAssertEqual(columns(cell.width), 14)
+    }
+
+    /// A 3:2 thumbnail (1920 × 1280) in the 90 × 60 image area is drawn **uncropped**:
+    /// aspect-fill's `max` and aspect-fit's `min` are equal, so the drawn rect is the whole cell.
+    /// The formula is the one `drawThumbnail(_:in:)` uses.
+    func testFilmstripThreeToTwoThumbnailIsDrawnWithoutCropping() {
+        let cell = WorkspaceLayout.filmstripCell
+        let imageHeight = cell.height - WorkspaceLayout.filmstripCaptionHeight
+        let image = CGSize(width: 1920, height: 1280)
+        let fill = max(cell.width / image.width, imageHeight / image.height)
+        let fit = min(cell.width / image.width, imageHeight / image.height)
+        XCTAssertEqual(fill, fit, accuracy: 0.000001, "no crop when the image matches the 3:2 area")
+        XCTAssertEqual(fill, 90.0 / 1920.0, accuracy: 0.000001)
+        let drawn = CGSize(width: image.width * fill, height: image.height * fill)
+        XCTAssertEqual(drawn.width, cell.width, accuracy: 0.001)
+        XCTAssertEqual(drawn.height, imageHeight, accuracy: 0.001)
+    }
+
 
     /// Single-row evidence from the layout engine itself: 40 items through a real
     /// `NSCollectionViewFlowLayout` configured exactly as `FilmstripController` configures it.

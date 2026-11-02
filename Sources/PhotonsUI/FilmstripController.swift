@@ -9,7 +9,7 @@ import PhotonsCore
 /// It shares `CatalogSession.selection` with the grid — no second selection set, no second model —
 /// and it shares the *thumbnail* pipeline too: one `ThumbnailProvider` (hence one
 /// `ThumbnailService` and one memory LRU) for both views, obtained through
-/// `ThumbnailProvider.shared(for:)`. A 111 × 69 pt cell asks for the tier its DPR implies (§1), i.e.
+/// `ThumbnailProvider.shared(for:)`. A 90 × 72 pt cell (90 × 60 image area, 3:2) asks for the tier its DPR implies (§1), i.e.
 /// `t256` at 1x and 2x, and the selected cell always goes out at `.onScreen` priority.
 ///
 /// 223/227 — the image itself is a `CAMetalLayer` (`ThumbnailEDRView`) showing the float
@@ -300,17 +300,17 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     /// 122 pt container gave 122 − 8 − 6 = 108 pt of column, which held 50 + 8 + 50 = two cells and one
     /// gap.
     ///
-    /// So the item height is derived from the live container instead of being a free-standing constant:
-    /// at the 83 pt strip this is `83 − 8 − 6 = 69` (identical to `WorkspaceLayout.filmstripCell`), and
-    /// if the strip is ever made taller the cell grows rather than the column wrapping. One item per
-    /// column, by construction — not by intent.
+    /// So the item size is derived from the live container instead of being a free-standing constant:
+    /// the height comes from the container and the width from the image's 3:2 aspect
+    /// (`WorkspaceLayout.filmstripCell(forContainerHeight:)`), and if the strip is ever made taller
+    /// the cell grows in both dimensions rather than the column wrapping. One item per column, by
+    /// construction — not by intent.
     private func fitItemHeightToContainer() {
         let container = view.bounds.height
         let insets = WorkspaceLayout.filmstripInsetTop + WorkspaceLayout.filmstripInsetBottom
         // Before the first real layout (`bounds == .zero`) keep the contract size.
         guard container > insets + 1 else { return }
-        let wanted = CGSize(width: WorkspaceLayout.filmstripCell.width,
-                            height: WorkspaceLayout.filmstripItemHeight(for: container))
+        let wanted = WorkspaceLayout.filmstripCell(forContainerHeight: container)
         guard abs(flow.itemSize.height - wanted.height) > 0.01
                 || abs(flow.itemSize.width - wanted.width) > 0.01 else { return }
         flow.itemSize = wanted
@@ -406,7 +406,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     /// 223 — the swatch is the cell minus its 12 pt filename caption; this is the real pixel size
-    /// the cache decodes to (111 × 57 pt → 222 × 114 px at 2×).
+    /// the cache decodes to (90 × 60 pt → 180 × 120 px at 2×).
     private var displayPixels: ImageSize {
         ThumbnailProvider.displayPixels(
             swatch: CGSize(width: flow.itemSize.width,
@@ -457,7 +457,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         return made
     }
 
-    /// The tier a 111 × 69 pt cell should ask for: cell edge × DPR, clamped to what the source can
+    /// The tier a 90 × 72 pt cell should ask for: cell edge × DPR, clamped to what the source can
     /// fill (`ThumbnailProvider.tier`), then to the pipeline ceiling (`effectiveTier`, §6.1).
     private func tier(for asset: Asset) -> ThumbTier {
         let edge = max(flow.itemSize.width, flow.itemSize.height)
