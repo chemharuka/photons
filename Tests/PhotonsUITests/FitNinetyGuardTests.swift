@@ -121,8 +121,8 @@ final class FitNinetyGuardTests: XCTestCase {
                      frame.canvas.keyString, occupancy))
 
         // The constraining axis is the whole story: the other one is letterboxed by the aspect.
-        XCTAssertEqual(occupancy, 0.90, accuracy: 0.005,
-                       "ordinary 适应 must draw the picture at 90 % of the viewport, not 100 %")
+        XCTAssertTrue(ninetyPercentGate(occupancy),
+                      "ordinary 适应 must draw the picture at 90 % of the viewport, not 100 %")
 
         // Drawn-side camera: the render's own `zoom` is the viewport fit × 0.90.
         let viewportFit = min(Double(frame.canvas.width) / Double(frame.window.width),
@@ -213,7 +213,68 @@ final class FitNinetyGuardTests: XCTestCase {
         XCTAssertLessThan(frame.zoom, ordinary, "45° must re-fit (the AABB no longer fits at 90 %)")
     }
 
+    /// ④ 245 reverse gate on the **drawn** side: with `fitMarginOverride = 1.0` the picture must be
+    /// drawn at 100 % of the viewport, so the same occupancy gate that passes at 0.90 goes red. This
+    /// is the side 234 could only prove by hand-reverting the production line: the camera and the
+    /// drawn rectangle both read the override, so they stay consistent with each other and still both
+    /// miss 0.90.
+    func testDrawnOccupancyGateGoesRedWhenTheFitMarginIsOverriddenToOne() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.close() }
+        let loupe = editor.rootView.loupeController
+        let session = editor.session
+
+        loupe.zoomToFit()
+        CropUITestSupport.pump(0.05)
+        let fitZoomAtNinety = try XCTUnwrap(loupe.framing()).fitZoom
+
+        // Default (nil): the production margin, and the gate holds.
+        let defaultState = loupe.viewState
+        let defaultFrame = try renderedFrame(loupe, session: session, state: defaultState)
+        let defaultOccupancy = occupancy(of: defaultFrame)
+        print(String(format: "245 reverse gate · default · fitZoom %.6f · drawn %.6f · occupancy %.4f",
+                     fitZoomAtNinety, defaultFrame.zoom, defaultOccupancy))
+        XCTAssertTrue(ninetyPercentGate(defaultOccupancy),
+                      "the gate must hold at the production margin (nil ⇒ 0.90)")
+
+        // Override = 1.0: the same code path, drawn at the un-margined viewport fit.
+        loupe.fitMarginOverride = 1.0
+        defer { loupe.fitMarginOverride = nil }
+        let state = loupe.viewState
+        let frame = try renderedFrame(loupe, session: session, state: state)
+        let drawnOccupancy = occupancy(of: frame)
+        let gateMessage = String(format:
+            "XCTAssertEqual failed: occupancy %.4f is not equal to 0.90 ± 0.005", drawnOccupancy)
+        print(String(format: "245 reverse gate · override 1.0 · fitZoom %.6f · drawn %.6f "
+                     + "· occupancy %.4f", loupe.effectiveZoom, frame.zoom, drawnOccupancy))
+        print("245 reverse gate · the 90 % assertion would fail: \(gateMessage)")
+
+        XCTAssertFalse(ninetyPercentGate(drawnOccupancy),
+                       "override 1.0 must turn the drawn 90 % assertion red — otherwise the gate "
+                       + "does not guard the drawing")
+        XCTAssertEqual(drawnOccupancy, 1.0, accuracy: 0.005,
+                       "override 1.0 means the un-margined viewport fit, i.e. 100 % occupancy")
+        XCTAssertGreaterThan(abs(frame.zoom - fitZoomAtNinety), 0.005,
+                             "override 1.0 must also move the drawn zoom off the 0.90 value")
+
+        // §1.3: camera and drawing remain one number even when that number is not 0.90.
+        let relative = abs(loupe.effectiveZoom - frame.zoom) / max(frame.zoom, 1e-9)
+        XCTAssertLessThanOrEqual(relative, 0.005,
+                                 "override must move camera and drawing together, not apart")
+    }
+
     // MARK: - harness
+
+    /// The drawn 90 % criterion, extracted so the production-margin case and the override case run
+    /// the **same** predicate: `true` at occupancy 0.90 ± 0.005, `false` at 1.00.
+    private func ninetyPercentGate(_ occupancy: Double) -> Bool {
+        abs(occupancy - 0.90) <= 0.005
+    }
+
+    private func occupancy(of frame: LoupeController.FrameResult) -> Double {
+        max(Double(frame.photoRect.width) / Double(frame.canvas.width),
+            Double(frame.photoRect.height) / Double(frame.canvas.height))
+    }
 
     private func renderedFrame(_ loupe: LoupeController, session: CatalogSession,
                                state: LoupeViewState,
