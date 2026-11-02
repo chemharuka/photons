@@ -3356,6 +3356,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         cropReturnMonitor = nil
     }
 
+    /// Whether the window-level `↵` monitor is installed — the acceptance reads it to prove the
+    /// monitor's lifetime is the frame's.
+    var hasCropReturnMonitorForTesting: Bool { cropReturnMonitor != nil }
+
     /// `↵` applies the draft when the crop frame is up in this view's window. Internal for the test
     /// that pins the key binding without synthesising a whole event loop.
     func handleCropReturn(_ event: NSEvent) -> Bool {
@@ -3363,10 +3367,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard event.window == nil || event.window === canvasView.window else { return false }
         let key = event.charactersIgnoringModifiers ?? ""
         guard key == "\r" || key == "\u{3}" else { return false }
+        // A bare `↵`, or the keypad's Enter (which AppKit also tags `.numericPad` — and, on some
+        // keyboards, `.function`). Anything the user *held* — ⌘, ⌥, ⇧, ⌃ — is not this binding.
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags.isEmpty || flags == .numericPad else { return false }
+            .subtracting([.numericPad, .function])
+        guard flags.isEmpty else { return false }
         if canvasView.window?.firstResponder is NSTextView { return false }
-        return applyCropTool()
+        // `true` = *consumed*, not "the document changed": an apply with nothing to write still closes
+        // the frame, and the event must not fall through to a control that would beep.
+        applyCropTool()
+        return true
     }
 
     /// Historical alias (132 §9): the crop workspace used to ask for `fit × 0.90` through this
@@ -3579,6 +3589,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // so the frame on screen keeps covering the pixels it covered before the press.
         let inSession = session.isToolSessionActive
         if inSession { session.endToolSession(label: "裁切与旋转") }
+        // The frame the camera is measured in, **before** the turn — the picture is about to swap its
+        // two dimensions, so a window centre in the old frame means something else in the new one.
+        //
+        // The unit matters: `viewState.centerX/Y` are **full-resolution turned-frame pixels**
+        // (`LoupeFraming.sourceWidth`, i.e. the decode divided by its scale), while `cropSourceSize`
+        // is the *decoded* grid — at the 0.5 rung it is half the numbers. The framing is the authority
+        // the camera itself is laid out with, so the swap reads its dimensions.
+        let framingBeforeTurn = framing()
+        let frameBeforeTurn = ImageSize(width: Int((framingBeforeTurn?.sourceWidth ?? 1).rounded()),
+                                        height: Int((framingBeforeTurn?.sourceHeight ?? 1).rounded()))
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
         guard turned else {
@@ -3593,6 +3613,27 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // one snapshot, with or without the frame up.
         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
                                            coalesce: false)
+        // **The picture turned, so the camera turns with it** (2026-11-02). The window centre is stored
+        // in the photograph's own (turned) pixels; a quarter turn renames those axes, so leaving the
+        // number alone points the window at another part of the photograph — the picture jumps to one
+        // side and, at a zoom where the canvas is smaller than the viewport, the rest of the canvas is
+        // the matte. 「旋转后照片被推到左边、右边纯黑，缩放一下才对」 was exactly this: `⌘0` recomputes
+        // the centre from the crop, so it looked like the zoom 「fixed」 the render.
+        //
+        // Clockwise: `(x, y) ↦ (H − y, x)`; counter-clockwise: `(x, y) ↦ (y, W − x)`, with `W × H` the
+        // frame the camera was measured in before the press. `.fit` derives its centre from the crop,
+        // so nothing is stored there to move.
+        if viewState.mode == .actual {
+            var next = viewState
+            if clockwise {
+                next.centerX = Double(frameBeforeTurn.height) - viewState.centerY
+                next.centerY = viewState.centerX
+            } else {
+                next.centerX = viewState.centerY
+                next.centerY = Double(frameBeforeTurn.width) - viewState.centerX
+            }
+            setViewState(next)
+        }
         if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()

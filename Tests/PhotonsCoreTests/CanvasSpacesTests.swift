@@ -147,6 +147,42 @@ final class CanvasSpacesTests: XCTestCase {
         XCTAssertEqual(cg.photoCanvas, source)
     }
 
+    /// 2026-11-02 — **a right angle covers exactly the photograph.** `rotatedExtent` answers the AABB
+    /// of a turned rect, which at 90° is `h × w`; the canvas a crop is measured against is the region
+    /// the turned photograph *covers*, and at a right angle that is the photograph's own rect. Without
+    /// this guard a 90° document is told its own full-frame crop is illegal (measured: 6000×4500 gave
+    /// `x ∈ [0.125, 0.875]`), which is the kind of contract bug a later caller would inherit.
+    func testARightAngleIsThePhotographAndNotTheSwappedBox() {
+        let source = ImageSize(width: 6000, height: 4500)
+        for degrees in [0.0, 90, 180, 270, -90, 360] {
+            XCTAssertEqual(CropGeometry.documentCanvasCropRect(in: source, degrees: degrees), .full,
+                           "θ=\(degrees): a right angle covers the photograph, so its legal area is the frame")
+        }
+        // The document stores whatever a sidecar says, and the **read** path clamps the straighten to
+        // ±45° (`GeometryGroup.straightenDegrees`), so a 90° document is not reachable in practice —
+        // the guard above is a contract statement for the static function, not a live branch. Pin that
+        // too, so the day the ±45° rule moves the guard is already the right answer.
+        var right = GeometryGroup.identity
+        right.rotationDegrees = 90
+        XCTAssertEqual(right.rotationDegrees, 90, "文档照抄 XMP")
+        XCTAssertEqual(right.straightenDegrees, 45, "读取时钳到 ±45°")
+        let clamped = CropGeometry(geometry: right, source: source)
+        XCTAssertEqual(clamped.rotationDegrees, 45)
+        XCTAssertEqual(clamped.photoCanvas,
+                       ImageSize(width: CropGeometry.canvasPixels(
+                                    CropGeometry.rotatedExtent(of: source, degrees: 45).width),
+                                 height: CropGeometry.canvasPixels(
+                                    CropGeometry.rotatedExtent(of: source, degrees: 45).height)))
+        let tilted = CropGeometry(geometry: geometry(.full, degrees: 45), source: source)
+        XCTAssertLessThan(tilted.documentCanvasCropRect.left, 0, "45° sweeps wider than the photograph")
+        XCTAssertLessThan(tilted.documentCanvasCropRect.top, 0)
+        XCTAssertEqual(tilted.photoCanvas,
+                       ImageSize(width: CropGeometry.canvasPixels(
+                                    CropGeometry.rotatedExtent(of: source, degrees: 45).width),
+                                 height: CropGeometry.canvasPixels(
+                                    CropGeometry.rotatedExtent(of: source, degrees: 45).height)))
+    }
+
     // MARK: the document canvas (space 4)
 
     func testDocumentCanvasGrowsWithTheAngleAndIgnoresTheCrop() {

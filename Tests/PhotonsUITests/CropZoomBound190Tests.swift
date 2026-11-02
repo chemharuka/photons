@@ -14,6 +14,12 @@ import PhotonsCore
 /// `CropTool.layout`'s four corners before the view's similarity, and the canvas is the turned
 /// source's AABB — the region the workspace calls 画布. Neither number knows about a viewport, a
 /// zoom or a window, so a limit computed from them cannot move when the framing does.
+///
+/// **2026-11-02 — the canvas the clamp uses is the document canvas** (「旋转之后裁剪框能移动的范围应该
+/// 是画布，不是原始图片」). `legalRect(degrees:)` below re-derives that box from the AABB formula (never
+/// from `CropGeometry`), and every screen-space containment check now compares the drawn frame with the
+/// **drawn legal rect** instead of 219's `mapping.canvasRect` (the picture at the current camera), which
+/// is a different object: the legal rect is the same box at every zoom, `canvasRect` is not.
 @MainActor
 final class CropZoomBound190Tests: XCTestCase {
 
@@ -53,14 +59,44 @@ final class CropZoomBound190Tests: XCTestCase {
 
     // MARK: - the document-space geometry (the test's own, not the implementation's)
 
-    /// The turned whole-source AABB in source pixels — the **canvas** in document space.
-    private static var canvasPixels: CGRect {
-        let e = LoupeFraming.rotatedExtent(width: Double(source.width), height: Double(source.height),
-                                           degrees: degrees)
-        return CGRect(x: (Double(source.width) - e.width) / 2,
-                      y: (Double(source.height) - e.height) / 2,
-                      width: e.width, height: e.height)
+    /// The legal area of a crop frame — the **document canvas**: the smallest axis-aligned box holding
+    /// every pixel of the whole photograph after the turn, in normalized crop coordinates.
+    ///
+    /// Written out from the AABB formula here (`e = |w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, centred on
+    /// the photograph) rather than read from `CropGeometry.documentCanvasCropRect` / `rotatedExtent`, so
+    /// the test derives the bound it measures against instead of proving the implementation with itself.
+    /// `0…1` at 0°/180°, an axis swap at 90°/270°, wider than the photograph in between
+    /// (5.4° on 6000 × 4500: `-0.033072…1.033072 × -0.060520…1.060520`).
+    private static func legalRect(degrees: Double, source: ImageSize) -> CropRect {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let quarter = degrees / 90
+        let extent: (width: Double, height: Double)
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            extent = Int(quarter.rounded()) % 2 != 0 ? (h, w) : (w, h)
+        } else {
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            extent = (w * c + h * s, w * s + h * c)
+        }
+        let left = (w - extent.width) / 2, top = (h - extent.height) / 2
+        return CropRect(left: left / w, top: top / h,
+                        right: (left + extent.width) / w, bottom: (top + extent.height) / h)
     }
+
+    private func legalRect(degrees: Double) -> CropRect {
+        Self.legalRect(degrees: degrees, source: Self.source)
+    }
+
+    /// The canvas in **document pixels**: the turned whole-source AABB, centred on the source's centre.
+    /// 2026-11-02 — this is also the clamp's legal area (`legalRect`), so the coverage readout, the
+    /// pull-back and the containment law all speak about one object.
+    private static func canvasPixels(at degrees: Double) -> CGRect {
+        let r = legalRect(degrees: degrees, source: source)
+        let w = Double(source.width), h = Double(source.height)
+        return CGRect(x: r.left * w, y: r.top * h, width: r.width * w, height: r.height * h)
+    }
+
+    private static var canvasPixels: CGRect { canvasPixels(at: degrees) }
 
     /// The frame's four corners in document pixels: the same quad `CropTool.layout` projects, with
     /// the view's similarity removed (`imagePoint`'s `R(−θ)` about the **source** centre).
@@ -100,6 +136,16 @@ final class CropZoomBound190Tests: XCTestCase {
         return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
                       width: (xs.max() ?? 0) - (xs.min() ?? 0),
                       height: (ys.max() ?? 0) - (ys.min() ?? 0))
+    }
+
+    /// The **drawn** canvas: the legal rect pushed through the very projection the frame is drawn with
+    /// (rotation included), so "the frame is inside the canvas" is compared in one space.
+    ///
+    /// 2026-11-02 — this replaced `mapping.canvasRect` as the containment source. That one is 219's
+    /// picture-at-the-camera and grows/shrinks with the framing; the legal rect is the document's, the
+    /// same box at every zoom, which is the whole point of 190.
+    private func canvasBox(mapping: LoupeMapping, degrees: Double) -> CGRect {
+        screenBox(legalRect(degrees: degrees), mapping: mapping, degrees: degrees)
     }
 
     /// Sutherland–Hodgman against the axis-aligned canvas, then the shoelace area.
@@ -168,8 +214,9 @@ final class CropZoomBound190Tests: XCTestCase {
         let centreInViewport: Bool
         let steps: Int
         let screen: CGRect
-        /// 219 — the canvas the frame was clamped to, in device pixels (the viewport at 适应; the
-        /// picture, possibly much larger than the screen, at 1:1 / 2×).
+        /// The legal area (`legalRect`) as it is drawn at this framing — the same projection the frame
+        /// goes through, so "inside the canvas" is one space. 2026-11-02: this used to be
+        /// `mapping.canvasRect(rotatedBy:)`, 219's picture-at-the-camera.
         let canvas: CGRect
     }
 
@@ -216,7 +263,7 @@ final class CropZoomBound190Tests: XCTestCase {
         return Limit(crop: crop, overlap: overlapFraction(crop),
                      centreInViewport: inViewport, steps: steps,
                      screen: screenBox(crop, mapping: mapping, degrees: Self.degrees),
-                     canvas: mapping.canvasRect(rotatedBy: Self.degrees))
+                     canvas: canvasBox(mapping: mapping, degrees: Self.degrees))
     }
 
     // MARK: - the claim
@@ -243,10 +290,10 @@ final class CropZoomBound190Tests: XCTestCase {
                          l.overlap, l.centreInViewport ? "yes" : "no"))
         }
 
-        // 213/§5 — the law is **screen-space**: the drawn frame's four corners stay inside the
-        // horizontal canvas (0.5 px of slack), at every framing. 219: at 1:1/2× the canvas is the
-        // picture, not the window, so the frame may leave the screen. The document-space overlap /
-        // AABB numbers above are printed as readouts only.
+        // 213/§5 — the law is **screen-space**: the drawn frame's four corners stay inside the drawn
+        // canvas (0.5 px of slack), at every framing. 2026-11-02: the canvas is the document's legal
+        // rect (`legalRect`, the turned photograph's AABB), not 219's picture-at-the-camera, and it is
+        // the same box at 适应 / 1:1 / 2× — which is exactly why the three limits must agree.
         for (framing, l) in measured {
             XCTAssertGreaterThanOrEqual(l.screen.minX, l.canvas.minX - 0.5,
                                         "\(framing.name): the frame leaves the canvas on the left")
@@ -259,9 +306,34 @@ final class CropZoomBound190Tests: XCTestCase {
             XCTAssertLessThanOrEqual(l.overlap, 1.0 + 1e-9)
         }
 
-        // The bound only ever *shrinks* a frame that is larger than the canvas. The 20 % fixture
-        // fits at 适应, so there it must be moved at its own size; at 1:1/2× the canvas is the whole
-        // picture, so a 20 % frame still fits and is moved, never shrunk (219).
+        // …and the model value, in document coordinates: the same law without any projection, and with
+        // the same tolerance, so a layout bug cannot hide a clamp bug.
+        let legal = legalRect(degrees: Self.degrees)
+        for (framing, l) in measured {
+            XCTAssertGreaterThanOrEqual(l.crop.left, legal.left - 1e-12, "\(framing.name): left")
+            XCTAssertGreaterThanOrEqual(l.crop.top, legal.top - 1e-12, "\(framing.name): top")
+            XCTAssertLessThanOrEqual(l.crop.right, legal.right + 1e-12, "\(framing.name): right")
+            XCTAssertLessThanOrEqual(l.crop.bottom, legal.bottom + 1e-12, "\(framing.name): bottom")
+        }
+
+        // The three limits are one number: the same document, the same angle, three framings. Compared
+        // with 1e-9 rather than bit-for-bit — the three drags take different tick sizes, so the slide
+        // that lands on the canvas' edge carries a different last-bit rounding in each.
+        for (framing, l) in measured.dropFirst() {
+            XCTAssertEqual(l.crop.left, measured[0].1.crop.left, accuracy: 1e-9,
+                           "\(framing.name): the extreme must be the document's, not the zoom's (left)")
+            XCTAssertEqual(l.crop.top, measured[0].1.crop.top, accuracy: 1e-9,
+                           "\(framing.name): … (top)")
+            XCTAssertEqual(l.crop.right, measured[0].1.crop.right, accuracy: 1e-9,
+                           "\(framing.name): … (right)")
+            XCTAssertEqual(l.crop.bottom, measured[0].1.crop.bottom, accuracy: 1e-9,
+                           "\(framing.name): … (bottom)")
+        }
+
+        // The bound only ever *shrinks* a frame that is larger than the canvas. The 20 % fixture fits
+        // the document canvas, so it must be moved at its own size at every framing — never shrunk.
+        // 2026-11-02: the canvas is one box (the turned photograph's AABB), not 219's picture-at-the-
+        // camera, so this clause now reads the same at 适应 / 1:1 / 2×.
         for (framing, l) in measured {
             let initial = screenBox(Self.frame, mapping: LoupeFraming(
                 viewport: framing.viewport,
@@ -280,9 +352,12 @@ final class CropZoomBound190Tests: XCTestCase {
     }
 
     /// One far drag (a single tick that jumps the frame far off the document) must land **on the
-    /// document canvas' edge**, not somewhere in between: the clamp is a pull-back to `[0,1]²`
-    /// (224), so the rect ends flush with an edge and keeps its size. The drawn frame may sit inside
-    /// the view's picture with a margin — that margin is not part of the law any more.
+    /// document canvas' edge**, not somewhere in between: the clamp is a pull-back to the canvas
+    /// (2026-11-02), so the rect ends flush with one of its edges and keeps its size. The drawn frame
+    /// may sit inside the view's picture with a margin — that margin is not part of the law any more.
+    ///
+    /// At 5.4° on 6000 × 4500 the canvas is `-0.033072…1.033072 × -0.060520…1.060520`; the numbers are
+    /// derived from `legalRect`, not hard-coded.
     func testASingleFarDragIsPinnedOnTheCanvasEdge() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
@@ -305,21 +380,34 @@ final class CropZoomBound190Tests: XCTestCase {
         let crop = controller.draft.crop
         let b = box(crop)
         let screen = screenBox(crop, mapping: mapping, degrees: Self.degrees)
+        let legal = legalRect(degrees: Self.degrees)
+        let canvasBox = canvasBox(mapping: mapping, degrees: Self.degrees)
         print(String(format: "190 · far drag · crop l %.6f t %.6f r %.6f b %.6f · overlap %.6f "
-                     + "· screen %.3f,%.3f–%.3f,%.3f · doc box %.3f,%.3f–%.3f,%.3f",
+                     + "· screen %.3f,%.3f–%.3f,%.3f · doc box %.3f,%.3f–%.3f,%.3f "
+                     + "· 合法区 l %.6f t %.6f r %.6f b %.6f",
                      crop.left, crop.top, crop.right, crop.bottom, overlapFraction(crop),
                      screen.minX, screen.minY, screen.maxX, screen.maxY,
-                     b.minX, b.minY, b.maxX, b.maxY))
-        // 224 — pinned on the **document's** edge: inside `[0,1]²` on all four sides and flush with
-        // one of them. The document box above may leave the rotated photo's AABB; that is allowed.
-        XCTAssertGreaterThanOrEqual(crop.left, 0 - 1e-9)
-        XCTAssertGreaterThanOrEqual(crop.top, 0 - 1e-9)
-        XCTAssertLessThanOrEqual(crop.right, 1 + 1e-9)
-        XCTAssertLessThanOrEqual(crop.bottom, 1 + 1e-9)
-        XCTAssertEqual(min(crop.left, crop.top, 1 - crop.right, 1 - crop.bottom),
-                       0, accuracy: 1e-9, "the far drag did not reach the document's edge")
+                     b.minX, b.minY, b.maxX, b.maxY,
+                     legal.left, legal.top, legal.right, legal.bottom))
+        // 2026-11-02 — pinned on the **canvas'** edge: inside the legal rect on all four sides and
+        // flush with one of them (the bottom-right corner of the document canvas at 5.4°). The frame
+        // may cover the black corners a straighten opens; that is legal, not a leak.
+        XCTAssertGreaterThanOrEqual(crop.left, legal.left - 1e-9)
+        XCTAssertGreaterThanOrEqual(crop.top, legal.top - 1e-9)
+        XCTAssertLessThanOrEqual(crop.right, legal.right + 1e-9)
+        XCTAssertLessThanOrEqual(crop.bottom, legal.bottom + 1e-9)
+        XCTAssertEqual(min(crop.left - legal.left, crop.top - legal.top,
+                           legal.right - crop.right, legal.bottom - crop.bottom),
+                       0, accuracy: 1e-9, "the far drag did not reach the canvas' edge")
+        XCTAssertEqual(crop.right, legal.right, accuracy: 1e-9, "the far drag went down-right: right edge")
+        XCTAssertEqual(crop.bottom, legal.bottom, accuracy: 1e-9, "…and the bottom edge")
         XCTAssertEqual(crop.width, Self.frame.width, accuracy: 1e-9, "never shrunk")
         XCTAssertEqual(crop.height, Self.frame.height, accuracy: 1e-9)
+        // The drawn form of the same statement: the frame's quad inside the canvas' quad.
+        XCTAssertGreaterThanOrEqual(screen.minX, canvasBox.minX - 0.5)
+        XCTAssertGreaterThanOrEqual(screen.minY, canvasBox.minY - 0.5)
+        XCTAssertLessThanOrEqual(screen.maxX, canvasBox.maxX + 0.5)
+        XCTAssertLessThanOrEqual(screen.maxY, canvasBox.maxY + 0.5)
     }
 
     /// **Every** clamped result satisfies the law it was clamped by — including the two paths that
@@ -328,8 +416,14 @@ final class CropZoomBound190Tests: XCTestCase {
     /// (`clampsToRotatedFrame`, which must not be allowed to undo the 25 % floor).
     ///
     /// The inputs are the interesting corners of the space: smaller / equal / bigger than the canvas,
-    /// hanging over one edge, over a corner, with and without an aspect lock, at 5.4° / 45° / 90°,
+    /// hanging over one edge, over a corner, with and without an aspect lock, at 5.4° / 9° / 45°,
     /// with the photo-bound shrink on and off.
+    ///
+    /// 2026-11-02 — the last case used to be 90°. The dial's 拉直 is `CropTool.clampStraighten`d to
+    /// ±45°, so a 90° draft is **not a reachable document**: the clamp would read the 45° canvas while
+    /// the overlay drew the quad at 90°, i.e. the case would compare two different documents. It is now
+    /// the same overhang at 45° (the reachable maximum), and the canvas it is measured against is the
+    /// legal rect instead of 219's `mapping.canvasRect`.
     func testEveryClampedResultSatisfiesItsOwnLaw() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
@@ -366,9 +460,9 @@ final class CropZoomBound190Tests: XCTestCase {
             Case(name: "小于画布 · 16:9 锁", crop: CropRect(left: 0.45, top: 0.30, right: 0.75,
                                                            bottom: 0.50),
                  degrees: 9, lock: .sixteenNine, photoBound: false),
-            Case(name: "大于画布 · 90°", crop: CropRect(left: -0.2, top: -0.3, right: 1.2,
-                                                        bottom: 1.1),
-                 degrees: 90, lock: .original, photoBound: false),
+            Case(name: "大于画布 · 45°（原 90°：拉直钳在 ±45°）", crop: CropRect(left: -0.2, top: -0.3,
+                                                                          right: 1.2, bottom: 1.1),
+                 degrees: 45, lock: .original, photoBound: false),
             Case(name: "小于画布 · 照片约束开", crop: CropRect(left: 0.55, top: 0.85, right: 0.75,
                                                               bottom: 1.05),
                  degrees: 5.4, lock: .original, photoBound: true),
@@ -377,11 +471,6 @@ final class CropZoomBound190Tests: XCTestCase {
                  degrees: 9, lock: .original, photoBound: true),
         ]
 
-        // The biggest coverage any position can have: a frame bigger than the canvas tops out at
-        // canvas/frame when it is centred on it, so 25 % is simply not reachable for a huge frame.
-        let canvasPixels = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
-                                                      height: Double(Self.source.height),
-                                                      degrees: 0)
         for c in cases {
             controller.clampsToRotatedFrame = c.photoBound
             controller.draft = CropToolController.Draft(crop: c.crop, straighten: c.degrees,
@@ -393,28 +482,34 @@ final class CropZoomBound190Tests: XCTestCase {
             // 诊断，不是判据：可达性在 190 里由「25% 在画布上 + 适应可看全帧」保证，见 `legal` 的注释。
             let reachable = controller.hasReachableGrip(after, source: Self.source)
 
-            let extent = LoupeFraming.rotatedExtent(width: Double(Self.source.width),
-                                                    height: Double(Self.source.height),
-                                                    degrees: c.degrees)
+            let extent = Self.canvasPixels(at: c.degrees)
             let frameArea = after.width * Double(Self.source.width)
                 * after.height * Double(Self.source.height)
             // 画布面积 / 框面积 —— 只用来判断「25% 到底可达不可达」，不是 coverage 的上界。
             let best = min(1, extent.width * extent.height / max(frameArea, 1e-9))
-            _ = canvasPixels
             print(String(format: "190 · law · %@ · moved %@ · l %.6f t %.6f r %.6f b %.6f · "
                          + "coverage %.6f (画布/框 %.6f) · 可抓 %@",
                          c.name, moved ? "yes" : "no", after.left, after.top, after.right,
                          after.bottom, coverage, best, reachable ? "yes" : "no"))
 
+            // 2026-11-02 — the law the clamp applies: the result sits inside the **document canvas**
+            // (`legalRect`, the turned photograph's AABB), with zero slack beyond the clamp's own
+            // rounding. This is the document-space statement; the screen-space one follows.
+            let legal = legalRect(degrees: c.degrees)
+            XCTAssertGreaterThanOrEqual(after.left, legal.left - 1e-9, "\(c.name): left of the canvas")
+            XCTAssertGreaterThanOrEqual(after.top, legal.top - 1e-9, "\(c.name): above the canvas")
+            XCTAssertLessThanOrEqual(after.right, legal.right + 1e-9, "\(c.name): right of the canvas")
+            XCTAssertLessThanOrEqual(after.bottom, legal.bottom + 1e-9, "\(c.name): below the canvas")
+
             // 213/§5 — the law, re-measured on the result **in screen space**: the drawn quad's
-            // four sides inside the **canvas** (0.5 px of slack), with the frame shrunk only when
-            // it is genuinely bigger than the canvas (219: at 适应 that is the window; a zoomed-in
-            // canvas is the picture and may be far larger).
+            // four sides inside the **drawn canvas** (0.5 px of slack), with the frame shrunk only
+            // when it is genuinely bigger than the canvas. 2026-11-02: the canvas is the legal rect
+            // drawn through the same projection (`canvasBox`), not 219's picture-at-the-camera.
             // The overlay draws `effectiveCrop` (the opt-in photo bound is a view, not a draft
             // write), so the screen law is measured on that rect.
             let drawn = controller.effectiveCrop(source: Self.source)
             let screen = screenBox(drawn, mapping: mapping, degrees: c.degrees)
-            let canvas = mapping.canvasRect(rotatedBy: c.degrees)
+            let canvas = canvasBox(mapping: mapping, degrees: c.degrees)
             XCTAssertGreaterThanOrEqual(screen.minX, canvas.minX - 0.5,
                                         "\(c.name): hangs off the canvas' left — \(screen)")
             XCTAssertLessThanOrEqual(screen.maxX, canvas.maxX + 0.5,
@@ -425,11 +520,11 @@ final class CropZoomBound190Tests: XCTestCase {
                                      "\(c.name): hangs off the canvas' bottom — \(screen)")
             XCTAssertLessThanOrEqual(coverage, 1.0 + 1e-9)
 
-            // A clamp only ever *moves* a frame that fits; one bigger than the canvas is shrunk.
-            let beforeScreen = screenBox(before, mapping: mapping, degrees: c.degrees)
-            if beforeScreen.width <= canvas.width + 0.5,
-               beforeScreen.height <= canvas.height + 0.5,
-               c.lock.ratio == nil, !c.photoBound {
+            // A clamp only ever *moves* a frame that fits; one bigger than the canvas is shrunk. The
+            // test is made in **frame space**, which is where the clamp makes it: comparing drawn AABBs
+            // would let a rotated square "fit" a narrower rectangle (its AABB is the sum, not the max).
+            let fits = before.width <= legal.width + 1e-12 && before.height <= legal.height + 1e-12
+            if fits, c.lock.ratio == nil, !c.photoBound {
                 XCTAssertEqual(after.width, before.width, accuracy: 1e-9, c.name)
                 XCTAssertEqual(after.height, before.height, accuracy: 1e-9, c.name)
             } else {
@@ -447,7 +542,23 @@ final class CropZoomBound190Tests: XCTestCase {
     /// The reverse gate for the upright path: `clampedToCanvas` is not part of 190, so its numbers
     /// are the 188 ones to the last digit. The string below is printed before and after the change
     /// and diffed — any drift is a regression, not a tolerance.
+    ///
+    /// 2026-11-02 — this is also the guard that the new rule **degenerates** upright: `legalRect(0)` is
+    /// exactly `[0,1]²`, so nothing that 224 allowed became illegal at θ = 0 and no upright number may
+    /// move. Asserted bit-for-bit, not with a tolerance.
     func testZeroDegreeClampIsUnchanged() throws {
+        let upright = legalRect(degrees: 0)
+        XCTAssertEqual(upright.left, 0, accuracy: 0)
+        XCTAssertEqual(upright.top, 0, accuracy: 0)
+        XCTAssertEqual(upright.right, 1, accuracy: 0)
+        XCTAssertEqual(upright.bottom, 1, accuracy: 0)
+        // …and 180°, the other right angle the AABB degenerates on (the 拉直 dial itself stops at ±45°,
+        // so 90/180 arrive here as formula checks only, never as a reachable draft).
+        let upsideDown = legalRect(degrees: 180)
+        XCTAssertEqual(upsideDown.left, 0, accuracy: 0)
+        XCTAssertEqual(upsideDown.top, 0, accuracy: 0)
+        XCTAssertEqual(upsideDown.right, 1, accuracy: 0)
+        XCTAssertEqual(upsideDown.bottom, 1, accuracy: 0)
         let (session, _) = try CropUITestSupport.makeSession(in: workDir,
                                                              width: Self.source.width,
                                                              height: Self.source.height)

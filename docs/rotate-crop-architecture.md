@@ -68,7 +68,7 @@ static rotatedExtent(width:height:degrees:) / documentCanvasCropRect(in:degrees:
 委托 `CropGeometry.rotatedExtent`。右角度（0/90/180/270）**原样返回输入**（不是 `w·1+h·0`），
 所以未拉直的文档一个数都不动。
 
-### 2.3 裁切合法区：规则搬进类型，应用侧仍走 224（**未切换**）
+### 2.3 裁切合法区：规则搬进类型（应用侧 2026-11-02 已切换，见 §6）
 
 `CropGeometry.documentCanvasCropRect(in:degrees:)` 已经把「文档画布」算出来了，并配了
 `clampedToDocumentCanvas(_:)` 与 5 条类型级测试。但 `CropTool.clampToCanvas` 的**判定仍然是
@@ -143,7 +143,9 @@ orient 一次 —— 奇数 quarter turn 下裁切工具的 `source / frameSize 
 把 backdrop 改成常驻「整张照片」的低清层（用户口径 4 的字面读法）会打破它——需要先把
 「纹理画布」变成类型，再改语义。**本次不动，记录在此。**
 
-### D3 · `LoupeMapping.canvasRect` 仍把视口并进读数
+### D3 · 钳制切到文档画布 — **已于 2026-11-02 切换**（见 §6）
+
+### D3b · `LoupeMapping.canvasRect` 仍把视口并进读数
 
 219 的 `canvasRect`（`LoupeZoom.swift:1145`）现在是**纯读数**（钳制已不用它），但仍会 union 视口，
 语义上仍误导。等 `safeCropRect`/`canvasBounds` 的调用点清完再删。
@@ -203,3 +205,72 @@ PHOTONS_TEST_RAW=~/Desktop/test/L1030433.dng swift test --skip-build --filter "C
   `CropMathTests`、`MaskTests` 全绿。L22 的「push 金值陈旧」随之关闭——根因是测试侧没把
   「解码已带该白平衡」告诉渲染图（`RenderInput.whiteBalance`），S1 二次施加，只有带 WB 的文档分叉。
 - `WindowTests.testPanFrameCostDoesNotRegress` 仍是负载相关的性能阈值（load ≈ 10 时红）。
+
+---
+
+## 6. 2026-11-02 — 合法区切到文档画布；裁切模式 `↵` 应用
+
+用户当天两条口径，都已在应用侧落地。
+
+### 6.1 「旋转之后，裁剪框能移动的范围应该是画布，不是原始图片」
+
+§2.3/§4 里挂着的那次切换做完了，三处一起改：
+
+| 位置 | 改动 |
+|---|---|
+| `CropTool.clampToCanvas(_:mapping:source:degrees:tolerance:)` | 合法区 = `CropGeometry.documentCanvasCropRect(in: source, degrees:)`；缩放判据也从「大于 1」改成「大于画布」；最后一道 `.clamped(false)` → `.clamped(allowsOutsideSource: true)` |
+| `CropToolController.clampToView` / `continueDrag` | 把**草稿角度** `clampStraighten(draft.straighten)` 传进钳制；新增 `canvasBounds(source:)` 给拖动用 |
+| `CropTool.constrain(…, bounds:)` / `CropToolDrag.crop(…, bounds:)` | 新增 `bounds`（默认 `.full`，旧调用方数字不变）；`base = crop.clamped(allowsOutsideSource: true)`，鼠标按下时不再被照片边界拽回 |
+
+验收：`CropClampDocument224Tests` / `CropZoomBound190Tests` / `CropBoundsTests` / `CropFitNinetyTests`
+四套 16 条按新口径重写（每套自带私有 `legalRect(degrees:source:)` 独立推导，不调生产函数），
+`Crop|Clamp|QuarterTurn|CanvasSpaces` 194 条全绿。重算的期望值：8° @3000×2000 →
+`-0.041525 / -0.099514 / 1.041525 / 1.099514`；45° @6000×4500 →
+`-0.118718 / -0.324958 / 1.118718 / 1.324958`。
+
+**顺带修掉的契约 bug**：`CropGeometry.photoExtent` / `documentCanvasCropRect` 在 90°/270° 返回的是
+`rotatedExtent` 的交换 AABB（6000×4500 给出 `x ∈ [0.125, 0.875]`），于是「90° 的满幅框非法」——
+与本文档「at every right angle the canvas is the frame」直接矛盾。已加右角度早退（`hasAngle`），
+`CanvasSpacesTests.testARightAngleIsThePhotographAndNotTheSwappedBox` 钉住。拉直本身被钳在 ±45°，
+所以这是一条契约修复而不是可达文档的像素变化。
+
+**口径上仍需用户拍板的一点**：现在的合法区是「e 尺寸、以照片为中心的轴对齐矩形」，四角正好落在
+画布四角，但**边会在中间鼓出画布**（45° 时最多约 1.41×）。所以数学上「框的四个角 ⊆ 画布」成立，
+「框的每一条边 ⊆ 画布」不成立——后者是更紧的合法区（要按旋转后的菱形求交）。若用户要的是后者，
+改 `documentCanvasCropRect` 的公式即可，钳制的三处调用不用动。
+
+**仍在用旧判据的两条用例**（§4 的 9 条改判据清单剩下）：`CropClampMatrixProbe202Tests:173`、
+`CropFrameClampTests:101`（靠 0.5 px 松弛通过），切换时未改，属读数而非钳制。
+
+### 6.2 「旋转后照片被推到左边、右边纯黑，缩放一下才恢复」
+
+根因不在渲染几何，在**相机**：`rotateQuarter` 只写文档、不动 `viewState` 的窗口中心。窗口中心存在
+「转向后的照片像素」里，一次 90° 正好把两个轴换名，于是原来指向照片中部的数字在新坐标系里指向了
+别的部位——照片被推到一边；此时渲染的 `canvasRect` 按窗口算出来落在画布之外，被裁到可见部分，剩下的
+画布就是 `#0F0F0F`（用户读作「纯黑遮罩」）。`⌘0` 会从 crop 重算中心，所以看起来像「缩放修好了」。
+
+- `rotateQuarter` 现在把中心随照片一起转：顺时针 `(x,y) ↦ (H − y, x)`，逆时针 `(x,y) ↦ (y, W − x)`，
+  `W×H` 取 `framing()` 的 `sourceWidth/Height`（= `viewState.center` 的同一单位：整分辨率转向帧像素，
+  **不是** `cropSourceSize` 的解码网格——0.5 档下它只有一半）。`.fit` 的中心是从 crop 推出来的，
+  没有存下来的数字要搬，也不许因此把适应变成实际像素。
+- 定位过程：`~/photons-diag.log`（临时诊断，已移除）里一次 25% + 转动 6° 的呈现是
+  `presentRect=(0,0,1794,1600)` 而 canvas 是 2560×1600 —— 右边 766 px 就是那条黑带；同一份日志显示
+  `state centre=(4760,3168)` 而 90° 之后照片中心是 `(3168,4760)`。
+- 验收：`QuarterTurnKeepsTheCameraTests` 4 条（⌘] 的映射、⌘[ 的逆、照片中心仍是中心、适应不被改档）。
+
+### 6.3 「在裁剪界面按回车没有应用更改」
+
+`↵` / `Esc` 一直写在 `LoupeCanvasView.keyDown` 里，但那只在画布是第一响应者时才收得到键；而
+变换页签、裁切卡都是画布**旁边**的 AppKit/SwiftUI 控件，点一下焦点就离开了画布，`↵` 石沉大海。
+
+两件事，一起：
+
+- `LoupeController.beginCropTool()` → `focusCanvasForCrop()`：进入裁切把画布设为第一响应者（正在
+  打字时让位）；
+- `installCropReturnMonitor()`：窗口级 `NSEvent.addLocalMonitorForEvents(.keyDown)`，在事件**分发
+  之前**拦下 `↵` / 小键盘 Enter（`\u{3}`，允许 `.numericPad`/`.function`，⌘⌥⇧⌃ 都不算），焦点在
+  哪里都一样；输入框编辑中（`NSTextView`）让位；`leaveCropTool()` / `deinit` 拆掉。
+
+`handleCropReturn` 的返回值语义是**事件是否被吃下**（不是「文档变没变」：空草稿的 `↵` 也会关框）。
+验收：`CropReturnKeyTests` 5 条（进入即聚焦、焦点不在画布也能应用且只写一次、小键盘 Enter、⌘↵/
+别的键/框没开时不吃、监听随框存亡）。

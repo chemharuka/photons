@@ -948,12 +948,22 @@ public final class CropToolController {
         rect.clamped(allowsOutsideSource: true)
     }
 
-    /// 224 — the document-space containment: the candidate rect is clamped to `[0,1]²` by
-    /// `CropTool.clampToCanvas`, which reads no mapping, no angle and no source. Kept as a named
-    /// hop so the single call site stays legible.
+    /// 224 / 2026-11-02 — the document-space containment: the candidate rect is clamped to the
+    /// **document canvas** (`CropGeometry.documentCanvasCropRect`, `[0,1]²` at every right angle) by
+    /// `CropTool.clampToCanvas`, which reads no mapping and no screen. The draft's own angle is what
+    /// makes the canvas the turned photograph's AABB, so it has to be handed over here — the drag is
+    /// the one caller that knows the angle the user is currently looking at.
     private func clampToCanvas(_ rect: CropRect, mapping: LoupeMapping,
                                source: ImageSize) -> CropRect {
-        CropTool.clampToCanvas(rect, mapping: mapping, source: source)
+        CropTool.clampToCanvas(rect, mapping: mapping, source: source,
+                               degrees: CropTool.clampStraighten(draft.straighten))
+    }
+
+    /// The document canvas the frame is allowed to occupy, in normalized turned-frame coordinates —
+    /// `[0,1]²` for an upright document, the turned photograph's AABB otherwise.
+    private func canvasBounds(source: ImageSize) -> CropRect {
+        CropGeometry.documentCanvasCropRect(in: source,
+                                            degrees: CropTool.clampStraighten(draft.straighten))
     }
 
     // MARK: - the document-space canvas (190)
@@ -1146,7 +1156,8 @@ public final class CropToolController {
                                                    to: normalized, centre: centre, source: source)
             return
         }
-        let next = drag.crop(at: normalized, source: source, lock: draft.lock)
+        let next = drag.crop(at: normalized, source: source, lock: draft.lock,
+                             bounds: canvasBounds(source: source))
         // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
         // shrinking (there is no size at that centre), and jumping it back to the middle from under the
         // hand would be worse than ignoring it: the last legal frame stands.
@@ -1165,7 +1176,8 @@ public final class CropToolController {
             return
         }
         let candidate = reshapedForLock(next, source: source)
-        let clamped = CropTool.clampToCanvas(candidate, mapping: mapping, source: source)
+        let clamped = CropTool.clampToCanvas(candidate, mapping: mapping, source: source,
+                                             degrees: CropTool.clampStraighten(draft.straighten))
         clampCalls &+= 1
         if clamped != candidate { clampMoves &+= 1 }
         draft.crop = clamped
@@ -1294,8 +1306,10 @@ public final class CropToolController {
         public static let angle = "315.0°"
         /// The widest `%.2f` a ratio can print: four integer digits and two decimals.
         public static let ratio = "9999.99"
-        /// `9999×9999` — four digits per side and the multiplication sign.
-        public static let pixels = "9999×9999"
+        /// `99999×99999` — five digits per side and the multiplication sign. Five, not four: a 60 MP
+        /// frame cropped to a 102 000-px-wide stitch or a 1:8 ratio still prints five digits, and the
+        /// field must not clip the number it exists to report (N7, user 2026-11-02).
+        public static let pixels = "99999×99999"
     }
 
     static func ratioText(_ ratio: Double) -> String {
