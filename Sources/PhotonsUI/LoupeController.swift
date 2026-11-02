@@ -4460,6 +4460,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the decode key (`DecodeInputs` has no crop), so the rung is the same one as before — only
         // the render key moves, which is what a canvas change should do.
         let edit = cropTool.canvasEdit(from: session.edit)
+        if ProcessInfo.processInfo.environment["PHOTONS_DIAG"] != nil {
+            print("DIAG job kind=\(kind) viewport=\(viewport) angle=\(edit.geometry.straightenDegrees) "
+                  + "quarter=\(edit.geometry.quarterTurns) crop=\(edit.geometry.cropRect) "
+                  + "state=(mode \(viewState.mode) zoom \(viewState.zoom) centre \(viewState.centerX),\(viewState.centerY)) "
+                  + "windowPx=\(jobViewport() ?? ImageSize(width: 0, height: 0)) "
+                  + "framing=\(framing().map { "fit \($0.fitZoom) win \($0.windowSize(of: viewState)) crop \($0.crop)" } ?? "nil") "
+                  + "outWindow=\(String(describing: framing().flatMap { $0.outputWindow(of: viewState, decodeScale: Double(detailPreview ? 0.5 : 1)) }))")
+        }
         var job = RenderJob(kind: kind, url: url, baseIdentity: ladderIdentity(asset), viewport: viewport,
                             edit: edit, state: viewState, target: target, generation: gen,
                             changedAt: changedAt)
@@ -5871,6 +5879,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let request = PresentRequest(picture: texture, photoRect: photoRect, window: window,
                                      canvas: canvas, backdrop: backdrop,
                                      backdropWindow: backdropWindow)
+        if ProcessInfo.processInfo.environment["PHOTONS_DIAG"] != nil {
+            print("DIAG present tex=\(texture.width)×\(texture.height) canvas=\(canvas) "
+                  + "drawable=\(canvasView.metalLayer.drawableSize) bounds=\(canvasView.bounds) "
+                  + "frameCanvas=\(frameCanvas) photoRect=\(photoRect) pictureRect=\(String(describing: pictureRect)) "
+                  + "quad=\(request.pictureQuad) window=(u0 \(window.u0) v0 \(window.v0) du \(window.du) dv \(window.dv)) "
+                  + "backdropQuad=\(String(describing: request.backdropQuad)) frozen=\(frozen) zoom=\(zoom) "
+                  + "state=(mode \(viewState.mode) zoom \(viewState.zoom) centre \(viewState.centerX),\(viewState.centerY))")
+        }
         // The request is the exact thing the layer is asked to draw (geometry), kept
         // for tests that cannot read a `framebufferOnly` drawable back — and for the failure path,
         // which needs the geometry it tried.

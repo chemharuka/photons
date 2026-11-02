@@ -317,46 +317,42 @@ public enum CropTool {
         return layout
     }
 
-    // MARK: the document-space canvas clamp (224)
+    // MARK: the document-canvas clamp (224 → 2026-11-02)
 
-    /// **The one containment arithmetic** for 224: the frame is a rectangle of the **document**, and
-    /// the document's canvas is the frame rectangle `[0,1]²`. The bound is read from the rect alone —
-    /// never from the viewport, the zoom, the window size or the straightened picture's AABB — so the
-    /// same candidate yields the same answer at every framing and at every angle.
+    /// **The one containment arithmetic**: the frame is a rectangle of the **document**, and the
+    /// document's canvas is the box that holds every pixel of the whole photograph once it is turned
+    /// (`CropGeometry.documentCanvasCropRect`). At θ = 0 that box *is* `[0,1]²`, so an upright document
+    /// keeps 224's arithmetic bit for bit; at an angle it is the AABB of the turned photograph, which
+    /// is wider than the photograph — the frame may therefore enter the black corners a straighten
+    /// opens (user 2026-11-02: 「旋转之后，裁剪框能移动的范围应该是画布，不是原始图片」).
     ///
-    /// 224 replaced 213/219's screen-space reading, which made the canvas the *picture at the current
-    /// camera* (`LoupeMapping.canvasRect(rotatedBy:)`): at 45° that rectangle is 1485 × 1485 on a
-    /// 1400 × 1000 viewport, so the frame could be dragged without an upper bound. The user's rule is
-    /// simpler than either: 屏幕不参与 — the canvas is the document's own rectangle.
+    /// The bound is read from the rect, the source and the angle alone — never from the viewport, the
+    /// zoom or the window — so the same candidate yields the same answer at every framing.
     ///
     /// Moving is preferred: a rect that fits is translated the least amount that brings it inside.
     /// Only a rect genuinely larger than the canvas is shrunk, uniformly about its centre, so an
     /// aspect lock survives. The picture's turned quad is a **warning** (`frameExceedsPicture`),
     /// never a bound: the frame may cover the black corners a straighten cuts off.
     ///
-    /// `mapping`, `source` and `degrees` are kept for the call sites (a drag tick, a camera move, a
-    /// 拉直 tick); the law itself reads none of them, which is what makes the result screen-free.
+    /// `mapping` is kept for the call sites (a drag tick, a camera move, a 转动 tick); the law itself
+    /// reads none of it, which is what makes the result screen-free.
     public static func clampToCanvas(_ rect: CropRect,
                                      mapping: LoupeMapping,
                                      source: ImageSize,
                                      degrees: Double = 0,
                                      tolerance: Double = 0) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
-        // 2026-11-01 — **still the document's `[0, 1]²`, on purpose.** The wider rule the user's
-        // "画布 = 能包住全部照片像素的最小矩形" implies (the frame may enter the black corners a turn
-        // opens, bounded by `CropGeometry.documentCanvasCropRect`) is implemented and tested in
-        // `CropGeometry.clampedToDocumentCanvas`, but switching the app to it is a product decision:
-        // it rewrites 224's and 190's acceptance suites, which pin `[0,1]²` at every angle and were
-        // merged on the user's explicit instruction. See docs/rotate-crop-architecture.md §2.3/§3.
-        //
-        // Never the viewport, the zoom or the window: `mapping` and `degrees` are kept so the call
-        // sites read the same, and the law reads none of them (user 2026-11-01: 画布和屏幕无关).
+        // 2026-11-02 — the **document canvas**, not `[0,1]²`. `documentCanvasCropRect` degenerates to
+        // `[0,1]²` at every right angle, so nothing that used to be legal became illegal and every
+        // un-straightened number is the one 224 produced.
+        let legal = CropGeometry.documentCanvasCropRect(in: source, degrees: degrees)
         var result = c
 
-        // Shrink only a rect that is genuinely larger than the document's canvas — about its centre,
-        // so a ratio lock is preserved. A rect that already fits is never resized.
-        if result.width > 1 || result.height > 1 {
-            let shrink = min(1, 1 / max(result.width, 1e-9), 1 / max(result.height, 1e-9))
+        // Shrink only a rect that is genuinely larger than the canvas — about its centre, so a ratio
+        // lock is preserved. A rect that already fits is never resized.
+        if result.width > legal.width || result.height > legal.height {
+            let shrink = min(1, legal.width / max(result.width, 1e-9),
+                             legal.height / max(result.height, 1e-9))
             let width = result.width * shrink, height = result.height * shrink
             result = CropRect(left: result.centerX - width / 2,
                               top: result.centerY - height / 2,
@@ -364,20 +360,24 @@ public enum CropTool {
                               bottom: result.centerY + height / 2)
         }
 
-        // Move the least amount that puts the rect inside `[0,1]²`. Horizontal and vertical slides
+        // Move the least amount that puts the rect inside the canvas. Horizontal and vertical slides
         // are independent, so a corner overhang is pulled on both axes in one step.
         var du = 0.0, dv = 0.0
-        if result.left < 0 { du = -result.left }
-        else if result.right > 1 { du = 1 - result.right }
-        if result.top < 0 { dv = -result.top }
-        else if result.bottom > 1 { dv = 1 - result.bottom }
+        if result.left < legal.left { du = legal.left - result.left }
+        else if result.right > legal.right { du = legal.right - result.right }
+        if result.top < legal.top { dv = legal.top - result.top }
+        else if result.bottom > legal.bottom { dv = legal.bottom - result.bottom }
 
-        // The last `.clamped(false)` is the exact statement of the law: four edges in `0…1`, zero
-        // slack, whatever rounding the slide above produced.
+        _ = mapping      // kept for the call sites; the law is screen-free by construction
+        _ = tolerance
+        // The exact statement of the law: four edges inside the canvas, zero slack, whatever rounding
+        // the slide above produced. `allowsOutsideSource` keeps the frame's ability to sit in the
+        // black corners — this last pass only keeps the span finite and positive.
         return CropRect(left: result.left + du, top: result.top + dv,
                         right: result.right + du, bottom: result.bottom + dv)
-            .clamped(allowsOutsideSource: false)
+            .clamped(allowsOutsideSource: true)
     }
+
 
     // MARK: hit test
 
@@ -451,10 +451,15 @@ public enum CropTool {
     /// dimension (never growing past what the hand asked for), and the rect is placed so the
     /// **opposite corner or edge stays exactly where it was**. That is why dragging the bottom-right
     /// corner with 1:1 on does not creep: the top-left corner is a fixed point of the whole gesture.
+    ///
+    /// `bounds` is the document canvas the caller allows (2026-11-02): `[0,1]²` for an upright
+    /// document, the turned photograph's AABB otherwise. The default is the historical frame, so a
+    /// caller that never passes one gets the pre-2026-11-02 numbers.
     public static func constrain(_ rect: CropRect,
                                  lock: AspectLock,
                                  source: ImageSize,
-                                 anchor: CropToolAnchor) -> CropRect {
+                                 anchor: CropToolAnchor,
+                                 bounds: CropRect = .full) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
         guard let ratio = lock.ratio, let na = normalizedAspect(ratio, source: source) else {
             return c
@@ -487,10 +492,10 @@ public enum CropTool {
         // A rect that no longer fits the frame is *moved* into it, not resized: the ratio is the
         // rule the user chose, and a shift keeps it while a shrink would silently drop it.
         let span = minimumSpan(source: source)
-        let width = min(max(w, span.width), 1)
-        let height = min(max(h, span.height), 1)
-        let x = min(max(left, 0), 1 - width)
-        let y = min(max(top, 0), 1 - height)
+        let width = min(max(w, span.width), max(bounds.width, span.width))
+        let height = min(max(h, span.height), max(bounds.height, span.height))
+        let x = min(max(left, bounds.left), bounds.right - width)
+        let y = min(max(top, bounds.top), bounds.bottom - height)
         return CropRect(left: x, top: y, right: x + width, bottom: y + height)
     }
 
@@ -654,9 +659,13 @@ public struct CropToolDrag: Sendable, Equatable {
     /// the opposite side, and the minimum span is enforced before it.
     public func crop(at point: NormalizedPoint,
                      source: ImageSize,
-                     lock: AspectLock = .original) -> CropRect {
+                     lock: AspectLock = .original,
+                     bounds: CropRect = .full) -> CropRect {
         let span = CropTool.minimumSpan(source: source)
-        let base = crop.clamped()
+        // 2026-11-02: the rect under the hand may sit in the black corners a straighten opens, so the
+        // mouse-down snapshot is *not* pulled back inside the photograph. `bounds` (the document
+        // canvas) is what the caller clamps against afterwards.
+        let base = crop.clamped(allowsOutsideSource: true)
         var left = base.left, top = base.top, right = base.right, bottom = base.bottom
 
         switch handle {
@@ -702,6 +711,7 @@ public struct CropToolDrag: Sendable, Equatable {
         let free = CropRect(left: left, top: top, right: right, bottom: bottom)
             .clamped(allowsOutsideSource: true)
         guard lock.ratio != nil else { return free }
-        return CropTool.constrain(free, lock: lock, source: source, anchor: handle.anchor)
+        return CropTool.constrain(free, lock: lock, source: source, anchor: handle.anchor,
+                                  bounds: bounds)
     }
 }
