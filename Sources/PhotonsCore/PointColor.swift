@@ -271,11 +271,25 @@ public struct PointColor: Sendable, Equatable, Codable {
 
     /// The sampled YUV of a **decoded linear** RGB sample (the dropper's buffer), put through the same
     /// decode → working → display encoding the graph uses.
+    ///
+    /// This is the **white-balance / legacy** domain (the decode). 256's point-colour dropper reads
+    /// S3.6b's own input and must use `sampleYUV(fromWorkingLinear:)` instead: using this one there
+    /// would convert a working-primaries pixel as if it were a decoded one.
     public static func sampleYUV(fromDecodedLinear rgb: RGBSample) -> SIMD3<Double> {
         let decoded = SIMD3(rgb.r, rgb.g, rgb.b)
         let working = ColorPrimaries.conversion(from: ColorPrimaries.decoded,
                                                 to: ColorPrimaries.working).applying(to: decoded)
         return yuv(fromLinearWorking: working)
+    }
+
+    /// 256 — the sampled YUV of an **S3.6b input** pixel: linear **working** primaries, after S1/S2/
+    /// S3.4/S3.5/S3.6 and before S3.6b changes anything.
+    ///
+    /// Same conversion as the kernel (`s3_6b_point_colour.metal` builds its YUV from the
+    /// working→sRGB matrix), so the sample the card stores and the predicate the kernel evaluates
+    /// cannot come from two different colour pipelines.
+    public static func sampleYUV(fromWorkingLinear rgb: RGBSample) -> SIMD3<Double> {
+        yuv(fromLinearWorking: SIMD3(rgb.r, rgb.g, rgb.b))
     }
 
     /// Keep the 140 spelling for callers that only need the display hue/chroma.

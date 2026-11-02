@@ -88,8 +88,13 @@ extension PointColor {
 
 // MARK: - the sample command
 
-/// The dropper's write path, in one place: convert the decoded buffer sample to Rec.709 YCbCr, append
-/// one swatch, select it, and commit **one** history row.
+/// The dropper's write path, in one place: convert an **S3.6b input** sample (linear working
+/// primaries, after HSL) to Rec.709 YCbCr, append one swatch, select it, and commit **one** history
+/// row.
+///
+/// 256: the sample domain is the point-colour kernel's own input, not the decoded buffer. The
+/// conversion is `PointColor.yuv(fromLinearWorking:)`, the same matrix and transfer function S3.6b
+/// uses, so the stored YUV and the pixel the kernel selects are one measurement.
 ///
 /// It never touches the three adjustment sliders. The sample alone is therefore not an active stage
 /// (S3.6b's `isActive` needs an adjustment too), so the sampled frame is the frame before the click.
@@ -108,12 +113,13 @@ public struct PointColorCommands {
         case full
     }
 
-    /// Sample one decoded-RGB pixel and **append** it. Returns `.rejectedLowChroma` (writing nothing)
-    /// when `hypot(U − 0.5, V − 0.5) < PointColor.chromaFloorYCbCr` — the user's "不能选择饱和度很
-    /// 淡的区域" rule. At eight swatches the UI refuses the ninth.
+    /// Sample one **S3.6b input** pixel (linear working primaries) and **append** it. Returns
+    /// `.rejectedLowChroma` (writing nothing) when `hypot(U − 0.5, V − 0.5) <
+    /// PointColor.chromaFloorYCbCr` — the user's "不能选择饱和度很淡的区域" rule. At eight swatches the
+    /// UI refuses the ninth.
     @discardableResult
-    public func sample(_ rgb: RGBSample) -> SampleOutcome {
-        let yuv = PointColor.sampleYUV(fromDecodedLinear: rgb)
+    public func sampleForPointColor(workingLinear rgb: RGBSample) -> SampleOutcome {
+        let yuv = PointColor.sampleYUV(fromWorkingLinear: rgb)
         let swatch = PointColor(sampleY: yuv.x, sampleU: yuv.y, sampleV: yuv.z)
         guard swatch.isSampled else { return .rejectedLowChroma }
 

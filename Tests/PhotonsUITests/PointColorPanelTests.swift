@@ -110,13 +110,13 @@ final class PointColorPanelTests: XCTestCase {
         let commands = PointColorCommands(session: session)
         let base = session.history.count
 
-        XCTAssertEqual(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)),
+        XCTAssertEqual(commands.sampleForPointColor(workingLinear: RGBSample(r: 0.8, g: 0.1, b: 0.05)),
                        .appended(0), "U1: 第一次吸 ⇒ 1 个色框")
         XCTAssertEqual(session.edit.color.point?.swatches.count, 1)
         XCTAssertEqual(session.edit.color.point?.active, 0)
         XCTAssertEqual(session.history.count, base + 1, "一次取样 = 一条历史")
 
-        XCTAssertEqual(commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8)),
+        XCTAssertEqual(commands.sampleForPointColor(workingLinear: RGBSample(r: 0.05, g: 0.1, b: 0.8)),
                        .appended(1), "U2: 再吸 ⇒ 第 2 个，且新的是选中态")
         XCTAssertEqual(session.edit.color.point?.swatches.count, 2)
         XCTAssertEqual(session.edit.color.point?.active, 1)
@@ -135,8 +135,8 @@ final class PointColorPanelTests: XCTestCase {
     func testU3DoubleDeletingWalksBackOneSwatchAtATime() throws {
         let session = CatalogSession()
         let commands = PointColorCommands(session: session)
-        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
-        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.05, g: 0.1, b: 0.8))
         XCTAssertEqual(session.edit.color.point?.swatches.count, 2)
         XCTAssertEqual(session.edit.color.point?.active, 1)
 
@@ -160,9 +160,9 @@ final class PointColorPanelTests: XCTestCase {
     func testU4DeletingTheFirstLeavesTheOldSecondSelected() throws {
         let session = CatalogSession()
         let commands = PointColorCommands(session: session)
-        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.8, g: 0.1, b: 0.05))
         let firstYUV = session.edit.color.point?.swatches[0].sampleY
-        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.05, g: 0.1, b: 0.8))
         let secondYUV = session.edit.color.point?.swatches[1].sampleY
         XCTAssertNotEqual(firstYUV, secondYUV)
 
@@ -178,8 +178,8 @@ final class PointColorPanelTests: XCTestCase {
     func testU5SwitchingSwatchesChangesTheSlidersButNotHistory() throws {
         let session = CatalogSession()
         let commands = PointColorCommands(session: session)
-        commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05))
-        commands.sample(RGBSample(r: 0.05, g: 0.1, b: 0.8))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.8, g: 0.1, b: 0.05))
+        commands.sampleForPointColor(workingLinear: RGBSample(r: 0.05, g: 0.1, b: 0.8))
         session.applyEdit { model in
             guard var set = model.color.point else { return }
             set.swatches[0].hue = 40
@@ -303,7 +303,7 @@ final class PointColorPanelTests: XCTestCase {
         let base = session.history.count
         let commands = PointColorCommands(session: session)
 
-        XCTAssertEqual(commands.sample(RGBSample(r: 0.8, g: 0.1, b: 0.05)), .appended(0),
+        XCTAssertEqual(commands.sampleForPointColor(workingLinear: RGBSample(r: 0.8, g: 0.1, b: 0.05)), .appended(0),
                        "一次取样 = 一条历史")
         XCTAssertEqual(session.history.count, base + 1)
         XCTAssertEqual(session.history.snapshots.last?.label, "点颜色 取样")
@@ -316,7 +316,7 @@ final class PointColorPanelTests: XCTestCase {
 
         // A near-grey sample: below chromaFloorYCbCr, so nothing is written and no swatch is added.
         let pale = RGBSample(r: 0.18, g: 0.18, b: 0.181)
-        XCTAssertEqual(commands.sample(pale), .rejectedLowChroma)
+        XCTAssertEqual(commands.sampleForPointColor(workingLinear: pale), .rejectedLowChroma)
         XCTAssertEqual(session.edit.color.point?.swatches.count, 1, "淡色不许创建色框")
         XCTAssertEqual(session.history.count, base + 1, "拒绝不产生历史")
         print("POINT DROPPER · sample H \(String(format: "%.1f", stored.sampleHue))°"
@@ -340,6 +340,8 @@ final class PointColorPanelTests: XCTestCase {
         XCTAssertTrue(card.contains("sliderRow("), "每一行都是面板唯一的那根行")
         XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: card), 0, "卡里不许自己造滑杆")
         let source = try String(contentsOf: Self.inspectorSource, encoding: .utf8)
+        XCTAssertTrue(source.contains("loupe.armPointColorEyedropper"),
+                      "256: the point dropper has its own S3.6b-input route")
         XCTAssertTrue(source.contains("loupe.armEyedropper"), "吸管走 LoupeController")
         let strip = try String(contentsOf: Self.stripSource, encoding: .utf8)
         XCTAssertTrue(strip.contains("TapGesture(count: 2)"), "双击删除")
