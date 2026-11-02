@@ -38,6 +38,11 @@ extension CatalogSession {
     /// the letterbox does not mint a history row.
     @discardableResult
     public func addHealSpot(at framePoint: NormalizedPoint, radius: Double? = nil) -> HealSpot? {
+        // 229 — the preset is part of the tool, so the document door agrees with the canvas door.
+        // Default `.heal` keeps every pre-229 caller byte for byte.
+        if healToolMode == .redeye {
+            return addRedEyeSpot(at: framePoint, searchRadius: radius)
+        }
         guard framePoint.x >= 0, framePoint.x <= 1,
               framePoint.y >= 0, framePoint.y <= 1 else { return nil }
         let r = radius ?? healRadius
