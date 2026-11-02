@@ -535,6 +535,54 @@ public struct EditHistory: Sendable, Equatable, Codable {
         return true
     }
 
+    // MARK: 263 — undo one row by appending the opposite step
+
+    /// Undo one 「最新」 row **without removing it**: append a normal snapshot whose label says
+    /// 「撤销 <row>」 and whose document is the current document with only that row's fields put
+    /// back to the value they had immediately before it.
+    ///
+    /// ```
+    ///   A 曝光 +0.2   B 曝光 +0.5   C 曲线   D 曝光 +0.8   E 修复
+    ///   revert(D)  →  A B C D E F，F = 「撤销 D」：曝光回到 B 的 +0.5，
+    ///                 C 的曲线和 E 的修复保持不动
+    /// ```
+    ///
+    /// Why this is an ordinary snapshot and not a tombstone: a snapshot is an **absolute** document
+    /// (D10), so a revert is just the next state. `seq` keeps growing, the redo branch is truncated
+    /// by the normal append path, and every existing reader (save/load, the panel, ⌘Z) needs no new
+    /// shape.
+    ///
+    /// The row must pass `isNewestOfClass` — the **same** predicate the panel draws 「撤销」 from.
+    /// A covered row is refused because no later row carries its value forward, so "what it was
+    /// before" is not a state the current document can be moved to without rewinding somebody
+    /// else's edit.
+    ///
+    /// - Returns: the appended snapshot, or nil when the row is not revertible (index 0, covered,
+    ///   empty diff) or the reverted document is identical to the current one (the normal append
+    ///   rule refuses a no-op).
+    @discardableResult
+    public mutating func revert(at index: Int) -> Snapshot? {
+        guard index >= 1, isNewestOfClass(at: index) else { return nil }
+        guard let row = snapshot(at: index), !row.changes.isEmpty,
+              let base = current else { return nil }
+
+        // `row.changes` was recorded against the row immediately before it, so `change.from` **is**
+        // the absolute value that field had before this row (the last writer at or before index−1,
+        // carried forward by the neighbours). The snapshot is the source for the two structural
+        // cases (`curve.*.count`, `masks.*.order`) whose value is not a single leaf.
+        let previous = snapshots[index - 1].edit
+        var reverted = base
+        for change in row.changes {
+            EditHistory.revert(change, from: previous, into: &reverted)
+        }
+
+        return appendSnapshot(reverted,
+                              label: "撤销 \(row.label)",
+                              before: base,
+                              now: Date(),
+                              allowsMerge: false)
+    }
+
     /// Fill in `changes` for rows that arrive without them (a version-1 envelope, or rows built from
     /// `asset_history`, which stores no diff).
     ///
@@ -611,5 +659,412 @@ public struct EditHistory: Sendable, Equatable, Codable {
         try c.encode(snapshots, forKey: .snapshots)
         try c.encode(cursor, forKey: .cursor)
         try c.encode(nextSeq, forKey: .nextSeq)
+    }
+}
+
+// MARK: - 263: putting one row's fields back
+
+private extension EditHistory {
+
+    /// Put one recorded `FieldChange` back on `doc`, using the value the field had before that row.
+    ///
+    /// The flat leaves are written by key; the three dynamic shapes (`curve.white[3].y`,
+    /// `color.bands[2].hue`, `masks.<id>.feather`) are parsed from the same key `changedFields`
+    /// produced. `previous` is the row immediately before the reverted one and is only read for the
+    /// structural values (`curve.*.count`, `masks.*.order`) where a single number is not enough.
+    static func revert(_ change: FieldChange, from previous: EditModel, into doc: inout EditModel) {
+        let key = change.field.key
+
+        if key.hasPrefix("curve.") {
+            revertCurve(change, from: previous, into: &doc)
+            return
+        }
+        if key.hasPrefix("color.bands[") {
+            revertBand(change, into: &doc)
+            return
+        }
+        if key.hasPrefix("color.point[") {
+            revertPoint(change, into: &doc)
+            return
+        }
+        if key.hasPrefix("colorGrading.") {
+            revertGrade(change, into: &doc)
+            return
+        }
+        if key.hasPrefix("masks.") {
+            revertMask(change, from: previous, into: &doc)
+            return
+        }
+        if key.hasPrefix("heal.") {
+            revertHeal(change, from: previous, into: &doc)
+            return
+        }
+
+        switch key {
+        case "document.schemaVersion":
+            if let v = integer(change.from) { doc.schemaVersion = v }
+        case "document.processVersion":
+            if let v = integer(change.from) { doc.processVersion = v }
+
+        case "geometry.crop.x":
+            if let v = number(change.from) { doc.geometry.crop.x = v }
+        case "geometry.crop.y":
+            if let v = number(change.from) { doc.geometry.crop.y = v }
+        case "geometry.crop.width":
+            if let v = number(change.from) { doc.geometry.crop.width = v }
+        case "geometry.crop.height":
+            if let v = number(change.from) { doc.geometry.crop.height = v }
+        case "geometry.rotationDegrees":
+            if let v = number(change.from) { doc.geometry.rotationDegrees = v }
+        case "geometry.flipHorizontal":
+            if let v = flag(change.from) { doc.geometry.flipHorizontal = v }
+        case "geometry.flipVertical":
+            if let v = flag(change.from) { doc.geometry.flipVertical = v }
+        case "geometry.perspectiveVertical":
+            if let v = number(change.from) { doc.geometry.perspectiveVertical = v }
+        case "geometry.perspectiveHorizontal":
+            if let v = number(change.from) { doc.geometry.perspectiveHorizontal = v }
+        case "geometry.quarterTurns":
+            if let v = integer(change.from) { doc.geometry.quarterTurns = v }
+        case "geometry.aspectLock":
+            if let v = text(change.from) { doc.geometry.aspectLock = AspectLock(code: v) ?? .original }
+
+        case "light.exposure":
+            if let v = number(change.from) { doc.light.exposure = v }
+        case "light.contrast":
+            if let v = number(change.from) { doc.light.contrast = v }
+        case "light.highlights":
+            if let v = number(change.from) { doc.light.highlights = v }
+        case "light.shadows":
+            if let v = number(change.from) { doc.light.shadows = v }
+        case "light.whites":
+            if let v = number(change.from) { doc.light.whites = v }
+        case "light.blacks":
+            if let v = number(change.from) { doc.light.blacks = v }
+        case "light.temperature":
+            if let v = optionalNumber(change.from) { doc.light.temperature = v }
+        case "light.tint":
+            if let v = optionalNumber(change.from) { doc.light.tint = v }
+        case "light.highlightRecovery":
+            if let v = number(change.from) { doc.light.highlightRecovery = v }
+        case "light.blackOffset":
+            if let v = number(change.from) { doc.light.blackOffset = v }
+
+        case "color.vibrance":
+            if let v = number(change.from) { doc.color.vibrance = v }
+        case "color.saturation":
+            if let v = number(change.from) { doc.color.saturation = v }
+        case "color.blackAndWhite":
+            if let v = flag(change.from) { doc.color.blackAndWhite = v }
+
+        case "detail.sharpening":
+            if let v = number(change.from) { doc.detail.sharpening = v }
+        case "detail.sharpeningRadius":
+            if let v = number(change.from) { doc.detail.sharpeningRadius = v }
+        case "detail.noiseLuminance":
+            if let v = number(change.from) { doc.detail.noiseLuminance = v }
+        case "detail.noiseColor":
+            if let v = number(change.from) { doc.detail.noiseColor = v }
+        case "detail.lensCorrections":
+            if let v = flag(change.from) { doc.detail.lensCorrections = v }
+
+        case "detailSettings.luminanceNR":
+            if let v = optionalNumber(change.from) { doc.detailSettings.luminanceNR = v }
+        case "detailSettings.colorNR":
+            if let v = optionalNumber(change.from) { doc.detailSettings.colorNR = v }
+        case "detailSettings.sharpness":
+            if let v = optionalNumber(change.from) { doc.detailSettings.sharpness = v }
+        case "detailSettings.detail":
+            if let v = optionalNumber(change.from) { doc.detailSettings.detail = v }
+        case "detailSettings.moire":
+            if let v = optionalNumber(change.from) { doc.detailSettings.moire = v }
+
+        case "decoderVersion":
+            if let v = text(change.from) { doc.decoderVersion = v == "默认" ? nil : v }
+
+        case "effects.vignetteAmount":
+            if let v = number(change.from) { doc.effects.vignetteAmount = v }
+        case "effects.vignetteMidpoint":
+            if let v = number(change.from) { doc.effects.vignetteMidpoint = v }
+        case "effects.vignetteFeather":
+            if let v = number(change.from) { doc.effects.vignetteFeather = v }
+        case "effects.grain":
+            if let v = number(change.from) { doc.effects.grain = v }
+        case "effects.grainSize":
+            if let v = number(change.from) { doc.effects.grainSize = v }
+        case "effects.grainRoughness":
+            if let v = number(change.from) { doc.effects.grainRoughness = v }
+        case "effects.grainSeed":
+            if let v = integer(change.from) { doc.effects.grainSeed = Double(v) }
+        case "effects.texture":
+            if let v = number(change.from) { doc.effects.texture = v }
+        case "effects.clarity":
+            if let v = number(change.from) { doc.effects.clarity = v }
+        case "effects.nonBayerLuminanceNR":
+            if let v = number(change.from) { doc.effects.nonBayerLuminanceNR = v }
+        case "effects.nonBayerColorNR":
+            if let v = number(change.from) { doc.effects.nonBayerColorNR = v }
+        case "effects.dehaze":
+            if let v = number(change.from) { doc.effects.dehaze = v }
+
+        case "sharpen.amount":
+            if let v = number(change.from) { doc.sharpen.amount = v }
+        case "sharpen.radius":
+            if let v = number(change.from) { doc.sharpen.radius = v }
+        case "sharpen.detail":
+            if let v = number(change.from) { doc.sharpen.detail = v }
+        case "sharpen.masking":
+            if let v = number(change.from) { doc.sharpen.masking = v }
+
+        case "optics.caRed":
+            if let v = number(change.from) { doc.optics.caRed = v }
+        case "optics.caBlue":
+            if let v = number(change.from) { doc.optics.caBlue = v }
+
+        default:
+            break
+        }
+    }
+
+    // MARK: dynamic keys
+
+    static func revertCurve(_ change: FieldChange, from previous: EditModel, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("curve.".count)
+        if rest.hasSuffix(".count") {
+            let name = String(rest.dropLast(".count".count))
+            guard let path = curvePath(name) else { return }
+            let source = previous[keyPath: path]
+            var current = doc[keyPath: path]
+            if current.count > source.count {
+                current.removeLast(current.count - source.count)
+            } else if current.count < source.count {
+                current.append(contentsOf: source[current.count...])
+            }
+            doc[keyPath: path] = current
+            return
+        }
+        guard let open = rest.firstIndex(of: "["),
+              let close = rest.firstIndex(of: "]"),
+              let index = Int(rest[rest.index(after: open)..<close]) else { return }
+        let name = String(rest[..<open])
+        let axis = String(rest[rest.index(after: close)...])
+        guard let path = curvePath(name) else { return }
+        var points = doc[keyPath: path]
+        guard points.indices.contains(index) else { return }
+        if axis == ".x", let v = number(change.from) {
+            points[index].x = v
+        } else if axis == ".y", let v = number(change.from) {
+            points[index].y = v
+        }
+        doc[keyPath: path] = points
+    }
+
+    static func curvePath(_ name: String) -> WritableKeyPath<EditModel, [CurvePoint]>? {
+        switch name {
+        case "white": return \EditModel.curve.white
+        case "red": return \EditModel.curve.red
+        case "green": return \EditModel.curve.green
+        case "blue": return \EditModel.curve.blue
+        default: return nil
+        }
+    }
+
+    static func revertBand(_ change: FieldChange, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("color.bands[".count)
+        guard let close = rest.firstIndex(of: "]"),
+              let index = Int(rest[..<close]) else { return }
+        let field = String(rest[rest.index(after: close)...].dropFirst())
+        guard doc.color.bands.indices.contains(index) else { return }
+        var band = doc.color.bands[index]
+        switch field {
+        case "hue": if let v = number(change.from) { band.hue = v }
+        case "saturation": if let v = number(change.from) { band.saturation = v }
+        case "luminance": if let v = number(change.from) { band.luminance = v }
+        case "mix": if let v = number(change.from) { band.mix = v }
+        default: return
+        }
+        doc.color.bands[index] = band
+    }
+
+    static func revertPoint(_ change: FieldChange, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("color.point[".count)
+        guard let close = rest.firstIndex(of: "]"),
+              let index = Int(rest[..<close]) else { return }
+        let field = String(rest[rest.index(after: close)...].dropFirst())
+        guard var set = doc.color.point, set.swatches.indices.contains(index) else { return }
+        var swatch = set.swatches[index]
+        switch field {
+        case "sampleY": if let v = number(change.from) { swatch.sampleY = v }
+        case "sampleU": if let v = number(change.from) { swatch.sampleU = v }
+        case "sampleV": if let v = number(change.from) { swatch.sampleV = v }
+        case "range": if let v = number(change.from) { swatch.range = v }
+        case "feather": if let v = number(change.from) { swatch.feather = v }
+        case "hue": if let v = number(change.from) { swatch.hue = v }
+        case "saturation": if let v = number(change.from) { swatch.saturation = v }
+        case "luminance": if let v = number(change.from) { swatch.luminance = v }
+        default: return
+        }
+        set.swatches[index] = swatch
+        doc.color.point = set
+    }
+
+    static func revertGrade(_ change: FieldChange, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("colorGrading.".count)
+        let parts = rest.split(separator: ".", maxSplits: 1)
+        guard parts.count == 2, let value = number(change.from) else { return }
+        let wheel = String(parts[0])
+        let axis = String(parts[1])
+        var grade: GradeWheel
+        switch wheel {
+        case "shadows": grade = doc.colorGrading.shadows
+        case "midtones": grade = doc.colorGrading.midtones
+        case "highlights": grade = doc.colorGrading.highlights
+        default: return
+        }
+        switch axis {
+        case "hue": grade.hue = value
+        case "saturation": grade.saturation = value
+        case "lightness": grade.lightness = value
+        default: return
+        }
+        switch wheel {
+        case "shadows": doc.colorGrading.shadows = grade
+        case "midtones": doc.colorGrading.midtones = grade
+        default: doc.colorGrading.highlights = grade
+        }
+    }
+
+    static func revertMask(_ change: FieldChange, from previous: EditModel, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("masks.".count)
+        if rest == "order" {
+            doc.masks = reordered(doc.masks, like: previous.masks.map(\.id))
+            return
+        }
+        guard let dot = rest.firstIndex(of: ".") else { return }
+        let id = String(rest[..<dot])
+        let field = String(rest[rest.index(after: dot)...])
+
+        if field == "added" {
+            doc.masks.removeAll { $0.id == id }
+            return
+        }
+        if field == "removed" {
+            if !doc.masks.contains(where: { $0.id == id }),
+               let saved = previous.masks.first(where: { $0.id == id }) {
+                doc.masks.append(saved)
+            }
+            return
+        }
+        guard let index = doc.masks.firstIndex(where: { $0.id == id }) else { return }
+        switch field {
+        case "isEnabled": if let v = flag(change.from) { doc.masks[index].isEnabled = v }
+        case "opacity": if let v = number(change.from) { doc.masks[index].opacity = v }
+        case "invert": if let v = flag(change.from) { doc.masks[index].invert = v }
+        case "feather": if let v = number(change.from) { doc.masks[index].feather = v }
+        case "refine": if let v = number(change.from) { doc.masks[index].refine = v }
+        case "name": if let v = text(change.from) { doc.masks[index].name = v }
+        case "components":
+            if let saved = previous.masks.first(where: { $0.id == id }) {
+                doc.masks[index].components = saved.components
+            }
+        default:
+            guard field.hasPrefix("adj."), let v = number(change.from) else { return }
+            let axis = String(field.dropFirst("adj.".count))
+            var adjustments = doc.masks[index].adjustments
+            switch axis {
+            case "amount": adjustments.amount = v
+            case "exposure": adjustments.exposure = v
+            case "temperature": adjustments.temperature = v
+            case "tint": adjustments.tint = v
+            case "contrast": adjustments.contrast = v
+            case "highlights": adjustments.highlights = v
+            case "shadows": adjustments.shadows = v
+            case "whites": adjustments.whites = v
+            case "blacks": adjustments.blacks = v
+            case "hue": adjustments.hue = v
+            case "saturation": adjustments.saturation = v
+            default: return
+            }
+            doc.masks[index].adjustments = adjustments
+        }
+    }
+
+    static func revertHeal(_ change: FieldChange, from previous: EditModel, into doc: inout EditModel) {
+        let rest = change.field.key.dropFirst("heal.".count)
+        if rest == "order" {
+            doc.healSpots = reordered(doc.healSpots, like: previous.healSpots.map(\.id))
+            return
+        }
+        guard let dot = rest.firstIndex(of: ".") else { return }
+        let id = String(rest[..<dot])
+        let field = String(rest[rest.index(after: dot)...])
+
+        if field == "added" {
+            doc.healSpots.removeAll { $0.id == id }
+            return
+        }
+        if field == "removed" {
+            if !doc.healSpots.contains(where: { $0.id == id }),
+               let saved = previous.healSpots.first(where: { $0.id == id }) {
+                doc.healSpots.append(saved)
+            }
+            return
+        }
+        guard let index = doc.healSpots.firstIndex(where: { $0.id == id }) else { return }
+        switch field {
+        case "center.x": if let v = number(change.from) { doc.healSpots[index].center.x = v }
+        case "center.y": if let v = number(change.from) { doc.healSpots[index].center.y = v }
+        case "radius": if let v = number(change.from) { doc.healSpots[index].radius = v }
+        case "source.x": if let v = number(change.from) { doc.healSpots[index].sourceOffset.x = v }
+        case "source.y": if let v = number(change.from) { doc.healSpots[index].sourceOffset.y = v }
+        case "feather": if let v = number(change.from) { doc.healSpots[index].feather = v }
+        case "opacity": if let v = number(change.from) { doc.healSpots[index].opacity = v }
+        case "mode":
+            if let v = text(change.from), let mode = HealMode(rawValue: v) {
+                doc.healSpots[index].mode = mode
+            }
+        default:
+            break
+        }
+    }
+
+    // MARK: value conversions
+
+    static func number(_ value: FieldValue) -> Double? {
+        if case .number(let v) = value { return v }
+        return nil
+    }
+
+    /// `Double??` distinguishes "this is an optional field, set it to nil" (`.some(nil)`) from "this
+    /// value is not an optional number at all" (`nil`).
+    static func optionalNumber(_ value: FieldValue) -> Double?? {
+        if case .optionalNumber(let v) = value { return .some(v) }
+        return nil
+    }
+
+    static func flag(_ value: FieldValue) -> Bool? {
+        if case .flag(let v) = value { return v }
+        return nil
+    }
+
+    static func text(_ value: FieldValue) -> String? {
+        if case .text(let v) = value { return v }
+        return nil
+    }
+
+    static func integer(_ value: FieldValue) -> Int? {
+        switch value {
+        case .number(let v): return Int(v.rounded())
+        case .text(let v): return Int(v)
+        default: return nil
+        }
+    }
+
+    static func reordered<T: Identifiable>(_ items: [T], like ids: [String]) -> [T] where T.ID == String {
+        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var out = ids.compactMap { byID[$0] }
+        let known = Set(ids)
+        out.append(contentsOf: items.filter { !known.contains($0.id) })
+        return out
     }
 }
