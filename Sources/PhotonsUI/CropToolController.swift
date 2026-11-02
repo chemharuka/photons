@@ -1306,8 +1306,10 @@ public final class CropToolController {
         public static let angle = "315.0°"
         /// The widest `%.2f` a ratio can print: four integer digits and two decimals.
         public static let ratio = "9999.99"
-        /// `9999×9999` — four digits per side and the multiplication sign.
-        public static let pixels = "9999×9999"
+        /// `99999×99999` — five digits per side and the multiplication sign. Five, not four: a 60 MP
+        /// frame cropped to a 102 000-px-wide stitch or a 1:8 ratio still prints five digits, and the
+        /// field must not clip the number it exists to report (N7, user 2026-11-02).
+        public static let pixels = "99999×99999"
     }
 
     static func ratioText(_ ratio: Double) -> String {
