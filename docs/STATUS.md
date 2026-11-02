@@ -111,6 +111,10 @@ M3 记的"`L1030433.dng` 少 orientation tag"是误判（tag 存在且为 1）�
 2. 蒙版面板改名会产生 1 条历史（`masks` 按值比较含名字），像素与 `selectionKey` 都不变——语义可选，待定。
 3. `LocalAdjustments` 没有 sharpen 字段，面板只露出 amount 作“强度”。
 
+## 233（HLG 导出「过亮」）
+
+真实照片 `L1030433.dng` 走 `BatchExport` → `s4_display_linear` → `Exporter.write`：PNG16 的 PQ/HLG 逐 EV 绝对亮度比 **1.000**（HEIC10 ≤8%，暗部 10-bit 量化），HLG 文件带 `DisplayP3_HLG` ICC（`lumi` 白点 **203 nits**）+ cICP 18，与 ColorSync 旧路径逐阶比 **≤5%**。**文件正确；「更亮」来自查看器把 HLG 信号按别的参考白/峰值解释。**
+
 ## 下一步（按依赖排序，可并行派发）
 
 1. UI 接真数据：网格出真缩略图、检查器滑杆驱动重渲（防抖+单飞）、⌘Z/⇧⌘Z 接 `EditHistory`（在跑）。
