@@ -442,6 +442,33 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return hit
     }
 
+    // MARK: - 235: the frame before the first frame
+
+    /// The cached thumbnail for a photo, at its **own** aspect and already decoded to displayable
+    /// sRGB — the picture the loupe puts up while the real frame is still being developed.
+    ///
+    /// Deliberately cache-only: generating one here would put a second decode in front of the frame
+    /// the user is waiting for, which is the opposite of the fix. The HD family (the grid/filmstrip's
+    /// shared key) is preferred because it is the whole picture at 1920; the legacy preview JPEG is
+    /// the fallback for a library that still has one from an earlier build. `nil` means neither is on
+    /// disk, and the caller then asks the service for a fresh preview asynchronously.
+    ///
+    /// The returned `CGImage` is never cropped: its aspect is the photo's, so the caller can fit it
+    /// into the canvas without stretching.
+    public func cachedCanvasPlaceholder(for asset: Asset, document: EditModel) -> CGImage? {
+        let hd = ThumbnailProvider.hdKey(for: asset, document: document)
+        if cache.exists(hd), let data = cache.data(for: hd),
+           let image = ThumbnailProvider.decodeHDForPlaceholder(data) {
+            return image
+        }
+        let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
+        let preview = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
+        if cache.exists(preview), let data = cache.data(for: preview) {
+            return ThumbnailCache.decode(data)
+        }
+        return nil
+    }
+
     /// Work the service has queued *or* running. Exposed so `--ui-smoke` can assert the queue does
     /// not grow with the library (§5: "队列峰值 ≤ 预取窗口的 2 倍").
     public var queueDepth: Int { service.pendingCount + service.stats().active }
@@ -681,6 +708,12 @@ public final class ThumbnailProvider: @unchecked Sendable {
         ThumbnailHDRDecoder.shared.decode(data, display: display)
     }
 
+    /// 235 — the HD file as a **whole-picture sRGB** bitmap, for the loupe's first-frame stand-in.
+    /// No aspect-fill here: the caller fits it, so cropping it would show the wrong composition.
+    static func decodeHDForPlaceholder(_ data: Data) -> CGImage? {
+        ThumbnailHDRDecoder.shared.decodeWholePictureSRGB(data)
+    }
+
     private func rawDecoder() -> RAWDecoder? {
         lock.lock()
         if let decoder { lock.unlock(); return decoder }
@@ -848,6 +881,19 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
             return tagged
         }
         return CIImage(data: data)
+    }
+
+    /// 235 — the whole picture, aspect preserved, encoded as ordinary sRGB.
+    ///
+    /// A cell always wants one display-sized crop, but the loupe's stand-in is the whole photograph:
+    /// the canvas fits it and a cropped grid bitmap would show the wrong framing. SDR (sRGB) on
+    /// purpose — this is a placeholder drawn by `NSImageView`, which has no EDR surface of its own.
+    func decodeWholePictureSRGB(_ data: Data) -> CGImage? {
+        guard let image = Self.sourceImage(data),
+              let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+        return context.createCGImage(image, from: extent, format: .RGBA8, colorSpace: srgb)
     }
 
     /// Decode `data` (a 10-bit Display P3 PQ HEIC) into exactly `display` pixels.

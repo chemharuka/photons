@@ -17,6 +17,36 @@ public final class LoupeCanvasView: NSView {
     /// The controller that owns the zoom/pan state. Weak: the controller owns the view.
     public weak var controller: LoupeController?
 
+    /// 235 — what the canvas shows between 「enter the loupe」 and the first real frame.
+    ///
+    /// On a cold start the decode of a 60 MP file takes hundreds of milliseconds, and until it lands
+    /// the layer is the matte colour: the user sees an empty editor. The grid already holds this
+    /// photo's thumbnail, so the controller hands it here and this view draws it **aspect-fit** over
+    /// the matte. It is removed by the first `present`, so it is a stand-in, never a second picture
+    /// path.
+    private let firstFramePlaceholder = FirstFramePlaceholderView()
+
+    /// `true` only while a stand-in is actually drawn (an image was installed and no frame has
+    /// replaced it). Read by the cold-start test and by `LoupeController.firstFrameContent`.
+    public var isShowingFirstFramePlaceholder: Bool {
+        !firstFramePlaceholder.isHidden && firstFramePlaceholder.image != nil
+    }
+
+    /// Draw `image` over the matte until the first frame arrives. The image keeps its own aspect and
+    /// is fitted inside the canvas (`scaleProportionallyUpOrDown`, centred), so a grid thumbnail's
+    /// pixels are never stretched to the viewport's shape.
+    public func showFirstFramePlaceholder(_ image: CGImage) {
+        firstFramePlaceholder.image = NSImage(cgImage: image,
+                                             size: NSSize(width: image.width, height: image.height))
+        firstFramePlaceholder.isHidden = false
+    }
+
+    /// The real frame is on the layer (or the photo went away): take the stand-in down.
+    public func hideFirstFramePlaceholder() {
+        firstFramePlaceholder.isHidden = true
+        firstFramePlaceholder.image = nil
+    }
+
     /// The mask painter, when a brush is armed. Every event still goes through `LoupeController`,
     /// which is the only thing that can turn a view point into a normalised source point; this view
     /// only says *which* of the two gestures a drag is (Q22).
@@ -43,6 +73,12 @@ public final class LoupeCanvasView: NSView {
         // only seen before the first drawable arrives.
         metalLayer.backgroundColor = NSColor.canvasMatte.cgColor
         metalLayer.isOpaque = true
+        // 235 — a subview's layer composites above the view's backing layer, so this sits on top of
+        // the Metal content and below every overlay the controller adds around the canvas.
+        firstFramePlaceholder.isHidden = true
+        firstFramePlaceholder.frame = bounds
+        firstFramePlaceholder.autoresizingMask = [.width, .height]
+        addSubview(firstFramePlaceholder)
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -368,6 +404,27 @@ public final class LoupeCanvasView: NSView {
         let zoomed = controller?.viewState.isActualSize ?? false
         addCursorRect(bounds, cursor: zoomed ? .openHand : .arrow)
     }
+}
+
+/// 235 — an image view that is deliberately **not** part of the canvas' gesture surface.
+///
+/// The loupe canvas owns every click (pan, zoom, crop, mask), so a stand-in drawn above it must be
+/// transparent to hit testing or the first click after entering the editor would be swallowed by a
+/// dead picture.
+final class FirstFramePlaceholderView: NSImageView {
+    init() {
+        super.init(frame: .zero)
+        imageScaling = .scaleProportionallyUpOrDown
+        imageAlignment = .alignCenter
+        isEditable = false
+        animates = false
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - gesture ownership
