@@ -3356,6 +3356,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         cropReturnMonitor = nil
     }
 
+    /// Whether the window-level `↵` monitor is installed — the acceptance reads it to prove the
+    /// monitor's lifetime is the frame's.
+    var hasCropReturnMonitorForTesting: Bool { cropReturnMonitor != nil }
+
     /// `↵` applies the draft when the crop frame is up in this view's window. Internal for the test
     /// that pins the key binding without synthesising a whole event loop.
     func handleCropReturn(_ event: NSEvent) -> Bool {
@@ -3363,10 +3367,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard event.window == nil || event.window === canvasView.window else { return false }
         let key = event.charactersIgnoringModifiers ?? ""
         guard key == "\r" || key == "\u{3}" else { return false }
+        // A bare `↵`, or the keypad's Enter (which AppKit also tags `.numericPad` — and, on some
+        // keyboards, `.function`). Anything the user *held* — ⌘, ⌥, ⇧, ⌃ — is not this binding.
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags.isEmpty || flags == .numericPad else { return false }
+            .subtracting([.numericPad, .function])
+        guard flags.isEmpty else { return false }
         if canvasView.window?.firstResponder is NSTextView { return false }
-        return applyCropTool()
+        // `true` = *consumed*, not "the document changed": an apply with nothing to write still closes
+        // the frame, and the event must not fall through to a control that would beep.
+        applyCropTool()
+        return true
     }
 
     /// Historical alias (132 §9): the crop workspace used to ask for `fit × 0.90` through this
