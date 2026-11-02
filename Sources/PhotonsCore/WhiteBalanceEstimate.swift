@@ -278,13 +278,23 @@ public enum WhiteBalanceEstimate {
         return Chromaticity(x: x, y: y)
     }
 
-    /// The tint displacement, in CIE 1960 uv per tint unit.
+    /// The tint displacement, in CIE 1960 uv per tint unit — **calibrated against the decoder** (240).
     ///
     /// Lightroom's positive tint is magenta, i.e. *below* the Planckian locus in CIE 1960 (green is
-    /// the higher-v side). The normal is chosen to make that true; the magnitude is a display scale,
-    /// not a physical constant — ±150 is a clearly visible magenta/green correction, not a different
-    /// white point.
-    public static let tintPerUnit = 0.00005
+    /// the higher-v side). The normal is chosen to make that true; the **magnitude** is not free:
+    /// `CIRAWFilter.neutralTint` is the reference the drag has to reproduce, and the old
+    /// `0.00005` (a display-scale guess) moved the white point **6.86× too little**, which is the
+    /// "tint deviation" of 派单 240 — at 6500 K a ±150 request was 31–54 display codes off the settled
+    /// frame, growing to ~139 at 4000 K.
+    ///
+    /// Measured on `tools/wb-calibrate/chart256.dng` (32 neutral patches, ground truth), 2026-11-02:
+    /// the white point implied by the decoder's own answer moves **linearly** along this same normal
+    /// through the whole `WhiteBalance.tintRange` (−150…150) and every temperature in
+    /// `WhiteBalance.temperatureRange`; the fitted slope is `0.000343 ± 0.000002 uv/unit` (the
+    /// residual at the 5×9 grid is ≤ 0.0007 uv, i.e. ≤ 1 code). Because the direction already
+    /// matched, the fix is this one coefficient, not a new curve or a per-body table. The fit table is
+    /// in `local/REPORT.md`.
+    public static let tintPerUnit = 0.000343
 
     /// The illuminant XYZ for a requested pair: Planckian uv + a perpendicular tint displacement.
     public static func illuminantXYZ(temperature: Double, tint: Double) -> SIMD3<Double> {
