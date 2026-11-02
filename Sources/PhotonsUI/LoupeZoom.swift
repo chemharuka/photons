@@ -1260,14 +1260,11 @@ public struct LoupeMapping: Equatable, Sendable {
         var fx = cropLeft + (viewX - originX) * cropWidth / max(contentWidth, 1e-9)
         var fy = cropTop + (viewY - originY) * cropHeight / max(contentHeight, 1e-9)
         let px = frameWidth / 2, py = frameHeight / 2
-        // 248 — with a turn the flip and the rotation both pivot on the **photograph's** centre
-        // (matching `s0_geometry`). At θ = 0 the kernel's un-rotated instantiation flips the crop
-        // window, so the flip pivots on the window there; the two are the same for a full crop.
-        let straight = abs(sinT) < 1e-15 && abs(cosT - 1) < 1e-15
-        let flipX = straight ? cropLeft + cropWidth / 2 : px
-        let flipY = straight ? cropTop + cropHeight / 2 : py
-        if flipH { fx = 2 * flipX - fx }
-        if flipV { fy = 2 * flipY - fy }
+        // 248 D — one flip rule at every angle: mirror the photograph about its centre, matching
+        // `s0_geometry`'s two instances. A full crop is unchanged (the window and the photo share a
+        // centre); a smaller crop no longer jumps when the straighten leaves zero.
+        if flipH { fx = 2 * px - fx }
+        if flipV { fy = 2 * py - fy }
         // 2. the rotation — of **pixel** offsets, about the photograph's centre. This is the one line
         //    the shear lived on: rotating `(u − ½, v − ½)` (u divided by the width, v by the height) and
         //    then scaling by `cropWidth`/`cropHeight` is `R(θ)` followed by a non-uniform scale, so the
@@ -1287,11 +1284,8 @@ public struct LoupeMapping: Equatable, Sendable {
         let rx = qx * cosT + qy * sinT
         let ry = -qx * sinT + qy * cosT
         var fx = rx + px, fy = ry + py
-        let straight = abs(sinT) < 1e-15 && abs(cosT - 1) < 1e-15
-        let flipX = straight ? cropLeft + cropWidth / 2 : px
-        let flipY = straight ? cropTop + cropHeight / 2 : py
-        if flipH { fx = 2 * flipX - fx }
-        if flipV { fy = 2 * flipY - fy }
+        if flipH { fx = 2 * px - fx }
+        if flipV { fy = 2 * py - fy }
         return (originX + (fx - cropLeft) * contentWidth / max(cropWidth, 1e-9),
                 originY + (fy - cropTop) * contentHeight / max(cropHeight, 1e-9))
     }

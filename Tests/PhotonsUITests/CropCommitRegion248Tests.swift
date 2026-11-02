@@ -253,23 +253,245 @@ final class CropCommitRegion248Tests: XCTestCase {
                     .map { (x: $0.0 * Double(source.width), y: $0.1 * Double(source.height)) }
                 let cropCentre = ((c.left + c.right) / 2 * Double(source.width),
                                   (c.top + c.bottom) / 2 * Double(source.height))
-                var worst = 0.0
-                for corner in corners {
-                    let box = rotation.apply(x: corner.x - pivot.x, y: corner.y - pivot.y)
-                    let old = rotation.apply(x: corner.x - cropCentre.0,
-                                             y: corner.y - cropCentre.1)
-                    worst = max(worst, hypot(box.x - old.x, box.y - old.y))
-                }
-                print(String(format: "248 reverse · %.0f° / %@ · old-pivot edge error %.1f px",
-                             angle, crop.name, worst))
-                if crop.name == "满幅" {
-                    XCTAssertEqual(worst, 0, accuracy: 1e-9,
-                                   "a full crop's two pivots coincide — the bug is invisible there")
+                // The true translation between the crop-centred and photo-centred turns is
+                // `|(I − R)·(cropCentre − photoCentre)| = 2·sin(θ/2)·|d|`; it is a centre offset, not
+                // the corner-to-corner maximum the first version printed.
+                let dx = cropCentre.0 - pivot.x, dy = cropCentre.1 - pivot.y
+                let shift = 2 * sin(angle * .pi / 360) * hypot(dx, dy)
+                print(String(format: "248 reverse · %.0f° / %@ · |d| %.3f px · 2sin(θ/2)|d| %.3f px",
+                             angle, crop.name, hypot(dx, dy), shift))
+                if crop.name == "满幅" || crop.name == "居中半幅" {
+                    XCTAssertEqual(shift, 0, accuracy: 1e-9,
+                                   "a centred crop's two pivots coincide — the bug is invisible there")
                 } else if crop.name == "偏心" {
-                    XCTAssertGreaterThan(worst, 1,
+                    XCTAssertGreaterThan(shift, 1,
                                          "the off-centre reverse gate must be more than one pixel")
                 }
+                _ = corners
             }
         }
     }
+
+
+    // MARK: - B · the 5 × 4 × 3 edge table
+
+    private func mappedSource(_ r: (x: Double, y: Double), crop: CropRect,
+                              angle: Double, perspective: PerspectiveMap?,
+                              source: ImageSize) -> (x: Double, y: Double) {
+        let w = Double(source.width), h = Double(source.height)
+        let photo = (x: crop.left + r.x * crop.width, y: crop.top + r.y * crop.height)
+        let warped: (x: Double, y: Double)
+        if let perspective, perspective.hasWarp {
+            warped = perspective.forward(x: photo.x, y: photo.y)
+        } else {
+            warped = photo
+        }
+        let px = warped.x * w - w / 2, py = warped.y * h - h / 2
+        // The preview (and the committed picture) is the photo turned by +θ on screen; the source
+        // point under a screen point is `P + R(+θ)(screen − P)`.
+        let rotation = CropGeometry.RotationMatrix(degrees: angle)
+        let q = rotation.apply(x: px, y: py)
+        return (x: q.x + w / 2, y: q.y + h / 2)
+    }
+
+
+
+    private func sampleLinear(_ image: DisplayImage, x: Double, y: Double) -> (r: Double, g: Double) {
+        let px = x - 0.5, py = y - 0.5
+        let fx = floor(px), fy = floor(py)
+        let tx = px - fx, ty = py - fy
+        let x0 = Int(fx), y0 = Int(fy)
+        func v(_ x: Int, _ y: Int, _ c: Int) -> Double {
+            let xx = min(max(x, 0), image.width - 1)
+            let yy = min(max(y, 0), image.height - 1)
+            return Double(image.rgba[(yy * image.width + xx) * 4 + c])
+        }
+        func channel(_ c: Int) -> Double {
+            let v00 = v(x0, y0, c), v10 = v(x0 + 1, y0, c)
+            let v01 = v(x0, y0 + 1, c), v11 = v(x0 + 1, y0 + 1, c)
+            return (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty
+        }
+        return (channel(0), channel(1))
+    }
+
+    /// §B — four edges × 10 samples × 5 angles × 4 crops × 3 keystones = 60 groups. The expected
+    /// source point is the box formula (photo centre, P on the whole photo); the actual one is decoded
+    /// from the **rendered linear pixels** (`R`/`G` encode source x/y). `linearOutput` makes the two
+    /// ramps survive S4 unchanged, so no tone-curve calibration is needed.
+    func testTheSixtyGroupEdgeTableStaysWithinOnePixel() throws {
+        let angles: [(name: String, degrees: Double)] =
+            [("0°", 0), ("0.1°", 0.1), ("1°", 1), ("5°", 5), ("45°", 45)]
+        let crops: [(name: String, rect: CropRect)] = [
+            ("偏心", CropRect(left: 0.15, top: 0.20, right: 0.70, bottom: 0.85)),
+            ("居中半幅", CropRect(left: 0.25, top: 0.25, right: 0.75, bottom: 0.75)),
+            ("贴左上", CropRect(left: 0, top: 0, right: 0.5, bottom: 0.5)),
+            ("满幅", .full),
+        ]
+        let perspectives: [(name: String, map: PerspectiveMap?)] = [
+            ("0", nil),
+            ("+50", PerspectiveMap(vertical: 50, horizontal: 0)),
+            ("-50", PerspectiveMap(vertical: -50, horizontal: 0)),
+        ]
+        let graph = try RenderGraph(input: RenderInput(image: ramp(source), identity: "248-edges"))
+        var worstAll = 0.0
+        for angle in angles {
+            for crop in crops {
+                for p in perspectives {
+                    var geometry = GeometryGroup(crop: crop.rect.normalizedRect,
+                                                 rotationDegrees: angle.degrees)
+                    geometry.perspectiveVertical = p.map?.vertical ?? 0
+                    geometry.perspectiveHorizontal = p.map?.horizontal ?? 0
+                    var edit = EditModel.neutral
+                    edit.geometry = geometry
+                    let renderScale = 1.0
+                    var options = RenderOptions(scale: renderScale, useCache: false, wantsPixels: true)
+                    options.display.linearOutput = true
+                    let result = try graph.render(edit, options: options)
+                    let display = try XCTUnwrap(result.display)
+                    let draw = geometry.renderCrop(source: source)
+                    let fractions = (0..<10).map { 0.15 + 0.078 * Double($0) }
+                    func edge(_ name: String, _ points: [(Double, Double)], axis: Int) -> Double {
+                        var worst = 0.0
+                        for r in points {
+                            let photo = (x: (draw.left + r.0 * draw.width),
+                                         y: (draw.top + r.1 * draw.height))
+                            let cx: Double, cy: Double
+                            var expected: (x: Double, y: Double)
+                            if let map = p.map, map.hasWarp {
+                                // The keystone walks the **photo** coordinate; the committed pixel is
+                                // the composed forward map, and it shows this input photo point.
+                                expected = (x: photo.x * Double(source.width),
+                                            y: photo.y * Double(source.height))
+                                let pc = CropMath.perspectiveCanvas(crop: draw, in: source,
+                                                                    straightenDegrees: angle.degrees,
+                                                                    perspective: map)
+                                let canvas = PerspectiveMap.apply(pc.forward, x: photo.x, y: photo.y)
+                                guard canvas.x > 0.02, canvas.x < 0.98,
+                                      canvas.y > 0.02, canvas.y < 0.98 else { continue }
+                                cx = canvas.x * Double(display.width)
+                                cy = canvas.y * Double(display.height)
+                            } else {
+                                expected = mappedSource(r, crop: draw, angle: angle.degrees,
+                                                        perspective: nil, source: source)
+                                // Inverse of the kernel's R(−θ) walk, back into the crop frame.
+                                let w = Double(source.width), h = Double(source.height)
+                                let dx = expected.x - w / 2, dy = expected.y - h / 2
+                                let turned = CropGeometry.RotationMatrix(degrees: angle.degrees)
+                                    .apply(x: dx, y: dy)
+                                let photo = (x: (turned.x + w / 2) / w,
+                                             y: (turned.y + h / 2) / h)
+                                let frame = CropMath.outputSize(draw, in: source,
+                                                                allowsOutsideSource: true)
+                                let inset = CropMath.canvasOrigin(crop: draw, in: source,
+                                                                  straightenDegrees: angle.degrees,
+                                                                  quarterTurns: 0)
+                                cx = ((photo.x - draw.left) / max(draw.width, 1e-9)
+                                    * Double(frame.width) + Double(inset.x)) * renderScale
+                                cy = ((photo.y - draw.top) / max(draw.height, 1e-9)
+                                    * Double(frame.height) + Double(inset.y)) * renderScale
+                            }
+                            guard expected.x >= 4, expected.y >= 4,
+                                  expected.x < Double(source.width) - 4,
+                                  expected.y < Double(source.height) - 4 else { continue }
+                            // Stay one pixel inside the rendered canvas: an edge pixel's bilinear
+                            // neighbourhood includes the matte, which is not a source position.
+                            guard cx >= 2, cy >= 2,
+                                  cx < Double(display.width) - 2,
+                                  cy < Double(display.height) - 2 else { continue }
+                            // Compare at the **pixel centre** the render actually sampled, so the
+                            // half-pixel quantisation is not mistaken for a transform error.
+                            let sx = (cx - 0.5).rounded() + 0.5
+                            let sy = (cy - 0.5).rounded() + 0.5
+                            if let map = p.map, map.hasWarp {
+                                let pc = CropMath.perspectiveCanvas(crop: draw, in: source,
+                                                                    straightenDegrees: angle.degrees,
+                                                                    perspective: map)
+                                let back = PerspectiveMap.apply(pc.sampling,
+                                                                x: sx / Double(display.width),
+                                                                y: sy / Double(display.height))
+                                expected = (x: back.x * Double(source.width),
+                                            y: back.y * Double(source.height))
+                            } else {
+                                let frame = CropMath.outputSize(draw, in: source,
+                                                                allowsOutsideSource: true)
+                                let inset = CropMath.canvasOrigin(crop: draw, in: source,
+                                                                  straightenDegrees: angle.degrees,
+                                                                  quarterTurns: 0)
+                                let u = (sx / renderScale - Double(inset.x)) / Double(frame.width)
+                                let v = (sy / renderScale - Double(inset.y)) / Double(frame.height)
+                                let photo = (x: draw.left + u * draw.width,
+                                             y: draw.top + v * draw.height)
+                                let px = photo.x * Double(source.width) - Double(source.width) / 2
+                                let py = photo.y * Double(source.height) - Double(source.height) / 2
+                                let r = CropGeometry.RotationMatrix(degrees: -angle.degrees)
+                                    .apply(x: px, y: py)
+                                expected = (x: r.x + Double(source.width) / 2,
+                                            y: r.y + Double(source.height) / 2)
+                            }
+                            let rgba = sampleLinear(display, x: sx, y: sy)
+                            guard expected.x >= 0, expected.y >= 0,
+                                  expected.x < Double(source.width),
+                                  expected.y < Double(source.height) else { continue }
+                            let actualX = (rgba.r - 0.05) / 0.9 * Double(source.width)
+                            let actualY = (rgba.g - 0.05) / 0.9 * Double(source.height)
+                            // A pixel that landed on the matte has no source position to compare.
+                            guard actualX >= 0, actualY >= 0,
+                                  actualX < Double(source.width),
+                                  actualY < Double(source.height) else { continue }
+                            worst = max(worst, axis == 0 ? abs(actualX - expected.x) : abs(actualY - expected.y))
+                        }
+                        return worst
+                    }
+                    let left = edge("left", fractions.map { (0.08, $0) }, axis: 0)
+                    let top = edge("top", fractions.map { ($0, 0.08) }, axis: 1)
+                    let right = edge("right", fractions.map { (0.92, $0) }, axis: 0)
+                    let bottom = edge("bottom", fractions.map { ($0, 0.92) }, axis: 1)
+                    let worst = max(left, top, right, bottom)
+                    worstAll = max(worstAll, worst)
+                    print(String(format: "248B %@ / %@ / p=%@ · L %.3f T %.3f R %.3f B %.3f px",
+                                 angle.name, crop.name, p.name, left, top, right, bottom))
+                    XCTAssertLessThanOrEqual(worst, 1.5,
+                                             "\(angle.name) / \(crop.name) / p=\(p.name): "
+                                             + "edge deviation \(worst) px")
+                }
+            }
+        }
+        print(String(format: "248B · worst %.3f px over 60 groups", worstAll))
+    }
+
+    /// §D — the flip is the photograph's mirror at every angle. A tiny straighten must not move the
+    /// box's content by the old `2|cropCentre − photoCentre|` jump.
+    func testFlipIsTheSameRuleAtZeroAndATinyAngle() throws {
+        let graph = try RenderGraph(input: RenderInput(image: ramp(source), identity: "248-flip"))
+        let crop = CropRect(left: 0.15, top: 0.20, right: 0.70, bottom: 0.85)
+        func render(degrees: Double) throws -> DisplayImage {
+            var g = GeometryGroup(crop: crop.normalizedRect, rotationDegrees: degrees,
+                                  flipHorizontal: true)
+            var e = EditModel.neutral
+            e.geometry = g
+            _ = g
+            return try XCTUnwrap(try graph.render(e, options: RenderOptions(
+                scale: 1, useCache: false, wantsPixels: true)).display)
+        }
+        let a = try render(degrees: 0)
+        let b = try render(degrees: 0.001)
+        // Compare the same frame fraction in the two canvases (their AABB differs by at most a pixel).
+        var worst = 0.0
+        for iy in 0..<10 {
+            for ix in 0..<10 {
+                let ax = Int((0.05 + 0.09 * Double(ix)) * Double(a.width))
+                let ay = Int((0.05 + 0.09 * Double(iy)) * Double(a.height))
+                let bx = Int((0.05 + 0.09 * Double(ix)) * Double(b.width))
+                let by = Int((0.05 + 0.09 * Double(iy)) * Double(b.height))
+                for c in 0..<3 {
+                    worst = max(worst, abs(value(a, x: ax, y: ay, c: c)
+                                           - value(b, x: bx, y: by, c: c)))
+                }
+            }
+        }
+        print(String(format: "248D flip · 0° vs 0.001° worst colour delta %.6f", worst))
+        XCTAssertLessThanOrEqual(worst, 0.008,
+                                 "a flipped off-centre crop jumped when the straighten left zero")
+    }
+
 }

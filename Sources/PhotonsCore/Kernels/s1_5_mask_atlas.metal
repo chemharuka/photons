@@ -160,23 +160,32 @@ static inline float2 source_uv(float2 pixel, constant MaskAtlasParams &p) {
     }
     float2 framePx = local + p.f.zw;
     float2 uv = framePx / max(p.f.xy, float2(1.0));
-    if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
-    if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
 
     float cs = p.d.x;
     float sn = p.d.y;
     float2 r;
     if (HAS_ROTATION) {
-        // The turn, in **frame pixels** — `R(θ)` applied to `uv − ½` is `rot ∘ aniso(frameSize)`, a
-        // shear, and that is the 273 px the mask used to miss by. Same expression as S0's, from the
-        // same header, so the picture and the selection cannot be turned by different maths.
-        float2 o = (uv - 0.5) * max(p.f.xy, float2(1.0));
-        float2 rotated = frame_turn_pixels(o, cs, sn);
-        r = rotated / max(p.f.xy, float2(1.0)) + 0.5;
+        // 248 E — S0 turns the **photograph** about its centre, so the atlas must walk the same
+        // pivot: `P + R(photo − P)` in turned-photo pixels (`P = orientedSource/2`). Rotating the
+        // crop frame about its own centre put the selection `(I−R)(cropCentre−photoCentre)` away
+        // from the picture under a rotation + an off-centre crop. The flip is the photo's mirror,
+        // in the same space, exactly as S0's rotating instance.
+        int turns = p.e.y;
+        float2 srcSize = p.b.zw;
+        float2 oriented = float2((turns % 2 == 1) ? srcSize.yx : srcSize);
+        float2 photo = p.c.xy + uv * p.c.zw;
+        if (p.d.z > 0.5) { photo.x = 1.0 - photo.x; }
+        if (p.d.w > 0.5) { photo.y = 1.0 - photo.y; }
+        float2 px = photo * oriented;
+        float2 pivot = oriented * 0.5;
+        float2 rotated = frame_turn_pixels(px - pivot, cs, sn) + pivot;
+        r = (rotated / max(oriented, float2(1.0)) - p.c.xy) / max(p.c.zw, float2(1e-12));
     } else {
         // No rotation is compiled into this instantiation. At θ = 0 `R(θ)·o` is `o` exactly, so this
         // is `o + ½` — the shape the recorded atlases contain, kept spelled as a turn so that the two
         // instantiations differ in exactly one thing (where the anisotropy sits) and nothing else.
+        if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
+        if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
         float2 o = uv - 0.5;
         r = float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs) + 0.5;
     }

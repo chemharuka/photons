@@ -127,7 +127,7 @@ static inline float4 to_working_primaries(float4 c, constant float4x4 &m) {
 // `HAS_ROTATION` is: the un-turn is a coordinate permutation with *no* arithmetic of its own, and a
 // branch that the compiler cannot fold would still be a branch per pixel in the hot loop. Four
 // instantiations, dispatched by `RenderGraph` on `quarterTurns != 0` × `straightenDegrees != 0`.
-template <bool HAS_ROTATION, bool HAS_TURN, bool HAS_LENS_WARP>
+template <bool HAS_ROTATION, bool HAS_TURN, bool HAS_LENS_WARP, bool HAS_FLIP>
 static inline void s0_body(texture2d<float, access::read> src,
                            texture2d<float, access::write> dst,
                            constant S0Params &p,
@@ -252,11 +252,18 @@ static inline void s0_body(texture2d<float, access::read> src,
         // separate rounding — the compiler's fast-math kernel will happily reassociate `o + ½` back
         // into `uv`, which is exactly the bug — while still keeping the *rotation* out of this
         // instantiation: no `× frameSize`, no `÷ frameSize`, no cos/sin.
-        if (p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
-        if (p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
+        if (!HAS_FLIP && p.d.z > 0.5) { uv.x = 1.0 - uv.x; }
+        if (!HAS_FLIP && p.d.w > 0.5) { uv.y = 1.0 - uv.y; }
         float2 o = uv - 0.5;
         float2 r = fma(o, float2(1.0), float2(0.5));
         cropped = p.c.xy + r * p.c.zw;
+        if (HAS_FLIP) {
+            // 248 D — one flip rule at every angle: mirror the **photograph** about its centre. This
+            // lives behind the compile-time `HAS_FLIP` so the no-flip instantiation keeps the exact
+            // pre-248 machine code (the neutral golden is byte-pinned).
+            if (p.d.z > 0.5) { cropped.x = 1.0 - cropped.x; }
+            if (p.d.w > 0.5) { cropped.y = 1.0 - cropped.y; }
+        }
     }
 
     // ── 183 · the keystone ──────────────────────────────────────────────────────────────────────
@@ -382,7 +389,7 @@ kernel void s0_geometry(texture2d<float, access::read> src [[texture(0)]],
                         constant S0Params &p [[buffer(0)]],
                         constant float4x4 &primaries [[buffer(1)]],
                         uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, false, false>(src, dst, p, primaries, gid);
+    s0_body<false, false, false, false>(src, dst, p, primaries, gid);
 }
 
 // The same body with the pixel-space turn compiled in. Picked only for a straightened document.
@@ -391,7 +398,7 @@ kernel void s0_geometry_rot(texture2d<float, access::read> src [[texture(0)]],
                             constant S0Params &p [[buffer(0)]],
                             constant float4x4 &primaries [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, false, false>(src, dst, p, primaries, gid);
+    s0_body<true, false, false, false>(src, dst, p, primaries, gid);
 }
 
 // 2026-10-28 (P0-10): the two 90° entry points. `s0_geometry_turn` is the one a rotate press takes
@@ -402,7 +409,7 @@ kernel void s0_geometry_turn(texture2d<float, access::read> src [[texture(0)]],
                              constant S0Params &p [[buffer(0)]],
                              constant float4x4 &primaries [[buffer(1)]],
                              uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, true, false>(src, dst, p, primaries, gid);
+    s0_body<false, true, false, false>(src, dst, p, primaries, gid);
 }
 
 kernel void s0_geometry_turn_rot(texture2d<float, access::read> src [[texture(0)]],
@@ -410,7 +417,7 @@ kernel void s0_geometry_turn_rot(texture2d<float, access::read> src [[texture(0)
                                  constant S0Params &p [[buffer(0)]],
                                  constant float4x4 &primaries [[buffer(1)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, true, false>(src, dst, p, primaries, gid);
+    s0_body<true, true, false, false>(src, dst, p, primaries, gid);
 }
 
 // ── 097: the per-plane lens-warp entry points ──────────────────────────────────────────────────
@@ -424,7 +431,7 @@ kernel void s0_geometry_lens(texture2d<float, access::read> src [[texture(0)]],
                              constant S0Params &p [[buffer(0)]],
                              constant float4x4 &primaries [[buffer(1)]],
                              uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, false, true>(src, dst, p, primaries, gid);
+    s0_body<false, false, true, false>(src, dst, p, primaries, gid);
 }
 
 kernel void s0_geometry_lens_rot(texture2d<float, access::read> src [[texture(0)]],
@@ -432,7 +439,7 @@ kernel void s0_geometry_lens_rot(texture2d<float, access::read> src [[texture(0)
                                  constant S0Params &p [[buffer(0)]],
                                  constant float4x4 &primaries [[buffer(1)]],
                                  uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, false, true>(src, dst, p, primaries, gid);
+    s0_body<true, false, true, false>(src, dst, p, primaries, gid);
 }
 
 kernel void s0_geometry_lens_turn(texture2d<float, access::read> src [[texture(0)]],
@@ -440,7 +447,7 @@ kernel void s0_geometry_lens_turn(texture2d<float, access::read> src [[texture(0
                                   constant S0Params &p [[buffer(0)]],
                                   constant float4x4 &primaries [[buffer(1)]],
                                   uint2 gid [[thread_position_in_grid]]) {
-    s0_body<false, true, true>(src, dst, p, primaries, gid);
+    s0_body<false, true, true, false>(src, dst, p, primaries, gid);
 }
 
 kernel void s0_geometry_lens_turn_rot(texture2d<float, access::read> src [[texture(0)]],
@@ -448,5 +455,27 @@ kernel void s0_geometry_lens_turn_rot(texture2d<float, access::read> src [[textu
                                       constant S0Params &p [[buffer(0)]],
                                       constant float4x4 &primaries [[buffer(1)]],
                                       uint2 gid [[thread_position_in_grid]]) {
-    s0_body<true, true, true>(src, dst, p, primaries, gid);
+    s0_body<true, true, true, false>(src, dst, p, primaries, gid);
 }
+
+// ── 248 D: the same eight bodies with `HAS_FLIP == true` ────────────────────────────────────────
+// A flip is a **photograph-space** mirror at every angle. It is a compile-time template parameter
+// rather than a runtime `if` inside the shared body so the no-flip entries keep the byte-pinned
+// pre-248 machine code (the neutral golden would otherwise move by an ulp).
+#define S0_FLIP_ENTRY(name, rot, turn, lens) \
+kernel void name(texture2d<float, access::read> src [[texture(0)]], \
+                 texture2d<float, access::write> dst [[texture(1)]], \
+                 constant S0Params &p [[buffer(0)]], \
+                 constant float4x4 &primaries [[buffer(1)]], \
+                 uint2 gid [[thread_position_in_grid]]) { \
+    s0_body<rot, turn, lens, true>(src, dst, p, primaries, gid); \
+}
+S0_FLIP_ENTRY(s0_geometry_flip, false, false, false)
+S0_FLIP_ENTRY(s0_geometry_rot_flip, true, false, false)
+S0_FLIP_ENTRY(s0_geometry_turn_flip, false, true, false)
+S0_FLIP_ENTRY(s0_geometry_turn_rot_flip, true, true, false)
+S0_FLIP_ENTRY(s0_geometry_lens_flip, false, false, true)
+S0_FLIP_ENTRY(s0_geometry_lens_rot_flip, true, false, true)
+S0_FLIP_ENTRY(s0_geometry_lens_turn_flip, false, true, true)
+S0_FLIP_ENTRY(s0_geometry_lens_turn_rot_flip, true, true, true)
+#undef S0_FLIP_ENTRY

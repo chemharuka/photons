@@ -690,11 +690,14 @@ final class PerspectiveTests: XCTestCase {
                                  "S0 p95 grew by \(Int((ratio - 1) * 100))% (> 20% + noise floor)")
         let keystonedSize = keystoned.geometry.outputPixels(in: ImageSize(width: image.width,
                                                                           height: image.height))
-        // The `ceil` can add at most one pixel; the canvases are the same work within that pixel.
-        XCTAssertLessThanOrEqual(abs(keystonedSize.width - image.width), 1,
-                                 "the two documents must have the same canvas width")
-        XCTAssertLessThanOrEqual(abs(keystonedSize.height - image.height), 1,
-                                 "the two documents must have the same canvas height")
+        // 248 C — P is anchored on the whole photograph now, so this historical crop (which
+        // compensated the old crop-frame anchoring) no longer lands on exactly 2048×2000. The two
+        // canvases stay within 3 % of each other, which is what keeps the comparison to the
+        // composed matrix's arithmetic rather than a different allocation size.
+        XCTAssertLessThanOrEqual(abs(keystonedSize.width - image.width), image.width / 32,
+                                 "the two documents must be the same work (width)")
+        XCTAssertLessThanOrEqual(abs(keystonedSize.height - image.height), image.height / 32,
+                                 "the two documents must be the same work (height)")
     }
 
     /// The two knobs at 0 must not change *any* of the geometry the renderer already had: the canvas,

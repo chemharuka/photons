@@ -1488,34 +1488,24 @@ public struct MaskCanvasMapping: Sendable, Equatable {
         // rect is measured in the turned frame and the masks are not, so this is what makes the two
         // meet — the host-side copy of the turn `s0_geometry` and `s1_5_mask_atlas` share
         // (`frame_unturn_uv` is this map's inverse). Skipped at 0, so the pre-9 numbers are exact.
-        let p = quarterTurns == 0 ? p : CropMath.turned(p, quarterTurns: quarterTurns)
-        // source → position inside the crop (0…1), the inverse of `src = crop.xy + r·crop.zw`.
-        let rx = (p.x - crop.left) / max(crop.width, 1e-9) - 0.5
-        let ry = (p.y - crop.top) / max(crop.height, 1e-9) - 0.5
-        // Un-rotate: `s0_geometry` now applies the **inverse** turn (`R(−θ)`, canvas → source), so the
-        // forward direction — which is what a bounds/handle map needs — is `R(+θ)`. 126: this used to
-        // be the other way round because S0 consumed `+sin`; keeping it would put every mask bound 2θ
-        // off the picture the kernel actually draws.
-        //
-        // In **pixels**, about the frame's centre — the same turn `s0_geometry` and
-        // `s1_5_mask_atlas` compile from `frame_turn.metal`. Turning `(rx, ry)` directly is
-        // `rot ∘ aniso(W/H)`: a rotation of normalised coordinates is followed by the non-uniform
-        // scale back to pixels, which is a *shear* (073's bug, and until 派单 080 the mapping the
-        // atlas still used, so this map was shearing in step with it and agreeing with the wrong
-        // answer). A bounds test that agrees with a faulty kernel is worth nothing, so this is
-        // spelled the way the shader is.
+        var p = quarterTurns == 0 ? p : CropMath.turned(p, quarterTurns: quarterTurns)
+        // 248 D/E — the kernel's forward walk is: crop window → photo normalized → flip the photo
+        // about its centre → turn the photo about its centre → source. Invert it in that order; the
+        // pivot is the **photograph's** centre, not the crop frame's, for the same reason S0's is.
+        let sx = p.x * Double(source.width), sy = p.y * Double(source.height)
         let ox: Double, oy: Double
         if rotates {
-            let fx = Double(content.width), fy = Double(content.height)
-            let px = rx * fx, py = ry * fy
-            ox = (px * cosTheta - py * sinTheta) / fx
-            oy = (px * sinTheta + py * cosTheta) / fy
+            let px = sx - Double(source.width) / 2, py = sy - Double(source.height) / 2
+            ox = (px * cosTheta - py * sinTheta + Double(source.width) / 2) / Double(source.width)
+            oy = (px * sinTheta + py * cosTheta + Double(source.height) / 2) / Double(source.height)
         } else {
-            ox = rx * cosTheta - ry * sinTheta
-            oy = rx * sinTheta + ry * cosTheta
+            ox = p.x
+            oy = p.y
         }
-        var u = ox + 0.5
-        var v = oy + 0.5
+        // The kernel flips the photo **before** the turn, so the inverse un-turns first and then
+        // un-flips (the two do not commute for an off-centre crop).
+        var u = (ox - crop.left) / max(crop.width, 1e-9)
+        var v = (oy - crop.top) / max(crop.height, 1e-9)
         if flipH { u = 1 - u }
         if flipV { v = 1 - v }
         return (u * Double(content.width) + originX - 0.5,

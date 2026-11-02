@@ -631,13 +631,23 @@ public enum CropMath {
         let c = crop.clamped(allowsOutsideSource: true)
         let pixels = outputSize(c, in: source, allowsOutsideSource: true)
         let frame = DSize(width: Double(pixels.width), height: Double(pixels.height))
-        let half = (x: frame.width / 2, y: frame.height / 2)
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
 
-        // (1) P: the crop frame's four corners in warped pixels.
-        let warped = perspective.warpedQuad().map { p in
-            (x: p.x * frame.width, y: p.y * frame.height)
+        // (1) P: the **whole photograph's** normalized domain, anchored on the crop's four corners in
+        // photo coordinates. Before 248 this warped the crop's own unit square and then scaled by the
+        // crop's pixel size, i.e. it anchored the homography on the crop frame — a picture that was
+        // keystoned differently depending on how much was cropped.
+        let cropCorners = [(c.left, c.top), (c.right, c.top),
+                           (c.right, c.bottom), (c.left, c.bottom)]
+        let warped = cropCorners.map { corner -> (x: Double, y: Double) in
+            let p = perspective.forward(x: corner.0, y: corner.1)
+            return (x: p.x * w, y: p.y * h)
         }
-        // (2) R: turn the warped pixels about the crop's centre — the same pivot S0 has always used.
+        // (2) R: turn the warped pixels about the **photograph's** centre — the same pivot as S0's
+        // non-perspective path and `LoupeMapping.sourcePoint`. The photo centre in the warped domain
+        // is the centre of the photo's own normalized square, so its pixel position is `(w/2, h/2)`;
+        // for `crop == .full` this is bit-for-bit 246's old `frame/2` (there frame == source).
+        let half = (x: w / 2, y: h / 2)
         let rotation = CropGeometry.RotationMatrix(degrees: straightenDegrees)
         let turned = warped.map { p -> (x: Double, y: Double) in
             let r = rotation.apply(x: p.x - half.x, y: p.y - half.y)
@@ -652,21 +662,18 @@ public enum CropMath {
                              height: CropGeometry.canvasPixels(extent.height))
 
         // The forward map, one factor per line of the prose above.
-        //   crop norm → warped norm             P
-        //   warped norm → warped px             diag(frame)
+        //   photo norm → warped norm            P
+        //   warped norm → warped px             diag(photo)
         //   warped px → turned px               T(+½) · R · T(−½)
         //   turned px → canvas px               T(−AABB origin)
         //   canvas px → canvas norm             diag(1/extent)
-        let toPixels = diag(frame.width, frame.height)
+        let toPixels = diag(w, h)
         let turn = translation(half.x, half.y)
             * rotationMatrix(rotation)
             * translation(-half.x, -half.y)
         let toCanvas = diag(1 / extent.width, 1 / extent.height)
             * translation(-minX, -minY)
-        // photo norm → crop norm: `u = (photo − crop.origin) / crop.size`
-        let fromPhoto = diag(1 / max(c.width, 1e-12), 1 / max(c.height, 1e-12))
-            * translation(-c.left, -c.top)
-        let forward = toCanvas * turn * toPixels * perspective.forwardMatrix * fromPhoto
+        let forward = toCanvas * turn * toPixels * perspective.forwardMatrix
         let sampling = PerspectiveMap.invert(forward)
         return PerspectiveCanvas(size: size, extent: extent,
                                  originX: minX, originY: minY, frame: frame,
