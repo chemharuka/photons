@@ -263,6 +263,19 @@ public struct RenderOptions: Sendable {
     /// with `useCache = false`. Never set by the app, never part of a key.
     var reuseDehazeStatistics: Bool = false
 
+    /// 256 — stop the pipeline **before** this stage's position and hand back the texture the
+    /// previous stage wrote, instead of running to S4. `nil` is every ordinary render.
+    ///
+    /// It is a *position*, not a stage membership: a document without `.pointColour` still stops
+    /// where that stage would have been (the first stage at or after the cutoff, or the end of the
+    /// pipeline). The point-colour dropper uses it to ask for exactly the bytes S3.6b reads, in the
+    /// working (display-linear) primaries, without a second whole-frame render.
+    ///
+    /// A stopped render **reads** the document-level caches (contrast maps, dehaze statistics) but
+    /// never writes or resumes the frame's stage cache: it is a 1×1 probe, and its keys belong to a
+    /// canvas the next frame must not inherit. Never part of a key.
+    public var stopBefore: RenderStage?
+
     public init(canvas: ImageSize? = nil,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
@@ -283,7 +296,8 @@ public struct RenderOptions: Sendable {
                 probesDehazeAirlight: Bool = false,
                 legacyDehazePerChannel: Bool = false,
                 legacyDehazeBlockVeil: Bool = false,
-                legacyDehazeUnboundedRecovery: Bool = false) {
+                legacyDehazeUnboundedRecovery: Bool = false,
+                stopBefore: RenderStage? = nil) {
         self.canvas = canvas
         self.scale = scale
         self.outputWindow = outputWindow
@@ -305,6 +319,7 @@ public struct RenderOptions: Sendable {
         self.legacyDehazePerChannel = legacyDehazePerChannel
         self.legacyDehazeBlockVeil = legacyDehazeBlockVeil
         self.legacyDehazeUnboundedRecovery = legacyDehazeUnboundedRecovery
+        self.stopBefore = stopBefore
     }
 }
 
@@ -621,6 +636,12 @@ public final class RenderResult {
     /// The part of the frame these pixels are, in content pixels of the full frame at this render's
     /// `scale`; the whole frame when no window was asked for.
     public let window: ImageRect
+    /// The window the caller actually got after normalization (`nil` = the whole baseline frame).
+    ///
+    /// `window` cannot say this: it is a non-optional rect and reads the same for "no window" and
+    /// "a window that happens to cover the whole frame". 256's point-colour probe needs the
+    /// distinction to turn a canvas texel into a content pixel.
+    public let outputWindow: ImageRect?
     public let keys: StageKeys
     public let trace: RenderTrace
     /// Present when `RenderOptions.wantsPixels` was set.
@@ -669,7 +690,7 @@ public final class RenderResult {
     public let whiteBalanceGain: SIMD3<Double>
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, canvasRect: ImageRect? = nil,
-         window: ImageRect,
+         window: ImageRect, outputWindow: ImageRect? = nil,
          keys: StageKeys, trace: RenderTrace, display: DisplayImage?, output: MTLTexture?,
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
@@ -683,6 +704,7 @@ public final class RenderResult {
         self.canvasRect = canvasRect ?? drawnRect
 
         self.window = window
+        self.outputWindow = outputWindow
         self.keys = keys
         self.trace = trace
         self.display = display
@@ -2180,6 +2202,13 @@ public final class RenderGraph {
         // parameters-cleared document instead, which is the refutation.
         let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
+        // 256 — a stopped probe may need a mask atlas of its own 1×1 canvas, but it must not evict
+        // the full-frame atlas the presented frame's next edit will reuse. The local stage reads
+        // `atlasCache` (the shipped path's one slot), so the probe points it at its own texture for
+        // the duration of this render and puts the real entry back on every exit.
+        let isProbe = options.stopBefore != nil
+        let savedAtlasCache = atlasCache
+        defer { if isProbe { atlasCache = savedAtlasCache } }
         // 143b — the gain is computed **once** for the frame, and both the S1 params and the result
         // carry it. The preview renders a document whose pair is the drag's target, so the two paths
         // cannot disagree about the numbers they applied.
@@ -2262,13 +2291,18 @@ public final class RenderGraph {
         // Both halves are gated on `useCache`, so a cache-off frame runs exactly the code it ran before
         // 081: not a comparison, not a concatenation. That is what keeps the cold number a number this
         // change cannot move.
-        let compositeStage = options.useCache
+        //
+        // 256 — a `stopBefore` render is a 1×1 probe: it may **read** the document-level statistic
+        // caches (contrast maps, dehaze statistics) but must never read or write the frame's stage
+        // cache, whose entries belong to the canvas on screen.
+        let usesStageCache = options.useCache && options.stopBefore == nil
+        let compositeStage = usesStageCache
             ? stages.last { RenderGraph.ownsGenericCacheEntry($0) } : nil
         let compositeKey = compositeStage.map {
             compositeKey(edit, plan, stage: $0, tilingSuffix: tilingSuffix, semanticSuffix: semanticSuffix)
         }
         var firstStage = 0
-        if options.useCache, let compositeStage, let compositeKey,
+        if usesStageCache, let compositeStage, let compositeKey,
            let entry = cache[compositeStage], entry.resumeKey == compositeKey,
            entry.texture.width == plan.canvas.width, entry.texture.height == plan.canvas.height,
            // `showMask` draws from the atlas S1.5 built; a resume would start after it.
@@ -2288,6 +2322,13 @@ public final class RenderGraph {
             }
         }
         for stage in stages[firstStage...] {
+            // 256 — the point-colour dropper asks for the bytes S3.6b reads. The cutoff is a
+            // *position*: a document without a `.pointColour` stage still stops where it would have
+            // been, so the probe never accidentally runs S4.
+            if let cutoff = options.stopBefore, stage.index >= cutoff.index {
+                finish = current
+                break
+            }
             // The environment suffix has to reach **every** stage the atlas feeds, not just the two
             // mask stages: the document's key chain cannot know that a matte appeared (it is not in
             // the document), so a downstream cache hit would otherwise hand back a frame computed
@@ -2302,7 +2343,7 @@ public final class RenderGraph {
             // reach S1's texture and skip the pass; a red one moves `boff`/`blL`/`whL` and misses.
             if stage == .sceneLinear {
                 let s1Key = self.s1Key(edit, plan)
-                if options.useCache, let e = s1Entry, e.key == s1Key,
+                if usesStageCache, let e = s1Entry, e.key == s1Key,
                    e.texture.width == plan.canvas.width, e.texture.height == plan.canvas.height {
                     trace.record(stage, executed: false)
                     current = e.texture
@@ -2318,7 +2359,7 @@ public final class RenderGraph {
                 // P1b: S1's input is consumed — a one-shot graph gives it back before the next
                 // `obtain`, so the export's frame textures do not accumulate.
                 if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
-                if options.useCache {
+                if usesStageCache {
                     // The old texture goes back **after** the new one is in hand, so a failed
                     // allocation cannot leave the slot pointing at a recycled texture.
                     if let old = s1Entry, old.texture !== out { pool.recycle(old.texture) }
@@ -2343,7 +2384,7 @@ public final class RenderGraph {
                 let applyKeys = Dictionary(uniqueKeysWithValues: edit.activeMasks.map { ($0.id, $0.applyKey) })
 
                 // (a) nothing moved: the whole stage is a hit.
-                if options.useCache, let e = localEntry, e.key == localKey,
+                if usesStageCache, let e = localEntry, e.key == localKey,
                    e.texture.width == plan.canvas.width, e.texture.height == plan.canvas.height {
                     trace.record(stage, executed: false)
                     if report != nil {
@@ -2359,7 +2400,7 @@ public final class RenderGraph {
                 // (b) only some `applyKey`s moved and the selection did not: rewrite just those
                 // masks' bounds inside the cached texture. This is the case a slider drag produces
                 // hundreds of times per second, and the only one where tiling is a win.
-                if options.useCache, options.maskTiling != .off, let e = localEntry,
+                if usesStageCache, options.maskTiling != .off, let e = localEntry,
                    e.atlasKey == atlasKey,
                    e.texture.width == plan.canvas.width, e.texture.height == plan.canvas.height,
                    let incremental = incrementalTilePlan(previous: e, applyKeys: applyKeys,
@@ -2386,7 +2427,7 @@ public final class RenderGraph {
                 trace.record(stage, executed: true)
                 if report != nil { report?.localPlan = tilePlan }
                 if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
-                if options.useCache {
+                if usesStageCache {
                     if let old = localEntry, old.texture !== out { pool.recycle(old.texture) }
                     localEntry = LocalEntry(atlasKey: atlasKey, applyKeys: applyKeys, key: localKey,
                                             texture: out, bounds: localBounds(edit: edit, plan: plan))
@@ -2402,14 +2443,15 @@ public final class RenderGraph {
             // pipeline image: it is the predicate every later consumer reads, so it is cached on its
             // own and `current` keeps pointing at S1's output.
             if stage == .maskAtlas {
-                if options.useCache, let hit = atlasCache, hit.key == key {
+                if usesStageCache, let hit = atlasCache, hit.key == key {
                     trace.record(stage, executed: false)
                     continue
                 }
                 guard let table else {
                     throw RenderError.executeFailed("mask stage present without a mask table")
                 }
-                let atlas = try atlasTexture(for: table, size: plan.canvas)
+                let atlas = try atlasTexture(for: table, size: plan.canvas,
+                                             cache: options.stopBefore == nil)
                 let stageReport = try encodeAtlas(cb: cb, into: atlas, from: current, table: table,
                                                   plan: plan, edit: edit, semantics: semantics)
                 if report != nil {
@@ -2422,13 +2464,15 @@ public final class RenderGraph {
                     report?.atlasCanvasPixels = stageReport.atlasCanvasPixels
                 }
                 trace.record(stage, executed: true)
+                // The probe assigns its own 1×1 atlas so S1.6 can read it; `renderResolved`'s
+                // deferred restore puts the frame's entry back on the way out.
                 atlasCache = AtlasEntry(key: key, texture: atlas, ids: table.ids)
                 continue
             }
 
             // S4 is never cached: its output is handed to the caller (or read back), so it must not
             // be a texture the pool or the cache could later reuse.
-            if stage != .display, options.useCache, let hit = cache[stage], hit.key == key {
+            if stage != .display, usesStageCache, let hit = cache[stage], hit.key == key {
                 trace.record(stage, executed: false)
                 touchCache(stage)
                 current = hit.texture
@@ -2439,7 +2483,8 @@ public final class RenderGraph {
             // The histogram reads what S4 is about to read: scene-linear RGB after S2/S3, before the
             // primaries matrix, the transfer function and the headroom clamp. Captured here rather
             // than looked up afterwards because S4's output is the only texture a caller ever sees.
-            if stage == .display, options.collectHistogram || options.histogramSampleLongEdge > 0 {
+            if stage == .display, options.stopBefore == nil,
+               options.collectHistogram || options.histogramSampleLongEdge > 0 {
                 histogramSource = current
             }
 
@@ -2455,7 +2500,7 @@ public final class RenderGraph {
             let readAfterCommit = histogramSource.map { $0 === consumed } ?? false
             if recyclesEachStage, consumedIsTransient, !readAfterCommit { pool.recycle(consumed) }
 
-            if options.useCache && stage != .display {
+            if usesStageCache && stage != .display {
                 insertCache(stage, key: key, texture: out,
                             resumeKey: stage == compositeStage ? compositeKey : nil)
                 currentIsTransient = false
@@ -2487,7 +2532,8 @@ public final class RenderGraph {
         /// being presented, and the readback then reads the grid instead of the frame. Deferring the
         /// recycle is what makes the frame's own recycles independent of the encoders' order.
         var finishedReading: [MTLTexture] = []
-        if !decodeOnly, let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
+        if options.stopBefore == nil, !decodeOnly,
+           let wanted = edit.showMaskID, let atlas = atlasCache, let shown = finish,
            let slice = atlas.ids.firstIndex(of: wanted) {
             // P1e — the key this pass's output is a function of. `compositeKey` is the resume key of the
             // last stage above S4 (081): when it matches, every stage upstream of S4 would have been a
@@ -2708,6 +2754,12 @@ public final class RenderGraph {
             }
         }
 
+        // A stopped probe's output is the stage before the cutoff — a transient in the usual walk,
+        // but it is what this render **returns**, so it must not go back to the pool with the rest of
+        // the intermediates. (The display path never has this problem: S4's output is not transient.)
+        if let finish, let i = transient.firstIndex(where: { $0 === finish }) {
+            transient.remove(at: i)
+        }
         for t in transient { pool.recycle(t) }
 
 
@@ -2720,7 +2772,8 @@ public final class RenderGraph {
             if showMaskEntry?.texture !== finalTexture { pool.recycle(finalTexture) }
             return RenderResult(canvas: plan.canvas, content: plan.content,
                                 drawnRect: plan.drawnRect, canvasRect: plan.canvasRect,
-                                window: plan.windowRect, keys: plan.keys,
+                                window: plan.windowRect, outputWindow: plan.window,
+                                keys: plan.keys,
                                 trace: trace, display: pixels, output: nil, maskReport: report,
                                 showsMask: showsMask, histogram: histogramPayload,
                                 histogramMilliseconds: histogramMilliseconds,
@@ -2730,13 +2783,51 @@ public final class RenderGraph {
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect, canvasRect: plan.canvasRect,
-                            window: plan.windowRect, keys: plan.keys,
+                            window: plan.windowRect, outputWindow: plan.window,
+                            keys: plan.keys,
                             trace: trace, display: nil, output: finalTexture, maskReport: report,
                             showsMask: showsMask, histogram: histogramPayload,
                             histogramMilliseconds: histogramMilliseconds,
                             histogramSample: histogramSample,
                             histogramCost: histogramCost,
                             whiteBalanceGain: appliedWhiteBalance)
+    }
+
+    /// 256 — the **S3.6b input** at one content pixel, as working-primaries linear light.
+    ///
+    /// The point-colour dropper needs the pixel the kernel is about to read, not the decoded buffer
+    /// and not S4's clamped output. There is no retained S3.6b texture (a frame gives its
+    /// intermediates back to the pool), so this runs a **1 × 1 window** through the pipeline and
+    /// stops before `.pointColour`: S0 → … → S3.6, one texel, no whole-frame render and no decode.
+    ///
+    /// `contentPixel` is in the render's own content grid at `scale` (the unit
+    /// `RenderOptions.outputWindow` uses); the caller derives it from the presented frame's
+    /// `outputWindow`/`drawnRect`, never from a second view↔frame conversion. `scale` is the
+    /// displayed frame's `zoom / decodeScale`, so the probe samples the same source pixel the frame
+    /// did.
+    ///
+    /// Returns `nil` when the probe canvas is not `rgba16Float` or the render failed. The texture is
+    /// handed back to the pool before this returns.
+    public func samplePointColorInput(_ edit: EditModel,
+                                      contentPixel: (x: Int, y: Int),
+                                      scale: Double) throws -> RGBSample? {
+        let window = ImageRect(x: contentPixel.x, y: contentPixel.y, width: 1, height: 1)
+        let options = RenderOptions(scale: scale, outputWindow: window,
+                                    useCache: true, wantsPixels: false,
+                                    stopBefore: .pointColour)
+        let result = try render(edit, options: options)
+        guard let texture = result.output else { return nil }
+        defer { recycle(output: texture) }
+        guard texture.pixelFormat == .rgba16Float,
+              texture.width >= 1, texture.height >= 1 else { return nil }
+        var raw = [UInt16](repeating: 0, count: 4)
+        raw.withUnsafeMutableBytes { buffer in
+            texture.getBytes(buffer.baseAddress!,
+                             bytesPerRow: 4 * MemoryLayout<UInt16>.size,
+                             from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0)
+        }
+        func channel(_ i: Int) -> Double { Double(Float16(bitPattern: raw[i])) }
+        return RGBSample(r: channel(0), g: channel(1), b: channel(2))
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
@@ -4037,6 +4128,7 @@ public final class RenderGraph {
         proxyOptions.wantsPixels = false
         proxyOptions.useCache = false
         proxyOptions.collectHistogram = false
+        proxyOptions.stopBefore = nil
         proxyOptions.probesDehazeAirlight = false   // never touch this frame's probe
         // 160 — this prefix re-renders `.dehaze` at another rung. The statistics proxy is canonical
         // (512, whole picture), so its entry is the same one the frame already (or will) use; reuse
@@ -5095,6 +5187,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         proxyOptions.wantsPixels = false
         proxyOptions.useCache = false
         proxyOptions.collectHistogram = false
+        proxyOptions.stopBefore = nil
         proxyOptions.probesDehazeAirlight = false   // never touch this frame's probe
         let proxyPlan = self.plan(edit, proxyOptions)
         // The proxy canvas is the stage input's own grid at the canonical rung. At θ = 0 it is the
@@ -5881,9 +5974,10 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         return b
     }
 
-    private func atlasTexture(for table: MaskTable, size: ImageSize) throws -> MTLTexture {
+    private func atlasTexture(for table: MaskTable, size: ImageSize,
+                              cache: Bool = true) throws -> MTLTexture {
         let key = "\(size.keyString)x\(table.ids.count)"
-        if let hit = atlasPool, hit.key == key { return hit.texture }
+        if cache, let hit = atlasPool, hit.key == key { return hit.texture }
 
         let desc = MTLTextureDescriptor()
         desc.textureType = .type2DArray
@@ -5897,7 +5991,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         guard let t = device.makeTexture(descriptor: desc) else {
             throw RenderError.allocationFailed("mask atlas \(key)")
         }
-        atlasPool = (key, t)
+        if cache { atlasPool = (key, t) }
         return t
     }
 

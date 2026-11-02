@@ -971,25 +971,29 @@ public struct InspectorView: View {
         }
         pointDropperArmed = true
         pointHint = "点击画布上要调的颜色…"
-        loupe.armEyedropper { outcome in applyPointColorDropper(outcome) }
+        loupe.armPointColorEyedropper { outcome in applyPointColorDropper(outcome) }
     }
 
     /// The dropper's answer: one sample = one appended swatch = one history row. It writes only the
     /// YUV sample (`PointColorCommands`), never an adjustment, so an empty document's frame does not
     /// move. A too-pale pixel is refused by the model, with the user's own wording in the card.
-    private func applyPointColorDropper(_ outcome: LoupeController.DropperOutcome) {
+    ///
+    /// 256: the sample is **S3.6b's input**, one pixel of the frame on screen. The hint says so, so
+    /// the new behaviour is distinguishable from the old decode-buffer reading.
+    private func applyPointColorDropper(_ outcome: LoupeController.PointColorDropperOutcome) {
         switch outcome {
         case .sampled(let sample):
             pointDropperArmed = false
-            switch PointColorCommands(session: session).sample(sample.rgb) {
+            switch PointColorCommands(session: session).sampleForPointColor(workingLinear: sample.rgb) {
             case .appended(let index):
                 let stored = session.edit.color.point?.swatches.indices.contains(index) == true
                     ? session.edit.color.point?.swatches[index] : nil
                 if let stored {
-                    pointHint = String(format: "已吸取 色框 %d · H %.0f° · C %.3f",
-                                       index + 1, stored.sampleHue, stored.sampleChroma)
+                    pointHint = String(format: "已吸取 色框 %d · H %.0f° · C %.3f · %@",
+                                       index + 1, stored.sampleHue, stored.sampleChroma,
+                                       outcome.hint)
                 } else {
-                    pointHint = "已吸取 色框 \(index + 1)"
+                    pointHint = "已吸取 色框 \(index + 1) · " + outcome.hint
                 }
             case .rejectedLowChroma:
                 pointHint = "这里几乎没有颜色，换个位置点"

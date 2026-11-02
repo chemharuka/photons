@@ -44,6 +44,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// clear colour `#0F0F0F` — 「旋转后缩小，画布外的遮罩侵入了画布」. Equal to `photoRect` at
         /// every right angle and at 适应, where the picture *is* the whole canvas.
         public let presentRect: ImageRect
+        /// The output window this frame was rendered for, in **content pixels** of the whole frame
+        /// (`RenderResult.outputWindow`); `nil` when the frame is the whole picture. The point-colour
+        /// probe needs it to turn the canvas texel under the click into the render's content pixel.
+        public let outputWindow: ImageRect?
         public let decodeScale: Float
         public let decodeMilliseconds: Double
         public let renderMilliseconds: Double
@@ -51,6 +55,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let capabilities: DecoderCapabilities?
         public let primaries: OutputPrimaries
         public let editRevision: Int
+        /// The document this frame was rendered from. 256's point-colour probe re-runs the pipeline
+        /// with **this** edit, not a newer one the session may already hold: the answer must describe
+        /// the frame on screen.
+        public let edit: EditModel
         /// SHA-256 of the presented pixels, captured before the texture goes back to the pool.
         /// Only computed when `hashesFrames` is on (it costs a 16-bit readback), which is how
         /// `--ui-smoke` asserts "undo returned to the previous pixels" rather than "a frame arrived".
@@ -2631,12 +2639,62 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
     }
 
-    /// True between arming the tool and the disarming sample (white balance) or until Esc / the
-    /// inspector's toggle (mask pickers, `staysArmed`).
+    // MARK: - 256 point-colour dropper (S3.6b input, one pixel)
+
+    /// One point-colour probe: the pixel **S3.6b is about to read**, in linear working primaries.
+    ///
+    /// `rgb` is not a decoded-buffer sample. It is the output of the last stage before
+    /// `.pointColour` (S1/S2/S3.4/S3.5/S3.6, whichever the document has), read from a 1 × 1 probe
+    /// at the clicked pixel. The card converts it with `PointColor.sampleYUV(fromWorkingLinear:)`,
+    /// the same conversion the kernel applies.
+    public struct PointColorDropperSample: Equatable, Sendable {
+        /// The pixel inside the render's own content grid at the frame's scale.
+        public let contentX: Int
+        public let contentY: Int
+        public let rgb: RGBSample
+        /// Wall time of the 1 × 1 probe (render + readback), in milliseconds.
+        public let milliseconds: Double
+
+        public var text: String {
+            String(format: "读数 1 px · S3.6b 输入 · @%d,%d · RGB %@",
+                   contentX, contentY, rgb.text)
+        }
+    }
+
+    /// What one point-colour click produced. Deliberately a separate type from `DropperOutcome`:
+    /// white balance reads the decode, point colour reads S3.6b's input, and the two must not be
+    /// interchangeable by accident.
+    public enum PointColorDropperOutcome: Equatable, Sendable {
+        case sampled(PointColorDropperSample)
+        case outsideImage
+        case notReady
+
+        public var hint: String {
+            switch self {
+            case .sampled: return "读数 1 px · S3.6b 输入"
+            case .outsideImage: return "点在照片外（letterbox），未取样"
+            case .notReady: return "画面尚未就绪，未取样"
+            }
+        }
+    }
+
+    /// True between arming the tool and the disarming sample (white balance / point colour) or
+    /// until Esc / the inspector's toggle (mask pickers, `staysArmed`).
     public private(set) var isEyedropperArmed = false
-    private var eyedropperHandler: ((DropperOutcome, Bool) -> Void)?
-    /// False for the white-balance one-shot; true for the mask pickers, which keep sampling until
-    /// Esc / the inspector's toggle / a photo switch (多采样点 needs more than one click).
+    /// The armed tool's own handler. Two cases because the two samplers read different domains
+    /// (256): white balance reads the decode, point colour reads S3.6b's input.
+    private enum EyedropperRoute {
+        case whiteBalance((DropperOutcome, Bool) -> Void)
+        case pointColor((PointColorDropperOutcome) -> Void)
+    }
+    private var eyedropperRoute: EyedropperRoute?
+    /// 256 — how many 1 × 1 point-colour probes have run, and how long the last one took. The cost
+    /// gate is asserted from these numbers rather than from a stopwatch around the click (the queue
+    /// wait is not the probe).
+    public private(set) var pointColorProbeCount = 0
+    public private(set) var lastPointColorProbeMilliseconds: Double = 0
+    /// False for the one-shot droppers; true for the mask pickers, which keep sampling until Esc /
+    /// the inspector's toggle / a photo switch (多采样点 needs more than one click).
     private var eyedropperStaysArmed = false
 
     /// Arm the one-shot picker. The next click on the canvas samples and disarms; a click that lands
@@ -2650,7 +2708,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                               _ handler: @escaping (DropperOutcome, Bool) -> Void) {
         isEyedropperArmed = true
         eyedropperStaysArmed = staysArmed
-        eyedropperHandler = handler
+        eyedropperRoute = .whiteBalance(handler)
         refreshEyedropperCursor()
     }
 
@@ -2659,12 +2717,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
         armEyedropper(staysArmed: false) { outcome, _ in handler(outcome) }
     }
 
+    /// 256 — arm the **point-colour** dropper. It samples S3.6b's input, not the decode buffer, so
+    /// it has its own route and its own outcome type; arming it disarms any other eyedropper.
+    public func armPointColorEyedropper(_ handler: @escaping (PointColorDropperOutcome) -> Void) {
+        isEyedropperArmed = true
+        eyedropperStaysArmed = false
+        eyedropperRoute = .pointColor(handler)
+        refreshEyedropperCursor()
+    }
+
     /// Esc, or the inspector's toggle going off.
     public func cancelEyedropper() {
         guard isEyedropperArmed else { return }
         isEyedropperArmed = false
         eyedropperStaysArmed = false
-        eyedropperHandler = nil
+        eyedropperRoute = nil
         refreshEyedropperCursor()
     }
 
@@ -2676,27 +2743,43 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// call it directly (there is no window in `swift test`).
     ///
     /// Returns `nil` when the tool is not armed — a plain click on the canvas is a pan, not a probe.
+    /// A **point-colour** click also returns `nil` (its answer belongs to `PointColorDropperOutcome`;
+    /// the inspector receives it through the armed closure).
     @discardableResult
     public func handleEyedropperClick(atViewPoint point: CGPoint,
                                       option: Bool = false) -> DropperOutcome? {
-        guard isEyedropperArmed, let handler = eyedropperHandler else { return nil }
-        let outcome = samplePixel(atViewPoint: point)
-        if case .sampled = outcome, !eyedropperStaysArmed {
-            isEyedropperArmed = false      // one-shot: Lightroom's dropper is a click, not a mode
-            eyedropperHandler = nil
-            refreshEyedropperCursor()
+        guard isEyedropperArmed, let route = eyedropperRoute else { return nil }
+        switch route {
+        case .whiteBalance(let handler):
+            let outcome = sampleForWhiteBalance(atViewPoint: point)
+            if case .sampled = outcome, !eyedropperStaysArmed {
+                isEyedropperArmed = false  // one-shot: Lightroom's dropper is a click, not a mode
+                eyedropperRoute = nil
+                refreshEyedropperCursor()
+            }
+            handler(outcome, option)
+            return outcome
+        case .pointColor(let handler):
+            let outcome = sampleForPointColor(atViewPoint: point)
+            if case .sampled = outcome {
+                isEyedropperArmed = false
+                eyedropperRoute = nil
+                refreshEyedropperCursor()
+            }
+            handler(outcome)
+            return nil
         }
-        handler(outcome, option)
-        return outcome
     }
 
-    /// Read the buffer pixel under a view point (points, y down).
+    /// Read the buffer pixel under a view point (points, y down) for the **white-balance** dropper.
     ///
-    /// `viewport`/`backingScale` exist for the tests: without a window the canvas has no backing
-    /// scale, and a probe must still be able to say "this point, in this frame".
-    public func samplePixel(atViewPoint point: CGPoint,
-                            viewport: ImageSize? = nil,
-                            backingScale scaleOverride: Double? = nil) -> DropperOutcome {
+    /// This is deliberately the **decode domain**: the white balance solves an illuminant from the
+    /// light the file recorded, before S0–S4 (crop, tone map, output primaries). Point colour must
+    /// not use it — 256 split the two paths into `sampleForWhiteBalance` and
+    /// `sampleForPointColor`.
+    public func sampleForWhiteBalance(atViewPoint point: CGPoint,
+                                      viewport: ImageSize? = nil,
+                                      backingScale scaleOverride: Double? = nil) -> DropperOutcome {
         guard let image = decoded else { return .notReady }
         guard let framing = framing(viewport: viewport) else { return .notReady }
         let scale = scaleOverride ?? backingScale
@@ -2722,6 +2805,75 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return .sampled(DropperSample(sourceX: source.x, sourceY: source.y,
                                       bufferX: bx, bufferY: by, decodeScale: ds,
                                       rgb: image.averageRGB(x: bx, y: by)))
+    }
+
+    /// The pre-256 spelling, kept because the white-balance dropper and its tests call it. It is the
+    /// **white-balance** path, not a shared one: point colour has its own `sampleForPointColor`.
+    public func samplePixel(atViewPoint point: CGPoint,
+                            viewport: ImageSize? = nil,
+                            backingScale scaleOverride: Double? = nil) -> DropperOutcome {
+        sampleForWhiteBalance(atViewPoint: point, viewport: viewport,
+                              backingScale: scaleOverride)
+    }
+
+    /// 256 — the point-colour dropper: **one pixel of the frame on screen, at S3.6b's input**.
+    ///
+    /// The click is resolved to a texel of the presented frame (the same `textureTexel` the pointer
+    /// readout uses), then to the render's own content pixel through the frame's `outputWindow` /
+    /// `drawnRect`. The probe re-runs the pipeline for that **one** pixel and stops before
+    /// `.pointColour`, so the answer includes S1/S2/S3.4/S3.5/S3.6 exactly as the kernel will see
+    /// them — and costs no whole-frame render and no decode.
+    ///
+    /// It deliberately does **not** fall back to `decoded`: a frame that is not ready reports
+    /// `.notReady`.
+    public func sampleForPointColor(atViewPoint point: CGPoint) -> PointColorDropperOutcome {
+        guard graph != nil, let frame = lastFrame else { return .notReady }
+        if case .edited = frame.mode {} else { return .notReady }
+        guard let texel = textureTexel(forViewPoint: point) else { return .outsideImage }
+        let picture = frame.photoRect
+        guard texel.x >= picture.x, texel.y >= picture.y,
+              texel.x < picture.maxX, texel.y < picture.maxY else { return .outsideImage }
+
+        // A windowed frame's texture is the window, whose origin is `outputWindow` in the whole
+        // frame's content pixels. A whole-frame texture is the letterboxed canvas, so the picture's
+        // own origin is what turns the texel into a content pixel.
+        let content: (x: Int, y: Int)
+        if let window = frame.outputWindow {
+            content = (window.x + texel.x, window.y + texel.y)
+        } else {
+            content = (texel.x - picture.x, texel.y - picture.y)
+        }
+
+        let ds = Double(frame.decodeScale)
+        guard ds.isFinite, ds > 0, frame.zoom > 0 else { return .notReady }
+        let scale = frame.zoom / ds
+        guard let probed = probePointColorInput(contentX: content.x, contentY: content.y,
+                                                scale: scale, edit: frame.edit) else {
+            return .notReady
+        }
+        return .sampled(PointColorDropperSample(contentX: content.x, contentY: content.y,
+                                                rgb: probed.rgb,
+                                                milliseconds: probed.milliseconds))
+    }
+
+    /// Run the 1 × 1 probe on the render queue (the graph is not safe to call from two threads).
+    /// Clicks are user-paced, so waiting one frame's worth of queue is the honest cost of "read the
+    /// frame that is actually on screen"; the probe itself is a tiny render, not a frame.
+    private func probePointColorInput(contentX: Int, contentY: Int, scale: Double,
+                                      edit: EditModel) -> (rgb: RGBSample, milliseconds: Double)? {
+        guard let graph else { return nil }
+        var result: RGBSample?
+        var milliseconds = 0.0
+        queue.sync {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            result = try? graph.samplePointColorInput(edit, contentPixel: (x: contentX, y: contentY),
+                                                      scale: scale)
+            milliseconds = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        }
+        pointColorProbeCount += 1
+        lastPointColorProbeMilliseconds = milliseconds
+        guard let result else { return nil }
+        return (result, milliseconds)
     }
 
     /// 236 — the **native** eyedropper probe: the file and the uncropped upright source pixel.
@@ -4440,6 +4592,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         present(frame: frame, renderMilliseconds: 0, state: state ?? viewState)
     }
 
+    /// 256 test seam — install the frame the loupe should treat as "on screen" without a Metal
+    /// drawable. The point-colour probe reads `lastFrame` (the presented frame), and a headless test
+    /// has no layer that can accept a present; this is the same value `present` stores on success.
+    func installFrameForTesting(_ frame: FrameResult) {
+        lastFrame = frame
+    }
+
     // MARK: pan / pinch render loop (single-flight)
 
     /// A pan/zoom request. Collapsed like the edit path: at most one frame in flight, and the newest
@@ -5912,10 +6071,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let shotForFrame = mode == .original ? originalShot : editedShot
         return FrameResult(texture: texture, canvas: drawing.canvas, content: drawing.content,
                            photoRect: photoRect, presentRect: presentRect,
+                           outputWindow: drawing.outputWindow,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
                            capabilities: decodedCaps, primaries: primaries,
-                           editRevision: session?.editRevision ?? 0, displayHash: hash,
+                           editRevision: session?.editRevision ?? 0, edit: model,
+                           displayHash: hash,
                            zoom: shotForFrame.projected.zoom(of: state), headroom: ceiling,
                            window: shotForFrame.pixels,
                            clipped: clipped,
