@@ -1087,7 +1087,8 @@ private struct DisplayParams {
 /// offset scaled by the frame's short edge (`HealSpotU` in the kernel's own words).
 private struct HealSpotU {
     var a: SIMD4<Float>   // centerCanvas.xy, radiusPx, feather
-    var b: SIMD4<Float>   // offsetCanvas.xy, opacity, mode (0 heal, 1 clone)
+    var b: SIMD4<Float>   // offsetCanvas.xy, opacity, mode (0 heal, 1 clone, 2 redeye)
+    var c: SIMD4<Float>   // 229 red gate: threshold, softness, 0, 0 (display-encoded redness)
 }
 
 private struct HealParamsU {
@@ -3264,11 +3265,15 @@ public final class RenderGraph {
             let c = base + SIMD2<Float>(Float(spot.center.x) * plan.frameSize.x,
                                         Float(spot.center.y) * plan.frameSize.y)
             let r = Float(spot.clampedRadius) * shortEdge
+            // 229: red-eye is a third mode, not a second code path — it is `heal` plus the red gate
+            // in `s1_9_heal_apply`. `.heal`/`.clone` keep their pre-229 mode numbers byte for byte.
+            let mode: Float = spot.kind == .redeye ? 2 : (spot.mode == .clone ? 1 : 0)
             return HealSpotU(a: SIMD4(c.x, c.y, max(r, 0.5), Float(spot.feather)),
                              b: SIMD4(Float(spot.sourceOffset.x) * shortEdge,
                                       Float(spot.sourceOffset.y) * shortEdge,
                                       Float(spot.opacity),
-                                      spot.mode == .clone ? 1 : 0))
+                                      mode),
+                             c: SIMD4(Float(spot.redThreshold), Float(spot.redSoftness), 0, 0))
         }
     }
 

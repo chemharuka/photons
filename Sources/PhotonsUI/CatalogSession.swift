@@ -204,6 +204,36 @@ public final class CatalogSession {
     /// Mode of the next spot.
     public var healMode: HealMode = .heal
 
+    // MARK: view state — 229 红眼
+    //
+    // Same rule as the heal view state above: none of this is in the document, a snapshot or a
+    // cache key. The spots themselves are.
+
+    /// 修复 / 红眼 — what the next canvas click means.
+    public var healToolMode: HealToolMode = .heal
+
+    /// The red-eye search radius, in **view points** (the card's 0.5…8 pt slider). The controller
+    /// converts it to short-edge units with the live projection, so it means the same distance on
+    /// screen at fit and at 1:1.
+    public var redEyeRadiusPoints: Double = RedEye.defaultRadiusPoints
+
+    /// 0…1 — the spot's opacity, shown as 0…100 in the card.
+    public var redEyeStrength: Double = 1.0
+
+    /// What the last red-eye click measured (the card's one status line; `nil` = no pupil found).
+    public private(set) var lastRedEyeDetection: RedEye.Detection?
+
+    /// Vision's face/animal hints for one image. Injectable so a headless test can answer without
+    /// running a model; production is `RedEyeVision`, on the click only.
+    public var redEyeFaceHintProvider: ((LinearImage) -> [RedEyeFaceHint])? = { image in
+        RedEyeVision.hints(in: image)
+    }
+
+    /// Internal door for `addRedEyeSpot`, so a view cannot pretend a detection happened.
+    func setLastRedEyeDetection(_ detection: RedEye.Detection?) {
+        lastRedEyeDetection = detection
+    }
+
     /// 自动取源：**view state**，不进文档、不进快照、不进 cache key。默认开。
     public var autoHealSource: Bool = true
 

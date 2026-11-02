@@ -52,6 +52,25 @@ import Foundation
 // turn carries them with the frame. Lightroom anchors spots to the image; anchoring to the frame is
 // this version's choice, and `HealTests` pins what it does.
 
+/// 229 — what a spot is *for*. A red-eye spot is a **heal preset**: the same disk, the same source
+/// search, the same S1.9 blend, with a red gate in front of the blend and a per-spot threshold.
+///
+/// The case is additive in the document: an absent `kind` reads `.heal` and a `.heal` spot is
+/// encoded without the key, so every pre-229 `healSpots` array re-encodes byte for byte.
+public enum HealSpotKind: String, Sendable, Codable, CaseIterable {
+    /// 修复 / 克隆 — the pre-229 behaviour, byte for byte.
+    case heal
+    /// 红眼 — only pixels the red test accepts are replaced.
+    case redeye
+
+    public var label: String {
+        switch self {
+        case .heal: return "修复"
+        case .redeye: return "红眼"
+        }
+    }
+}
+
 /// Heal or clone. Two cases, both implemented (`Kernels/s1_9_heal.metal`).
 public enum HealMode: String, Sendable, Codable, CaseIterable {
     /// Source texture **+ boundary correction** (mean and gradient matched on the rim).
@@ -147,6 +166,51 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     public var feather: Double
     /// Multiplies the blend: `1` = the source replaces the destination inside the disk.
     public var opacity: Double
+    /// 229 — heal (default) or red-eye. A red-eye spot is rendered by the same S1.9 pass with the
+    /// per-pixel red gate described in `RedEye`.
+    public var kind: HealSpotKind
+    /// 229 — the red gate's threshold, in **display-encoded** redness
+    /// (`sRGB(r) − max(sRGB(g), sRGB(b))`). The kernel applies the same curve, so the CPU detector
+    /// and the renderer cannot disagree about what "red" means. `RedEye.noopThreshold` is the
+    /// sentinel a click with no detected pupil writes: no pixel can pass it, so the spot is a
+    /// history row that changes nothing.
+    public var redThreshold: Double
+    /// 229 — half-width of the red gate's ramp. `0` is a hard threshold.
+    public var redSoftness: Double
+
+    /// The nested spelling (`HealSpot.Kind.redeye`) and the top-level one (`HealSpotKind.redeye`)
+    /// are the same type; the spec talks about a spot's `kind`, so both read naturally.
+    public typealias Kind = HealSpotKind
+
+    // MARK: - identity
+    //
+    // The red gate is arithmetic only for `.redeye`. A `.heal` spot ignores those two fields in
+    // equality/hashing (the same rule `keyString` follows), so a spot written before 229 — or by a
+    // build with a different default — is the same spot, not a document change.
+
+    public static func == (lhs: HealSpot, rhs: HealSpot) -> Bool {
+        guard lhs.id == rhs.id, lhs.center == rhs.center, lhs.radius == rhs.radius,
+              lhs.sourceOffset == rhs.sourceOffset, lhs.mode == rhs.mode,
+              lhs.feather == rhs.feather, lhs.opacity == rhs.opacity,
+              lhs.kind == rhs.kind else { return false }
+        guard lhs.kind == .redeye else { return true }
+        return lhs.redThreshold == rhs.redThreshold && lhs.redSoftness == rhs.redSoftness
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(center)
+        hasher.combine(radius)
+        hasher.combine(sourceOffset)
+        hasher.combine(mode)
+        hasher.combine(feather)
+        hasher.combine(opacity)
+        hasher.combine(kind)
+        if kind == .redeye {
+            hasher.combine(redThreshold)
+            hasher.combine(redSoftness)
+        }
+    }
 
     public static let defaultRadius = 0.02
     public static let defaultFeather = 0.35
@@ -158,7 +222,10 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
                 sourceOffset: NormalizedPoint = NormalizedPoint(HealSpot.defaultRadius * 2, 0),
                 mode: HealMode = .heal,
                 feather: Double = HealSpot.defaultFeather,
-                opacity: Double = HealSpot.defaultOpacity) {
+                opacity: Double = HealSpot.defaultOpacity,
+                kind: HealSpotKind = .heal,
+                redThreshold: Double = RedEye.defaultThreshold,
+                redSoftness: Double = RedEye.defaultSoftness) {
         self.id = id
         self.center = center
         self.radius = radius
@@ -166,6 +233,9 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         self.mode = mode
         self.feather = feather
         self.opacity = opacity
+        self.kind = kind
+        self.redThreshold = redThreshold
+        self.redSoftness = redSoftness
     }
 
     // MARK: - the additive-decoding rule
@@ -181,10 +251,32 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
                                       NormalizedPoint(HealSpot.defaultRadius * 2, 0)),
                   mode: c.val("mode", HealMode.heal),
                   feather: c.val("feather", HealSpot.defaultFeather),
-                  opacity: c.val("opacity", HealSpot.defaultOpacity))
+                  opacity: c.val("opacity", HealSpot.defaultOpacity),
+                  kind: c.val("kind", HealSpotKind.heal),
+                  redThreshold: c.val("redThreshold", RedEye.defaultThreshold),
+                  redSoftness: c.val("redSoftness", RedEye.defaultSoftness))
         self.radius = clampedRadius
         self.feather = min(max(feather, 0), 0.999)
         self.opacity = min(max(opacity, 0), 1)
+        self.redThreshold = min(max(redThreshold, 0), RedEye.noopThreshold)
+        self.redSoftness = min(max(redSoftness, 0), 0.5)
+    }
+
+    /// Explicit, and deliberately the pre-229 key set for `.heal`: a document on disk re-encodes
+    /// byte for byte. Only a red-eye spot carries the three new keys.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyCodingKey.self)
+        try c.encode(id, forKey: AnyCodingKey("id"))
+        try c.encode(center, forKey: AnyCodingKey("center"))
+        try c.encode(radius, forKey: AnyCodingKey("radius"))
+        try c.encode(sourceOffset, forKey: AnyCodingKey("sourceOffset"))
+        try c.encode(mode, forKey: AnyCodingKey("mode"))
+        try c.encode(feather, forKey: AnyCodingKey("feather"))
+        try c.encode(opacity, forKey: AnyCodingKey("opacity"))
+        guard kind != .heal else { return }
+        try c.encode(kind, forKey: AnyCodingKey("kind"))
+        try c.encode(redThreshold, forKey: AnyCodingKey("redThreshold"))
+        try c.encode(redSoftness, forKey: AnyCodingKey("redSoftness"))
     }
 
     // MARK: - clamping
@@ -203,6 +295,8 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         v.feather = min(max(feather, 0), 0.999)
         v.opacity = min(max(opacity, 0), 1)
         v.center = NormalizedPoint(min(max(center.x, 0), 1), min(max(center.y, 0), 1))
+        v.redThreshold = min(max(redThreshold, 0), RedEye.noopThreshold)
+        v.redSoftness = min(max(redSoftness, 0), 0.5)
         return v
     }
 
@@ -213,8 +307,12 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     /// keeps the id, because a mask's id names a slice) read the other way: a spot has no slice, so
     /// its id is only a document handle.
     public var keyString: String {
-        "c=\(center.keyString);r=\(k(clampedRadius));so=\(sourceOffset.keyString)"
+        let base = "c=\(center.keyString);r=\(k(clampedRadius));so=\(sourceOffset.keyString)"
             + ";mode=\(mode.rawValue);f=\(k(feather));op=\(k(opacity))"
+        // A heal spot's key is untouched (pre-229 documents and caches keep their answer). Only the
+        // red gate changes pixels, so only a red-eye spot's key carries it.
+        guard kind != .heal else { return base }
+        return base + ";kind=redeye;rt=\(k(redThreshold));rs=\(k(redSoftness))"
     }
 
     // MARK: - the default source

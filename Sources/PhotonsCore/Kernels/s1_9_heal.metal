@@ -34,6 +34,11 @@ using namespace metal;
 //
 // `heal`   out = mix(dst, src(q + o) + P(q), w)                — a copy **plus a plane**.
 //
+// 229 — `redeye` is mode 2 and it is **not a third repair**: it is `heal` with `w` gated by the
+// destination pixel's display-encoded redness (`heal_redness`), plus a hue pull-to-neutral on a
+// source that is itself red. Non-red pixels inside the disk get `w = 0`, which is what keeps the
+// skin around a pupil byte-identical. The same redness definition lives in `RedEye.swift`.
+//
 // `P` is the boundary correction, and it is this build's version of Lightroom's Poisson step:
 //
 // ### What Poisson would do, and what this does instead
@@ -119,7 +124,10 @@ using namespace metal;
 
 struct HealSpotU {
     float4 a;   // centerCanvas.xy, radiusPx, feather (0…1 of the radius)
-    float4 b;   // offsetCanvas.xy, opacity, mode (0 = heal, 1 = clone)
+    float4 b;   // offsetCanvas.xy, opacity, mode (0 = heal, 1 = clone, 2 = redeye)
+    // 229 — the red gate. `x` threshold, `y` softness, both in display-encoded redness. A heal /
+    // clone spot leaves them zero; a no-detection redeye spot carries a threshold no pixel can pass.
+    float4 c;
 };
 
 struct HealParamsU {
@@ -141,6 +149,18 @@ constexpr sampler kHealSampler(coord::normalized, filter::linear, address::clamp
 static inline float heal_smoothstep(float e0, float e1, float x) {
     float t = clamp((x - e0) / max(e1 - e0, 1e-6), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
+}
+
+// 229 — the red gate's definition, byte for byte the one in `RedEye.redness(r:g:b:)`. Measuring in
+// display encoding is what separates a red pupil from neutral skin: in scene linear a warm skin
+// tone and a dim red eye can have the same `r − max(g,b)`.
+static inline float heal_srgb(float x) {
+    float c = max(x, 0.0);
+    return c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+static inline float heal_redness(float3 c) {
+    return heal_srgb(c.r) - max(heal_srgb(c.g), heal_srgb(c.b));
 }
 
 // MARK: - pass 1: the boundary ring's mean and gradient, per spot
@@ -220,6 +240,18 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
         float w = spot.b.z * (1.0 - heal_smoothstep(1.0 - spot.a.w, 1.0, t));
         if (w <= 0.0) { continue; }
 
+        // 229 — red-eye is a **gated heal**: the disk decides *how much* of the repair can reach a
+        // pixel, and the pixel's own redness decides whether it is a repair at all. Non-red pixels
+        // therefore keep their bytes, which is the negative acceptance (a click on skin is a no-op)
+        // and the reason the acceptance can demand "outside the circle unchanged".
+        bool redeye = spot.b.w > 1.5;
+        if (redeye) {
+            float soft = max(spot.c.y, 1e-4);
+            float redAlpha = heal_smoothstep(spot.c.x - soft, spot.c.x + soft, heal_redness(v.rgb));
+            w *= redAlpha;
+            if (w <= 0.0) { continue; }
+        }
+
         // The source texel, bilinearly sampled at `p + offset` (clamped at the frame's edge, which is
         // what a spot whose source runs off the picture means).
         // `q` is already a pixel centre (`gid + 0.5` plus the offset), so the normalized coordinate
@@ -228,14 +260,23 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
         float2 q = float2(gid) + 0.5 + spot.b.xy;
         float3 s4 = samp.sample(kHealSampler, q / size).rgb;
 
-        if (spot.b.w < 0.5) {
-            // heal — add the plane. (u, v) is the offset **inside the disk**, in radii, so the plane
-            // reproduces the rim's own mean and gradient where the blend hands over.
+        if (spot.b.w < 0.5 || redeye) {
+            // heal / redeye — add the plane. (u, v) is the offset **inside the disk**, in radii, so
+            // the plane reproduces the rim's own mean and gradient where the blend hands over.
             float2 uv = rel / r;
             HealStatU st = stats[s];
             s4.r += st.c0.x + st.c0.y * uv.x + st.c0.z * uv.y;
             s4.g += st.c1.x + st.c1.y * uv.x + st.c1.z * uv.y;
             s4.b += st.c2.x + st.c2.y * uv.x + st.c2.z * uv.y;
+        }
+
+        if (redeye) {
+            // 红瞳像素的色相拉回中性（`r ← (g+b)/2`）。The automatic source normally avoids red, but
+            // two pupils in one face can put the `2r…4r` band on the other one; this is the last
+            // line of defence, and it only fires when the sampled result is itself red.
+            if (heal_redness(s4) > spot.c.x) {
+                s4.r = 0.5 * (s4.g + s4.b);
+            }
         }
 
         if (w >= 1.0) {

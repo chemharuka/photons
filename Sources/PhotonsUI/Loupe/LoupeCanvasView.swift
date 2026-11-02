@@ -57,6 +57,8 @@ public final class LoupeCanvasView: NSView {
     private var lastDragPoint: CGPoint = .zero
     private var isDragging = false
     private var isPainting = false
+    /// 229 — a 红眼 drag: every spacing step tries a detection, and only a hit places a spot.
+    private var isRedEyeDragging = false
     /// A gradient drag: creating a linear/radial mask, or reshaping the selected one.
     private var isShaping = false
     private var isDraggingHandle = false
@@ -249,6 +251,9 @@ public final class LoupeCanvasView: NSView {
             // nothing else (the tool stays armed, which is what makes clipping several blemishes in a
             // row one action per click).
             controller?.addHealSpot(atViewPoint: point)
+            // 229: only the 红眼 preset turns a drag into a row of spots; the heal preset keeps its
+            // one-click-per-spot behaviour.
+            isRedEyeDragging = controller?.isRedEyeMode == true
             return
         case .maskCreate:
             // A gradient drag is the innermost mask gesture: it exists only while a shape is armed,
@@ -312,6 +317,10 @@ public final class LoupeCanvasView: NSView {
                                       pressure: Self.pressure(of: event))
             return
         }
+        if isRedEyeDragging {
+            controller?.continueRedEyeDrag(atViewPoint: convert(event.locationInWindow, from: nil))
+            return
+        }
         guard isDragging else { return }
         let delta = CGSize(width: event.locationInWindow.x - lastDragPoint.x,
                            height: event.locationInWindow.y - lastDragPoint.y)
@@ -342,6 +351,11 @@ public final class LoupeCanvasView: NSView {
         if isPainting {
             isPainting = false
             controller?.endPaint()
+            return
+        }
+        if isRedEyeDragging {
+            isRedEyeDragging = false
+            controller?.endRedEyeDrag()
             return
         }
         isDragging = false

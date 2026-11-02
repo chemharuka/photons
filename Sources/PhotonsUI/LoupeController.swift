@@ -1105,6 +1105,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return try performWhiteBalancePreviewRender(request)
     }
 
+    /// 229 — last point a 红眼 drag placed a spot at, in **source** coordinates. Only spacing is
+    /// measured against it; it is cleared on mouse-up / cancel.
+    private var redEyeDragLast: NormalizedPoint?
+
     // Pan/zoom single-flight: a drag emits 60–120 events/s, a window frame costs more than that.
     private var viewInFlight = false
     private var viewPending = false
@@ -2795,12 +2799,76 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// radius to the right, which is Lightroom's own first guess.
     @discardableResult
     public func addHealSpot(atViewPoint point: CGPoint) -> HealSpot? {
-        guard let session, let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
+        guard let session else { return nil }
+        if session.healToolMode == .redeye {
+            return addRedEyeSpot(atViewPoint: point)
+        }
+        guard let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
         let crop = session.edit.geometry.crop
         let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
         let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
         return session.addHealSpot(at: frame)
     }
+
+    // MARK: 229 — 红眼 clicks and drags
+
+    /// True while the 修复 card is on its 红眼 segment; the canvas uses it to arm the drag path.
+    public var isRedEyeMode: Bool { session?.healToolMode == .redeye }
+
+    /// The card's 0.5…8 pt slider → short-edge units through the **live projection**, so 3 pt is
+    /// the same distance on screen at fit and at 1:1. Falls back to `points / 100` when no framing
+    /// exists (a headless call), which is the same click-sized unit the session defaults to.
+    private func redEyeSearchRadius(atViewPoint point: CGPoint, session: CatalogSession) -> Double {
+        let points = min(max(session.redEyeRadiusPoints,
+                             RedEye.radiusPointsRange.lowerBound),
+                         RedEye.radiusPointsRange.upperBound)
+        guard let a = normalizedSourcePoint(forViewPoint: point),
+              let b = normalizedSourcePoint(forViewPoint: CGPoint(x: point.x + CGFloat(points),
+                                                                 y: point.y)) else {
+            return points / 100
+        }
+        let source = session.maskSourceSize
+        let shortEdge = Double(max(min(source.width, source.height), 1))
+        let dx = (b.x - a.x) * Double(source.width) / shortEdge
+        let dy = (b.y - a.y) * Double(source.height) / shortEdge
+        let distance = (dx * dx + dy * dy).squareRoot()
+        return distance > 1e-6 ? distance : points / 100
+    }
+
+    /// One 红眼 click. Same frame conversion as `addHealSpot`; the search radius is the card's
+    /// slider, and the session's detector decides whether a pupil is there.
+    @discardableResult
+    public func addRedEyeSpot(atViewPoint point: CGPoint,
+                              requireDetection: Bool = false) -> HealSpot? {
+        guard let session, let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
+        let crop = session.edit.geometry.crop
+        let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
+        let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
+        let radius = redEyeSearchRadius(atViewPoint: point, session: session)
+        return session.addRedEyeSpot(at: frame, searchRadius: radius,
+                                     requireDetection: requireDetection)
+    }
+
+    /// A red-eye drag places spots at the same spacing the brush uses (two search radii), and only
+    /// where a pupil was actually found — dragging across a cheek must not fill the history with
+    /// no-op rows. Each landed spot is still one ⌘Z.
+    @discardableResult
+    public func continueRedEyeDrag(atViewPoint point: CGPoint) -> HealSpot? {
+        guard let session, session.healToolMode == .redeye,
+              let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
+        let spacing = max(0.003, 2 * redEyeSearchRadius(atViewPoint: point, session: session))
+        if let last = redEyeDragLast {
+            let source = session.maskSourceSize
+            let shortEdge = Double(max(min(source.width, source.height), 1))
+            let dx = (p.x - last.x) * Double(source.width) / shortEdge
+            let dy = (p.y - last.y) * Double(source.height) / shortEdge
+            if (dx * dx + dy * dy).squareRoot() < spacing { return nil }
+        }
+        redEyeDragLast = p
+        return addRedEyeSpot(atViewPoint: point, requireDetection: true)
+    }
+
+    public func endRedEyeDrag() { redEyeDragLast = nil }
 
     public func beginPaint(at point: CGPoint, pressure: Double? = nil) {
         guard let p = normalizedSourcePoint(forViewPoint: point) else { return }

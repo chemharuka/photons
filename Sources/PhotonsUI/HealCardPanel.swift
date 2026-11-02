@@ -111,16 +111,32 @@ public struct HealCardPanel: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 4)
-                Picker("", selection: healModeBinding) {
-                    ForEach(HealMode.allCases, id: \.rawValue) { mode in
-                        Text(mode.label).tag(mode)
+                if session.healToolMode == .heal {
+                    Picker("", selection: healModeBinding) {
+                        ForEach(HealMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.label).tag(mode)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .frame(width: 86)
+                    .accessibilityIdentifier("inspector.heal.mode")
                 }
-                .pickerStyle(.segmented)
-                .controlSize(.mini)
-                .labelsHidden()
-                .frame(width: 86)
-                .accessibilityIdentifier("inspector.heal.mode")
+            }
+            // 229 — 修复 / 红眼. One card, two presets of the same spot tool.
+            Picker("", selection: healToolModeBinding) {
+                ForEach(HealToolMode.allCases, id: \.rawValue) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.mini)
+            .labelsHidden()
+            .accessibilityIdentifier("inspector.redeye.mode")
+            .help("红眼是 修复 的一个预设：点一次找红瞳并修正，拖动连续修补")
+            if session.healToolMode == .redeye {
+                redEyeControls
             }
             Toggle("自动取源", isOn: Binding(get: { session.autoHealSource },
                                             set: { session.autoHealSource = $0 }))
@@ -148,9 +164,43 @@ public struct HealCardPanel: View {
         }
     }
 
+    /// 229 — the two controls that only mean something for 红眼. Shown when that segment is on.
+    private var redEyeControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("半径")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Slider(value: redEyeRadiusBinding, in: RedEye.radiusPointsRange)
+                    .controlSize(.mini)
+                    .accessibilityIdentifier("inspector.redeye.radius")
+                Text(String(format: "%.1f pt", session.redEyeRadiusPoints))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            HStack(spacing: 6) {
+                Text("强度")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Slider(value: redEyeStrengthBinding, in: 0 ... 100)
+                    .controlSize(.mini)
+                    .accessibilityIdentifier("inspector.redeye.strength")
+                Text("\(Int((session.redEyeStrength * 100).rounded()))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            Text("点一下修一只红眼；拖动连续修补")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("inspector.redeye.hint")
+        }
+    }
+
     private func healRow(_ spot: HealSpot) -> some View {
         HStack(spacing: 6) {
-            Text(spot.mode.label)
+            Text(spot.kind == .redeye ? "红眼" : spot.mode.label)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(width: 26, alignment: .leading)
@@ -189,6 +239,22 @@ public struct HealCardPanel: View {
         case .searchSkipped:
             return "源：默认"
         }
+    }
+
+    private var healToolModeBinding: Binding<HealToolMode> {
+        Binding(get: { session.healToolMode }, set: { session.healToolMode = $0 })
+    }
+
+    private var redEyeRadiusBinding: Binding<Double> {
+        Binding(get: { session.redEyeRadiusPoints },
+                set: { session.redEyeRadiusPoints = min(max($0,
+                                                             RedEye.radiusPointsRange.lowerBound),
+                                                          RedEye.radiusPointsRange.upperBound) })
+    }
+
+    private var redEyeStrengthBinding: Binding<Double> {
+        Binding(get: { session.redEyeStrength * 100 },
+                set: { session.redEyeStrength = min(max($0, 0), 100) / 100 })
     }
 
     private var healModeBinding: Binding<HealMode> {
