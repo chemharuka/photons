@@ -349,7 +349,7 @@ final class ThumbnailCacheTests: XCTestCase {
         XCTAssertNotEqual(neutral.digest, changed.digest, "the stage keys must move the cache key")
         XCTAssertEqual(neutral.relativePath(in: root).pathExtension, "heic")
         XCTAssertTrue(neutral.keyString.contains("hd1920q75p3pq10"))
-        XCTAssertTrue(neutral.keyString.contains("sv1"))
+        XCTAssertTrue(neutral.keyString.contains("sv2"))
     }
 
     func testTrimEnforcesTheFileCountCeilingAndCountsHEIC() throws {

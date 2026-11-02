@@ -915,6 +915,28 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         }
         let headroom = max(1, min(peak, 16))
 
+        // 241 — the one place the read-back changes coordinate systems.
+        //
+        // `CIContext.render(_:to:)` writes the image with row 0 at the **bottom** (Core Image's
+        // origin is bottom-left; a Metal texture's row 0 is its first row). `getBytes` therefore
+        // hands us bottom-row-first data, while `CGImage` and the `CAMetalLayer` upload below both
+        // mean "row 0 = top". Reverse the rows once here. The CPU fallback above already returns
+        // CGImage row order via `createCGImage`, so it needs nothing.
+        //
+        // 238 removed the row flip inside `HDREncoding` (PQ exports were upside down). Until then
+        // that flip had been cancelling this one for HD thumbnails, which is why the grid only
+        // turned upside down after 238.
+        let rowHalfCount = width * 4
+        if height > 1 {
+            halves.withUnsafeMutableBufferPointer { rows in
+                for y in 0..<(height / 2) {
+                    let a = y * rowHalfCount
+                    let b = (height - 1 - y) * rowHalfCount
+                    for i in 0..<rowHalfCount { rows.swapAt(a + i, b + i) }
+                }
+            }
+        }
+
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue
                                       | CGBitmapInfo.floatComponents.rawValue
                                       | CGBitmapInfo.byteOrder16Little.rawValue)
