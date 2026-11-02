@@ -389,6 +389,12 @@ extension EditHistory {
         out.append(contentsOf: healChanges(before.healSpots, after.healSpots))
 
         // `showMaskID` is deliberately absent: it is view state (005e), never a document edit.
+        //
+        // 267 — the same holds for the two forward-compat carriers: `forwardExtras` and
+        // `forwardCompatVersion` are a newer build's unknown fields passed through unchanged (205).
+        // Nothing in the graph reads them, so a change to them moves no pixel and must not mint a
+        // row; `DiffCoverageTests.whitelist` asserts that silence on purpose (with the reason), so
+        // the day one of them becomes a render input that test goes red instead of hiding it.
         return out
     }
 
@@ -439,19 +445,50 @@ extension EditHistory {
                                        from: .number(Double(o.components.count)),
                                        to: .number(Double(m.components.count))))
             } else {
-                // 267 — the geometry inside a component. The count row above says a component
-                // appeared or went; this says the one that stayed was **moved** (a brush stroke, a
-                // radial's centre/radius, a linear's two lines, a colour/luminance window). Without
-                // it a canvas drag committed nothing: the mask's own numbers were unchanged.
+                // 267 — the fields **inside** a component. The count row above says a component
+                // appeared or went; these say the one that stayed was edited: its geometry (a brush
+                // stroke, a radial's centre/radius, a linear's two lines, a colour/luminance window),
+                // its blend arithmetic (`op`: max / a·(1−a) / a·a), its per-component inversion and
+                // its edge softness. Without them a canvas drag or a 组合方式 picker wrote a value
+                // that produced no history row and could not be undone.
                 //
-                // The value is the kind plus a short hash of `shape.keyString` — the row is for a
-                // human ("radialGradient#a1b2c3"), and `revert` never parses it: it copies the whole
-                // component back from `previous`, so a future shape field needs no new branch here.
-                for i in o.components.indices where o.components[i].shape != m.components[i].shape {
-                    out.append(FieldChange(
-                        field: EditField(key: key("components[\(i)].shape"), group: .masks),
-                        from: .text(shapeToken(o.components[i].shape)),
-                        to: .text(shapeToken(m.components[i].shape))))
+                // `op` and `invert`/`feather` have no slider of their own today (only the mask
+                // card's 组合方式 picker writes `op`; presets and scripts can write all three), but
+                // they are **render inputs** — `Mask.selectionKey` reads every one of them — so they
+                // are diffed like any other parameter, never whitelisted as view state.
+                //
+                // A shape's value is the kind plus a short hash of `shape.keyString` — the row is
+                // for a human ("radialGradient#a1b2c3"). `revert` never parses any of these values:
+                // it copies the whole component back from `previous`, so a future component field
+                // needs no new branch here.
+                for i in o.components.indices {
+                    let beforeComponent = o.components[i]
+                    let afterComponent = m.components[i]
+                    let prefix = "components[\(i)]"
+                    if beforeComponent.op != afterComponent.op {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).op"), group: .masks),
+                            from: .text(beforeComponent.op.rawValue),
+                            to: .text(afterComponent.op.rawValue)))
+                    }
+                    if beforeComponent.invert != afterComponent.invert {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).invert"), group: .masks),
+                            from: .flag(beforeComponent.invert),
+                            to: .flag(afterComponent.invert)))
+                    }
+                    if !EditParameters.areEqual(beforeComponent.feather, afterComponent.feather) {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).feather"), group: .masks),
+                            from: .number(beforeComponent.feather),
+                            to: .number(afterComponent.feather)))
+                    }
+                    if beforeComponent.shape != afterComponent.shape {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).shape"), group: .masks),
+                            from: .text(shapeToken(beforeComponent.shape)),
+                            to: .text(shapeToken(afterComponent.shape))))
+                    }
                 }
             }
             let adjBefore = o.adjustments
@@ -762,13 +799,23 @@ extension EditHistory {
         let rest = key.dropFirst("masks.".count)
         guard let dot = rest.firstIndex(of: ".") else { return nil }
         let field = String(rest[rest.index(after: dot)...])
-        // 267 — the per-component geometry row has a dynamic index, so it is composed like a curve
-        // point / HSL band rather than added to the flat table.
-        if field.hasPrefix("components["), field.hasSuffix("].shape"),
+        // 267 — the per-component rows have a dynamic index, so they are composed like a curve
+        // point / HSL band rather than added to the flat table. `op` is the card's 组合方式 picker;
+        // `invert` / `feather` are the component's own render inputs.
+        if field.hasPrefix("components["),
            let open = field.firstIndex(of: "["),
            let close = field.firstIndex(of: "]"), open < close,
            let index = Int(field[field.index(after: open)..<close]) {
-            return "蒙版 形状[\(index)]"
+            let axis = String(field[field.index(after: close)...].dropFirst())   // after "]."
+            let name: String
+            switch axis {
+            case "shape": name = "形状"
+            case "op": name = "组合"
+            case "invert": name = "反相"
+            case "feather": name = "羽化"
+            default: name = axis
+            }
+            return "蒙版 \(name)[\(index)]"
         }
         let name = maskFieldNames[field] ?? field
         return "蒙版 \(name)"

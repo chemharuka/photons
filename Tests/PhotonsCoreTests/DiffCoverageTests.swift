@@ -137,6 +137,22 @@ final class DiffCoverageTests: XCTestCase {
         }
     }
 
+    /// One field **inside** `components[0]` (shape / op / invert / feather). The base always carries
+    /// one component so the row is about that field and not about "a component appeared".
+    private func componentField(_ field: String,
+                                _ apply: @escaping (inout MaskComponent) -> Void) -> Param {
+        let id = Self.maskID
+        return Param(key: "masks.\(id).components[0].\(field)",
+                     base: base(masks: [Mask(id: id, components: [MaskComponent()])])) { m in
+            m.masks = m.masks.map { mask in
+                guard mask.id == id, !mask.components.isEmpty else { return mask }
+                var copy = mask
+                apply(&copy.components[0])
+                return copy
+            }
+        }
+    }
+
     private func healField(_ field: String,
                            _ baseSpot: HealSpot = HealSpot(id: healID),
                            _ apply: @escaping (inout HealSpot) -> Void) -> Param {
@@ -301,17 +317,13 @@ final class DiffCoverageTests: XCTestCase {
             maskField("adj.texture") { $0.adjustments.texture = 30 },
             maskField("adj.sharpen") { $0.adjustments.sharpen = 40 },
 
-            // 267 — a component's geometry, changed through a canvas handle drag.
-            Param(key: "masks.\(Self.maskID).components[0].shape",
-                  base: base(masks: [Mask(id: Self.maskID,
-                                          components: [MaskComponent()])])) { m in
-                m.masks = m.masks.map { mask in
-                    guard mask.id == Self.maskID, !mask.components.isEmpty else { return mask }
-                    var copy = mask
-                    copy.components[0].shape = .linearGradient(
-                        LinearGradientShape(start: NormalizedPoint(0.2, 0.1)))
-                    return copy
-                }
+            // 267 — the fields inside one component: blend arithmetic, inversion, edge softness and
+            // geometry (the last changed through a canvas handle drag).
+            componentField("op") { $0.op = .subtract },
+            componentField("invert") { $0.invert = true },
+            componentField("feather") { $0.feather = 0.2 },
+            componentField("shape") {
+                $0.shape = .linearGradient(LinearGradientShape(start: NormalizedPoint(0.2, 0.1)))
             },
 
             Param(key: "masks.order",
@@ -365,6 +377,12 @@ final class DiffCoverageTests: XCTestCase {
             Whitelisted(key: "color.point[].active",
                         reason: "140/158 的卡片选中项：只决定哪块色板被高亮，不动一个像素",
                         base: start) { $0.color.point?.active = 1 },
+            Whitelisted(key: "forwardExtras",
+                        reason: "205 的前向兼容透传：未知/更高版本字段原样保存，改它不动一个像素",
+                        base: .neutral) { $0.forwardExtras = ["futureThing": .number(1)] },
+            Whitelisted(key: "forwardCompatVersion",
+                        reason: "205 的前向兼容版本标签：只用于提示「来自更新的版本」，不是渲染参数",
+                        base: .neutral) { $0.forwardCompatVersion = 99 },
         ]
     }
 

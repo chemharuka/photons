@@ -32,6 +32,7 @@ final class RevertMapCoverageTests: XCTestCase {
 
     private static let maskID = "m-keep"
     private static let shapeMaskID = "m-shape"
+    private static let countMaskID = "m-count"
     private static let addedMaskID = "m-added"
     private static let removedMaskID = "m-removed"
     private static let orderMaskIDs = ["m-order-1", "m-order-2"]
@@ -299,7 +300,28 @@ final class RevertMapCoverageTests: XCTestCase {
             maskField("feather") { $0.feather = 0.2 },
             maskField("refine") { $0.refine = 0.5 },
             maskField("name") { $0.name = "Sky" },
-            maskField("components") { $0.components = [MaskComponent()] },
+            FieldCase(key: "masks.\(Self.countMaskID).components",
+                      base: base(masks: [Mask(id: Self.countMaskID)])) { m in
+                m.masks = m.masks.map { mask in
+                    guard mask.id == Self.countMaskID else { return mask }
+                    var copy = mask
+                    copy.components = [MaskComponent()]
+                    return copy
+                }
+            },
+            // 267b — the fields inside a component. `op` has the card's 组合方式 picker; invert and
+            // feather have no slider today, but they are render inputs and must be diffable.
+            maskField("components[0].op", Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].op = .subtract
+            },
+            maskField("components[0].invert",
+                      Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].invert = true
+            },
+            maskField("components[0].feather",
+                      Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].feather = 0.2
+            },
 
             maskField("adj.amount") { $0.adjustments.amount = 50 },
             maskField("adj.exposure") { $0.adjustments.exposure = 1 },
@@ -410,8 +432,9 @@ final class RevertMapCoverageTests: XCTestCase {
     private func universeA() -> EditModel {
         var m = EditModel.neutral
         m.color.point = PointColorSet(swatches: [PointColor()], active: 0)
-        m.masks = [Mask(id: Self.maskID),
+        m.masks = [Mask(id: Self.maskID, components: [MaskComponent()]),
                    Mask(id: Self.shapeMaskID, components: [MaskComponent()]),
+                   Mask(id: Self.countMaskID),
                    Mask(id: Self.removedMaskID),
                    Mask(id: Self.orderMaskIDs[0]), Mask(id: Self.orderMaskIDs[1])]
         m.healSpots = [HealSpot(id: Self.healID, kind: .redeye),
@@ -435,13 +458,15 @@ final class RevertMapCoverageTests: XCTestCase {
 
         b.masks = [
             Mask(id: Self.maskID, name: "Sky", isEnabled: false, opacity: 0.5, invert: true,
-                 feather: 0.2, refine: 0.5, components: [MaskComponent()],
+                 feather: 0.2, refine: 0.5,
+                 components: [MaskComponent(op: .subtract, invert: true, feather: 0.2)],
                  adjustments: LocalAdjustments(amount: 50, exposure: 1, temperature: 10, tint: 5,
                                                contrast: 10, highlights: 5, shadows: -5,
                                                whites: 3, blacks: -3, hue: 10, saturation: -10,
                                                texture: 30, sharpen: 40)),
             Mask(id: Self.shapeMaskID, components: [MaskComponent(
                 shape: .linearGradient(LinearGradientShape(start: NormalizedPoint(0.2, 0.1))))]),
+            Mask(id: Self.countMaskID, components: [MaskComponent()]),
             Mask(id: Self.addedMaskID),
             Mask(id: Self.orderMaskIDs[1]),
             Mask(id: Self.orderMaskIDs[0]),

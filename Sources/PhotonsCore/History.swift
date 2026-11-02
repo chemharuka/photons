@@ -976,11 +976,14 @@ private extension EditHistory {
             return
         }
         guard let index = doc.masks.firstIndex(where: { $0.id == id }) else { return }
-        // 267 — a component's geometry. The row's text is a label+hash; the exact inverse is the
-        // whole component from the previous snapshot, so a new shape field never needs a branch.
-        if field.hasPrefix("components["), field.hasSuffix("].shape"),
+        // 267 — any field **inside** a component (shape / op / invert / feather). The row's value is
+        // only a label (shape) or the scalar; the exact inverse is the whole component from the
+        // previous snapshot, so `op` / `invert` / `feather` and every future component field share
+        // one reversible path instead of three near-identical setters.
+        if field.hasPrefix("components["),
            let open = field.firstIndex(of: "["),
            let close = field.firstIndex(of: "]"), open < close,
+           field[field.index(after: close)...].hasPrefix("."),
            let componentIndex = Int(field[field.index(after: open)..<close]),
            let saved = previous.masks.first(where: { $0.id == id }),
            saved.components.indices.contains(componentIndex),
