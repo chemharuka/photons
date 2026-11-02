@@ -299,7 +299,10 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let extP3 = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3))
 
         let sizes = [ImageSize(width: 68, height: 68),          // browser list, 34 pt @2×
-                     ImageSize(width: 222, height: 114),        // filmstrip, 111×57 pt @2×
+                     ImageSize(width: Int((WorkspaceLayout.filmstripCell.width * 2).rounded()),
+                               height: Int(((WorkspaceLayout.filmstripCell.height
+                                             - WorkspaceLayout.filmstripCaptionHeight) * 2).rounded())),
+                                                            // filmstrip, 90×60 pt @2×
                      ImageSize(width: 326, height: 242)]        // grid, common 163×121 pt @2×
         for size in sizes {
             let image = try XCTUnwrap(ThumbnailProvider.decodeHD(data, display: size))

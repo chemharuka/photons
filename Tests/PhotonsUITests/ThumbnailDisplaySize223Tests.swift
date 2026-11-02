@@ -40,7 +40,7 @@ final class ThumbnailDisplaySize223Tests: XCTestCase {
         grid.view.frame = NSRect(x: 0, y: 0, width: 1400, height: 780)
         window.contentView?.addSubview(grid.view)
 
-        // Filmstrip: 111 × 69 pt cell, image area 111 × 57 pt.
+        // Filmstrip: 90 × 72 pt cell, image area 90 × 60 pt (3:2).
         let strip = FilmstripController(session: session)
         _ = strip.view
         strip.view.frame = NSRect(x: 0, y: 0, width: 1400, height: WorkspaceLayout.filmstripHeight)
@@ -65,7 +65,7 @@ final class ThumbnailDisplaySize223Tests: XCTestCase {
               + "strip \(stripSize.width)×\(stripSize.height) · "
               + "list \(listSize.width)×\(listSize.height) · scale \(scale)")
 
-        // Filmstrip and list are layout constants: 111×57 pt and 34×34 pt.
+        // Filmstrip and list are layout constants: 90×60 pt and 34×34 pt.
         XCTAssertEqual(stripSize, ThumbnailProvider.displayPixels(
             swatch: CGSize(width: WorkspaceLayout.filmstripCell.width,
                            height: WorkspaceLayout.filmstripCell.height
@@ -84,7 +84,7 @@ final class ThumbnailDisplaySize223Tests: XCTestCase {
         if scale == 2 {
             XCTAssertLessThanOrEqual(gridSize.width, 400, "grid ≤ 400 px at 2×")
             XCTAssertLessThanOrEqual(gridSize.height, 296, "grid ≤ 296 px at 2×")
-            XCTAssertEqual(stripSize, ImageSize(width: 222, height: 114))
+            XCTAssertEqual(stripSize, ImageSize(width: 180, height: 120))
             XCTAssertEqual(listSize, ImageSize(width: 68, height: 68))
         }
     }
@@ -95,8 +95,11 @@ final class ThumbnailDisplaySize223Tests: XCTestCase {
             swatch: CGSize(width: 34, height: 34), backingScale: 2),
             ImageSize(width: 68, height: 68))
         XCTAssertEqual(ThumbnailProvider.displayPixels(
-            swatch: CGSize(width: 111, height: 57), backingScale: 2),
-            ImageSize(width: 222, height: 114))
+            swatch: CGSize(width: WorkspaceLayout.filmstripCell.width,
+                           height: WorkspaceLayout.filmstripCell.height
+                               - WorkspaceLayout.filmstripCaptionHeight),
+            backingScale: 2),
+            ImageSize(width: 180, height: 120))
         XCTAssertEqual(ThumbnailProvider.displayPixels(
             swatch: CGSize(width: 163, height: 121), backingScale: 2),
             ImageSize(width: 326, height: 242))
