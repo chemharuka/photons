@@ -150,6 +150,85 @@ final class CropEnterFirstFrame231Tests: XCTestCase {
         XCTAssertEqual(final.height, expected.height, accuracy: 0.5)
     }
 
+    /// 231 — the **second** reproduction condition: the document already carries a crop. Entering
+    /// 裁切 must show *that* crop from the first frame, on the whole file, not a `.full` frame and not
+    /// a rect measured in the 0.5 rung's half-size grid.
+    ///
+    /// The first test above starts from `.full`, where the old bug happened to look like the top-left
+    /// 1/4. A cropped document is the harder case: the rect is neither `.full` nor origin-anchored, so
+    /// the assertion has to compare the projected quad against the **full-source** projection of the
+    /// document's own crop. Removing the `decodeScale` division makes the tool measure `600 × 400`
+    /// while the projection still describes `1200 × 800`, so every frame shrinks to half size and this
+    /// test (and the `.full` one above) goes red.
+    func testEnteringCropOnAnAlreadyCroppedDocumentShowsThatCropFromTheFirstFrame() throws {
+        let (loupe, session, window) = try makeLoupe()
+        defer { window.orderOut(nil) }
+
+        // The document already has a crop — the value the first frame has to show.
+        let documentCrop = CropRect(left: 0.2, top: 0.15, right: 0.8, bottom: 0.85)
+        session.applyEdit { $0.geometry.crop = documentCrop.normalizedRect }
+        session.commitEdit(label: "probe crop", coalesce: false)
+        CropUITestSupport.pump(0.02)
+        XCTAssertEqual(session.edit.geometry.cropRect, documentCrop,
+                       "231: the fixture did not keep the document's crop")
+
+        let start = loupe.cropOverlayLayoutFrames.count
+        XCTAssertTrue(loupe.setCropWorkspaceActive(true), "裁切 mode did not open")
+        // More than the five frames the case asks for: the entry itself, then one layout per refresh.
+        for _ in 0..<5 {
+            CropUITestSupport.pump(0.01)
+            loupe.refreshCropTool()
+        }
+        CropUITestSupport.pump(0.01)
+        XCTAssertTrue(loupe.isCropToolActive)
+
+        let frames = Array(loupe.cropOverlayLayoutFrames.dropFirst(start))
+        XCTAssertGreaterThanOrEqual(frames.count, 5, "231: fewer than five frames were laid out")
+
+        // The rect the whole file projects the document's crop to. This is computed from the
+        // **stored** `1200 × 800`, independently of what `cropSourceSize` currently says, so a tool
+        // measuring the 600 × 400 rung cannot match it.
+        let mapping = try XCTUnwrap(loupe.framing()).mapping(of: loupe.viewState)
+        let expectedLayout = CropTool.layout(crop: documentCrop, source: Self.stored,
+                                             mapping: mapping, pointScale: loupe.backingScale)
+        let canvasRect = try XCTUnwrap(bounds(expectedLayout.corners),
+                                       "231: the expected frame has no corners")
+        let viewport = loupe.viewportPixels
+        let canvas = CGRect(x: 0, y: 0,
+                            width: Double(viewport.width) / loupe.backingScale,
+                            height: Double(viewport.height) / loupe.backingScale)
+        XCTAssertLessThan(canvasRect.width, canvas.width * 0.9,
+                          "231: the fixture's crop is not narrower than the canvas")
+
+        for (index, frame) in frames.enumerated() {
+            // ① the draft is the document's crop — not `.full`, not a re-seed from the rung.
+            XCTAssertEqual(frame.crop, documentCrop,
+                           "frame \(index): the draft is not the document's crop")
+            guard let rect = frame.corners else {
+                XCTFail("frame \(index): the overlay was handed no corners")
+                continue
+            }
+            // ② the rect on the canvas is the whole-file projection from the very first frame.
+            XCTAssertEqual(rect.minX, canvasRect.minX, accuracy: 0.5,
+                           "frame \(index): the canvas rect is not final — \(rect) vs \(canvasRect)")
+            XCTAssertEqual(rect.minY, canvasRect.minY, accuracy: 0.5,
+                           "frame \(index): the canvas rect is not final — \(rect) vs \(canvasRect)")
+            XCTAssertEqual(rect.width, canvasRect.width, accuracy: 0.5,
+                           "frame \(index): the canvas rect is not final — \(rect) vs \(canvasRect)")
+            XCTAssertEqual(rect.height, canvasRect.height, accuracy: 0.5,
+                           "frame \(index): the canvas rect is not final — \(rect) vs \(canvasRect)")
+
+            let quarter = CGRect(x: 0, y: 0, width: canvas.width / 2, height: canvas.height / 2)
+            XCTAssertFalse(abs(rect.minX - quarter.minX) < 2 && abs(rect.minY - quarter.minY) < 2
+                           && abs(rect.width - quarter.width) < 2 && abs(rect.height - quarter.height) < 2,
+                           "frame \(index): the 0.5 rung's 1/4 frame was drawn — \(rect) vs \(quarter)")
+
+            print(String(format: "231 cropped · frame %d · crop l %.3f t %.3f r %.3f b %.3f · rect %@",
+                         index, frame.crop.left, frame.crop.top, frame.crop.right, frame.crop.bottom,
+                         NSStringFromRect(rect)))
+        }
+    }
+
     /// The pure policy the present path uses: the rung's pixels divided by the scale it was decoded
     /// at. At scale 1 this is the old value exactly.
     func testFullSourceSizeDividesTheRungByItsDecodeScale() {

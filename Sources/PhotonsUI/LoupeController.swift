@@ -1975,12 +1975,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     /// **188b — the key is the *shape*, not the pixel count.** The canvas is
     /// `CropMath.canvasSize(crop, in: source, straighten, …)`, and `source` here is
-    /// `cropSourceSize`, i.e. whatever decode rung is loaded (0.5 while the full one is being made).
-    /// Comparing the *pixels* therefore fired on a rung change — `4760 × 3168` → `9520 × 6336` — which
-    /// is the same document at another density, and it fired again on the very first refresh after a
-    /// present, when no size had been recorded yet. Both dropped a perfectly good frozen frame; inside
-    /// a live resize nothing re-renders by design, so nothing rebuilt it and the layer kept the old
-    /// canvas while the overlay followed the new one — 「帧与画布不一致」 (169 ④).
+    /// `cropSourceSize`, which since 231 is the **whole file's** frame: `publishIngestedSource(_:decodeScale:)`
+    /// divides the resident rung by the scale it was decoded at, so a 0.5 rung reports the same
+    /// `1200 × 800` a full rung does. That division is load-bearing: without it the crop tool measured
+    /// the 600 × 400 buffer while `framing()` described the 1200 × 800 file, and a `.full` frame on the
+    /// 0.5 rung was drawn as the top-left 1/4 of the picture until the full rung landed (231's bug —
+    /// see `docs/tasks/231-crop-enter-flash.md`). Because the published size no longer moves with a
+    /// rung, comparing the *pixels* is safe for a rung change; it is only the first refresh after a
+    /// present, when no size had been recorded yet, that used to drop a perfectly good frozen frame.
+    /// Inside a live resize nothing re-renders by design, so nothing rebuilt it and the layer kept the
+    /// old canvas while the overlay followed the new one — 「帧与画布不一致」 (169 ④).
     /// The angle and the keystone are the only inputs that change the canvas *shape* at a fixed crop
     /// (the tool's preview crop is always `.full`), and neither moves with a rung.
     private var lastCanvasGeometry: CanvasGeometryKey?
@@ -4016,9 +4020,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // two dimensions, so a window centre in the old frame means something else in the new one.
         //
         // The unit matters: `viewState.centerX/Y` are **full-resolution turned-frame pixels**
-        // (`LoupeFraming.sourceWidth`, i.e. the decode divided by its scale), while `cropSourceSize`
-        // is the *decoded* grid — at the 0.5 rung it is half the numbers. The framing is the authority
-        // the camera itself is laid out with, so the swap reads its dimensions.
+        // (`LoupeFraming.sourceWidth`, i.e. the decode divided by its scale). `cropSourceSize` is
+        // published the same way since 231 — `publishIngestedSource(_:decodeScale:)` divides the rung
+        // by the scale it was decoded at, so the crop tool and the projection both describe the whole
+        // file. That division is required: without it the 0.5 rung's `.full` frame was drawn as the
+        // top-left 1/4 of the picture until the full rung landed (see
+        // `docs/tasks/231-crop-enter-flash.md`). The framing is still the authority the camera itself
+        // is laid out with, so the swap reads its dimensions.
         let framingBeforeTurn = framing()
         let frameBeforeTurn = ImageSize(width: Int((framingBeforeTurn?.sourceWidth ?? 1).rounded()),
                                         height: Int((framingBeforeTurn?.sourceHeight ?? 1).rounded()))
