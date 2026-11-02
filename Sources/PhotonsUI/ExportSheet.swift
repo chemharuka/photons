@@ -1409,26 +1409,15 @@ public struct ExportSheetView: View {
             }
             // 206 — resolution is a pixel fact, so it has its own row and can be turned off. The
             // factory preset starts at 240 (Lightroom's default); an old preset keeps `nil` (no tag).
-            HStack(spacing: 8) {
-                Toggle(isOn: ppiEnabledBinding) {
-                    Text("PPI").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running)
-                .accessibilityIdentifier("export.ppi.enabled")
-                Spacer(minLength: 8)
-                if model.preset.ppi != nil {
-                    SliderNumberField(value: Double(model.preset.effectivePPI ?? 240),
-                                      range: 72 ... 600, format: "%.0f",
-                                      decimals: 0, fontSize: 10, width: 60,
-                                      accessibilityID: "export.ppi") { typed in
-                        model.setPPI(Int(typed.rounded()))
-                    }
-                    Text("像素/英寸").font(.system(size: 10)).foregroundStyle(.secondary)
-                } else {
-                    Text("不写入").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }
+            // 243 — PPI has no slider; it is the same constructor as 质量 / 不透明度 now.
+            exportSliderRow(label: "PPI", value: Double(model.preset.effectivePPI ?? 240),
+                            range: 72 ... 600, format: "%.0f", decimals: 0,
+                            unit: "像素/英寸", enabled: model.phase != .running,
+                            axID: "export.ppi", showsSlider: false,
+                            labelToggle: ExportRowToggle(title: "PPI", isOn: ppiEnabledBinding,
+                                                         axID: "export.ppi.enabled"),
+                            placeholder: model.preset.ppi == nil ? "不写入" : nil) { typed in
+                model.setPPI(Int(typed.rounded()))
             }
         } header: {
             sectionHeader("文件设置")
@@ -1457,36 +1446,23 @@ public struct ExportSheetView: View {
             }
             switch model.preset.sizingMode {
             case .longEdge:
-                HStack(spacing: 8) {
-                    Text("长边").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    SliderNumberField(value: Double(model.preset.longEdge ?? 2400),
-                                      range: 1 ... 20_000, format: "%.0f",
-                                      decimals: 0, fontSize: 10, width: 60,
-                                      accessibilityID: "export.size.longEdge") { typed in
-                        model.preset.longEdge = max(1, Int(typed.rounded()))
-                    }
-                    Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
-                    Toggle(isOn: $model.preset.noUpscale) {
-                        Text("不扩大").font(.system(size: 10))
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .disabled(model.phase == .running)
-                    .accessibilityIdentifier("export.size.noUpscale")
-                    .help("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大")
+                // 243 — no slider; the 不扩大 checkbox is the row's accessory column.
+                exportSliderRow(label: "长边", value: Double(model.preset.longEdge ?? 2400),
+                                range: 1 ... 20_000, format: "%.0f", decimals: 0,
+                                unit: "px", enabled: model.phase != .running,
+                                axID: "export.size.longEdge", showsSlider: false,
+                                trailingToggle: ExportRowToggle(
+                                    title: "不扩大", isOn: $model.preset.noUpscale,
+                                    axID: "export.size.noUpscale",
+                                    help: "勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大")) { typed in
+                    model.preset.longEdge = max(1, Int(typed.rounded()))
                 }
             case .percent:
-                HStack(spacing: 8) {
-                    Text("长边百分比").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    SliderNumberField(value: Double(model.preset.percent ?? 100),
-                                      range: 10 ... 100, format: "%.0f",
-                                      decimals: 0, fontSize: 10, width: 60,
-                                      accessibilityID: "export.size.percent") { typed in
-                        model.preset.percent = min(100, max(10, Int(typed.rounded())))
-                    }
-                    Text("%").font(.system(size: 10)).foregroundStyle(.secondary)
+                exportSliderRow(label: "长边百分比", value: Double(model.preset.percent ?? 100),
+                                range: 10 ... 100, format: "%.0f", decimals: 0,
+                                unit: "%", enabled: model.phase != .running,
+                                axID: "export.size.percent", showsSlider: false) { typed in
+                    model.preset.percent = min(100, max(10, Int(typed.rounded())))
                 }
             case .none:
                 HStack {
@@ -1742,52 +1718,106 @@ public struct ExportSheetView: View {
 
     // MARK: slider rows
 
-    /// 217 — one set of measurements for every export slider row, so 质量 and 不透明度 cannot drift
-    /// apart again.
+    /// 243 — a checkbox that belongs to a numeric row: `label` form carries the row label (PPI),
+    /// `trailing` form is the row's accessory (不扩大).
+    private struct ExportRowToggle {
+        var title: String
+        var isOn: Binding<Bool>
+        var axID: String
+        var help: String? = nil
+    }
+
+    /// 217 — one set of measurements for every export numeric row, so the rows cannot drift apart
+    /// again.
+    ///
+    /// 243 — the number field's x is only equal on every row if the columns to its **right** are the
+    /// same width everywhere. 质量 has no unit, 长边 has an extra 不扩大 checkbox, so both the unit
+    /// column and the accessory column are reserved on every row (empty when that row does not use
+    /// them). That is why `unitWidth` / `accessoryWidth` exist: they are placeholders, not decoration.
     private enum ExportSliderRowMetrics {
         static let sliderWidth: CGFloat = 140
         static let numberWidth: CGFloat = 46
         static let fontSize: CGFloat = 10
         static let spacing: CGFloat = 8
+        /// 243 — fixed unit column ("像素/英寸" measures 45.43 pt at 10 pt).
+        static let unitWidth: CGFloat = 52
+        /// 243 — fixed row-end accessory column (the 不扩大 checkbox).
+        static let accessoryWidth: CGFloat = 64
     }
 
-    /// 217 — the export sheet's one slider row: label, slider, `SliderNumberField`, optional unit.
-    /// Both 质量 and 不透明度 go through here; the numeric field is the app-wide control (the row no
-    /// longer carries a second `TextField` implementation).
+    /// 217/243 — the export sheet's ONE numeric row. 质量 / 不透明度 / PPI / 长边 / 长边百分比 all render
+    /// through here; `SliderNumberField` appears exactly once in this file, inside it.
     private func exportSliderRow(
         label: String, value: Double, range: ClosedRange<Double>,
         format: String, decimals: Int, unit: String? = nil,
         step: Double? = nil, enabled: Bool, axID: String,
+        showsSlider: Bool = true,
+        labelToggle: ExportRowToggle? = nil,
+        trailingToggle: ExportRowToggle? = nil,
+        placeholder: String? = nil,
         write: @escaping (Double) -> Void
     ) -> some View {
         HStack(spacing: ExportSliderRowMetrics.spacing) {
-            Text(label)
-                .font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Group {
-                if let step {
-                    Slider(value: Binding(get: { value }, set: write), in: range, step: step)
-                } else {
-                    Slider(value: Binding(get: { value }, set: write), in: range)
+            if let labelToggle {
+                Toggle(isOn: labelToggle.isOn) {
+                    Text(label).font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
-            }
-            .controlSize(.small)
-            .frame(width: ExportSliderRowMetrics.sliderWidth)
-            .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
-            .disabled(!enabled)
-            SliderNumberField(value: value, range: range, format: format,
-                              decimals: decimals,
-                              fontSize: ExportSliderRowMetrics.fontSize,
-                              width: ExportSliderRowMetrics.numberWidth,
-                              accessibilityID: axID, onCommit: write)
+                .toggleStyle(.checkbox).controlSize(.small)
                 .disabled(!enabled)
-                .background(ExportSliderRowProbeHost(kind: .number, rowID: axID))
-            if let unit {
-                Text(unit)
-                    .font(.system(size: ExportSliderRowMetrics.fontSize))
+                .accessibilityIdentifier(labelToggle.axID)
+            } else {
+                Text(label).font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
                     .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if showsSlider {
+                Group {
+                    if let step {
+                        Slider(value: Binding(get: { value }, set: write), in: range, step: step)
+                    } else {
+                        Slider(value: Binding(get: { value }, set: write), in: range)
+                    }
+                }
+                .controlSize(.small)
+                .frame(width: ExportSliderRowMetrics.sliderWidth)
+                .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
+                .disabled(!enabled)
+            }
+            if let placeholder {
+                Text(placeholder).font(.system(size: 9)).foregroundStyle(.tertiary)
+                    .frame(width: ExportSliderRowMetrics.numberWidth, alignment: .trailing)
+            } else {
+                SliderNumberField(value: value, range: range, format: format,
+                                  decimals: decimals,
+                                  fontSize: ExportSliderRowMetrics.fontSize,
+                                  width: ExportSliderRowMetrics.numberWidth,
+                                  accessibilityID: axID, onCommit: write)
+                    .disabled(!enabled)
+                    .background(ExportSliderRowProbeHost(kind: .number, rowID: axID))
+            }
+            // 243 — the unit column is reserved on every row (质量 has no unit), so the
+            // number field's x is identical everywhere. A row without a unit draws nothing there and
+            // therefore reports **no** unit probe (217's assertion stays true).
+            if let unit {
+                Text(unit).font(.system(size: ExportSliderRowMetrics.fontSize))
+                    .foregroundStyle(.secondary)
+                    .frame(width: ExportSliderRowMetrics.unitWidth, alignment: .leading)
                     .background(ExportSliderRowProbeHost(kind: .unit, rowID: axID))
+            } else {
+                Color.clear.frame(width: ExportSliderRowMetrics.unitWidth)
+            }
+            if let trailingToggle {
+                Toggle(isOn: trailingToggle.isOn) {
+                    Text(trailingToggle.title).font(.system(size: ExportSliderRowMetrics.fontSize))
+                }
+                .toggleStyle(.checkbox).controlSize(.small)
+                .disabled(!enabled)
+                .accessibilityIdentifier(trailingToggle.axID)
+                .help(trailingToggle.help ?? "")
+                .frame(width: ExportSliderRowMetrics.accessoryWidth, alignment: .leading)
+            } else {
+                Color.clear.frame(width: ExportSliderRowMetrics.accessoryWidth)
             }
         }
     }
