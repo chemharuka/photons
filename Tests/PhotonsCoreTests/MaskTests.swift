@@ -1055,13 +1055,18 @@ final class MaskTests: XCTestCase {
                 // the frame, flip, then turn the **pixel** offset about the frame's centre.
                 // 126: S0 walks canvas → source with `R(−θ)` (its `sintheta` is the inverse sine),
                 // because `+θ` is the picture's clockwise turn in the other direction.
-                var u = (Double(x) + 0.5 - ox) / fx
-                var v = (Double(y) + 0.5 - oy) / fy
-                u = 1 - u                                  // flipHorizontal
-                let px = (u - 0.5) * fx, py = (v - 0.5) * fy
-                let r = ((px * cs + py * sn) / fx, (-px * sn + py * cs) / fy)
-                let sx = (clamped.x + (r.0 + 0.5) * clamped.width) * w
-                let sy = (clamped.y + (r.1 + 0.5) * clamped.height) * h
+                // 248 E — the kernel's walk: crop window → photo normalized → flip → turn the
+                // **photo** about its centre → source. `cs/sn` are the inverse sine (canvas → source),
+                // exactly what `MaskAtlasParams.d` carries.
+                let u = (Double(x) + 0.5 - ox) / fx
+                let v = (Double(y) + 0.5 - oy) / fy
+                var photoX = clamped.x + u * clamped.width
+                var photoY = clamped.y + v * clamped.height
+                if edit.geometry.flipHorizontal { photoX = 1 - photoX }
+                let px = photoX * w - w / 2, py = photoY * h - h / 2
+                let rx = px * cs + py * sn, ry = -px * sn + py * cs
+                let sx = rx + w / 2
+                let sy = ry + h / 2
 
                 let expected = radialAlpha(x: sx, y: sy, shape, feather: 0.5,
                                            size: (image.width, image.height))

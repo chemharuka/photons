@@ -321,6 +321,14 @@ public final class CropToolController {
     /// pixel aspect kept — until it is fully inscribed in the sensor's turned quad
     /// (`CropMath.clampedToRotatedFrame`).
     ///
+    /// **Space (248).** The return value is a `CropRect` in the **turned photo's normalized
+    /// coordinates** — the same space `GeometryGroup.crop` and S0's `p.c` are measured in, after the
+    /// quarter turn and before the straighten. It is *not* a canvas rect: the renderer turns the
+    /// **whole photograph** about its centre (`P + R(photo − P)`, `s0_geometry.metal`) and cuts this
+    /// window out of that turned picture; the overlay draws the same window through `LoupeMapping`,
+    /// whose rotation pivot is also `frameWidth/2`. `应用` can therefore write this value straight
+    /// into `geometry.crop` — the two paths use one space and one pivot.
+    ///
     /// The stored rect is *not* written back, and that is the point: 拉直 is a view of the user's
     /// rect, so dragging the angle back to 0° gives the whole frame back instead of leaving it
     /// ratcheted smaller, and the shrink is idempotent by construction rather than by care.

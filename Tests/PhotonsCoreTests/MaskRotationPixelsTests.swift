@@ -150,21 +150,22 @@ final class MaskRotationPixelsTests: XCTestCase {
     /// rendered dot's own centroid, so it cannot quietly become a description of whatever the kernel
     /// happens to do.
     private func canvasOfSource(_ s: NormalizedPoint, crop: NormalizedRect, angle: Double,
-                                frame: ImageSize, canvas: ImageSize) -> (x: Double, y: Double) {
+                                frame: ImageSize, canvas: ImageSize,
+                                source: ImageSize? = nil) -> (x: Double, y: Double) {
         let t = angle * .pi / 180
         let cs = cos(t), sn = sin(t)
-        let fx = Double(frame.width), fy = Double(frame.height)
-        let rx = (s.x - crop.x) / max(crop.width, 1e-9) - 0.5
-        let ry = (s.y - crop.y) / max(crop.height, 1e-9) - 0.5
-        // `R(+θ)` on a **pixel** offset about the frame's centre — the forward direction of S0's
-        // canvas→source walk (`s0_geometry` consumes `R(−θ)` since 126, so the picture turns this
-        // way). Then back to index space (a pixel index i has its centre at i + 0.5), centred in the
-        // canvas — `origin + (frameSize)/2` in `RenderGraph.plan`.
-        let px = rx * fx, py = ry * fy
-        let ox = px * cs - py * sn
-        let oy = px * sn + py * cs
-        return (ox + 0.5 * Double(canvas.width) - 0.5,
-                oy + 0.5 * Double(canvas.height) - 0.5)
+        let photo = source ?? frame
+        let pw = Double(photo.width), ph = Double(photo.height)
+        let w = Double(frame.width), h = Double(frame.height)
+        // 248 E — S0/the atlas turn the **photograph** about its centre, then map the crop window
+        // into the canvas. The old model turned a crop-relative offset about the frame's centre.
+        let px = s.x * pw - pw / 2, py = s.y * ph - ph / 2
+        let rx = px * cs - py * sn, ry = px * sn + py * cs
+        let u = ((rx + pw / 2) / pw - crop.x) / max(crop.width, 1e-9)
+        let v = ((ry + ph / 2) / ph - crop.y) / max(crop.height, 1e-9)
+        let ox = (Double(canvas.width) - w) / 2
+        let oy = (Double(canvas.height) - h) / 2
+        return (u * w + ox - 0.5, v * h + oy - 0.5)
     }
 
     /// Coverage-weighted centroid of one slice, in canvas pixel indices.
@@ -247,7 +248,7 @@ final class MaskRotationPixelsTests: XCTestCase {
             let frame = CropMath.outputSize(CropRect(p.crop), in: source,
                                             allowsOutsideSource: true)
             let expected = canvasOfSource(sourceUV, crop: p.crop, angle: p.angle,
-                                          frame: frame, canvas: canvas)
+                                          frame: frame, canvas: canvas, source: source)
             let picture = pictureCentroid(display)
             let mask = maskCentroid(dump, slice: 0)
 

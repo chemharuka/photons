@@ -3743,7 +3743,7 @@ public final class RenderGraph {
             // 097: the four `_lens` entries are the same bodies with `HAS_LENS_WARP == true`; the
             // default entries never contain that block, so a file without three distinct planes
             // keeps the pre-097 machine code (and bytes).
-            let function: String
+            var function: String
             switch (turns != 0, s0TurnsPixels, plan.s0LensWarp) {
             case (false, false, false): function = "s0_geometry"
             case (false, true, false): function = "s0_geometry_rot"
@@ -3753,6 +3753,12 @@ public final class RenderGraph {
             case (false, true, true): function = "s0_geometry_lens_rot"
             case (true, false, true): function = "s0_geometry_lens_turn"
             case (true, true, true): function = "s0_geometry_lens_turn_rot"
+            }
+            // 248 D — a flip is a photograph-space mirror at every angle. It is a separate
+            // instantiation (`HAS_FLIP`), not a branch in the shared body, so the no-flip entries keep
+            // the pre-248 machine code byte for byte.
+            if edit.geometry.flipHorizontal || edit.geometry.flipVertical {
+                function += "_flip"
             }
             let p = try kernels.pipeline(file: "s0_geometry", function: function)
             // The identity/pure-CA decision lives in `plan(_:_:)` (`s0Identity`/`s0PureCA`): one
