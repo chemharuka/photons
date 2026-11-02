@@ -5,8 +5,8 @@ using namespace metal;
 
 // S2 — tone map: the three region lifts and the final clamp.
 //
-// 098 moved contrast out of this file: it is now S1.8 (`s1_8_contrast.metal`), a multiscale
-// edge-aware decomposition of `Y` in the scene-linear domain, **before** this stage. What is left here
+// 098 moved contrast out of this file: it is now S1.8/228 (`s1_8_contrast.metal`), a global
+// gain-domain power curve in the display-referred domain, **after** this stage. What is left here
 // is the three-window EV chain (085) — 阴影 / 中间调 / 高光 — and the final clamp. It is exact identity
 // at all zeros, which is what M1 has to prove.
 //

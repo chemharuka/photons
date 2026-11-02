@@ -394,17 +394,12 @@ final class ExposureEquivarianceTests: XCTestCase {
         return b > 0 ? a / b : 0
     }
 
-    /// 契约的**数字**：c = +100 时 L1030437 的 p50 增益是 **1.0786**，E 0 与 E +2 **同一个值**（差值 0，
-    /// 见 `COMMUTE` 行的 1 ULP 结论）。这三个数字一起钉住"同一个滑杆在两种曝光下是同一个算子"：
-    /// 窗口 ±0.02 让任何一端的漂移都可见，`|E+2 − E 0| ≤ 2 %` 把"两档相等"本身写成断言
-    /// （`docs/tasks/174-contrast-contract.md` §0，用户 2026-10-30 的算子顺序口径）。
-    ///
-    /// **187 重钉：1.1135 → 1.0786（−100 0.98069，+50 1.06189）。** 174 §0 的 1.1135 是在"四边
-    /// clamp 边界窗"下测的 —— 那时系数图的边界按 `address::clamp_to_edge` 复制边像素，边界窗均值被
-    /// 压平、残差趋 0、增益塌向 1。187 为了不再出现用户报的"对比拉到最大、四边出现无变化条带"，把
-    /// 边界改成**按真实样本数归一**（门是 `ContrastGlobalStatsTests.testNoZeroChangeStripAlongTheFourEdges`），
-    /// 全局 p50 增益因此降 3.1 %（1.1135 → 1.0786）。这是**定向修正，不是漂移**：退回 clamp 可以
-    /// 把数字恢复成 1.1129 附近，但条带会复现。−100 / +50 按同一套算式一并重钉，理由相同。
+    /// **228 re-pin.** This test used to pin 159's multiscale p50 gains (1.0786 at +100, 0.98069 at
+    /// −100, 1.06189 at +50). 228 replaced that operator with a global power curve, so those absolute
+    /// numbers belong to a different function. What survives — and what this test is for — is the
+    /// **exposure law**: the same slider at E 0 and E +2 must produce the same gain, because the curve
+    /// is built on `Y / exposureGain` and multiplied back onto the exposed pixel. The absolute gains
+    /// are printed, not asserted; `GlobalContrastTests` pins the curve itself.
     func testContrastGainIsPinnedAtZeroAndPlusTwoStops() throws {
         let path = Self.frames[0].1
         guard FileManager.default.fileExists(atPath: path) else {
@@ -422,35 +417,23 @@ final class ExposureEquivarianceTests: XCTestCase {
                 print(String(format: "CONTRAST · E%+.0f c=%+.0f · p50 增益 %.6f", ev, c, gain))
             }
         }
-        let e0 = gains[100], e2 = gains[120]
-        XCTAssertNotNil(e0); XCTAssertNotNil(e2)
-        if let e0, let e2 {
-            XCTAssertEqual(e0, 1.0786, accuracy: 0.02,
-                           "E 0 的 +100 增益漂移了（契约数字见 174 §0，187 重钉为 1.0786）")
-            XCTAssertEqual(e2, 1.0786, accuracy: 0.02,
-                           "E +2 的 +100 增益漂移了（契约数字见 174 §0，187 重钉为 1.0786）")
-            // 两档相等本身就是契约：S2.5 的残差增益对曝光的整幅缩放是不变的（同上一行的 1 ULP 定律）。
-            XCTAssertEqual(e2, e0, accuracy: 0.02 * e0,
-                           "E +2 与 E 0 的 p50 增益必须相同 —— 顺序一经确定就不许再动")
+        guard let e0 = gains[100], let e2 = gains[120] else {
+            return XCTFail("+100 没有测到")
         }
-        // 187 重钉的另外两档：同一个闸、同一套边界归一，两个曝光下各一份。
-        for (key, expected, label) in [(-100.0, 0.98069, "E 0 的 −100"),
-                                       (50.0, 1.06189, "E 0 的 +50"),
-                                       (20.0 - 100.0, 0.98069, "E +2 的 −100"),
-                                       (20.0 + 50.0, 1.06189, "E +2 的 +50")] {
-            guard let measured = gains[key] else {
-                XCTFail("\(label) 没有测到（契约数字见 174 §0 / 187 重钉）")
-                continue
+        XCTAssertEqual(e2, e0, accuracy: 0.02 * e0,
+                       "E +2 与 E 0 的 p50 增益必须相同 —— 228 的曲线建在 Y/exposure 上")
+        for c in [-100.0, 50.0] {
+            guard let a = gains[c], let b = gains[20 + c] else {
+                return XCTFail("c=\(c) 没有测到")
             }
-            XCTAssertEqual(measured, expected, accuracy: 0.02,
-                           "\(label) 增益漂移了（174 §0 的数字；187 按真实样本数归一后重钉）")
+            XCTAssertEqual(b, a, accuracy: 0.02 * a,
+                           "c=\(c)：两个曝光下必须是同一个算子")
         }
     }
 
-    /// 残差算子的**闭式**。098 在平场上有一个**电平**项：增益 `2^((k_c − 1)·s)` —— 它正是
-    /// `exposure × contrast` 不可交换的原因（142 的 audit）。159 删掉了它，所以在**没有残差**的场里
-    /// 闭式就是 `2^0 = 1`，与曝光、与滑杆位置无关；这是这套算子唯一还存在的闭式。
-    /// 电平项一旦回来，下面两行同时变红（174 §0）。
+    /// 228: the flat **0.18** frame is the curve's pivot, so its gain is exactly 1 at every exposure —
+    /// still the cleanest closed form the operator has. The old residual operator had *no* level term,
+    /// so every flat field was the identity; the global curve has one, and it is anchored here.
     func testFlatFrameGainIsExactlyOneAtEveryExposure() throws {
         let graph = try makeGraph(grey(0.18), identity: "contrast-flat-closed-form")
         for ev in [0.0, 2.0, -2.0] {
@@ -464,12 +447,10 @@ final class ExposureEquivarianceTests: XCTestCase {
                                "E \(Int(ev)) c=\(Int(c))：平场没有残差，增益必须是 1")
             }
         }
-        // 同一个算子在 Swift 侧的看法：零残差 ⇒ 零指数。粗带的电平项是具名的 0（`coarseWeight`）。
-        let bands = MultiscaleContrast.Bands(coarse: -3, mid: 0, fine: 0)
-        XCTAssertEqual(MultiscaleContrast.gainRatio(Y: 0.18, bands: bands, contrast: 100), 1,
-                       accuracy: 0)
-        XCTAssertEqual(MultiscaleContrast.scaleGains(t: 1).coarse, 0, accuracy: 0,
-                       "098 的 `k_c`（电平项）必须还是 0")
+        // 同一个算子在 Swift 侧的看法：0.18 是枢轴，所以 `gain(0.18, c) == 1`，与滑杆位置无关。
+        XCTAssertEqual(GlobalContrast.gain(luma: 0.18, contrast: 100), 1, accuracy: 1e-15)
+        XCTAssertEqual(GlobalContrast.gain(luma: 0.18, contrast: -100), 1, accuracy: 1e-15)
+        XCTAssertEqual(GlobalContrast.pivot, 0.18, accuracy: 0)
     }
 
     // MARK: - 4. mask predicates: IoU / mean |Δcov| / cov ≥ 0.8 share

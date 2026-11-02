@@ -39,18 +39,16 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is **deleted**; this is the one curve. `grep -rn "s3_curve" Sources` must find nothing but
     /// this sentence.
     case curve = "s1.7-hdr-curve"
-    /// 159 — **contrast**, a multiscale edge-aware decomposition of `Y` in the **display-referred**
-    /// domain (S2.5). 098 introduced it as S1.8 in scene light, after the curve and before S2; 142
-    /// measured that this made `exposure × contrast` non-commutative (a gain anchored to an absolute
-    /// scene level is not invariant under a change of level) and that the masked contrast was a
-    /// different operator. S2.5 sits **after the tone map and before S3 colour**, reads the display
-    /// values S2 produced (white = 1 = 0 EV), and builds its gain from the decomposition's residuals
-    /// only, so an exposure gain shifts `G` and `B_c` together and cancels exactly.
+    /// **Contrast — 228: global, in the gain domain.** S2.5, after the tone map and before S3 colour.
+    /// The stage reads display linear `Y` (white = 1, unbounded above for HDR), curves it on the
+    /// log2/EV axis with one global power, and multiplies all three channels by the same gain
+    /// `((Y/e)/0.18)^(γ−1)`. 159's multiscale edge-aware decomposition was a *local* operator (it
+    /// competed with 清晰度 and left a smooth ramp untouched) and is gone.
     ///
     /// **Conditional** like the mask/effect stages: it exists only when `light.contrast != 0` (or a
-    /// mask carries a contrast value, from step 2 of 159), so a neutral document keeps its trace, key
-    /// chain and pixels byte for byte. The raw value keeps its 098 spelling `s1.8-contrast` for
-    /// recorded traces; `short` says `s2.5`, which is where it now runs.
+    /// mask carries a contrast value), so a neutral document keeps its trace, key chain and pixels
+    /// byte for byte. The raw value keeps its 098 spelling `s1.8-contrast` for recorded traces;
+    /// `short` says `s2.5`, which is where it runs.
     case contrast = "s1.8-contrast"
     /// 117 — **去雾**, in the scene-linear domain, at the end of the linear chain.
     ///
@@ -184,9 +182,9 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         // lens-vignetting *correction*, so it multiplies light, not tone-mapped codes.
         // 117 — dehaze joins that same linear tail, between the curve and the vignette: it removes a
         // veil from scene light, and the vignette must see the recovered light, not the veil.
-        // 159 — contrast left the linear chain entirely: it now runs **after S2 and before S3**, on
-        // the tone-mapped display values. A residual-only gain there is invariant under S1's exposure
-        // gain, which is what 142 asked for; in scene light its level anchor was not.
+        // 159 — contrast left the linear chain entirely: it runs **after S2 and before S3**, on the
+        // tone-mapped display values. 228 keeps that position and restores the global operator as a
+        // gain-domain power curve, so the exposure normalisation still makes E × C commute.
         [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .dehaze,
          .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl, .pointColour, .grade,
          .detailFX, .sharpen, .grain, .display]

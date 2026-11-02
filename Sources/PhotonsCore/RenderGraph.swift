@@ -257,10 +257,11 @@ public struct RenderOptions: Sendable {
     /// invert). Never set by the app, never part of a key.
     public var legacyDehazeUnboundedRecovery: Bool
 
-    /// **Internal (160).** The caller is the 187 contrast stage's proxy prefix: it renders the
-    /// upstream chain at a different rung but asks for the *same* whole-picture dehaze statistics, so
-    /// the canonical `DehazeStatsCache` entry may be reused even though that internal prefix renders
-    /// with `useCache = false`. Never set by the app, never part of a key.
+    /// **Internal (160).** A caller that renders the upstream chain at a different rung but asks for
+    /// the *same* whole-picture dehaze statistics, so the canonical `DehazeStatsCache` entry may be
+    /// reused even though that internal prefix renders with `useCache = false`. Never set by the app,
+    /// never part of a key. (228 removed the only caller — the contrast stage's 187 proxy — but the
+    /// flag is part of the dehaze contract and stays for any future internal prefix.)
     var reuseDehazeStatistics: Bool = false
 
     public init(canvas: ImageSize? = nil,
@@ -908,23 +909,12 @@ private struct S2Params {
     var c: SIMD4<Float>
 }
 
-/// 098 — mirror of `ContrastParams` in `Kernels/s1_8_contrast.metal`, byte for byte. One struct for
-/// every pass of the stage; each kernel reads the fields it needs.
+/// 228 — mirror of `ContrastParams` in `Kernels/s1_8_contrast.metal`, byte for byte.
 private struct ContrastParamsU {
-    var a: SIMD4<Float>    // t (= contrast/100), pivot EV, coarse ε, mid ε
-    var b: SIMD4<Float>    // k_c, k_m, k_f, gate lower knee
-    var c: SIMD4<Float>    // gate upper knee, 147: S1 exposure gain (the analysis divides by it), pad, pad
+    var a: SIMD4<Float>    // contrast (−100…100), pivot (linear display light), exposure gain, travel EV
     var luma: SIMD4<Float> // Rec2020 luma weights, pad
     var rect: SIMD4<Float> // contentOrigin.xy, contentSize.xy (canvas pixels)
-    var d: SIMD4<Int32>    // canvasW, canvasH, q, coarse radius in the 1/q domain
-    var e: SIMD4<Int32>    // qW, qH, segment length, mid radius in the 1/q domain
-    var f: SIMD4<Int32>    // mode (0 = G statistics, 1 = D1 statistics), mask count, direct-read flag, pad
-    // 187 — the whole-picture coefficient map's mapping (mirror of the three rows appended to the
-    // kernel's `ContrastParams`). `map = (uvScaleX, uvScaleY, spanX, spanY)`,
-    // `mapOrigin = (frameOrigin.xy, contentOrigin.xy)`, `srcMax` = picture pixel → proxy canvas.
-    var map: SIMD4<Float>
-    var mapOrigin: SIMD4<Float>
-    var srcMax: SIMD4<Float>
+    var d: SIMD4<Int32>    // canvasW, canvasH, mask count, pad
 }
 
 /// Mirror of `HDRCurveParams` in `s1_7_hdr_curve.metal`, byte for byte (派单 030).
@@ -3620,9 +3610,9 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .contrast:
-            // S2.5 — 159: the multiscale, edge-aware decomposition of Y in the **display-referred**
-            // domain, after S2 and before S3. Encoded **only** for documents whose contrast is
-            // non-zero (`hasContrastStage`), so a neutral document has no pass to be neutral in.
+            // S2.5 — 228: global contrast in the gain domain, after S2 and before S3. Encoded
+            // **only** for documents whose contrast is non-zero (`hasContrastStage`), so a neutral
+            // document has no pass to be neutral in.
             try encodeContrast(cb: cb, into: out, from: src, edit: edit, plan: plan,
                                options: options, table: table, atlas: atlasCache?.texture)
 
@@ -3880,393 +3870,78 @@ public final class RenderGraph {
         }
     }
 
-    // MARK: - S2.5 contrast (159; 098's file, display-referred)
+    // MARK: - S2.5 contrast (228; 098's file, display-referred)
     //
-    // 187 — **the statistics are a whole-picture fact, so they are computed once on a fix
-    // full-picture proxy and cached.**
+    // 228 — global contrast is **one power curve in the gain domain**, after the tone map and before
+    // S3. The stage exists only when the global slider or a mask's contrast is non-zero
+    // (`hasContrastStage`), so a neutral document has no pass to be neutral in.
     //
-    // Through 185 the coefficient maps `coeffC`/`coeffM` were built from the *frame being rendered*:
-    // the block statistics packed the current canvas, so a 1:1 window of 800×600 saw a different set
-    // of coarse/mid coefficients from the fit preview or from a panned 1:1 window of the same
-    // physical pixels. The gain of a physical pixel therefore depended on the framing and on
-    // `options.scale` — and a low-resolution full-size preview was not the same picture as the
-    // `render --scale 0.25` the CLI produced.
+    // 159 ran a multiscale, edge-aware decomposition here. That is the **local** operator the owner
+    // asked to leave: it competes with 清晰度/细节, and a smooth EV ramp has no residual to act on. The
+    // replacement is the old global bend (`ContrastCurve.swift`'s linear-light power lineage), with
+    // the arithmetic moved into the gain domain:
     //
-    // Now the maps are derived from **one** proxy of the cropped picture at
-    // `MultiscaleContrast.statisticsLongEdge` (see its doc comment for why 1024): the upstream prefix
-    // (`geo → lin → [masks] → [heal] → curve → [dehaze] → [vignette] → toneMap`) is re-encoded at
-    // that resolution into `contrast-proxy-a/b`, the pack → box → coeff chain runs on the proxy's
-    // picture grid (`256×160` q-texels at the default long edge), and the two coefficient textures
-    // are cached. The frame's own apply then samples them in **picture-normalized** coordinates
-    // (`imgPx = px + ½ − contentOrigin + frameOrigin`, then `/ frameSize`), so fit, 25 %, 1:1 and a
-    // panned 1:1 window all read the same coefficient at the same physical pixel.
+    //     Y    = dot(max(rgb, 0), Rec2020 weights)          // display linear, unbounded above
+    //     G    = log2(Y / exposureGain)                      // unexposed display EV
+    //     G′   = P + γ·(G − P)                               // P = log2(0.18), γ = 2^(c/100·travel)
+    //     gain = 2^(G′ − G)                                  // one scalar for R/G/B
     //
-    // **Cache key**: `document + every stage up to and including S2 + the slider + the proxy rung`:
+    // The constants live in `GlobalContrast` and travel in `ContrastParams.a`; this file has no copy
+    // of them. There is no upper clamp, so the HDR segment is expanded by the same curve as the SDR
+    // segment (228 §2.2), and the exposure division is what keeps E × C commutative.
     //
-    //     KeyBuilder(proxyPlan.keys.toneMap)
-    //         effects.keyString       // 187: the vignette runs *before* S2 in `RenderStage.order`
-    //         c=<contrast>            // §2: a contrast drag rebuilds once, then hits
-    //         proxy=<statisticsLongEdge>
-    //         px=<proxyW>x<proxyH>
-    //
-    // `proxyPlan.keys.toneMap` is the upstream chain at the **proxy** plan, whose canvas/window/scale
-    // are all canonical — so it cannot move with the caller's `options.scale`/`outputWindow` the way
-    // `plan.keys` does. It carries `geo → lin → [masks] → [heal] → curve → [dehaze] → toneMap`, and
-    // `alg=` rides inside each link. The `vignette` is the one prefix stage the chain does **not**
-    // fold into `toneMap` (`RenderKeyChain` computes its link after S3, while `RenderStage.order`
-    // executes it before S2), so its three numbers are spelled here — the proxy prefix really does
-    // run it, and a vignette drag must rebuild the maps. `c=` is the contrast value itself, `px=` the
-    // proxy grid.
-    //
-    // `useCache == false` rebuilds every frame (the cold measurement path, and the existing meaning
-    // of the flag); `useCache == true` increments `contrastMapHits` on a hit and rebuilds once on a
-    // miss. `contrastMapBuilds` is a **counter**, not a log line: "1 rebuild when only `contrast`
-    // moves, 0 when only the window pans" is a claim a test can assert.
-    //
-    // **Deliberately omitted from the proxy prefix:** `.maskAtlas`, `.localApply` and `.heal`. The
-    // atlas is a canvas-sized raster and a repair's source point is a content pixel; neither is
-    // meaningful on the proxy. More importantly they do not have to be: masks and heal spots do
-    // **not participate in the statistics**, so their effect on the map is "the same global one" on
-    // every framing rather than a window-dependent term. The rest of the prefix — geometry,
-    // scene-linear, curve, dehaze, vignette, tone map — is mandatory: dehaze and the vignette move
-    // the luminance distribution substantially and leaving them out would not be "the whole picture".
+    // 187's whole-picture coefficient maps (pack → box → coeff, the proxy prefix, and their cache)
+    // are **deleted with the decomposition**: the global curve is a per-pixel function of that pixel's
+    // own luma, so there is no statistic to build and no 4.10 Mpx cold path to amortise. The two
+    // counters `contrastMapBuilds`/`contrastMapHits` and `ContrastGlobalStatsTests` went with them.
 
-    /// The stage: coarse guided filter → mid guided filter on the coarse residual → one full-resolution
-    /// apply that rebuilds `B_c`, `B_m`, `D_f` and applies the two residual gains.
-    ///
-    /// It reads the **tone-mapped display light** S2 wrote (white = 1 = 0 EV), not scene light: 142
-    /// measured that a scene-linear gain anchored to a fixed level makes `exposure × contrast`
-    /// non-commutative, and that moving it after the tone map is what makes the two commute.
-    ///
-    /// The coefficient maps are built on the **whole-picture proxy** and cached (187, above); the
-    /// frame pays one bilinear sample of each map in the apply pass.
+    /// The stage: one full-resolution pass. Global contrast is `maskCount == 0`; a document whose
+    /// masks carry contrast binds the atlas and runs the same gain body once per mask, mixed by
+    /// coverage. A full-canvas mask therefore equals the global slider by construction (079 B1).
     private func encodeContrast(cb: MTLCommandBuffer, into out: MTLTexture,
                                 from src: MTLTexture, edit: EditModel, plan: Plan,
                                 options: RenderOptions,
                                 table: MaskTable?, atlas: MTLTexture?) throws {
         let w = plan.canvas.width, h = plan.canvas.height
-        let q = MultiscaleContrast.block
-
-        // 187 — the proxy rung is a function of the **document** only: the cropped picture's own
-        // pixel size, capped at `statisticsLongEdge` on the long edge. It is recomputed here (a
-        // private helper) rather than read off `plan`, because `plan` is the caller's frame and the
-        // whole point is that this must not move with it. `plan(_:_:)` is untouched.
-        let picture = contrastPicture(edit)
-        let proxyScale = min(1.0, Double(MultiscaleContrast.statisticsLongEdge)
-            / Double(max(picture.width, picture.height)))
-        let proxyW = max(1, Int((Double(picture.width) * proxyScale).rounded()))
-        let proxyH = max(1, Int((Double(picture.height) * proxyScale).rounded()))
-        let mapW = max(1, (proxyW + q - 1) / q), mapH = max(1, (proxyH + q - 1) / q)
-        // The radius is a resolution-independent physical length, so it is measured on the **proxy's**
-        // short edge (in the 1/q domain). Using the frame's short edge here would make a 1:1 window
-        // and a fit preview ask for different radii, which is the bug 187 is removing.
-        let shortEdge = Double(min(proxyW, proxyH))
-        let radiusC = Int32(MultiscaleContrast.radiusQ(
-            fraction: MultiscaleContrast.coarseRadiusFraction,
-            cap: MultiscaleContrast.coarseRadiusCap, shortEdge: shortEdge))
-        let radiusM = Int32(MultiscaleContrast.radiusQ(
-            fraction: MultiscaleContrast.midRadiusFraction,
-            cap: MultiscaleContrast.midRadiusCap, shortEdge: shortEdge))
-        let gains = MultiscaleContrast.scaleGains(t: edit.light.contrast / 100)
         let lw = ColorPrimaries.working.luminanceWeights
-
-        // The proxy plan: the whole cropped picture at `proxyScale`, no canvas letterbox, no window,
-        // no readback, no probes. `useCache = false` because this is an internal prefix, not a frame
-        // the stage cache may resume — the map cache above is the only reuse that matters here.
-        var proxyOptions = options
-        proxyOptions.scale = proxyScale
-        proxyOptions.canvas = nil
-        proxyOptions.outputWindow = nil
-        proxyOptions.wantsPixels = false
-        proxyOptions.useCache = false
-        proxyOptions.collectHistogram = false
-        proxyOptions.probesDehazeAirlight = false   // never touch this frame's probe
-        // 160 — this prefix re-renders `.dehaze` at another rung. The statistics proxy is canonical
-        // (512, whole picture), so its entry is the same one the frame already (or will) use; reuse
-        // it instead of measuring it a second time just because this prefix is cacheless.
-        proxyOptions.reuseDehazeStatistics = true
-        let proxyPlan = self.plan(edit, proxyOptions)
-        let key = contrastMapKey(edit, proxyPlan, proxyW: proxyW, proxyH: proxyH)
-
-        let coeffC: MTLTexture
-        let coeffM: MTLTexture
-        if options.useCache, let entry = contrastMap, entry.key == key,
-           entry.mapW == mapW, entry.mapH == mapH,
-           entry.proxyW == proxyW, entry.proxyH == proxyH,
-           let stored = contrastMapTextures {
-            // Hot frame: the maps were built for this document; sample, do not rebuild.
-            contrastMapHits += 1
-            coeffC = stored.c
-            coeffM = stored.m
-        } else {
-            (coeffC, coeffM) = try buildContrastMaps(
-                cb: cb, edit: edit, proxyPlan: proxyPlan, proxyOptions: proxyOptions,
-                proxyW: proxyW, proxyH: proxyH, mapW: mapW, mapH: mapH,
-                radiusC: radiusC, radiusM: radiusM, q: q)
-            contrastMapBuilds += 1
-            contrastMap = ContrastMapEntry(key: key, mapW: mapW, mapH: mapH,
-                                           proxyW: proxyW, proxyH: proxyH)
-            contrastMapTextures = (coeffC, coeffM)
-        }
-
         var params = ContrastParamsU(
-            a: SIMD4(Float(edit.light.contrast), Float(MultiscaleContrast.pivotEV),
-                     Float(MultiscaleContrast.coarseEpsilon),
-                     Float(MultiscaleContrast.midEpsilon)),
-            b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),
-                     Float(MultiscaleContrast.gateLo)),
-            // 147/159 — `.y` is `log2(exposureGain)`: the decomposition runs on the **unexposed**
-            // display log (`G − log2 g`), so a power-of-two exposure gives bit-identical filter
-            // inputs and an identical residual gain (A1/A2). `.z` is the gain itself, which scales
-            // the A5 black floor with the picture. Neither divides anything out of the gain.
-            c: SIMD4(Float(MultiscaleContrast.gateHi),
-                     Float(log2(max(Double(edit.light.exposureGain), 1e-6))),
-                     Float(edit.light.exposureGain), 0),
+            a: SIMD4(Float(edit.light.contrast), Float(GlobalContrast.pivot),
+                     Float(edit.light.exposureGain), Float(GlobalContrast.travelEV)),
             luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
             rect: SIMD4(plan.origin.x, plan.origin.y,
                         Float(plan.content.width), Float(plan.content.height)),
-            d: SIMD4(Int32(w), Int32(h), Int32(q), radiusC),
-            e: SIMD4(Int32((w + q - 1) / q), Int32((h + q - 1) / q), 32, radiusM),
-            // `.x` packs the two filters; `.y` is the mask count the masked apply loops over. `.z`
-            // is the pack-only direct-read flag, which the apply path must not see.
-            f: SIMD4(0, 0, 0, 0),
-            // 187 — the map's uv: picture-normalized (isotropic in the picture's own grid) scaled into
-            // the proxy grid. `uvScale == 1` exactly when the proxy *is* this frame's grid, which is
-            // what keeps the canonical renders bit-identical.
-            map: SIMD4(Float(proxyW) / max(plan.frameSize.x, 1),
-                       Float(proxyH) / max(plan.frameSize.y, 1),
-                       Float(q) * Float(mapW), Float(q) * Float(mapH)),
-            mapOrigin: SIMD4(plan.frameOrigin.x, plan.frameOrigin.y, plan.origin.x, plan.origin.y),
-            srcMax: SIMD4(0, 0, 0, 0))
+            d: SIMD4(Int32(w), Int32(h), 0, 0))
 
-        // Full-resolution apply: one gain for all three channels. A document whose masks carry
-        // contrast takes the **masked** entry point; it computes the same `s2_5_contrast_gain` and
-        // mixes the per-mask gains by coverage (B1: a full-canvas mask is the global slider).
-        // **One kernel for both paths.** B1 asks a full-canvas mask to equal the global slider to
-        // ≤1 code, and the global and masked arithmetic must therefore be the *same compiled body*,
-        // not two entry points whose fp16 rounding can differ by one ULP. A global document binds
-        // the dummy atlas with mask count 0; the loop is empty and the gain is untouched.
         let apply = try kernels.pipeline(file: "s1_8_contrast",
                                          function: "s1_8_g_contrast_apply_masked")
-        guard let e4 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e4.setComputePipelineState(apply)
-        e4.setTexture(src, index: 0)
-        e4.setTexture(coeffC, index: 1)
-        e4.setTexture(coeffM, index: 2)
-        e4.setTexture(out, index: 3)
+        guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e.setComputePipelineState(apply)
+        e.setTexture(src, index: 0)
+        e.setTexture(out, index: 1)
         if let table, let atlas {
-            params.f.y = Int32(table.adjust.count)
-            e4.setTexture(atlas, index: 5)
-            e4.setBuffer(table.adjustBuffer, offset: 0, index: 1)
+            params.d.z = Int32(table.adjust.count)
+            e.setTexture(atlas, index: 2)
+            e.setBuffer(table.adjustBuffer, offset: 0, index: 1)
         } else {
-            params.f.y = 0
-            e4.setTexture(try contrastDummyAtlas(), index: 5)
-            e4.setBuffer(try contrastDummyAdjust(), offset: 0, index: 1)
+            params.d.z = 0
+            e.setTexture(try contrastDummyAtlas(), index: 2)
+            e.setBuffer(try contrastDummyAdjust(), offset: 0, index: 1)
         }
-        e4.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatch(e4, apply, plan.canvas)
-        e4.endEncoding()
+        e.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
+        dispatch(e, apply, plan.canvas)
+        e.endEncoding()
     }
 
-    /// 187 — the cropped picture's own pixel size, in picture pixels: the exact expression
-    /// `plan(_:_:)` uses for its crop (`CropMath.frameSize` of the oriented source, after the
-    /// keystone). Factored out so the coefficient map's proxy cannot drift from the frame the caller
-    /// asked for; `plan(_:_:)` itself is not touched.
+    /// The cropped picture's own pixel size, in picture pixels: the exact expression `plan(_:_:)`
+    /// uses for its crop (`CropMath.frameSize` of the oriented source, after the keystone). Kept as a
+    /// private helper because the dehaze statistics proxy is derived from the **document**, not from
+    /// the caller's frame. (Until 228 the contrast stage's proxy used it too; that proxy is gone.)
     private func contrastPicture(_ edit: EditModel) -> ImageSize {
         let crop = edit.geometry.renderCrop(source: sourceSize)
         let oriented = edit.geometry.orientedSource(sourceSize)
         return CropMath.frameSize(crop, in: oriented, allowsOutsideSource: true,
                                   perspective: edit.geometry.perspective)
     }
-
-    /// 187 — the cache key of the whole-picture coefficient maps.
-    ///
-    /// `document + every stage up to and including S2 + the slider + the proxy rung`.
-    ///
-    /// `proxyPlan.keys.toneMap` is the whole upstream chain at the **proxy** plan, whose
-    /// canvas/window/scale are all canonical — so it cannot move with the caller's
-    /// `options.scale`/`outputWindow` the way `plan.keys` does. `effects.keyString` names the
-    /// vignette, which executes before S2 in `RenderStage.order` but whose key link the pre-existing
-    /// chain computes after S3; the prefix runs it, so the map key must name it. `c=` is the contrast
-    /// value itself (§2: a contrast drag must rebuild once), `px=` the proxy grid, `alg=` the
-    /// algorithm version token that every other key carries (inside each link).
-    private func contrastMapKey(_ edit: EditModel, _ proxyPlan: Plan,
-                                proxyW: Int, proxyH: Int) -> String {
-        KeyBuilder(proxyPlan.keys.toneMap)
-            .add(edit.effects.keyString)
-            .add("c=\(edit.light.contrast)")
-            .add("proxy=\(MultiscaleContrast.statisticsLongEdge)")
-            .add("px=\(proxyW)x\(proxyH)")
-            .canonical
-    }
-
-    /// 187 — the **cold** half of S2.5: render the upstream prefix on the whole-picture proxy, then
-    /// pack → box → coeff the two coefficient maps. Runs inside the frame's command buffer, so a
-    /// miss costs these dispatches and nothing else; the frame's apply is encoded by the caller.
-    private func buildContrastMaps(cb: MTLCommandBuffer, edit: EditModel,
-                                   proxyPlan: Plan, proxyOptions: RenderOptions,
-                                   proxyW: Int, proxyH: Int, mapW: Int, mapH: Int,
-                                   radiusC: Int32, radiusM: Int32, q: Int)
-        throws -> (coeffC: MTLTexture, coeffM: MTLTexture) {
-        // The prefix's ping-pong. `.rgba16Float` is the pool's stage format, so the proxy output is
-        // bit-for-bit what the same stages produce on a frame of that size.
-        let proxyA = try scratch("contrast-proxy-a", width: proxyPlan.canvas.width,
-                                 height: proxyPlan.canvas.height, format: .rgba16Float)
-        let proxyB = try scratch("contrast-proxy-b", width: proxyPlan.canvas.width,
-                                 height: proxyPlan.canvas.height, format: .rgba16Float)
-        var current = sourceTexture
-        var useA = true
-        var proxyReport: MaskStageReport? = nil
-        for stage in proxyPlan.stages where stage.index <= RenderStage.toneMap.index {
-            // 187 — masks and heal spots are deliberately absent: they do not participate in the
-            // statistics (see `encodeContrast`'s doc comment). Everything else in the prefix runs,
-            // including dehaze and the vignette, because they reshape the luminance distribution.
-            if stage == .maskAtlas || stage == .localApply || stage == .heal { continue }
-            let dst = useA ? proxyA : proxyB
-            try encode(stage, cb: cb, into: dst, from: current, edit: edit, plan: proxyPlan,
-                       options: proxyOptions, table: nil, report: &proxyReport)
-            current = dst
-            useA.toggle()
-        }
-
-        let gains = MultiscaleContrast.scaleGains(t: edit.light.contrast / 100)
-        let lw = ColorPrimaries.working.luminanceWeights
-        // 187 — `srcMax` maps a **picture** pixel onto the proxy canvas: `gid + ½ −
-        // contentOrigin + frameOrigin` (S0's own rule), written as `pos = p·scale + offset` so the
-        // pack can sample at `(pos + ½) / canvas`. `f.z == 1` is the canonical case (the proxy
-        // canvas *is* the picture grid) and reads the texture directly, bit-exact.
-        let contentRect = ImageRect(x: Int(proxyPlan.origin.x.rounded()),
-                                    y: Int(proxyPlan.origin.y.rounded()),
-                                    width: proxyPlan.content.width,
-                                    height: proxyPlan.content.height)
-        let direct = proxyPlan.origin == SIMD2<Float>(0, 0)
-            && proxyPlan.frameSize == SIMD2<Float>(Float(proxyW), Float(proxyH))
-            && proxyPlan.drawnRect.x == contentRect.x
-            && proxyPlan.drawnRect.y == contentRect.y
-            && proxyPlan.drawnRect.width == contentRect.width
-            && proxyPlan.drawnRect.height == contentRect.height
-            && proxyPlan.canvas.width == proxyW && proxyPlan.canvas.height == proxyH
-        let scaleX = proxyPlan.frameSize.x / Float(proxyW)
-        let scaleY = proxyPlan.frameSize.y / Float(proxyH)
-        let offX = 0.5 * scaleX - 0.5 + proxyPlan.origin.x - proxyPlan.frameOrigin.x
-        let offY = 0.5 * scaleY - 0.5 + proxyPlan.origin.y - proxyPlan.frameOrigin.y
-
-        var params = ContrastParamsU(
-            a: SIMD4(Float(edit.light.contrast), Float(MultiscaleContrast.pivotEV),
-                     Float(MultiscaleContrast.coarseEpsilon),
-                     Float(MultiscaleContrast.midEpsilon)),
-            b: SIMD4(Float(gains.mid), Float(gains.fine), Float(gains.coarse),
-                     Float(MultiscaleContrast.gateLo)),
-            c: SIMD4(Float(MultiscaleContrast.gateHi),
-                     Float(log2(max(Double(edit.light.exposureGain), 1e-6))),
-                     Float(edit.light.exposureGain), 0),
-            luma: SIMD4(Float(lw.x), Float(lw.y), Float(lw.z), 0),
-            rect: SIMD4(proxyPlan.origin.x, proxyPlan.origin.y,
-                        Float(proxyPlan.content.width), Float(proxyPlan.content.height)),
-            // `d` is the proxy **canvas** (the sampler's uv denominator); `e` is the **picture**
-            // grid the pack walks and the coefficient maps live on.
-            d: SIMD4(Int32(proxyPlan.canvas.width), Int32(proxyPlan.canvas.height),
-                     Int32(q), radiusC),
-            e: SIMD4(Int32(mapW), Int32(mapH), 32, radiusC),
-            f: SIMD4(0, 0, direct ? 1 : 0, 0),
-            map: SIMD4(0, 0, 0, 0),
-            mapOrigin: SIMD4(0, 0, 0, 0),
-            srcMax: SIMD4(scaleX, scaleY, offX, offY))
-
-        let base = try scratch("contrast-map-base", width: mapW, height: mapH, format: .rgba32Float)
-        let tmp = try scratch("contrast-map-tmp", width: mapW, height: mapH, format: .rgba32Float)
-        let boxedC = try scratch("contrast-map-coarse", width: mapW, height: mapH,
-                                 format: .rgba32Float)
-        let coeffC = try scratch("contrast-map-c", width: mapW, height: mapH,
-                                 format: .rgba32Float)
-        let statsM = try scratch("contrast-map-mid", width: mapW, height: mapH,
-                                 format: .rgba32Float)
-        let boxedM = try scratch("contrast-map-mid-boxed", width: mapW, height: mapH,
-                                 format: .rgba32Float)
-        let coeffM = try scratch("contrast-map-m", width: mapW, height: mapH,
-                                 format: .rgba32Float)
-
-        // 1. Pack G's block statistics on the picture grid.
-        let pack = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_pack")
-        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e0.setComputePipelineState(pack)
-        // 187 — both bindings point at the same proxy texture: index 0 is the direct read, index 4
-        // the resampling read. Only one is taken inside `s1_8_fetch`, by `p.f.z`.
-        e0.setTexture(current, index: 0)
-        e0.setTexture(current, index: 4)
-        e0.setTexture(base, index: 1)
-        // Mode 0 never reads these two; bind the textures the later passes will write rather than
-        // aliasing `base` as both a read and a write binding.
-        e0.setTexture(coeffC, index: 2)
-        e0.setTexture(statsM, index: 3)
-        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatch(e0, pack, ImageSize(width: mapW, height: mapH))
-        e0.endEncoding()
-
-        // 2. Coarse guided filter: box the statistics, then solve (a, b, gate).
-        params.e.w = radiusC
-        try contrastBox(cb: cb, from: base, tmp: tmp, to: boxedC, params: &params,
-                        qW: mapW, qH: mapH)
-        params.f.x = 0
-        let coeffPipe = try kernels.pipeline(file: "s1_8_contrast",
-                                             function: "s1_8_g_contrast_coeff")
-        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e1.setComputePipelineState(coeffPipe)
-        e1.setTexture(boxedC, index: 0)
-        e1.setTexture(coeffC, index: 1)
-        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatch(e1, coeffPipe, ImageSize(width: mapW, height: mapH))
-        e1.endEncoding()
-
-        // 3. The mid band's input: `D1 = G − (a_c·G + b_c)` per pixel, packed as block statistics.
-        // The residual has to be sampled per pixel: its block mean from the *block* mean of G is
-        // always zero, because the self-guided base passes through that mean.
-        params.f.x = 1
-        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e2.setComputePipelineState(pack)
-        e2.setTexture(current, index: 0)
-        e2.setTexture(current, index: 4)
-        e2.setTexture(statsM, index: 1)
-        e2.setTexture(coeffC, index: 2)
-        e2.setTexture(statsM, index: 3)
-        e2.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatch(e2, pack, ImageSize(width: mapW, height: mapH))
-        e2.endEncoding()
-
-        // 4. Mid guided filter on `D1`.
-        params.e.w = radiusM
-        try contrastBox(cb: cb, from: statsM, tmp: tmp, to: boxedM, params: &params,
-                        qW: mapW, qH: mapH)
-        params.f.x = 1
-        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e3.setComputePipelineState(coeffPipe)
-        e3.setTexture(boxedM, index: 0)
-        e3.setTexture(coeffM, index: 1)
-        e3.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatch(e3, coeffPipe, ImageSize(width: mapW, height: mapH))
-        e3.endEncoding()
-
-        return (coeffC, coeffM)
-    }
-
-    /// 187 — the whole-picture coefficient maps (see `encodeContrast`).
-    private struct ContrastMapEntry {
-        var key: String
-        var mapW: Int
-        var mapH: Int
-        var proxyW: Int
-        var proxyH: Int
-    }
-    private var contrastMap: ContrastMapEntry?
-    /// The two cached coefficient textures. Kept by reference so a `scratch` eviction (which clears
-    /// the label dictionary wholesale) cannot turn a hit into an uninitialised texture: the maps are
-    /// still alive here, and the next miss re-acquires and replaces them.
-    private var contrastMapTextures: (c: MTLTexture, m: MTLTexture)?
-    /// How many times the coefficient maps were (re)built. A **counter**, not a log line: §2 asks for
-    /// "1 rebuild when only `contrast` moves, 0 when only the window pans" and a log cannot prove it.
-    public private(set) var contrastMapBuilds = 0
-    /// Frames that sampled an already-built map (the hot-frame path).
-    public private(set) var contrastMapHits = 0
 
     // MARK: - 160 — the dehaze statistics cache
 
@@ -4281,8 +3956,8 @@ public final class RenderGraph {
         var qH: Int
     }
     private var dehazeStats: DehazeStatsEntry?
-    /// The measured textures, kept by reference (not by `scratch` label) for the same reason as the
-    /// contrast maps: a label-cache eviction must not turn a hit into an uninitialised texture.
+    /// The measured textures, kept by reference (not by `scratch` label) so a label-cache eviction
+    /// cannot turn a hit into an uninitialised texture.
     private var dehazeStatsTextures: (veil: MTLTexture, dark: MTLTexture,
                                       airlight: MTLTexture, limited: MTLTexture)?
     /// Proxy statistics builds. A counter, not a log line: S5/S6 are claims about *not recomputing*
@@ -4317,29 +3992,6 @@ public final class RenderGraph {
         _ = try contrastDummyAtlas()
         guard let d = contrastDummy else { throw RenderError.commandBufferFailed }
         return d.adjust
-    }
-
-    /// The separable box mean of one statistics map: `from → tmp → to`.
-    private func contrastBox(cb: MTLCommandBuffer, from: MTLTexture, tmp: MTLTexture,
-                             to: MTLTexture, params: inout ContrastParamsU,
-                             qW: Int, qH: Int) throws {
-        let h = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_h")
-        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e0.setComputePipelineState(h)
-        e0.setTexture(from, index: 0)
-        e0.setTexture(tmp, index: 1)
-        e0.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatchSegments(e0, qW: qW, qH: qH)
-        e0.endEncoding()
-
-        let v = try kernels.pipeline(file: "s1_8_contrast", function: "s1_8_g_contrast_box_v")
-        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-        e1.setComputePipelineState(v)
-        e1.setTexture(tmp, index: 0)
-        e1.setTexture(to, index: 1)
-        e1.setBytes(&params, length: MemoryLayout<ContrastParamsU>.stride, index: 0)
-        dispatchSegments(e1, qW: qW, qH: qH)
-        e1.endEncoding()
     }
 
     // MARK: - S3.9 纹理 / 清晰度 (2026-10-28, P0-6; 117 split 去雾 out)
@@ -4992,8 +4644,8 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
     // scale, which is what makes the fit preview, a 1:1 window and the export agree.
     //
     // The proxy prefix deliberately omits `.maskAtlas`, `.localApply` and `.heal`: those are
-    // canvas-sized rasters / source-pixel repairs and the contrast stage's 187 proxy omits them for
-    // the same reason. A mask or heal spot therefore does not participate in `A`/`p99`/`veil`; it
+    // canvas-sized rasters / source-pixel repairs, and 228's contrast stage no longer keeps a proxy
+    // at all. A mask or heal spot therefore does not participate in `A`/`p99`/`veil`; it
     // still participates in the frame (the apply pass runs on the real, masked/healed input).
     //
     // **Cache (160).** `DehazeStatsCache` key = the proxy plan's upstream stage key through the
@@ -5098,9 +4750,9 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             airlight = stored.airlight
             limited = stored.limited
         } else {
-            // The proxy's input. When the caller already rendered this exact canonical proxy (the
-            // contrast stage's 187 prefix at a different rung is not it, so that case re-renders
-            // here), reuse its texture instead of re-encoding the same stages.
+            // The proxy's input. When the caller already rendered this exact canonical proxy, reuse
+            // its texture instead of re-encoding the same stages (228 removed the contrast stage's
+            // own 187 prefix, so this is now the only prefix at another rung).
             let canonical = plan.window == nil
                 && plan.canvas == proxyPlan.canvas
                 && plan.content == proxyPlan.content
@@ -5120,7 +4772,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
                 var proxyReport: MaskStageReport? = nil
                 for stage in proxyPlan.stages where stage.index <= RenderStage.curve.index {
                     // Canvas-sized mask rasters and source-pixel repairs are deliberately absent: they
-                    // are not statistics (see the header), and the contrast proxy omits them too.
+                    // are not statistics (see the header).
                     if stage == .maskAtlas || stage == .localApply || stage == .heal { continue }
                     let dst = useA ? proxyA : proxyB
                     try encode(stage, cb: cb, into: dst, from: current, edit: edit,

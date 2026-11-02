@@ -121,6 +121,11 @@ public enum StageAlgorithmVersion {
     /// table, so the same stored points produce different pixels. The stage's generation moves;
     /// the positive-curve pixels do not.
     public static let curve = 2
+    /// **3** — 228：全局对比度回增益域. 159's multiscale residual operator is gone; the stage is one
+    /// global power curve on the unexposed display luma, `gain = ((Y/e)/0.18)^(γ−1)`, applied to all
+    /// three channels, with no clamp at white. Same stored number, different pixels for every
+    /// non-zero contrast (and for every mask that carries one); `contrast == 0` is still the exact
+    /// identity and never reaches the stage.
     /// **2** — 159: contrast moved out of the scene-linear chain into S2.5 (after the tone map and
     /// before S3), where the multiscale gain is built from the decomposition's **residuals** on the
     /// display values. Same stored number, different pixels: the level anchor that made 142's
@@ -128,7 +133,7 @@ public enum StageAlgorithmVersion {
     /// (`MC_W_M/W_F`, gate, ε) change the local response. `contrast == 0` never reaches the stage.
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
-    public static let contrast = 2
+    public static let contrast = 3
     /// **5** — 124: 高光 covers the whole HDR range. The high→white closure moved from
     /// `smoothstep(−1.2, 0.0, L)` to `smoothstep(+4.0, +6.0, L)`, so a document with
     /// `highlights != 0` now moves every pixel above −0.9 EV, including values above display white
