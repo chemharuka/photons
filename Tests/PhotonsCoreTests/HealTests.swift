@@ -569,7 +569,12 @@ final class HealTests: XCTestCase {
         func best(_ edit: EditModel) throws -> Double {
             _ = try graph.render(edit, options: options)
             var best = Double.infinity
-            for _ in 0..<7 {
+            // Three independent best-of-7 trials, best of the three. This worktree shares the machine
+            // with other lanes, and one 7-sample minimum was observed jumping by 1.7 ms under their
+            // `swift-frontend` load. The minimum is still the estimate (the quiet-slot cost); more
+            // trials only make it less likely that the "without" and "with" minima come from
+            // different load regimes.
+            for _ in 0..<21 {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 _ = try graph.render(edit, options: options)
                 best = min(best, Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6)
