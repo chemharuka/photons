@@ -11,12 +11,13 @@ import PhotonsCore
 /// the session:
 ///
 ///   · **click** the row → `jumpToHistory(seq:)` (move the cursor and re-render once — no snapshot);
-///   · **删除** → `deleteHistoryEntry(at:)`, enabled only when `HistoryRow.canDelete` (the model's
-///     own `deletable(at:)`, i.e. 「只有最新的该类操作可以单独删除」);
+///   · **撤销** → `revertHistoryEntry(at:)`, enabled only when `HistoryRow.canUndo` (the model's
+///     own `isNewestOfClass(at:)` and `index >= 1`, i.e. 「最新」 has something before it);
 ///   · nothing else. This panel cannot edit the document, so it cannot grow the stack.
 ///
-/// `最新` is drawn from `HistoryRow.isNewestOfClass` — the same predicate the delete button uses, so
-/// the badge and the button can never disagree about a row.
+/// 「撤销」 is drawn from the same `isNewestOfClass` predicate the model uses, so the button and the
+/// rule can never disagree about a row. A revert is an ordinary appended snapshot, never a removed
+/// row: the panel grows by one line and the new line is itself 「最新」.
 ///
 /// **Scrolling**: the rows are a `LazyVStack` inside the inspector's *existing* `ScrollView` — no
 /// nested scroll view (a second scrollbar inside a 330 pt panel is a trap), and no eager `VStack`
@@ -89,7 +90,7 @@ public struct HistoryPanel: View {
         }
     }
 
-    /// `序号 · 摘要（具体参数 + 旧→新）· 标签/时间`, current row highlighted, newest-of-class badged.
+    /// `序号 · 摘要（具体参数 + 旧→新）· 标签/时间`, current row highlighted, newest-of-class undoable.
     private func rowView(_ row: HistoryRow) -> some View {
         HStack(alignment: .top, spacing: HistoryPanelLayout.spacing) {
             Text("\(row.seq)")
@@ -120,8 +121,7 @@ public struct HistoryPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            badge(row)
-            deleteButton(row)
+            undoButton(row)
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 3)
@@ -138,40 +138,33 @@ public struct HistoryPanel: View {
         .accessibilityIdentifier("inspector.history.row.\(row.seq)")
     }
 
-    /// 「最新」 — every field this row moved is still the newest statement about that field. The
-    /// column is always reserved, so a badge cannot shift the text of the rows below it.
-    private func badge(_ row: HistoryRow) -> some View {
-        Text(row.isNewestOfClass ? "最新" : "")
-            .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(Color.accentColor)
-            .frame(width: HistoryPanelLayout.badgeWidth, alignment: .trailing)
-            .padding(.top, 1)
-            .accessibilityLabel(row.isNewestOfClass ? "最新" : "")
-    }
-
-    /// 删除 — only on the newest row of its class. The column is reserved either way (`Color.clear`
-    /// rather than a removed view) so the timeline does not re-flow when a row becomes deletable.
-    private func deleteButton(_ row: HistoryRow) -> some View {
+    /// 撤销 — only on the newest row of its class. The column is reserved either way (`Color.clear`
+    /// rather than a removed view) so the timeline does not re-flow when a row becomes undoable.
+    ///
+    /// 263: this replaces the old 「最新」 marker and the delete glyph. A sentence in the accent
+    /// colour is what the user asked to see; the hit rectangle is fixed at `undoWidth` ×
+    /// `undoHitHeight` so a 9 pt label still has an 18 pt target.
+    private func undoButton(_ row: HistoryRow) -> some View {
         Group {
-            if row.canDelete {
+            if row.canUndo {
                 Button {
-                    session.deleteHistoryEntry(at: row.index)
+                    session.revertHistoryEntry(at: row.index)
                 } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .semibold))
-                        .frame(width: HistoryPanelLayout.deleteWidth,
-                               height: HistoryPanelLayout.deleteHitHeight)
+                    Text("撤销")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: HistoryPanelLayout.undoWidth,
+                               height: HistoryPanelLayout.undoHitHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.tertiary)
-                .help("删除这一条（只允许删除该类最新的一条）")
-                .accessibilityLabel("删除第 \(row.seq) 条")
-                .accessibilityIdentifier("inspector.history.delete.\(row.seq)")
+                .help("撤销这一步（改回之前的值）")
+                .accessibilityLabel("撤销第 \(row.seq) 条")
+                .accessibilityIdentifier("inspector.history.undo.\(row.seq)")
             } else {
                 Color.clear
-                    .frame(width: HistoryPanelLayout.deleteWidth,
-                           height: HistoryPanelLayout.deleteHitHeight)
+                    .frame(width: HistoryPanelLayout.undoWidth,
+                           height: HistoryPanelLayout.undoHitHeight)
             }
         }
         .padding(.top, 1)
@@ -188,12 +181,11 @@ public struct HistoryPanel: View {
 public enum HistoryPanelLayout {
     /// `序号` — four digits of 9 pt mono.
     public static let seqWidth: CGFloat = 22
-    /// 「最新」 — always reserved.
-    public static let badgeWidth: CGFloat = 26
-    /// The delete glyph — always reserved.
-    public static let deleteWidth: CGFloat = 16
-    public static let deleteHitHeight: CGFloat = 14
-    /// Gap between columns (three of them: seq | text | badge | delete).
+    /// 「撤销」 — two 9 pt characters plus 2 pt on each side. Always reserved.
+    public static let undoWidth: CGFloat = 26
+    /// The undo target's height (≥ 18 pt, so the 9 pt label is comfortably clickable).
+    public static let undoHitHeight: CGFloat = 18
+    /// Gap between columns (two of them: seq | text | undo).
     public static let spacing: CGFloat = 6
     /// The summary is 10 pt, the label/time line 9 pt.
     public static let summaryFontSize: CGFloat = 10
@@ -211,7 +203,7 @@ public enum HistoryPanelLayout {
 
     /// What is left for the summary text.
     public static func summaryColumn(contentWidth: CGFloat) -> CGFloat {
-        max(0, contentWidth - seqWidth - badgeWidth - deleteWidth - 3 * spacing)
+        max(0, contentWidth - seqWidth - undoWidth - 2 * spacing)
     }
 
     /// The summary column at a given **panel** width (the card is `panel − 2·12`).
@@ -240,6 +232,8 @@ public final class HistoryPanelProbe: NSView {
         public var isCurrent: Bool
         public var isNewest: Bool
         public var canDelete: Bool
+        /// 263: whether the panel drew 「撤销」 on this row.
+        public var canUndo: Bool
         /// The measured width of `summary` at the row's font.
         public var textWidth: CGFloat
         /// Lines the summary needs inside `summaryColumn` (1 for anything that fits).
@@ -290,7 +284,8 @@ public final class HistoryPanelProbe: NSView {
             let lines = summaryColumn <= 0 ? 99 : max(1, Int((width / summaryColumn).rounded(.up)))
             return RowFact(index: row.index, seq: row.seq, summary: row.summary, label: row.label,
                            isCurrent: row.isCurrent, isNewest: row.isNewestOfClass,
-                           canDelete: row.canDelete, textWidth: width, lines: lines)
+                           canDelete: row.canDelete, canUndo: row.canUndo,
+                           textWidth: width, lines: lines)
         }
     }
 }

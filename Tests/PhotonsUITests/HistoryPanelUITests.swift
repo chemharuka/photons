@@ -9,13 +9,13 @@ import PhotonsCore
 ///
 /// What is pinned here, and why each assertion is the one that matters:
 ///
-///   1. **行 = 快照**：每行一个已提交状态，序号/摘要/标签来自模型本身，当前行高亮，每类最新一条带标识 ——
-///      而且标识与可删是**同一个谓词**（`HistoryRow.isNewestOfClass == canDelete`）。
+///   1. **行 = 快照**：每行一个已提交状态，序号/摘要/标签来自模型本身，当前行高亮，每类最新一条可撤销 ——
+///      而且「最新」与可撤销是**同一个谓词**（`HistoryRow.isNewestOfClass`；263 的 `canUndo` 只多一个 `index >= 1`）。
 ///   2. **300 / 330 / 364 不截断**：摘要列宽由面板自己的 frame 算出来，摘要文字在允许的两行内**装得下**
 ///      （不是被省略号吃掉）。这是实测：`NSAttributedString` 量字宽 vs 列宽。
 ///   3. **上千行不一次建满 view**：`LazyVStack` 只构建视口内的行，`HistoryPanelProbe.builtRows`
 ///      远小于 `totalRows`。
-///   4. **接线**：点行 = 跳转、× = 删一条（只在该行可删时出现）。`swift test` 没有窗口会话、无障碍树
+///   4. **接线**：点行 = 跳转、撤销 = 追加一条（只在该行可撤销时出现）。`swift test` 没有窗口会话、无障碍树
 ///      是空的，所以这两条按源码钉住 —— 与 `PanelResetTests.testEveryParameterCardCanBeResetFromItsTitle`
 ///      同一套路。
 @MainActor
@@ -155,9 +155,9 @@ final class HistoryPanelUITests: XCTestCase {
         print("HISTORY LAZY · total \(probe.totalRows) · built \(probe.builtRows)")
     }
 
-    // MARK: - 4. 接线：点行跳转 / × 删除
+    // MARK: - 4. 接线：点行跳转 / 撤销追加（删除 API 仍在）
 
-    func testTheRowJumpsAndTheDeleteButtonDeletes() throws {
+    func testTheRowJumpsAndTheUndoButtonAppendsAReversion() throws {
         let session = makeSession()
         session.applyEdit { $0.light.exposure = 0.5 }
         XCTAssertTrue(session.commitEdit(label: "曝光"))
@@ -177,14 +177,17 @@ final class HistoryPanelUITests: XCTestCase {
         XCTAssertEqual(session.history.count, countBefore - 1)
         XCTAssertEqual(session.history.nextSeq, 4, "删行不回收 seq")
 
-        // …and the view is wired to exactly those two doors, on the row and on the ×.
+        // …and the view is wired to exactly those two doors, on the row and on the 「撤销」 button.
+        // 263: the panel no longer calls the delete door; the API is kept for old callers/tests.
         let source = try String(contentsOf: Self.panelSource, encoding: .utf8)
         XCTAssertTrue(source.contains(".onTapGesture { session.jumpToHistory(seq: row.seq) }"),
                       "点行必须走跳转入口")
-        XCTAssertTrue(source.contains("session.deleteHistoryEntry(at: row.index)"),
-                      "× 必须走删行入口")
-        XCTAssertTrue(source.contains("if row.canDelete {"),
-                      "只有可删的行才画删除按钮")
+        XCTAssertTrue(source.contains("session.revertHistoryEntry(at: row.index)"),
+                      "撤销必须走追加入口")
+        XCTAssertTrue(source.contains("if row.canUndo {"),
+                      "只有可撤销的行才画撤销按钮")
+        XCTAssertFalse(source.contains("session.deleteHistoryEntry(at: row.index)"),
+                       "面板不再调用删行入口")
         XCTAssertTrue(source.contains("LazyVStack"),
                       "行必须是 LazyVStack（上千行不一次建满）")
         XCTAssertFalse(source.contains("ScrollView {"),

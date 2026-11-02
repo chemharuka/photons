@@ -731,6 +731,10 @@ public struct HistoryRow: Identifiable, Hashable, Sendable {
     public var isNewestOfClass: Bool
     /// Whether the panel may offer 删除. Identical to `isNewestOfClass` by construction.
     public var canDelete: Bool
+    /// 263: whether the row may be reverted — 「最新」 and not the floor. The panel's 「撤销」 uses
+    /// this, the **same** `isNewestOfClass` predicate (index 0 is the floor and has nothing before
+    /// it to go back to).
+    public var canUndo: Bool { isNewestOfClass && index >= 1 }
 
     public var id: Int { seq }
 

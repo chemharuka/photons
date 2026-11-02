@@ -1069,6 +1069,20 @@ public final class CatalogSession {
         return true
     }
 
+    /// 263: 撤销 one 「最新」 row — append a normal 「撤销 xxx」 snapshot that puts that row's fields
+    /// back to their previous values, then write it once.
+    ///
+    /// Unlike `deleteHistoryEntry`, this always moves the document (the reverted snapshot is the new
+    /// tip), so `restore` is unconditional: the append itself is the "the current document changed"
+    /// signal. Returns false when the row cannot be reverted.
+    @discardableResult
+    public func revertHistoryEntry(at index: Int) -> Bool {
+        guard let snapshot = history.revert(at: index) else { return false }
+        restore(snapshot.edit)
+        persist()
+        return true
+    }
+
     /// Rows for the panel: seq, label, the field-level summary, the time, and the two flags.
     public var historyRows: [HistoryRow] { history.rows }
 
