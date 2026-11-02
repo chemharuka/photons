@@ -23,15 +23,21 @@ public struct WhiteBalance: Sendable, Hashable, Codable {
 
     public static let asShot = WhiteBalance()
 
-    /// `CIRAWFilter`'s documented range is 2000…50000 K; the UI and the validator use 2000…12000 K
-    /// (`LightGroup`'s old slider), and the same −150…150 for tint.
-    public static let temperatureRange: ClosedRange<Double> = 2000...12000
+    /// 242 — the UI, the validator and the decoder write share one range: **2000…50000 K**. This is
+    /// our product choice, not a `CIRAWFilter` limit (the filter accepted 2000…1 000 000 K in the
+    /// measured tests); the top end was raised from 12000 K because the decoder really does change
+    /// the picture out there (ΔE76 vs 12000 K: 7.21 at 20000 K, 12.41 at 50000 K). Tint stays the
+    /// same −150…150.
+    public static let temperatureRange: ClosedRange<Double> = TemperatureScale.kelvinRange
     public static let tintRange: ClosedRange<Double> = -150...150
     /// Slider quanta. A full-size development is ~762 ms, so the value the document stores only
-    /// changes when the *decoded pixels* would change in a way a person can see: one 25 K step is
-    /// well below anything visible, and quantizing removes the "12 drags in one bucket, 12 decodes"
-    /// class of waste (派单 006 B③).
-    public static let temperatureStep: Double = 25
+    /// changes when the *decoded pixels* would change in a way a person can see. 242 moved the
+    /// temperature grid **into the mired domain** (`TemperatureScale.miredStep`): one mired is
+    /// ~25 K at 5000 K and ~400 K at 20000 K, so the step stays invisible across the whole new
+    /// range. Tint keeps its one-unit step.
+    ///
+    /// Quantization changes the *grid*, never the unit: the document still stores Kelvin, and this
+    /// type never exposes mired outside the slider mapping.
     public static let tintStep: Double = 1
 
     public init(temperature: Double? = nil, tint: Double? = nil) {
@@ -52,9 +58,14 @@ public struct WhiteBalance: Sendable, Hashable, Codable {
     }
 
     /// Rounded to the slider quanta, then clamped — the only form that is ever committed.
+    ///
+    /// 242: temperature is quantized **in mired** (`TemperatureScale.quantizedKelvin`), not in
+    /// Kelvin. The returned value is still Kelvin, which is why the document format does not change.
+    /// Reading a document does not call this — an old `5200` loads and decodes as `5200`; only a
+    /// gesture (drag release / typed value / preset) puts it on the new grid.
     public func quantized() -> WhiteBalance {
         func step(_ v: Double, _ q: Double) -> Double { (v / q).rounded() * q }
-        return WhiteBalance(temperature: temperature.map { step($0, Self.temperatureStep) },
+        return WhiteBalance(temperature: temperature.map { TemperatureScale.quantizedKelvin($0) },
                             tint: tint.map { step($0, Self.tintStep) }).clamped()
     }
 
@@ -433,7 +444,7 @@ public final class RAWDecoder {
     /// A neutral outside the filter's own documented range is a "no answer", not a value to show.
     ///
     /// Measured on this machine with nothing assigned: `L1030433.dng` reports 5871.6 K / +20.35 and
-    /// `_1274394.dng` 4803.6 K / +19.97 — both inside 2000…12000. A body that reports 0 (or NaN)
+    /// `_1274394.dng` 4803.6 K / +19.97 — both inside 2000…50000. A body that reports 0 (or NaN)
     /// must not become a slider position.
     static func saneTemperature(_ v: Float) -> Double? {
         let d = Double(v)

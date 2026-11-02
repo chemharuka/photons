@@ -280,8 +280,9 @@ final class PanelResetTests: XCTestCase {
         XCTAssertTrue(session.commitEdit(label: "色温"))
         XCTAssertNotEqual(session.edit.renderInputs.key, asShotKey,
                           "显式色温必然改 S1 的增益（同一个缓冲，新渲染）")
-        XCTAssertEqual(session.edit.decodeInputs.key, asShotDecode,
-                       "白平衡不再碰解码输入")
+        XCTAssertNotEqual(session.edit.decodeInputs.key, asShotDecode,
+                          "194: an explicit pair IS a decode input (`wb=5200K/+8`), so reset must "
+                          + "bring this key home")
         let before = session.history.count
 
         XCTAssertTrue(resets.group(.whiteBalance))

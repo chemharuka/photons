@@ -202,7 +202,11 @@ final class WhiteBalanceSectionTests: XCTestCase {
         // Exactly what the menu's selection handler runs.
         commands.commit(WhiteBalancePresets.daylight.whiteBalance!, label: "预设 日光")
 
-        XCTAssertEqual(session.edit.light.temperature, 5500)
+        // 242: the preset is still 5500 K in the menu, and the document takes it onto the mired
+        // commit grid (5500 K → 5495 K); the point of the test is the one-snapshot/one-development
+        // contract, not a 5 K spelling.
+        let committed = WhiteBalancePresets.daylight.whiteBalance!.quantized()
+        XCTAssertEqual(session.edit.light.temperature, committed.temperature)
         XCTAssertEqual(session.edit.light.tint, 0)
         XCTAssertEqual(session.history.count, historyBefore + 1, "one preset = one snapshot")
         XCTAssertEqual(session.history.currentSnapshot?.label, "预设 日光")

@@ -2207,6 +2207,23 @@ public struct InspectorView: View {
         /// 黄色：黄色是卡片对**落定帧**的承诺（值真的经解码器作用在线性缓冲上）。
         /// 类别归 `SliderShape` 一处表达，行视图照着上色，不写死一个颜色。
         public var shape: SliderShape = .bar
+
+        /// 242: the slider's travel. 色温 is **not** linear Kelvin — it is uniform in mired, with
+        /// 2000 K at the left end and 50000 K at the right. Tint stays the row's own numeric range.
+        public var sliderRange: ClosedRange<Double> {
+            isTemperature ? TemperatureScale.fractionRange : range
+        }
+
+        /// 242: the document value → slider position. Temperature goes through `TemperatureScale`
+        /// (the one implementation); tint is already the position. Both directions are clamped.
+        public func sliderPosition(of value: Double) -> Double {
+            isTemperature ? TemperatureScale.fraction(forKelvin: value) : value
+        }
+
+        /// 242: slider position → document value. Still Kelvin for temperature, never mired.
+        public func value(atSliderPosition position: Double) -> Double {
+            isTemperature ? TemperatureScale.kelvin(forFraction: position) : position
+        }
     }
 
     /// 118: the line 「as shot」 / 「模拟预览」 lives on. One height for both states is what keeps the
@@ -2280,7 +2297,7 @@ public struct InspectorView: View {
     ///  · **The number shown is the file's** while the document is as shot (`nil`), read from the
     ///    decode, not the nominal 6500 the panel used to print for every photo. An explicit value
     ///    wins as soon as one exists; "as shot" next to the title is the state, not a hint.
-    ///  · **Drag ≠ decode.** A tick only moves `@State`; release quantizes (25 K / 1 tint) and
+    ///  · **Drag ≠ decode.** A tick only moves `@State`; release quantizes (mired / 1 tint) and
     ///    writes the document once. Committing per tick would queue a ~762 ms development per pixel
     ///    of slider travel, and the pixels could never keep up with the thumb anyway.
     ///
@@ -2333,13 +2350,17 @@ public struct InspectorView: View {
             // 「解 RAW 参数」的承诺，只是它现在描述的是**落定**的那一帧。
             // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
             // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
-            Self.shapeSlider(Binding(get: { shown },
-                                     set: { newValue in
+            // 242: 色温's track is mired, tint's is its own units. The row owns the two conversions
+            // (`sliderPosition(of:)` / `value(atSliderPosition:)`), and those call the one Core
+            // implementation — the view never spells a mired formula itself.
+            Self.shapeSlider(Binding(get: { row.sliderPosition(of: shown) },
+                                     set: { position in
+                                         let newValue = row.value(atSliderPosition: position)
                                          if isTemperature { draftTemperature = newValue }
                                          else { draftTint = newValue }
                                          previewWhiteBalance(isTemperature: isTemperature, value: newValue)
                                      }),
-                             in: row.range,
+                             in: row.sliderRange,
                              shape: row.shape) { editing in
                 if editing {
                     beginWhiteBalancePreview()
@@ -2506,7 +2527,7 @@ public struct InspectorView: View {
 
     /// The one place a white-balance drag becomes a document change.
     ///
-    /// Quantization is the contract (`WhiteBalance.quantized()`: 25 K, 1 tint), and so is the
+    /// Quantization is the contract (`WhiteBalance.quantized()`: 1 mired, 1 tint), and so is the
     /// round-trip home: a value within half a step of the file's as-shot becomes `nil` again, because
     /// pinning `5875` for a 5871.6 K shot would re-decode to *slightly different* pixels — the
     /// decoder's as-shot state is not reproducible by assigning the number it reports.
@@ -2549,7 +2570,7 @@ public struct InspectorView: View {
     }
 
     /// The one place a white-balance *number* becomes a document change — shared by a drag's release
-    /// and by a typed value (047), so both quantize (25 K / 1), both fold a value that lands on the
+    /// and by a typed value (047), so both quantize (1 mired / 1), both fold a value that lands on the
     /// file's own back to `nil` (assigning the reported Kelvin is not a no-op: 派单 006 measured
     /// 0.15–0.40 % of samples moving), and both write exactly one snapshot.
     private func commitWhiteBalanceValue(_ value: Double, isTemperature: Bool) {
@@ -2557,7 +2578,7 @@ public struct InspectorView: View {
                               tint: isTemperature ? session.edit.light.tint : value).quantized()
         let shot = asShotWhiteBalance
         if isTemperature, let v = wb.temperature, let s = shot.temperature,
-           abs(v - s) <= WhiteBalance.temperatureStep / 2 {
+           TemperatureScale.isWithinOneStep(v, s) {
             wb.temperature = nil
         }
         if !isTemperature, let v = wb.tint, let s = shot.tint, abs(v - s) <= WhiteBalance.tintStep / 2 {
@@ -3252,7 +3273,7 @@ public struct WhiteBalanceCommands {
     /// 4000 K / +30 is not at 6500 K. Solving against `localReference` then asks the inverse for a
     /// pair relative to the wrong illuminant, and the measured cost on the synthetic chart is 33–595 %
     /// of the ideal gain (the iterative refiner cannot recover either: its first step is already at
-    /// the 12000 K / +150 boundary). The reference must be the pair the pixels were actually decoded
+    /// the 50000 K / +150 boundary). The reference must be the pair the pixels were actually decoded
     /// with: the document's own pair when it has one, otherwise the file's as-shot pair (which is what
     /// `.asShot` leaves the filter at), and only a caller with neither gets the nominal fallback.
     public var reference: WhiteBalanceSolver.Reference {

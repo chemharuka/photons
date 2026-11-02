@@ -5,7 +5,7 @@ import Foundation
 /// Since 236 the eyedropper's primary route is Apple's own `CIRAWFilter.neutralLocation`
 /// (`WhiteBalanceNativeDropper`): the decoder solves the point in the RAW domain and reports the pair,
 /// with no development and no iteration. This refiner remains for the files/points where that property
-/// returns nothing usable (a refused file, or an answer outside 2000–12000 K / ±150), and for the
+/// returns nothing usable (a refused file, or an answer outside 2000–50000 K / ±150), and for the
 /// measurements that need a convergence curve.
 ///
 /// It is the pre-236 route, unchanged: solve analytically, then **iterate against the decoder** —
