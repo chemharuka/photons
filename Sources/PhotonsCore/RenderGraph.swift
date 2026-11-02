@@ -1915,11 +1915,17 @@ public final class RenderGraph {
         // Where the window's pixel 0 is, in requested pixels at the content's scale.
         let windowOrigin = SIMD2<Float>(Float(window?.x ?? 0) * kx, Float(window?.y ?? 0) * ky)
         // …and where the picture is: the window's place inside the baseline, less the picture's own
-        // inset into it (0 at θ = 0), plus the baseline's place in a letterboxed canvas (132's
-        // `origin`, which the window branch never had to add because a window *was* the canvas).
+        // inset into it (0 at θ = 0). **Both are content-space numbers.**
+        //
+        // 232 — the baseline's place in a letterboxed canvas is *already* accounted for by S0:
+        // `s0_geometry` computes `local = gid − p.a.zw` (the letterbox origin) and only then adds
+        // this. Adding `origin` a second time here (the pre-232 spelling) moved the picture up-left
+        // by exactly the letterbox offset on every 适应 frame of a straightened document — the
+        // reported 「旋转后画面整体往左上移」. A zoom change makes `canvas == requested`, so
+        // `origin == 0` and the frame looked correct again (「改缩放即恢复」).
         frameOrigin = expandedCanvas == nil
             ? windowOrigin
-            : origin + windowOrigin - SIMD2<Float>(inset.x * kx, inset.y * ky)
+            : windowOrigin - SIMD2<Float>(inset.x * kx, inset.y * ky)
         frameInCanvas = (window == nil && expandedCanvas == nil)
             ? content
             : ImageSize(width: max(1, Int(frameSize.x.rounded())),

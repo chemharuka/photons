@@ -5,8 +5,9 @@ import PhotonsCore
 
 /// 197 **探针** —— 竖拍「适应」取景：画布只被画到一半宽，右半是黑的。
 ///
-/// **既有缺陷，本单不修**（197 只是碰巧在同一段几何里）。196 的角落套件早就看见它，用
-/// `knownFitPortrait` 跳过了断言；这条把它单独钉出来，附最小复现和四个数字，交给主线决定。
+/// **2026-11-02（232）已修**：根因是 `RenderGraph.plan` 在「有角度 + 无窗口（适应）」时把 letterbox
+/// 的 `origin` 重复加进 `frameOrigin`，画面整体往左上偏 `origin`。本探针原先断言「缺陷还在」；现在
+/// 翻成正面形式：竖拍 5.4° 适应时，亮区必须铺满 `canvasRect`（左右上下都到边）。
 ///
 /// 最小复现（不需要窗口、不需要 RAW、不需要解码 —— 一个 `RenderGraph` 就够）：
 ///
@@ -15,8 +16,9 @@ import PhotonsCore
 ///     θ        5.4°
 ///     状态      .fit（适应，window = nil）
 ///
-/// 期望：照片的左切线在画布左边缘、右切线在画布右边缘（画布 `358×500 @ x=171`）。
-/// 实测：照片只画到 `x = 357`，正好是画布中线 `171 + 358/2`；`358…528` 是 000000。
+/// 期望：照片的左切线在画布左边缘、右切线在画布右边缘。
+/// 修复前：照片只画到 `x = 357`，正好是画布中线 `171 + 358/2`；`358…528` 是 000000。
+/// 修复后（本探针当前断言）：亮区 `(189,25)–(509,473)`，画布 `189,25,322×450`，四边都到。
 ///
 /// 与 196 的关系：`git stash` 掉 196 的 s0 letterbox 守卫后逐值相同 —— 不是 196 引入的。
 @MainActor
@@ -53,11 +55,10 @@ final class CropPortraitFitDefect197ProbeTests: XCTestCase {
             + Float(Float16(bitPattern: raw[2])) > 0.03
     }
 
-    /// The phenomenon, as numbers. This is the probe: it **passes while the defect is there** and goes
-    /// red the day someone fixes it — at which point the right assertion is "the lit extent reaches
-    /// `canvasRect.maxX - 1`", i.e. exactly what `CropPortraitCorners196Tests` would then be able to
-    /// assert for `fit` too.
-    func testPortraitFitDrawsThePictureOnlyToTheCanvasMidline() throws {
+    /// The phenomenon, as numbers. It used to pass while the defect was there; **232 fixed the
+    /// letterbox offset**, so the assertions are now the positive form: the lit extent reaches all
+    /// four edges of `canvasRect`.
+    func testPortraitFitFillsTheWholeCanvas() throws {
         let graph = try RenderGraph(input: RenderInput(image: image(Self.portrait.width,
                                                                    Self.portrait.height),
                                                        identity: "portrait-fit-197"))
@@ -86,26 +87,24 @@ final class CropPortraitFitDefect197ProbeTests: XCTestCase {
         }
         let canvas = result.canvasRect
         let midX = canvas.x + canvas.width / 2
-        let rightBand = canvas.maxX - 5
         print("197 probe · 竖拍 fit · source \(Self.portrait.keyString) θ \(Self.angle)° "
               + "· fitZoom \(String(format: "%.4f", framing.fitZoom)) "
               + "· canvasRect \(canvas.keyString)@(\(canvas.x),\(canvas.y)) "
               + "· drawnRect \(result.drawnRect.keyString) "
               + "· lit extent (\(minX),\(minY))–(\(maxX),\(maxY)) "
-              + "· canvas midline x=\(midX) · canvas right x=\(canvas.maxX) "
-              + "· 右半采样 (\(rightBand),\(canvas.y + canvas.height / 2)) 亮? "
-              + "\(lit(texture, rightBand, canvas.y + canvas.height / 2))")
+              + "· canvas midline x=\(midX) · canvas right x=\(canvas.maxX)")
 
-        // ① the defect, stated without the pre-213 numbers: the picture does not reach the canvas'
-        // right edge (at 100 % fit it stopped exactly on the midline; at 213's 90 % fit the whole
-        // canvas is smaller, so pin the symptom rather than one scale-dependent coordinate).
-        XCTAssertLessThan(Double(maxX), Double(canvas.maxX) - 8,
-                          "197 probe: the lit extent now reaches the canvas' right edge "
-                          + "(maxX \(maxX) vs canvas.maxX \(canvas.maxX), canvas \(canvas.keyString)) "
-                          + "— if this is red, the defect is fixed: flip ①/② to the positive form.")
-        // ② the visible symptom: the right half of the canvas is empty.
-        XCTAssertFalse(lit(texture, rightBand, canvas.y + canvas.height / 2),
-                       "197 probe: the right half of the canvas is no longer black — see ①.")
+        // ① the picture reaches the canvas' right edge (it stopped exactly on the midline while the
+        // letterbox offset was applied twice; ±2 px absorbs the AABB ceil/round pair).
+        XCTAssertGreaterThanOrEqual(maxX, canvas.maxX - 2,
+                                    "197 probe: the lit extent does not reach the canvas' right edge "
+                                    + "(maxX \(maxX) vs canvas.maxX \(canvas.maxX), canvas \(canvas.keyString))")
+        // ② …and the other three edges: the lit box spans the canvas, not a quadrant of it.
+        XCTAssertLessThanOrEqual(minX, canvas.x + 1, "the picture does not reach the canvas' left edge")
+        XCTAssertLessThanOrEqual(minY, canvas.y + 1, "the picture does not reach the canvas' top edge")
+        XCTAssertGreaterThanOrEqual(maxY, canvas.maxY - 2, "the picture does not reach the canvas' bottom edge")
+        XCTAssertGreaterThan(maxX - minX, canvas.width - 4,
+                             "the picture covers only \(maxX - minX) of the canvas' \(canvas.width) px")
         // ③ it is not a missing canvas: the canvas is a real rect inside the viewport (213: it is
         //    90 % of it, so the hard-coded 100 % edges no longer apply).
         XCTAssertGreaterThan(canvas.width, 0)
