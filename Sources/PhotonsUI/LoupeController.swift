@@ -2720,6 +2720,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                       rgb: image.averageRGB(x: bx, y: by)))
     }
 
+    /// 236 — the **native** eyedropper probe: the file and the uncropped upright source pixel.
+    ///
+    /// `CIRAWFilter.neutralLocation` works in the filter's upright output pixels (bottom-left), not
+    /// in the decoded rung, so this deliberately uses `sample.sourceX/sourceY` (full-resolution,
+    /// uncropped) and `uprightHeight / decodeScale` rather than the buffer pixel. That is the same
+    /// source frame the mask coordinates use; a click at fit, at 1:1 and at 8:1 therefore names the
+    /// same point in the file.
+    ///
+    /// `nil` when no buffer is resident. A resident buffer is not proof the filter will accept the
+    /// file, so the caller must still handle `WhiteBalanceNativeDropper.whiteBalance(at:) == nil`
+    /// and fall back to `dropperProbe` + `WhiteBalanceDropperRefiner`.
+    public func dropperNativeProbe(for sample: DropperSample) -> WhiteBalanceNativeDropper.Probe? {
+        guard let url = decodedURL, let image = decoded else { return nil }
+        let ds = decodedScale > 0 ? decodedScale : 1
+        let height = Int((Double(image.uprightSize.height) / ds).rounded())
+        guard height > 0 else { return nil }
+        return WhiteBalanceNativeDropper.Probe(url: url,
+                                               sourceX: Int(sample.sourceX.rounded(.down)),
+                                               sourceY: Int(sample.sourceY.rounded(.down)),
+                                               uprightHeight: height)
+    }
+
     /// Where the refinement loop should read: the file, the rung on screen, and the buffer pixel the
     /// click resolved to. `nil` when no buffer is resident (nothing to iterate against).
     public func dropperProbe(for sample: DropperSample) -> WhiteBalanceDropperRefiner.Probe? {

@@ -1,21 +1,18 @@
 import Foundation
 
-/// **路线 B's bill, paid where it is cheapest: the eyedropper.**
+/// **The iterative fallback (236).**
 ///
-/// Since 194 the *settled* frame is `CIRAWFilter`'s answer, while the dropper's first solve is
-/// `WhiteBalanceSolver`'s analytic model. Measured on the user's own grey patch (L1030433, 1/8 rung),
-/// the settled frame at the solver's pair still carries a **13.71 %** cast: the model is a Planckian
-/// fit and the decoder balances in camera space with its own primaries. Drag-and-settle can live with
-/// that (路线 B accepts the jump), but a *dropper* cannot — it is a one-shot action whose whole promise
-/// is "this pixel is now grey", and it happens once per click, so it can afford what a drag cannot:
-/// **a few real developments.**
+/// Since 236 the eyedropper's primary route is Apple's own `CIRAWFilter.neutralLocation`
+/// (`WhiteBalanceNativeDropper`): the decoder solves the point in the RAW domain and reports the pair,
+/// with no development and no iteration. This refiner remains for the files/points where that property
+/// returns nothing usable (a refused file, or an answer outside 2000–12000 K / ±150), and for the
+/// measurements that need a convergence curve.
 ///
-/// So the click is: solve analytically (instant), then **iterate against the decoder** — develop, read
-/// the same pixel back off the developed buffer, and take a Newton step on `(log₂ K, tint)` with the
-/// Jacobian measured from two single-axis probes. The budget is **four developments** (the settle plus
-/// three steps, `maxDecodes`), each at the rung the loupe is already at, which is ~0.2 s each at 1/8
-/// scale on a 60 MP file — under the 1.5 s the task allows, and it runs off the main thread
-/// (`WhiteBalanceCommands.beginDropper`).
+/// It is the pre-236 route, unchanged: solve analytically, then **iterate against the decoder** —
+/// develop, read the same pixel back off the developed buffer, and take a Newton step on
+/// `(log₂ K, tint)` with the Jacobian measured from two single-axis probes. The budget is
+/// **five developments** (`maxDecodes`), each at the rung the loupe is already at, and it runs off the
+/// main thread (`WhiteBalanceCommands.beginDropper`).
 ///
 /// The target is **2 %**, the pre-194 gate, and it is a gate, not a wish: when the budget cannot reach
 /// it the report says so and carries the whole convergence curve (`attempts`), because a dropper that

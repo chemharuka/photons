@@ -2385,62 +2385,89 @@ public struct InspectorView: View {
         loupe.armEyedropper { outcome in applyDropper(outcome) }
     }
 
-    /// The dropper's answer: solve, refine against the decoder **off the main thread**, write once.
+    /// The dropper's answer: Apple's native neutral first (236), the iterative refiner as fallback.
     ///
-    /// 路线 B (2026-10-31): the drag may approximate, but the dropper's promise is "this pixel is now
-    /// grey", and the analytic solve leaves 13.71 % of cast on a settled frame. The refinement costs up
-    /// to four developments, so it cannot run inside the click: `beginDropper` returns immediately and
-    /// the moment the loop lands the pair is committed **once** (one history entry, one ⌘Z), with the
-    /// residual in the hint so the number is on screen rather than in a log.
+    /// 236 replaced the click's *primary* path. `CIRAWFilter.neutralLocation` solves the point in the
+    /// RAW domain and reports the pair directly, so there is nothing to iterate and nothing to
+    /// approximate: the settled frame is the same decoder that answered. The old path remains for
+    /// the files/points where the native property returns nothing usable, and its comment says why it
+    /// still has to iterate.
     private func applyDropper(_ outcome: LoupeController.DropperOutcome) {
         switch outcome {
         case .sampled(let sample):
             eyedropperArmed = false
-            guard let loupe, let probe = loupe.dropperProbe(for: sample) else {
-                // No resident buffer to iterate against: the analytic answer is all that is on offer,
-                // and it is still one development of the same document.
-                guard let solve = commands.applyDropper(sample.rgb) else {
-                    hint = "吸管：取样点几乎无颜色信息，未写入"
-                    return
-                }
-                lastPresetID = nil
-                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
-                              sample.text, solve.whiteBalance.summary, sample.rgb.text,
-                              solve.clamped ? " · 已到量程边界（近似）" : "")
-                return
-            }
             lastPresetID = nil
-            hint = "吸管精修：正在对解码器迭代（最多 \(WhiteBalanceDropperRefiner.maxDecodes) 次解码）…"
-            let started = Date()
-            let immediate = commands.beginDropper(sample.rgb, probe: probe) { solve, report in
-                guard let solve else {
-                    hint = "吸管：取样点几乎无颜色信息，未写入"
-                    return
+            if let loupe, let native = loupe.dropperNativeProbe(for: sample) {
+                hint = "吸管：正在读取 RAW 中性点…"
+                let started = Date()
+                commands.beginNativeDropper(native) { pair in
+                    guard let pair else {
+                        // Apple could not answer for this file/point: keep the old measurement.
+                        applyDropperRefinement(sample: sample, startHint: false)
+                        return
+                    }
+                    let elapsed = Date().timeIntervalSince(started) * 1000
+                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n原生 neutralLocation · 界面等待 %.0f ms",
+                                  sample.text, pair.summary, sample.rgb.text, elapsed)
+                    print(String(format: "dropper(native): %.0f ms → %@", elapsed,
+                                 pair.summary))
                 }
-                let elapsed = Date().timeIntervalSince(started) * 1000
-                if let report {
-                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n%@\n界面等待 %.0f ms",
-                                  sample.text, report.final.summary, sample.rgb.text,
-                                  report.text, 0.0)
-                    print(String(format: "dropper: %.2f%% after %d decode(s) in %.0f ms "
-                                 + "(wall %.0f ms) → %@%@",
-                                 report.residual * 100, report.decodes, report.milliseconds,
-                                 elapsed, report.final.summary,
-                                 report.converged ? "" : " · 未达 2%"))
-                } else {
-                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
-                                  sample.text, solve.whiteBalance.summary, sample.rgb.text,
-                                  solve.clamped ? " · 已到量程边界（近似）" : "")
-                }
-            }
-            guard immediate != nil else {
-                hint = "吸管：取样点几乎无颜色信息，未写入"
                 return
             }
+            applyDropperRefinement(sample: sample, startHint: true)
         case .outsideImage, .notReady:
             // No document write, and the tool stays armed on a miss (the loupe keeps it armed too).
             eyedropperArmed = loupe?.isEyedropperArmed ?? false
             hint = outcome.hint
+        }
+    }
+
+    /// The pre-236 click: analytic solve + iteration against the decoder. One history entry, one
+    /// document write; the only path that needs to explain a residual curve.
+    private func applyDropperRefinement(sample: LoupeController.DropperSample, startHint: Bool) {
+        guard let loupe else { return }
+        guard let probe = loupe.dropperProbe(for: sample) else {
+            // No resident buffer to iterate against: the analytic answer is all that is on offer,
+            // and it is still one development of the same document.
+            guard let solve = commands.applyDropper(sample.rgb) else {
+                hint = "吸管：取样点几乎无颜色信息，未写入"
+                return
+            }
+            lastPresetID = nil
+            hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
+                          sample.text, solve.whiteBalance.summary, sample.rgb.text,
+                          solve.clamped ? " · 已到量程边界（近似）" : "")
+            return
+        }
+        lastPresetID = nil
+        if startHint {
+            hint = "吸管精修：正在对解码器迭代（最多 \(WhiteBalanceDropperRefiner.maxDecodes) 次解码）…"
+        }
+        let started = Date()
+        let immediate = commands.beginDropper(sample.rgb, probe: probe) { solve, report in
+            guard let solve else {
+                hint = "吸管：取样点几乎无颜色信息，未写入"
+                return
+            }
+            let elapsed = Date().timeIntervalSince(started) * 1000
+            if let report {
+                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n%@\n界面等待 %.0f ms",
+                              sample.text, report.final.summary, sample.rgb.text,
+                              report.text, 0.0)
+                print(String(format: "dropper: %.2f%% after %d decode(s) in %.0f ms "
+                             + "(wall %.0f ms) → %@%@",
+                             report.residual * 100, report.decodes, report.milliseconds,
+                             elapsed, report.final.summary,
+                             report.converged ? "" : " · 未达 2%"))
+            } else {
+                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
+                              sample.text, solve.whiteBalance.summary, sample.rgb.text,
+                              solve.clamped ? " · 已到量程边界（近似）" : "")
+            }
+        }
+        guard immediate != nil else {
+            hint = "吸管：取样点几乎无颜色信息，未写入"
+            return
         }
     }
 
@@ -3098,9 +3125,10 @@ public struct WhiteBalanceCommands {
     /// dropper wrote a guess". The caller prints the hint either way.
     ///
     /// **This is the analytic answer only.** Since 194 the settled frame is `CIRAWFilter`'s, so the
-    /// analytic pair lands with a measurable residual (13.71 % on the user's grey patch). Use
-    /// `beginDropper` / `applyDropperRefined` — the ones the inspector and the tests call — for the
-    /// click that actually reads the decoder back.
+    /// analytic pair lands with a measurable residual (13.71 % on the user's grey patch). Since 236 the
+    /// click's primary route is `nativeDropper` (`CIRAWFilter.neutralLocation`); this analytic solve and
+    /// `beginDropper` are the fallback for a file/point the native property cannot answer, and they are
+    /// the ones the A/B comparison test measures against it.
     @discardableResult
     public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
         // 195 tried inverting the preview's 3×3 here (`WhiteBalanceEstimate.neutral`) on the theory
@@ -3114,12 +3142,48 @@ public struct WhiteBalanceCommands {
         return solve
     }
 
+    /// **236 — the native click, synchronously.** Apple's decoder solves the point in the RAW domain
+    /// (`neutralLocation`) and reports the pair; one document write, no development, no iteration.
+    ///
+    /// `nil` means the filter refused the file or the point had no in-range answer; the caller keeps
+    /// `applyDropperRefined` / `beginDropper` as the fallback. The document is untouched on `nil`.
+    @discardableResult
+    public func nativeDropper(_ probe: WhiteBalanceNativeDropper.Probe,
+                              label: String = "吸管白平衡") -> WhiteBalance? {
+        guard let pair = WhiteBalanceNativeDropper.whiteBalance(at: probe) else { return nil }
+        commit(pair, label: label)
+        return pair
+    }
+
+    /// **236 — the native click, off the main thread** — what the inspector's dropper runs.
+    ///
+    /// Opens the filter and reads back `neutralTemperature`/`neutralTint` in a detached task, then
+    /// writes the pair once on the main actor. `finish` receives `nil` when the native path could not
+    /// answer (a refused file, or a point outside the document's range), which is the signal to run
+    /// the iterative fallback; it is called on the main thread either way.
+    public func beginNativeDropper(_ probe: WhiteBalanceNativeDropper.Probe,
+                                   label: String = "吸管白平衡",
+                                   finish: @escaping (WhiteBalance?) -> Void) {
+        let session = self.session
+        let asShot = self.asShot
+        Task.detached(priority: .userInitiated) {
+            let pair = WhiteBalanceNativeDropper.whiteBalance(at: probe)
+            await MainActor.run {
+                if let pair {
+                    WhiteBalanceCommands(session: session, asShot: asShot).commit(pair, label: label)
+                }
+                finish(pair)
+            }
+        }
+    }
+
     /// **The refined click, synchronously** — solve, then iterate against the decoder
     /// (`WhiteBalanceDropperRefiner`), then write the final pair **once**.
     ///
-    /// One decode per attempt at the rung the loupe is on; at most `maxDecodes`. The document is
-    /// written a single time no matter how many attempts it took, so one click stays one history entry
-    /// and one ⌘Z.
+    /// This is now the **fallback** (236): it runs when `neutralLocation` cannot answer for this file
+    /// or point. It stays because a file/decoder combination that refuses the native neutral must
+    /// still produce something, and because it is the only measurement that can report a residual
+    /// curve when it does.
     @discardableResult
     public func applyDropperRefined(_ sample: RGBSample,
                                     probe: WhiteBalanceDropperRefiner.Probe,
@@ -3178,13 +3242,22 @@ public struct WhiteBalanceCommands {
 
     /// The illuminant the buffer on screen is referred to — the baseline the solve is absolute to.
     ///
-    /// 143: the decoded buffer is at Apple's as-shot balance and our model anchors that balance at
-    /// the nominal 6500 K / 0 (`WhiteBalanceSolver.localReference`). The eyedropper samples the
-    /// **decoded** buffer (not the rendered frame), so the solve is independent of the document's
-    /// current pair; using the file's reported Kelvin here would put the inverse on a different white
-    /// point than the S1 gain that will apply the answer.
+    /// **236 corrected this.** The comment here used to say the decoded buffer is at the nominal
+    /// 6500 K / 0. That was true in 143, when the pipeline decoded at as shot and applied our own S1
+    /// gain; since 194 the settled frame is decoded **at the document's pair**, so a buffer made with
+    /// 4000 K / +30 is not at 6500 K. Solving against `localReference` then asks the inverse for a
+    /// pair relative to the wrong illuminant, and the measured cost on the synthetic chart is 33–595 %
+    /// of the ideal gain (the iterative refiner cannot recover either: its first step is already at
+    /// the 12000 K / +150 boundary). The reference must be the pair the pixels were actually decoded
+    /// with: the document's own pair when it has one, otherwise the file's as-shot pair (which is what
+    /// `.asShot` leaves the filter at), and only a caller with neither gets the nominal fallback.
     public var reference: WhiteBalanceSolver.Reference {
-        WhiteBalanceSolver.localReference
+        let current = session.edit.light.whiteBalance
+        if !current.isAsShot {
+            return WhiteBalanceSolver.Reference(current, fallback: asShot ?? .asShot)
+        }
+        if let asShot { return WhiteBalanceSolver.Reference(asShot) }
+        return WhiteBalanceSolver.localReference
     }
 }
 

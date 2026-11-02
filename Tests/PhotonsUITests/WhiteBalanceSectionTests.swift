@@ -46,6 +46,14 @@ final class WhiteBalanceSectionTests: XCTestCase {
         throw XCTSkip("no RAW fixture; set PHOTONS_TEST_RAW")
     }
 
+    /// 236: the repo's synthetic 16×16 chart — known neutral cells make the native eyedropper's
+    /// acceptance measurable without the user's photo.
+    private var chartURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("tools/wb-calibrate/chart256.dng")
+    }
+
     /// A loupe with a canvas of the right size and no automatic rendering: every frame here is asked
     /// for explicitly, so nothing races the assertions.
     private func makeLoupe(_ session: CatalogSession) -> LoupeController {
@@ -61,8 +69,16 @@ final class WhiteBalanceSectionTests: XCTestCase {
         return loupe
     }
 
-    private func develop(_ loupe: LoupeController, _ url: URL, _ edit: EditModel) throws -> LoupeController.FrameResult {
-        try loupe.makeFrame(url: url, viewport: Self.viewport, decodeScale: Self.decodeScale, edit: edit)
+    private func develop(_ loupe: LoupeController, _ url: URL, _ edit: EditModel,
+                         scale: Float = 0.125) throws -> LoupeController.FrameResult {
+        // The test harness's photo: without it `framing()` has no identity to match the decoded
+        // buffer against, and every hit test (the dropper included) reports `.notReady`. Production
+        // gets this from `session.anchorAsset`. Set it to the same identity `makeFrame` keys on.
+        loupe.frameSource = LoupeController.FrameSource(url: url,
+                                                        identity: url.lastPathComponent,
+                                                        viewport: Self.viewport,
+                                                        edit: edit)
+        return try loupe.makeFrame(url: url, viewport: Self.viewport, decodeScale: scale, edit: edit)
     }
 
     private func decodeTotal() -> Int { RAWDecoder.decodeCounts().values.reduce(0, +) }
@@ -362,6 +378,272 @@ final class WhiteBalanceSectionTests: XCTestCase {
         _ = loupe.handleEyedropperClick(atViewPoint: CGPoint(x: 200, y: 150))
         XCTAssertEqual(reported, [.notReady])
         XCTAssertTrue(loupe.isEyedropperArmed)
+    }
+
+    // MARK: - 236: Apple's native neutralLocation
+
+    /// The chart's four measured neutral cells: one dark, two mid, one bright (top-left origin,
+    /// 32 px cells; row 0–1 are the neutral ramp). The same set is used by the report and by the
+    /// reverse gate, so a coordinate mistake cannot pass one and fail the other.
+    private static let chartNeutralCells: [(x: Int, y: Int)] = [
+        (336, 16),   // row 0, col 10 — darkest usable step (35/255)
+        (16, 48),    // row 1, col 0  — mid-low
+        (240, 48),   // row 1, col 7  — mid-high
+        (496, 48),   // row 1, col 15 — brightest
+    ]
+
+    /// The native click, end to end: a deliberately wrong document, a click on a known neutral cell
+    /// through `LoupeController` + `WhiteBalanceCommands`, then the settled frame measured at the
+    /// clicked cell **and** three other neutral cells of the same chart.
+    ///
+    /// The gates are the task's: the clicked cell `max−min ≤ 2` 8-bit codes, the other three `≤ 3`.
+    func testNativeNeutralLocationNeutralizesTheChartNeutralCells() throws {
+        let url = chartURL
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            throw XCTSkip("chart fixture missing: \(url.path)")
+        }
+
+        for (index, cell) in Self.chartNeutralCells.enumerated() {
+            let session = CatalogSession()
+            let loupe = makeLoupe(session)
+            // Start from a strong cast so "neutral afterwards" is the decoder's correction, not the
+            // as-shot state passing through unchanged.
+            session.applyEdit { $0.light.temperature = 4000; $0.light.tint = 30 }
+            session.commitEdit(label: "测试偏色", coalesce: false)
+            _ = try develop(loupe, url, session.edit, scale: 1)
+            let commands = WhiteBalanceCommands(session: session, asShot: loupe.asShotWhiteBalance)
+
+            let point = try XCTUnwrap(loupe.viewPoint(forSourcePoint: (x: Double(cell.x),
+                                                                       y: Double(cell.y))))
+            var pair: WhiteBalance?
+            var arrived = false
+            loupe.armEyedropper { outcome in
+                guard case .sampled(let s) = outcome else { return }
+                guard let native = loupe.dropperNativeProbe(for: s) else { return }
+                // The inspector's exact route: `beginNativeDropper` reads the RAW point off the main
+                // thread and writes the pair once on arrival.
+                commands.beginNativeDropper(native) { written in
+                    pair = written
+                    arrived = true
+                }
+            }
+            let outcome = try XCTUnwrap(loupe.handleEyedropperClick(atViewPoint: point))
+            guard case .sampled = outcome else {
+                throw XCTSkip("chart click \(cell) produced \(outcome)")
+            }
+            let deadline = Date().addingTimeInterval(10)
+            while !arrived, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            let applied = try XCTUnwrap(pair, "native neutralLocation gave no pair at \(cell)")
+            XCTAssertEqual(session.history.currentSnapshot?.label, "吸管白平衡")
+            XCTAssertEqual(session.edit.light.whiteBalance, applied.quantized())
+            XCTAssertEqual(applied.temperature ?? 0, 6500, accuracy: 250,
+                           "chart neutral should read ~6500 K, got \(applied.summary)")
+            XCTAssertEqual(applied.tint ?? 0, 0, accuracy: 8,
+                           "chart neutral should read ~0 tint, got \(applied.summary)")
+
+            // Settle the document, then measure. Same source points, same decoder the click answered.
+            _ = try develop(loupe, url, session.edit, scale: 1)
+            var spreads: [Double] = []
+            for probeCell in Self.chartNeutralCells {
+                let p = try XCTUnwrap(loupe.viewPoint(forSourcePoint: (x: Double(probeCell.x),
+                                                                        y: Double(probeCell.y))))
+                guard case .sampled(let s) = loupe.samplePixel(atViewPoint: p) else {
+                    return XCTFail("could not re-sample \(probeCell) after settling \(cell)")
+                }
+                spreads.append(Self.codeSpread(s.rgb))
+            }
+            let clickedSpread = spreads[index]
+            let others = spreads.enumerated().filter { $0.offset != index }.map(\.element)
+            print(String(format: "native chart cell %d,%d → %@ · clicked %.0f codes · others %@",
+                         cell.x, cell.y, applied.summary, clickedSpread,
+                         others.map { String(format: "%.0f", $0) }.joined(separator: "/")))
+            XCTAssertLessThanOrEqual(clickedSpread, 2,
+                                     "clicked neutral cell \(cell) settled at "
+                                     + String(format: "%.0f", clickedSpread) + " 8-bit codes")
+            XCTAssertLessThanOrEqual(others.max() ?? 0, 3,
+                                     "same-chart neutral cells disagree: "
+                                     + others.map { String(format: "%.0f", $0) }.joined(separator: "/"))
+        }
+    }
+
+    /// **The reverse gate.** The native assignment is `y = uprightHeight − 1 − sourceY`; this test
+    /// proves that removing the flip (the obvious first mistake, and the one the task names) makes
+    /// the clicked cell *not* neutral. If `Probe.neutralLocation` ever stops flipping, the right-hand
+    /// answer becomes the wrong one and the first assertion below fails.
+    func testNativeNeutralLocationRequiresTheYFlip() throws {
+        let url = chartURL
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            throw XCTSkip("chart fixture missing: \(url.path)")
+        }
+        let cell = Self.chartNeutralCells[2]   // mid-high, well exposed
+        let probe = WhiteBalanceNativeDropper.Probe(url: url, sourceX: cell.x, sourceY: cell.y,
+                                                     uprightHeight: 512)
+        XCTAssertEqual(probe.neutralLocation.y, 463,
+                       "top-left y 48 must become Core Image's bottom-left y 463")
+
+        let correct = try XCTUnwrap(WhiteBalanceNativeDropper.whiteBalance(at: probe))
+        let flipped = try XCTUnwrap(
+            WhiteBalanceNativeDropper.whiteBalance(
+                url: url, neutralLocation: CGPoint(x: cell.x, y: cell.y)),
+            "the un-flipped point must still be a legal (wrong) answer for this gate to mean something")
+
+        let correctSpread = try settledSpread(url: url, cell: cell, pair: correct)
+        let flippedSpread = try settledSpread(url: url, cell: cell, pair: flipped)
+        print(String(format: "y-flip gate: correct %@ → %.0f codes; flipped %@ → %.0f codes",
+                     correct.summary, correctSpread, flipped.summary, flippedSpread))
+        XCTAssertLessThanOrEqual(correctSpread, 2)
+        XCTAssertGreaterThan(flippedSpread, 3,
+                             "an un-flipped neutralLocation left the clicked cell at "
+                             + String(format: "%.0f", flippedSpread)
+                             + " codes — the coordinate conversion is not being exercised")
+    }
+
+    /// Develop the chart at `pair`, then read the 8-bit spread of one neutral cell.
+    private func settledSpread(url: URL, cell: (x: Int, y: Int),
+                               pair: WhiteBalance) throws -> Double {
+        let session = CatalogSession()
+        let loupe = makeLoupe(session)
+        WhiteBalanceCommands(session: session, asShot: nil).commit(pair, label: "gate")
+        _ = try develop(loupe, url, session.edit, scale: 1)
+        let point = try XCTUnwrap(loupe.viewPoint(forSourcePoint: (x: Double(cell.x),
+                                                                   y: Double(cell.y))))
+        guard case .sampled(let s) = loupe.samplePixel(atViewPoint: point) else {
+            throw XCTSkip("no sample at \(cell)")
+        }
+        return Self.codeSpread(s.rgb)
+    }
+
+    /// Scene-linear RGB → the 8-bit sRGB code spread a person would read off the picture.
+    private static func codeSpread(_ rgb: RGBSample) -> Double {
+        func code(_ v: Double) -> Double {
+            let c = min(max(v, 0), 1)
+            let s = c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1 / 2.4) - 0.055
+            return s * 255
+        }
+        let r = code(rgb.r), g = code(rgb.g), b = code(rgb.b)
+        return max(r, max(g, b)) - min(r, min(g, b))
+    }
+
+    // MARK: - 236: A/B/C measurement (opt-in)
+
+    /// The evidence table for `local/REPORT.md`: the current iterative path (A), Apple's native
+    /// `neutralLocation` (B), and the historical c16f19e path (C). Gated because A spends five
+    /// developments per point on a 60 MP file.
+    ///
+    /// C is the code at `c16f19e`: `WhiteBalanceDropperRefiner.swift` and `WhiteBalanceSolver` are
+    /// byte-identical between that commit and this branch (`git diff --stat` is empty), and the
+    /// dropper body in `InspectorView` is unchanged, so C is measured by running A — the report says
+    /// so rather than pretending to a second implementation.
+    func testDropperABComparisonReport() throws {
+        guard ProcessInfo.processInfo.environment["PHOTONS_WB_DROPPER_REPORT"] == "1" else {
+            throw XCTSkip("set PHOTONS_WB_DROPPER_REPORT=1 to print the A/B/C table")
+        }
+        let chart = chartURL
+        let real = try fixtureURL()
+        guard FileManager.default.isReadableFile(atPath: chart.path) else {
+            throw XCTSkip("chart fixture missing")
+        }
+
+        // Chart: the four known neutral cells, developed at full size.
+        try reportPoints(label: "chart", url: chart, scale: 1,
+                         cells: Self.chartNeutralCells.map { (x: $0.x, y: $0.y) },
+                         clicked: [0, 1, 2, 3])
+        // Real photo: two flat, low-chroma patches found in the as-shot frame (the grey facade /
+        // paving). Unlike a sparse grid's "lowest chroma", these are flat enough that a patch average
+        // and the single pixel the native neutral solves agree.
+        try reportPoints(label: "L1030433", url: real, scale: 0.125,
+                         cells: [(x: 4960, y: 4064), (x: 7520, y: 4128)],
+                         clicked: [0, 1])
+    }
+
+    private func reportPoints(label: String, url: URL, scale: Float,
+                              cells: [(x: Int, y: Int)], clicked: [Int]) throws {
+        // As-shot reference RGB for every cell (the "no WB" baseline of metric 3).
+        let baseSession = CatalogSession()
+        let baseLoupe = makeLoupe(baseSession)
+        _ = try develop(baseLoupe, url, baseSession.edit, scale: scale)
+        let baseline = try cells.map { cell -> RGBSample in
+            let p = try XCTUnwrap(baseLoupe.viewPoint(forSourcePoint: (x: Double(cell.x),
+                                                                       y: Double(cell.y))))
+            guard case .sampled(let s) = baseLoupe.samplePixel(atViewPoint: p) else {
+                throw XCTSkip("no baseline sample at \(cell)")
+            }
+            return s.rgb
+        }
+
+        for index in clicked {
+            let cell = cells[index]
+            for path in ["A", "A-analytic", "B", "C"] {
+                let session = CatalogSession()
+                let loupe = makeLoupe(session)
+                session.applyEdit { $0.light.temperature = 4000; $0.light.tint = 30 }
+                session.commitEdit(label: "测试偏色", coalesce: false)
+                _ = try develop(loupe, url, session.edit, scale: scale)
+                let commands = WhiteBalanceCommands(session: session,
+                                                    asShot: loupe.asShotWhiteBalance)
+                let point = try XCTUnwrap(loupe.viewPoint(forSourcePoint: (x: Double(cell.x),
+                                                                           y: Double(cell.y))))
+                var sample: LoupeController.DropperSample?
+                loupe.armEyedropper { outcome in
+                    if case .sampled(let s) = outcome { sample = s }
+                }
+                _ = loupe.handleEyedropperClick(atViewPoint: point)
+                let s = try XCTUnwrap(sample)
+                switch path {
+                case "B":
+                    let probe = try XCTUnwrap(loupe.dropperNativeProbe(for: s))
+                    _ = commands.nativeDropper(probe)
+                case "A-analytic":
+                    _ = commands.applyDropper(s.rgb)
+                default:   // A and C: the same iterative implementation (see the test doc)
+                    let probe = try XCTUnwrap(loupe.dropperProbe(for: s))
+                    let result = commands.applyDropperRefined(s.rgb, probe: probe)
+                    print("  \(path) solve \(result.solve?.whiteBalance.summary ?? "nil") "
+                          + "→ doc \(session.edit.light.whiteBalance.summary) "
+                          + "· refine \(result.refinement.map { "\($0.decodes)d \(String(format: "%.2f%%", $0.residual * 100))" } ?? "none")")
+                }
+
+                _ = try develop(loupe, url, session.edit, scale: scale)
+                var spreads: [Double] = []
+                for probeCell in cells {
+                    let p = try XCTUnwrap(loupe.viewPoint(forSourcePoint: (x: Double(probeCell.x),
+                                                                            y: Double(probeCell.y))))
+                    guard case .sampled(let m) = loupe.samplePixel(atViewPoint: p) else {
+                        throw XCTSkip("no settled sample at \(probeCell)")
+                    }
+                    spreads.append(Self.codeSpread(m.rgb))
+                }
+                let clickedSpread = spreads[index]
+                let otherMax = spreads.enumerated().filter { $0.offset != index }
+                    .map(\.element).max() ?? 0
+                let after = try sampleRGB(loupe, at: point)
+                let gainErr = Self.gainError(base: baseline[index], after: after)
+                print(String(format: "REPORT %@ point %d (%d,%d) %@ · clicked %.0f · others %.0f · gainErr %.2f%%",
+                             label, index, cell.x, cell.y, path, clickedSpread, otherMax, gainErr))
+            }
+        }
+    }
+
+    private func sampleRGB(_ loupe: LoupeController, at point: CGPoint) throws -> RGBSample {
+        guard case .sampled(let s) = loupe.samplePixel(atViewPoint: point) else {
+            throw XCTSkip("no sample at \(point)")
+        }
+        return s.rgb
+    }
+
+    /// The chromatic gain error against the no-WB ideal, normalised on green (so a brightness
+    /// difference between the two frames cannot masquerade as a colour error).
+    private static func gainError(base: RGBSample, after: RGBSample) -> Double {
+        let mean = (base.r + base.g + base.b) / 3
+        let ideal = (mean / max(base.r, 1e-6), mean / max(base.g, 1e-6),
+                     mean / max(base.b, 1e-6))
+        let actual = (after.r / max(base.r, 1e-6), after.g / max(base.g, 1e-6),
+                      after.b / max(base.b, 1e-6))
+        let idealN = (ideal.0 / ideal.1, 1.0, ideal.2 / ideal.1)
+        let actualN = (actual.0 / max(actual.1, 1e-9), 1.0, actual.2 / max(actual.1, 1e-9))
+        return max(abs(actualN.0 / idealN.0 - 1), abs(actualN.2 / idealN.2 - 1)) * 100
     }
 
     // MARK: - the one route a dropper click takes
