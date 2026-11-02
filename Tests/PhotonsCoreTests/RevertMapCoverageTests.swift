@@ -31,11 +31,14 @@ final class RevertMapCoverageTests: XCTestCase {
     }
 
     private static let maskID = "m-keep"
+    private static let shapeMaskID = "m-shape"
+    private static let countMaskID = "m-count"
     private static let addedMaskID = "m-added"
     private static let removedMaskID = "m-removed"
     private static let orderMaskIDs = ["m-order-1", "m-order-2"]
 
     private static let healID = "h-keep"
+    private static let kindHealID = "h-kind"
     private static let addedHealID = "h-added"
     private static let removedHealID = "h-removed"
     private static let orderHealIDs = ["h-order-1", "h-order-2"]
@@ -133,9 +136,11 @@ final class RevertMapCoverageTests: XCTestCase {
     }
 
     private func maskField(_ field: String,
+                           _ baseMask: Mask? = nil,
                            _ apply: @escaping (inout Mask) -> Void) -> FieldCase {
         let id = Self.maskID
-        return FieldCase(key: "masks.\(id).\(field)", base: base(masks: [Mask(id: id)])) { m in
+        return FieldCase(key: "masks.\(id).\(field)",
+                         base: base(masks: [baseMask ?? Mask(id: id)])) { m in
             // The lookup form (not `m.masks[0] = …`) keeps the other masks of the shared fixture
             // alive, so every mask case can be applied to the same "all fields differ" document.
             m.masks = m.masks.map { mask in
@@ -148,10 +153,11 @@ final class RevertMapCoverageTests: XCTestCase {
     }
 
     private func healField(_ field: String,
+                           _ baseSpot: HealSpot? = nil,
                            _ apply: @escaping (inout HealSpot) -> Void) -> FieldCase {
         let id = Self.healID
         return FieldCase(key: "heal.\(id).\(field)",
-                         base: base(heal: [HealSpot(id: id)])) { m in
+                         base: base(heal: [baseSpot ?? HealSpot(id: id)])) { m in
             m.healSpots = m.healSpots.map { spot in
                 guard spot.id == id else { return spot }
                 var copy = spot
@@ -189,6 +195,7 @@ final class RevertMapCoverageTests: XCTestCase {
             flat("light.exposure") { $0.light.exposure = 1 },
             flat("light.contrast") { $0.light.contrast = 20 },
             flat("light.highlights") { $0.light.highlights = 10 },
+            flat("light.midtones") { $0.light.midtones = 15 },
             flat("light.shadows") { $0.light.shadows = -10 },
             flat("light.whites") { $0.light.whites = 5 },
             flat("light.blacks") { $0.light.blacks = -5 },
@@ -200,6 +207,9 @@ final class RevertMapCoverageTests: XCTestCase {
             // S3 — Color's global numbers and the B&W switch. (The bands are added below.)
             flat("color.vibrance") { $0.color.vibrance = 20 },
             flat("color.saturation") { $0.color.saturation = 30 },
+            flat("color.global.hue") { $0.color.global.hue = 12 },
+            flat("color.global.saturation") { $0.color.global.saturation = -18 },
+            flat("color.global.luminance") { $0.color.global.luminance = 7 },
             flat("color.blackAndWhite") { $0.color.blackAndWhite = true },
 
             // Detail and the decoder-side amounts.
@@ -236,6 +246,15 @@ final class RevertMapCoverageTests: XCTestCase {
             // 029 — lateral CA.
             flat("optics.caRed") { $0.optics.caRed = 0.002 },
             flat("optics.caBlue") { $0.optics.caBlue = -0.001 },
+
+            // 179 — 原色校准's seven numbers.
+            flat("calibration.shadowTint") { $0.calibration.shadowTint = 20 },
+            flat("calibration.redHue") { $0.calibration.redHue = 25 },
+            flat("calibration.redSat") { $0.calibration.redSat = -15 },
+            flat("calibration.greenHue") { $0.calibration.greenHue = 10 },
+            flat("calibration.greenSat") { $0.calibration.greenSat = 5 },
+            flat("calibration.blueHue") { $0.calibration.blueHue = -20 },
+            flat("calibration.blueSat") { $0.calibration.blueSat = 12 },
         ]
 
         // S1.7 — four curves, both coordinates at both endpoints, and the structural count.
@@ -281,7 +300,28 @@ final class RevertMapCoverageTests: XCTestCase {
             maskField("feather") { $0.feather = 0.2 },
             maskField("refine") { $0.refine = 0.5 },
             maskField("name") { $0.name = "Sky" },
-            maskField("components") { $0.components = [MaskComponent()] },
+            FieldCase(key: "masks.\(Self.countMaskID).components",
+                      base: base(masks: [Mask(id: Self.countMaskID)])) { m in
+                m.masks = m.masks.map { mask in
+                    guard mask.id == Self.countMaskID else { return mask }
+                    var copy = mask
+                    copy.components = [MaskComponent()]
+                    return copy
+                }
+            },
+            // 267b — the fields inside a component. `op` has the card's 组合方式 picker; invert and
+            // feather have no slider today, but they are render inputs and must be diffable.
+            maskField("components[0].op", Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].op = .subtract
+            },
+            maskField("components[0].invert",
+                      Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].invert = true
+            },
+            maskField("components[0].feather",
+                      Mask(id: Self.maskID, components: [MaskComponent()])) {
+                $0.components[0].feather = 0.2
+            },
 
             maskField("adj.amount") { $0.adjustments.amount = 50 },
             maskField("adj.exposure") { $0.adjustments.exposure = 1 },
@@ -294,6 +334,21 @@ final class RevertMapCoverageTests: XCTestCase {
             maskField("adj.blacks") { $0.adjustments.blacks = -3 },
             maskField("adj.hue") { $0.adjustments.hue = 10 },
             maskField("adj.saturation") { $0.adjustments.saturation = -10 },
+            maskField("adj.texture") { $0.adjustments.texture = 30 },
+            maskField("adj.sharpen") { $0.adjustments.sharpen = 40 },
+
+            // 267 — a component's geometry (the shape behind a canvas handle drag).
+            FieldCase(key: "masks.\(Self.shapeMaskID).components[0].shape",
+                      base: base(masks: [Mask(id: Self.shapeMaskID,
+                                              components: [MaskComponent()])])) { m in
+                m.masks = m.masks.map { mask in
+                    guard mask.id == Self.shapeMaskID, !mask.components.isEmpty else { return mask }
+                    var copy = mask
+                    copy.components[0].shape = .linearGradient(
+                        LinearGradientShape(start: NormalizedPoint(0.2, 0.1)))
+                    return copy
+                }
+            },
         ]
 
         // …and the three structural entries.
@@ -321,6 +376,27 @@ final class RevertMapCoverageTests: XCTestCase {
             healField("feather") { $0.feather = 0.2 },
             healField("opacity") { $0.opacity = 0.8 },
             healField("mode") { $0.mode = .clone },
+
+            // 267 — 229's 红眼. The kind row uses its own spot so `healID` can stay `.redeye` on both
+            // sides of the universe (see the red-eye trap below); the red-gate rows need a `.redeye`
+            // base because a `.heal` spot ignores both numbers in `HealSpot.==`.
+            FieldCase(key: "heal.\(Self.kindHealID).kind",
+                      base: base(heal: [HealSpot(id: Self.kindHealID)])) { m in
+                m.healSpots = m.healSpots.map { spot in
+                    guard spot.id == Self.kindHealID else { return spot }
+                    var copy = spot
+                    copy.kind = .redeye
+                    return copy
+                }
+            },
+            healField("redThreshold",
+                      HealSpot(id: Self.healID, kind: .redeye, redThreshold: 0.4)) {
+                $0.redThreshold = 0.7
+            },
+            healField("redSoftness",
+                      HealSpot(id: Self.healID, kind: .redeye, redSoftness: 0.1)) {
+                $0.redSoftness = 0.2
+            },
 
             FieldCase(key: "heal.\(Self.addedHealID).added", base: .neutral) {
                 $0.healSpots = [HealSpot(id: Self.addedHealID)]
@@ -356,9 +432,14 @@ final class RevertMapCoverageTests: XCTestCase {
     private func universeA() -> EditModel {
         var m = EditModel.neutral
         m.color.point = PointColorSet(swatches: [PointColor()], active: 0)
-        m.masks = [Mask(id: Self.maskID), Mask(id: Self.removedMaskID),
+        m.masks = [Mask(id: Self.maskID, components: [MaskComponent()]),
+                   Mask(id: Self.shapeMaskID, components: [MaskComponent()]),
+                   Mask(id: Self.countMaskID),
+                   Mask(id: Self.removedMaskID),
                    Mask(id: Self.orderMaskIDs[0]), Mask(id: Self.orderMaskIDs[1])]
-        m.healSpots = [HealSpot(id: Self.healID), HealSpot(id: Self.removedHealID),
+        m.healSpots = [HealSpot(id: Self.healID, kind: .redeye),
+                       HealSpot(id: Self.kindHealID),
+                       HealSpot(id: Self.removedHealID),
                        HealSpot(id: Self.orderHealIDs[0]), HealSpot(id: Self.orderHealIDs[1])]
         return m
     }
@@ -377,10 +458,15 @@ final class RevertMapCoverageTests: XCTestCase {
 
         b.masks = [
             Mask(id: Self.maskID, name: "Sky", isEnabled: false, opacity: 0.5, invert: true,
-                 feather: 0.2, refine: 0.5, components: [MaskComponent()],
+                 feather: 0.2, refine: 0.5,
+                 components: [MaskComponent(op: .subtract, invert: true, feather: 0.2)],
                  adjustments: LocalAdjustments(amount: 50, exposure: 1, temperature: 10, tint: 5,
                                                contrast: 10, highlights: 5, shadows: -5,
-                                               whites: 3, blacks: -3, hue: 10, saturation: -10)),
+                                               whites: 3, blacks: -3, hue: 10, saturation: -10,
+                                               texture: 30, sharpen: 40)),
+            Mask(id: Self.shapeMaskID, components: [MaskComponent(
+                shape: .linearGradient(LinearGradientShape(start: NormalizedPoint(0.2, 0.1))))]),
+            Mask(id: Self.countMaskID, components: [MaskComponent()]),
             Mask(id: Self.addedMaskID),
             Mask(id: Self.orderMaskIDs[1]),
             Mask(id: Self.orderMaskIDs[0]),
@@ -388,7 +474,9 @@ final class RevertMapCoverageTests: XCTestCase {
         b.healSpots = [
             HealSpot(id: Self.healID, center: NormalizedPoint(0.4, 0.6), radius: 0.03,
                      sourceOffset: NormalizedPoint(0.1, 0.02), mode: .clone,
-                     feather: 0.2, opacity: 0.8),
+                     feather: 0.2, opacity: 0.8, kind: .redeye,
+                     redThreshold: 0.7, redSoftness: 0.2),
+            HealSpot(id: Self.kindHealID, kind: .redeye),
             HealSpot(id: Self.addedHealID),
             HealSpot(id: Self.orderHealIDs[1]),
             HealSpot(id: Self.orderHealIDs[0]),

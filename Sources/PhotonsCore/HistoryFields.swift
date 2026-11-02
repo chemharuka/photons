@@ -209,6 +209,9 @@ extension EditHistory {
         num("light.exposure", .light, before.light.exposure, after.light.exposure)
         num("light.contrast", .light, before.light.contrast, after.light.contrast)
         num("light.highlights", .light, before.light.highlights, after.light.highlights)
+        // 267 — 中间调 is S2's third window (085), between 高光 and 阴影 in the card. It used to be
+        // stored, rendered and **not** reported: a 中间调 drag produced no history row at all.
+        num("light.midtones", .light, before.light.midtones, after.light.midtones)
         num("light.shadows", .light, before.light.shadows, after.light.shadows)
         num("light.whites", .light, before.light.whites, after.light.whites)
         num("light.blacks", .light, before.light.blacks, after.light.blacks)
@@ -254,6 +257,14 @@ extension EditHistory {
             // four values in panel order.
             num("color.bands[\(i)].mix", .color, bandsBefore[i].mix, bandsAfter[i].mix)
         }
+        // 267 — the ninth HSL selector (「全局」, band 8 in the card): one triplet applied on top of
+        // every band. It sits immediately after the eight-band loop because that is where the card
+        // draws it; a drag here used to commit nothing (no row, no ⌘Z).
+        num("color.global.hue", .color, before.color.global.hue, after.color.global.hue)
+        num("color.global.saturation", .color,
+            before.color.global.saturation, after.color.global.saturation)
+        num("color.global.luminance", .color,
+            before.color.global.luminance, after.color.global.luminance)
         // The 黑白 switch itself: a structural flag, so the row says 「黑白 关 → 开」 rather than a
         // number (`FieldValue.flag`, the same shape `light.lensCorrections` uses).
         flag("color.blackAndWhite", .color, before.color.blackAndWhite, after.color.blackAndWhite)
@@ -357,6 +368,18 @@ extension EditHistory {
         num("optics.caRed", .geometry, before.optics.caRed, after.optics.caRed)
         num("optics.caBlue", .geometry, before.optics.caBlue, after.optics.caBlue)
 
+        // 267 — 原色校准's seven numbers. Grouped `.light` because there is no `.calibration`
+        // `RenderGroup` and the matrix is S1's arithmetic (`changedStages` dirties `.sceneLinear`),
+        // which is exactly the stage `.light` feeds. The card's units are the document's (−100…100).
+        num("calibration.shadowTint", .light,
+            before.calibration.shadowTint, after.calibration.shadowTint)
+        num("calibration.redHue", .light, before.calibration.redHue, after.calibration.redHue)
+        num("calibration.redSat", .light, before.calibration.redSat, after.calibration.redSat)
+        num("calibration.greenHue", .light, before.calibration.greenHue, after.calibration.greenHue)
+        num("calibration.greenSat", .light, before.calibration.greenSat, after.calibration.greenSat)
+        num("calibration.blueHue", .light, before.calibration.blueHue, after.calibration.blueHue)
+        num("calibration.blueSat", .light, before.calibration.blueSat, after.calibration.blueSat)
+
         // Masks — aligned by id. Array order is *combination* order (§3.3), so a reorder is an edit.
         out.append(contentsOf: maskChanges(before.masks, after.masks))
 
@@ -366,6 +389,12 @@ extension EditHistory {
         out.append(contentsOf: healChanges(before.healSpots, after.healSpots))
 
         // `showMaskID` is deliberately absent: it is view state (005e), never a document edit.
+        //
+        // 267 — the same holds for the two forward-compat carriers: `forwardExtras` and
+        // `forwardCompatVersion` are a newer build's unknown fields passed through unchanged (205).
+        // Nothing in the graph reads them, so a change to them moves no pixel and must not mint a
+        // row; `DiffCoverageTests.whitelist` asserts that silence on purpose (with the reason), so
+        // the day one of them becomes a render input that test goes red instead of hiding it.
         return out
     }
 
@@ -415,6 +444,52 @@ extension EditHistory {
                 out.append(FieldChange(field: EditField(key: key("components"), group: .masks),
                                        from: .number(Double(o.components.count)),
                                        to: .number(Double(m.components.count))))
+            } else {
+                // 267 — the fields **inside** a component. The count row above says a component
+                // appeared or went; these say the one that stayed was edited: its geometry (a brush
+                // stroke, a radial's centre/radius, a linear's two lines, a colour/luminance window),
+                // its blend arithmetic (`op`: max / a·(1−a) / a·a), its per-component inversion and
+                // its edge softness. Without them a canvas drag or a 组合方式 picker wrote a value
+                // that produced no history row and could not be undone.
+                //
+                // `op` and `invert`/`feather` have no slider of their own today (only the mask
+                // card's 组合方式 picker writes `op`; presets and scripts can write all three), but
+                // they are **render inputs** — `Mask.selectionKey` reads every one of them — so they
+                // are diffed like any other parameter, never whitelisted as view state.
+                //
+                // A shape's value is the kind plus a short hash of `shape.keyString` — the row is
+                // for a human ("radialGradient#a1b2c3"). `revert` never parses any of these values:
+                // it copies the whole component back from `previous`, so a future component field
+                // needs no new branch here.
+                for i in o.components.indices {
+                    let beforeComponent = o.components[i]
+                    let afterComponent = m.components[i]
+                    let prefix = "components[\(i)]"
+                    if beforeComponent.op != afterComponent.op {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).op"), group: .masks),
+                            from: .text(beforeComponent.op.rawValue),
+                            to: .text(afterComponent.op.rawValue)))
+                    }
+                    if beforeComponent.invert != afterComponent.invert {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).invert"), group: .masks),
+                            from: .flag(beforeComponent.invert),
+                            to: .flag(afterComponent.invert)))
+                    }
+                    if !EditParameters.areEqual(beforeComponent.feather, afterComponent.feather) {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).feather"), group: .masks),
+                            from: .number(beforeComponent.feather),
+                            to: .number(afterComponent.feather)))
+                    }
+                    if beforeComponent.shape != afterComponent.shape {
+                        out.append(FieldChange(
+                            field: EditField(key: key("\(prefix).shape"), group: .masks),
+                            from: .text(shapeToken(beforeComponent.shape)),
+                            to: .text(shapeToken(afterComponent.shape))))
+                    }
+                }
             }
             let adjBefore = o.adjustments
             let adjAfter = m.adjustments
@@ -434,6 +509,10 @@ extension EditHistory {
             adj("blacks", adjBefore.blacks, adjAfter.blacks)
             adj("hue", adjBefore.hue, adjAfter.hue)
             adj("saturation", adjBefore.saturation, adjAfter.saturation)
+            // 181 — 局部纹理 / 锐化. The names were already in `maskFieldNames`, but `maskChanges`
+            // never emitted them, so a mask's S3.9 sliders were undo-proof and invisible.
+            adj("texture", adjBefore.texture, adjAfter.texture)
+            adj("sharpen", adjBefore.sharpen, adjAfter.sharpen)
         }
         let afterIDsSet = Set(afterIDs)
         for o in before where !afterIDsSet.contains(o.id) {
@@ -447,6 +526,21 @@ extension EditHistory {
                                    to: .number(Double(afterIDs.count))))
         }
         return out
+    }
+
+    /// 267 — the short, stable token a shape row prints: `radialGradient#3f9a1c`.
+    ///
+    /// A shape's own `keyString` can be hundreds of characters (a brush stroke's point list), so it
+    /// must not go into a row's text. The hash is FNV-1a over that canonical string — process-stable
+    /// (unlike `Hashable.hashValue`, which is seeded per run) and dependency-free. The row only needs
+    /// to answer "did it move"; `revert` copies the component from the previous snapshot.
+    private static func shapeToken(_ shape: MaskShape) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in shape.keyString.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01B3
+        }
+        return "\(shape.kind)#" + String(format: "%06llx", hash & 0xFFFFFF)
     }
 
     /// The heal-spot half of the diff — the mask rule, read on a list that has no components.
@@ -486,6 +580,19 @@ extension EditHistory {
             if base.mode != s.mode {
                 out.append(FieldChange(field: EditField(key: key("mode"), group: .heal),
                                        from: .text(base.mode.rawValue), to: .text(s.mode.rawValue)))
+            }
+            // 267 — 229's 红眼 preset. `kind` is a text row (修复 ↔ 红眼); the two red-gate numbers
+            // only exist for a `.redeye` spot. **A `.heal` spot ignores them in equality/hashing**
+            // (`HealSpot.==`), so changing them there is not a document change and must not mint a
+            // row — the same rule `keyString` follows.
+            if base.kind != s.kind {
+                out.append(FieldChange(field: EditField(key: key("kind"), group: .heal),
+                                       from: .text(base.kind.rawValue),
+                                       to: .text(s.kind.rawValue)))
+            }
+            if s.kind == .redeye {
+                num("redThreshold", base.redThreshold, s.redThreshold)
+                num("redSoftness", base.redSoftness, s.redSoftness)
             }
         }
         let afterIDsSet = Set(afterIDs)
@@ -533,6 +640,7 @@ extension EditHistory {
         "light.exposure": "曝光",
         "light.contrast": "对比",
         "light.highlights": "高光",
+        "light.midtones": "中间调",
         "light.shadows": "阴影",
         "light.whites": "白色",
         "light.blacks": "黑色",
@@ -542,6 +650,9 @@ extension EditHistory {
         "light.blackOffset": "黑电平微调",
         "color.vibrance": "自然饱和",
         "color.saturation": "饱和",
+        "color.global.hue": "HSL[全局] 色相",
+        "color.global.saturation": "HSL[全局] 饱和",
+        "color.global.luminance": "HSL[全局] 亮度",
         "color.blackAndWhite": "黑白",
         "color.point.sampleHue": "点颜色[采样] 色相",
         "color.point.sampleChroma": "点颜色[采样] 彩度",
@@ -590,6 +701,13 @@ extension EditHistory {
         "sharpen.masking": "锐化蒙版",
         "optics.caRed": "横向色差 R",
         "optics.caBlue": "横向色差 B",
+        "calibration.shadowTint": "校准 阴影色调",
+        "calibration.redHue": "校准 红 色相",
+        "calibration.redSat": "校准 红 饱和",
+        "calibration.greenHue": "校准 绿 色相",
+        "calibration.greenSat": "校准 绿 饱和",
+        "calibration.blueHue": "校准 蓝 色相",
+        "calibration.blueSat": "校准 蓝 饱和",
         "masks.order": "蒙版顺序",
         "heal.order": "修复顺序",
     ]
@@ -675,12 +793,30 @@ extension EditHistory {
         return "点颜色[\(number)] \(name)"
     }
 
-    /// `masks.m-1.feather` → 「蒙版 羽化」.
+    /// `masks.m-1.feather` → 「蒙版 羽化」; `masks.m-1.components[0].shape` → 「蒙版 形状[0]」.
     private static func maskFieldName(_ key: String) -> String? {
         guard key.hasPrefix("masks.") else { return nil }
         let rest = key.dropFirst("masks.".count)
         guard let dot = rest.firstIndex(of: ".") else { return nil }
         let field = String(rest[rest.index(after: dot)...])
+        // 267 — the per-component rows have a dynamic index, so they are composed like a curve
+        // point / HSL band rather than added to the flat table. `op` is the card's 组合方式 picker;
+        // `invert` / `feather` are the component's own render inputs.
+        if field.hasPrefix("components["),
+           let open = field.firstIndex(of: "["),
+           let close = field.firstIndex(of: "]"), open < close,
+           let index = Int(field[field.index(after: open)..<close]) {
+            let axis = String(field[field.index(after: close)...].dropFirst())   // after "]."
+            let name: String
+            switch axis {
+            case "shape": name = "形状"
+            case "op": name = "组合"
+            case "invert": name = "反相"
+            case "feather": name = "羽化"
+            default: name = axis
+            }
+            return "蒙版 \(name)[\(index)]"
+        }
         let name = maskFieldNames[field] ?? field
         return "蒙版 \(name)"
     }
@@ -696,7 +832,8 @@ extension EditHistory {
     }
 
     private static let healFieldNames: [String: String] = [
-        "added": "新增", "removed": "删除", "mode": "模式",
+        "added": "新增", "removed": "删除", "mode": "模式", "kind": "类型",
+        "redThreshold": "红眼阈值", "redSoftness": "红眼过渡",
         "center.x": "位置 x", "center.y": "位置 y", "radius": "半径",
         "source.x": "源点 x", "source.y": "源点 y", "feather": "羽化", "opacity": "不透明度",
     ]
