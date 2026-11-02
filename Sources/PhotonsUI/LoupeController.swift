@@ -2614,7 +2614,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decoded: ImageSize(width: image.width, height: image.height),
                                 decodeScale: decodedScale,
                                 edit: edit,
-                                fitScale: currentCropWorkspaceFitScale)
+                                fitScale: currentCropWorkspaceFitScale,
+                                fitMargin: fitMarginOverride)
         }
         if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
             // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
@@ -2627,7 +2628,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decoded: source,
                                 decodeScale: 1,
                                 edit: edit,
-                                fitScale: currentCropWorkspaceFitScale)
+                                fitScale: currentCropWorkspaceFitScale,
+                                fitMargin: fitMarginOverride)
         }
         return nil
     }
@@ -3811,6 +3813,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 213 — the camera is the same in and out of the crop workspace: `fitZoom` owns the 90 %. The
     /// property stays so the projection, the render job and `makeFrame` read one name.
     var currentCropWorkspaceFitScale: Double { Self.cropWorkspaceFitScale }
+
+    /// 245 — test-only injection point for the 适应 margin. `nil` is `LoupeFraming.fitMargin` on
+    /// every production path; the framing (camera/readout) and the drawn frame both read it here, so
+    /// the reverse gate can make the *drawn* 90 % go red without a second source of truth.
+    var fitMarginOverride: Double?
 
     /// 082 — the card's section resets (and its title) write the document; the frame on screen is the
     /// draft, so it is re-seeded from the new document and re-laid-out in the same turn.
@@ -6125,7 +6132,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                          decoded: ImageSize(width: image.width, height: image.height),
                                          decodeScale: ds,
                                          edit: cameraEdit,
-                                         fitScale: fitScale)
+                                         fitScale: fitScale,
+                                         fitMargin: fitMarginOverride)
             // 176: the window indexes the **expanded canvas** (the rotated crop's bounding box), so it
             // carries the canvas origin `(canvas − frame)/2` — measured on this rung's grid, which is
             // why the decode scale goes with it.

@@ -607,6 +607,10 @@ public struct LoupeFraming: Equatable, Sendable {
     /// `CropWorkspaceLayout.entry`.
     public static let fitMargin: Double = 0.90
 
+    /// 245 — test-only injection point for the 适应 margin. `nil` (every production path) is
+    /// `Self.fitMargin`; the value is stored so `fitZoom` and the drawn frame read the same number.
+    var fitMarginOverride: Double?
+
     /// Retained for call sites that ask "is this the crop workspace?"; **never a multiplier** since
     /// 213. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
     public var fitScale: Double
@@ -619,7 +623,8 @@ public struct LoupeFraming: Equatable, Sendable {
                 crop: CropRect = .full, straightenDegrees: Double = 0,
                 flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1,
                 perspective: PerspectiveMap? = nil,
-                decodeScale: Double = 1, quarterTurns: Int = 0) {
+                decodeScale: Double = 1, quarterTurns: Int = 0,
+                fitMargin: Double? = nil) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
@@ -628,6 +633,7 @@ public struct LoupeFraming: Equatable, Sendable {
                                      GeometryGroup.straightenLimit)
         self.flipH = flipH
         self.flipV = flipV
+        self.fitMarginOverride = fitMargin
         self.fitScale = fitScale.isFinite ? min(max(fitScale, 0.1), 1) : 1
         self.perspective = perspective.flatMap { $0.hasWarp ? $0 : nil }
         self.decodeScale = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
@@ -642,7 +648,7 @@ public struct LoupeFraming: Equatable, Sendable {
     /// therefore a pixel of the *turned* frame — the same photograph, rotated — which is what every
     /// consumer of this projection (window, fit zoom, crop overlay) is asking about.
     public init(viewport: ImageSize, decoded: ImageSize, decodeScale: Double, edit: EditModel,
-                fitScale: Double = 1) {
+                fitScale: Double = 1, fitMargin: Double? = nil) {
         let ds = decodeScale > 0 && decodeScale.isFinite ? decodeScale : 1
         let turned = edit.geometry.orientedSource(decoded)
         let crop = CropMath.lockedCrop(edit.geometry.aspectLock,
@@ -658,7 +664,8 @@ public struct LoupeFraming: Equatable, Sendable {
                   fitScale: fitScale,
                   perspective: edit.geometry.perspective,
                   decodeScale: ds,
-                  quarterTurns: edit.geometry.quarterTurns)
+                  quarterTurns: edit.geometry.quarterTurns,
+                  fitMargin: fitMargin)
     }
 
     // MARK: crop metrics
@@ -755,11 +762,12 @@ public struct LoupeFraming: Equatable, Sendable {
     /// document reads the same ratio at 100 % / 200 % whether or not it is cropped.
     public static func fitZoom(viewportWidth: Double, viewportHeight: Double,
                                extent: (width: Double, height: Double),
-                               isWholeFrame: Bool) -> Double {
+                               isWholeFrame: Bool,
+                               margin: Double = fitMargin) -> Double {
         let z = min(viewportWidth / max(extent.width, 1e-9),
                     viewportHeight / max(extent.height, 1e-9))
         guard z.isFinite, z > 0 else { return 1 }
-        let fitted = z * fitMargin
+        let fitted = z * margin
         let bounded = isWholeFrame ? min(1, fitted) : fitted
         return min(maximumFitZoom, bounded)
     }
@@ -774,7 +782,8 @@ public struct LoupeFraming: Equatable, Sendable {
         Self.fitZoom(viewportWidth: Double(viewport.width),
                      viewportHeight: Double(viewport.height),
                      extent: rotatedCropExtent,
-                     isWholeFrame: crop.coversFrame)
+                     isWholeFrame: crop.coversFrame,
+                     margin: fitMarginOverride ?? Self.fitMargin)
     }
 
     public func zoom(of state: LoupeViewState) -> Double {
