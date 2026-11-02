@@ -26,25 +26,59 @@ public final class LoupeCanvasView: NSView {
     /// path.
     private let firstFramePlaceholder = FirstFramePlaceholderView()
 
+    /// 258 — the matte sheet that covers the **previous** photo's pixels from the instant the photo
+    /// changes until a frame of the new photo is on the layer.
+    ///
+    /// The canvas is a `CAMetalLayer`: its last drawable keeps showing the last photo no matter what
+    /// the controller does to its own bookkeeping. 235's stand-in is only installed once a thumbnail
+    /// is in hand, so a cold cache left that drawable visible — the reported 「残留上一个照片的像素
+    /// 缓存」. This sheet is synchronous, full-canvas and the same `#0F0F0F` as the matte, so the old
+    /// photo can never be the first thing the new selection shows.
+    private let canvasCover = NSView()
+
     /// `true` only while a stand-in is actually drawn (an image was installed and no frame has
     /// replaced it). Read by the cold-start test and by `LoupeController.firstFrameContent`.
     public var isShowingFirstFramePlaceholder: Bool {
         !firstFramePlaceholder.isHidden && firstFramePlaceholder.image != nil
     }
 
+    /// 258 — `true` between a photo change and the new photo's first present, even when the stand-in
+    /// itself is still being fetched.
+    public var isCoveringCanvas: Bool { !canvasCover.isHidden }
+
+    /// 258 — where the stand-in is drawn, in canvas points. The real frame draws its photograph in
+    /// the same `content` rect (0.90 fit), so this is the number the no-jump assertion reads.
+    public var firstFramePlaceholderRect: CGRect { firstFramePlaceholder.frame }
+
     /// Draw `image` over the matte until the first frame arrives. The image keeps its own aspect and
-    /// is fitted inside the canvas (`scaleProportionallyUpOrDown`, centred), so a grid thumbnail's
-    /// pixels are never stretched to the viewport's shape.
-    public func showFirstFramePlaceholder(_ image: CGImage) {
+    /// is fitted inside `contentRect` (`scaleProportionallyUpOrDown`, centred) — the same 0.90-fit
+    /// rectangle the real frame's photograph occupies, so the replacement does not move or resize it.
+    public func showFirstFramePlaceholder(_ image: CGImage, contentRect: CGRect) {
         firstFramePlaceholder.image = NSImage(cgImage: image,
                                              size: NSSize(width: image.width, height: image.height))
+        firstFramePlaceholder.frame = contentRect
         firstFramePlaceholder.isHidden = false
+    }
+
+    /// Re-place the stand-in after a canvas resize without changing the picture it shows.
+    public func setFirstFramePlaceholderContentRect(_ rect: CGRect) {
+        firstFramePlaceholder.frame = rect
     }
 
     /// The real frame is on the layer (or the photo went away): take the stand-in down.
     public func hideFirstFramePlaceholder() {
         firstFramePlaceholder.isHidden = true
         firstFramePlaceholder.image = nil
+    }
+
+    /// 258 — cover the layer with the matte at a photo change. Idempotent; the first present for the
+    /// new photo (or leaving the loupe) ends it.
+    public func beginPhotoSwitchCover() {
+        canvasCover.isHidden = false
+    }
+
+    public func endPhotoSwitchCover() {
+        canvasCover.isHidden = true
     }
 
     /// The mask painter, when a brush is armed. Every event still goes through `LoupeController`,
@@ -77,9 +111,17 @@ public final class LoupeCanvasView: NSView {
         metalLayer.isOpaque = true
         // 235 — a subview's layer composites above the view's backing layer, so this sits on top of
         // the Metal content and below every overlay the controller adds around the canvas.
+        //
+        // 258 — the matte cover goes first: it must hide the layer's previous drawable at a photo
+        // change, and the stand-in (when one is ready) is drawn on top of it.
+        canvasCover.wantsLayer = true
+        canvasCover.layer?.backgroundColor = NSColor.canvasMatte.cgColor
+        canvasCover.isHidden = true
+        canvasCover.frame = bounds
+        canvasCover.autoresizingMask = [.width, .height]
+        addSubview(canvasCover)
         firstFramePlaceholder.isHidden = true
-        firstFramePlaceholder.frame = bounds
-        firstFramePlaceholder.autoresizingMask = [.width, .height]
+        firstFramePlaceholder.frame = .zero
         addSubview(firstFramePlaceholder)
     }
 

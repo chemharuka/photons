@@ -92,6 +92,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// 143b — the white-balance triple S1 applied, straight from the render. The preview and the
         /// settled frame must agree on it bit for bit.
         public let whiteBalanceGain: SIMD3<Double>
+        /// 258 — the render plan's letterbox answer, carried for the photo-switch trace: whether the
+        /// frame filled the canvas or was drawn at `content`, S0's content origin, whether an angle
+        /// expanded the canvas, and whether the request kept a fitting content rect instead of
+        /// upscaling it. No drawing path reads these; they are the acceptance's per-frame evidence.
+        public let frameInCanvas: ImageSize
+        public let frameOrigin: SIMD2<Float>
+        public let expandedCanvas: ImageSize?
+        public let neverUpscalesContent: Bool
     }
 
     /// One frame's cost, in milliseconds, as measured on the render queue.
@@ -1162,6 +1170,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public private(set) var firstFrameContent: FirstFrameContent = .blank
     /// Intentionally false only in the reverse-gate test: with it off the cold open is the old blank.
     var armsColdStartPlaceholder = true
+    /// 258 — the reverse gate for the **geometry** half: with this off a 适应 frame is the old
+    /// full-canvas draw (100 %), which is how the acceptance proves the 90 % assertion can go red.
+    /// The shipped path is `true`; nothing in the app writes it.
+    var neverUpscalesFitContent = true
+    /// 258 — the reverse gate for the **content** half: with this off the previous photo's texture is
+    /// left on the layer (and `presentedPhoto` keeps its identity), reproducing 「残留上一张」.
+    var clearsPresentedFrameOnPhotoSwitch = true
     /// Milliseconds from the photo change (cold open included) to the stand-in being installed.
     public private(set) var firstFramePlaceholderMilliseconds: Double = 0
     /// `true` while the stand-in is on screen and no frame has replaced it.
@@ -1175,6 +1190,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var awaitingFirstFrameContent = false
     /// The photo whose frame is actually on the layer (nil before the first present).
     private var presentedPhoto: String?
+
+    // MARK: 258 — photo-switch trace (internal, for the acceptance)
+
+    /// The identity `presentedPhoto` currently holds; `nil` from a photo change until the new photo's
+    /// first successful present.
+    var currentPresentedPhotoForTesting: String? { presentedPhoto }
+    /// The photo every piece of in-flight work belongs to — set at the instant the switch is noticed.
+    var currentRenderedPhotoForTesting: String? { renderedPhoto }
+    /// The texture the canvas layer is carrying, or `nil` when the switch has removed it.
+    var currentCanvasTextureIDForTesting: ObjectIdentifier? { canvasTexture.map { ObjectIdentifier($0.texture) } }
+    /// The photo the stand-in belongs to, while it is up or being fetched.
+    var currentPlaceholderPhotoForTesting: String? { firstFramePlaceholderPhoto }
+    /// The matte sheet that hides the previous photo between the switch and the first new present.
+    var isCanvasCoveredForTesting: Bool { canvasView.isCoveringCanvas }
+    /// The stand-in's rect in canvas points (the 90 % content rectangle it shares with the real frame).
+    var placeholderRectForTesting: CGRect { canvasView.firstFramePlaceholderRect }
 
     /// True between a `scheduleRender` and the first frame it puts up. A cold open presents nothing
     /// until the preview rung lands (there is no buffer to draw), so "first frame" cannot be "index
@@ -1322,6 +1353,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // Same for the crop frame: a resize is a new projection, and both the frame and the tool strip
         // are laid out in view points.
         refreshCropTool()
+        // 258 — the stand-in occupies the same `content` rect as the real frame, so a resize while it
+        // is up has to re-place it too. No-op when nothing is standing in.
+        refreshFirstFramePlaceholderGeometry()
         // A resize is a new canvas: every pixel is re-rendered into it, and a bridge measured against
         // the old one would scale the picture about the wrong centre. Tear the transition down rather
         // than leave the transform in a mid-flight state nobody will ever finish.
@@ -4876,6 +4910,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
             ?? session?.anchorAsset.map({ currentRungIdentity($0) }) {
             decodeQueue.cancel(identity: identity)
         }
+        // 258 — a switch keeps the matte cover (the new photo has not presented yet); leaving the
+        // loupe, or having no photo at all, ends it. The stand-in goes with it so it can never be the
+        // thing the grid comes back to.
+        if session?.mode != .loupe || session?.anchorAsset == nil {
+            canvasView.endPhotoSwitchCover()
+            canvasView.hideFirstFramePlaceholder()
+            firstFramePlaceholderToken?.cancel()
+            firstFramePlaceholderToken = nil
+            firstFramePlaceholderPhoto = nil
+        }
     }
 
     /// P1b — give this graph's **idle** textures back to the device.
@@ -4931,6 +4975,27 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func notePhotoIdentity(_ identity: String?) {
         guard identity != renderedPhoto else { return }
         renderedPhoto = identity
+        // 258 — **the previous photo's pixels leave the layer at this instant.** The canvas is a
+        // `CAMetalLayer`, so its last drawable keeps showing A until something replaces it, and the
+        // new photo's first real frame is at least one development away. Clearing the controller's
+        // ownership alone was not enough: `presentedPhoto` still said A and nothing covered the
+        // drawable, so the switch showed A until B's thumbnail (or frame) arrived. Cover it
+        // synchronously, drop the old frame's texture and identity, and let 235's stand-in or the
+        // first present for B end the cover.
+        if clearsPresentedFrameOnPhotoSwitch {
+            canvasView.beginPhotoSwitchCover()
+            presentedPhoto = nil
+            // The texture stays owned by `canvasTexture` until the new photo's present recycles it
+            // through the presenter's own completion: the last drawable may still be sampling it on
+            // the GPU, and the present path is the one place that knows when that is finished. What
+            // must not survive is the *identity* and the geometry a replay would use.
+            canvasPicture = nil
+            canvasContent = nil
+            frozenFrame = nil
+            // No frame of the *new* photo is on the canvas yet: a resize must ask for one instead of
+            // matching the previous photo's canvas.
+            lastFrame = nil
+        }
         // A picker is aimed at one picture; a different one is a cancellation, like the crop frame.
         if isEyedropperArmed { cancelEyedropper() }
         cancelPendingFrames()
@@ -5012,8 +5077,44 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The photo may have moved on while the thumbnail was being read or generated.
         guard firstFramePlaceholderPhoto == photo, presentedPhoto != photo else { return }
         firstFramePlaceholderToken = nil
-        canvasView.showFirstFramePlaceholder(image)
+        canvasView.showFirstFramePlaceholder(image,
+                                            contentRect: firstFramePlaceholderContentRect(image: image))
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
+    }
+
+    /// 258 — the rectangle the stand-in occupies: the **same `content`** the real 适应 frame is laid
+    /// out in (`LoupeFraming.contentPixels` → `plan.content`), centred in the canvas, never the full
+    /// canvas. This is the whole geometry half of the task: a thumbnail drawn in the canvas made the
+    /// first frame look 100 % and the real frame then jumped to 90 %.
+    ///
+    /// `image` is only the fallback when the projection is not available yet (no asset dimensions,
+    /// no decode): then the thumbnail's own aspect is fitted with the same `fitMargin` instead of
+    /// being stretched to the viewport.
+    private func firstFramePlaceholderContentRect(image: CGImage? = nil) -> CGRect {
+        let canvas = canvasView.bounds.size
+        guard canvas.width > 1, canvas.height > 1 else { return canvasView.bounds }
+        let scale = max(1, backingScale)
+        var content: (width: Double, height: Double)?
+        if let framing = framing() {
+            let pixels = framing.contentPixels(of: viewState)
+            content = (Double(pixels.width), Double(pixels.height))
+        } else if let image {
+            let margin = CGFloat(LoupeFraming.fitMargin)
+            let fit = min(canvas.width * margin / CGFloat(image.width),
+                          canvas.height * margin / CGFloat(image.height))
+            content = (Double(image.width) * Double(fit), Double(image.height) * Double(fit))
+        }
+        guard let content else { return canvasView.bounds }
+        // Device pixels → points, and never larger than the canvas itself.
+        let w = min(canvas.width, CGFloat(content.width) / CGFloat(scale))
+        let h = min(canvas.height, CGFloat(content.height) / CGFloat(scale))
+        return CGRect(x: (canvas.width - w) / 2, y: (canvas.height - h) / 2, width: w, height: h)
+    }
+
+    /// 258 — a canvas resize while the stand-in is up re-places it on the same 90 % content rect.
+    private func refreshFirstFramePlaceholderGeometry() {
+        guard canvasView.isShowingFirstFramePlaceholder else { return }
+        canvasView.setFirstFramePlaceholderContentRect(firstFramePlaceholderContentRect())
     }
 
     /// Developments the queue has run, requests it has folded into one, deliveries it made and
@@ -5790,7 +5891,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // keeps the requested rect (centred, letterboxed) when it already fits, and still shrinks
             // it if the canvas is genuinely smaller. The crop workspace had this since 162; ordinary
             // 适应 needs the same rule now that 213 made it 90 %.
-            let neverUpscales = cropTool.isActive || state.mode == .fit
+            // 258 — the reverse gate turns only the 适应 half off (`neverUpscalesFitContent`), so the
+            // acceptance can show the 90 % assertion going red at 100 % without touching the crop
+            // workspace's rule.
+            let neverUpscales = cropTool.isActive
+                || (state.mode == .fit && neverUpscalesFitContent)
             let request = LoupeFrameRequest(
                 identity: cacheIdentity,
                 documentHash: "",
@@ -5922,7 +6027,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            sceneLinearSample: pointerSample,
                            mode: mode,
                            trace: drawing.trace,
-                           whiteBalanceGain: drawing.whiteBalanceGain)
+                           whiteBalanceGain: drawing.whiteBalanceGain,
+                           frameInCanvas: drawing.frameInCanvas,
+                           frameOrigin: drawing.frameOrigin,
+                           expandedCanvas: drawing.expandedCanvas,
+                           neverUpscalesContent: drawing.neverUpscalesContent)
     }
 
     /// The bounding box of two rects, clipped to the canvas — the matte rule for a compare frame.
@@ -6590,6 +6699,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             firstFramePlaceholderToken = nil
             firstFramePlaceholderPhoto = nil
         }
+        // 258 — the new photo's pixels are on the layer now; the matte cover is no longer hiding
+        // anything (and leaving it up would hide the picture itself).
+        canvasView.endPhotoSwitchCover()
         presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
