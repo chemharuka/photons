@@ -160,11 +160,16 @@ final class CropToolTests: XCTestCase {
         XCTAssertEqual(layout.corners[3].y, layout.corners[2].y, accuracy: 1e-9)
 
         // The *picture* turns, by the document's own angle (a similarity, not a taper).
+        // Measured on the forward direction (`viewPoint(sourceX:sourceY:)`, source → view): the
+        // renderer draws the source's axes onto the y-down canvas, so +x lands at +12°. The old
+        // assertion sampled `sourcePoint` (view → source), whose inverse angle is −12°; that is the
+        // direction of the map, not the picture.
         let m = f.mapping(of: .fit)
-        let o = m.sourcePoint(viewX: 0, viewY: 0), dx = m.sourcePoint(viewX: 1, viewY: 0)
+        let o = m.viewPoint(sourceX: 0, sourceY: 0)
+        let dx = m.viewPoint(sourceX: 1, sourceY: 0)
         let pictureAngle = atan2(dx.y - o.y, dx.x - o.x) * 180 / .pi
         XCTAssertEqual(pictureAngle, 12, accuracy: 1e-6,
-                       "the photo turns by the document angle on screen")
+                       "the photo turns by the document angle on screen, not by its inverse")
         // And the quad is still hit-testable: its centre is inside it.
         XCTAssertTrue(CropTool.contains(layout.center, in: layout))
     }

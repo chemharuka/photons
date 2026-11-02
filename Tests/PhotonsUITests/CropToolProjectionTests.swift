@@ -30,6 +30,15 @@ final class CropToolProjectionTests: XCTestCase {
         return ((dx.x - o.x, dx.y - o.y), (dy.x - o.x, dy.y - o.y))
     }
 
+    /// The linear part of `source → view`, i.e. the direction the renderer draws: how a source
+    /// vector (the document's own axes) lands on the y-down canvas.
+    private func sourceBasis(_ m: LoupeMapping) -> (e1: (Double, Double), e2: (Double, Double)) {
+        let o = m.viewPoint(sourceX: 0, sourceY: 0)
+        let dx = m.viewPoint(sourceX: 1, sourceY: 0)
+        let dy = m.viewPoint(sourceX: 0, sourceY: 1)
+        return ((dx.x - o.x, dx.y - o.y), (dy.x - o.x, dy.y - o.y))
+    }
+
     // MARK: 1. the projection is a similarity (rotation + uniform scale), never a shear
 
     /// A straightened picture is **turned**, not tapered: `|e1| == |e2|` and `e1 ⟂ e2`.
@@ -59,12 +68,25 @@ final class CropToolProjectionTests: XCTestCase {
     }
 
     /// The picture really is turned by the document's angle — the tool's readout and the pixels agree.
+    ///
+    /// Measured on the **forward** projection (`viewPoint(sourceX:sourceY:)`, source → view), which is
+    /// the direction the renderer draws: on the y-down canvas the source's +x axis lands at +9°.
+    /// `sourcePoint` (view → source) is the inverse, so it reads −9° — the same fact from the other
+    /// side, not a disagreement. Asserting the inverse's sign here is what pinned the old direction.
     func testTheScreenAngleIsTheDocumentAngle() {
         let m = mapping(source: landscape, degrees: 9)
-        let b = basis(m)
+        let b = sourceBasis(m)
         let angle = atan2(b.e1.1, b.e1.0) * 180 / .pi
-        // y is down on the canvas, so a positive document angle reads as a positive screen angle here.
-        XCTAssertEqual(angle, 9, accuracy: 1e-6)
+        XCTAssertEqual(angle, 9, accuracy: 1e-6,
+                       "the picture is drawn at the document's angle, not at its inverse")
+        // The picture is a similarity, so its other axis is at the same angle + 90°.
+        let angle2 = atan2(b.e2.1, b.e2.0) * 180 / .pi
+        XCTAssertEqual(angle2, 99, accuracy: 1e-6, "and stays square, not sheared")
+        // The two directions really are inverses: a source point round-trips through the screen.
+        let p = m.viewPoint(sourceX: 321.5, sourceY: 234.5)
+        let back = m.sourcePoint(viewX: p.x, viewY: p.y)
+        XCTAssertEqual(back.x, 321.5, accuracy: 1e-6)
+        XCTAssertEqual(back.y, 234.5, accuracy: 1e-6)
     }
 
     // MARK: 2. the crop frame stays an axis-aligned rectangle, whatever the straighten
