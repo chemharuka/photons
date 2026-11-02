@@ -15,6 +15,13 @@ import PhotonsCore
 /// centre has to stay on the canvas, its edges may cross it (「旋转后裁切框可以出画布」). The upright
 /// path (`clampedToCanvas`, θ = 0) is untouched and still contains the frame, which is why the two
 /// corner tests below are unchanged.
+///
+/// **2026-11-02 — the bound is the document canvas, not `[0,1]²`** (「旋转之后裁剪框能移动的范围应该是
+/// 画布，不是原始图片」). The canvas is the smallest axis-aligned box holding every pixel of the whole
+/// photograph after the turn; `legalRect(degrees:)` below re-derives it from the AABB formula (never
+/// from `CropGeometry`). Upright it *is* `[0,1]²`, so the 0° cases keep their numbers verbatim; at 8°
+/// on 3000 × 2000 it is `-0.041525…1.041525 × -0.099514…1.099514` and the frame may sit in the black
+/// corners a straighten opens — but not one pixel beyond them.
 @MainActor
 final class CropBoundsTests: XCTestCase {
 
@@ -56,6 +63,29 @@ final class CropBoundsTests: XCTestCase {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    /// The legal area of a crop frame — the **document canvas**: the smallest axis-aligned box holding
+    /// every pixel of the whole photograph once it is turned, in normalized crop coordinates.
+    ///
+    /// Derived here from the AABB formula (`e = |w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, centred on the
+    /// photograph) rather than read from `CropGeometry.documentCanvasCropRect`, so the test cannot prove
+    /// the implementation with itself. `[0,1]²` at 0°/180°; at 8° on 3000 × 2000 it is
+    /// `-0.041525…1.041525 × -0.099514…1.099514`.
+    private func legalRect(degrees: Double) -> CropRect {
+        let w = Double(max(Self.source.width, 1)), h = Double(max(Self.source.height, 1))
+        let quarter = degrees / 90
+        let extent: (width: Double, height: Double)
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            extent = Int(quarter.rounded()) % 2 != 0 ? (h, w) : (w, h)
+        } else {
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            extent = (w * c + h * s, w * s + h * c)
+        }
+        let left = (w - extent.width) / 2, top = (h - extent.height) / 2
+        return CropRect(left: left / w, top: top / h,
+                        right: (left + extent.width) / w, bottom: (top + extent.height) / h)
+    }
+
     /// A press in the middle of the frame, then one tick far away in `direction` — the shipped drag
     /// path, not `CropToolDrag` in isolation.
     private func drag(_ controller: CropToolController, mapping: LoupeMapping,
@@ -77,13 +107,19 @@ final class CropBoundsTests: XCTestCase {
 
     // MARK: - ① corners, upright
 
-    /// Four directions, same start: the frame lands flush on the **document canvas** (`[0,1]²`, which
-    /// at 0° 适应 projects to the picture rect) with no gap and no overshoot. 224: the edge is the
-    /// document's, not the viewport's, so the flush edges sit at `mapping.frameView(0,0)` /
+    /// Four directions, same start: the frame lands flush on the **document canvas** with no gap and no
+    /// overshoot. At 0° the canvas *is* `[0,1]²` (2026-11-02: the AABB of an upright photograph), which
+    /// 适应 projects to the picture rect, so the flush edges sit at `mapping.frameView(0,0)` /
     /// `(W,H)` — the 90 % fit's 45 / 30 pt margin is outside the document and not part of the law.
     func testDraggingToEachCornerPinsTheFrameToTheCanvas() throws {
         let (controller, _) = try makeController()
         let map = mapping(.fit)
+        // The bound, from the formula: `[0,1]²` at θ = 0, bit for bit.
+        let legal = legalRect(degrees: 0)
+        XCTAssertEqual(legal.left, 0, accuracy: 0)
+        XCTAssertEqual(legal.top, 0, accuracy: 0)
+        XCTAssertEqual(legal.right, 1, accuracy: 0)
+        XCTAssertEqual(legal.bottom, 1, accuracy: 0)
         let origin = map.frameView(frameX: 0, frameY: 0)
         let end = map.frameView(frameX: Double(Self.source.width),
                                 frameY: Double(Self.source.height))
@@ -124,37 +160,43 @@ final class CropBoundsTests: XCTestCase {
     }
 
     /// The model value is what is clamped, not just the drawing: `draft.crop` itself is inside the
-    /// **document canvas** `[0,1]²` after the drag (224 — the viewport no longer participates).
+    /// **document canvas** after the drag (2026-11-02 — the viewport no longer participates, and at 0°
+    /// the canvas is `[0,1]²`).
     func testTheDraftRectItselfStaysInsideTheCanvas() throws {
         let (controller, _) = try makeController()
         let map = mapping(.fit)
+        let legal = legalRect(degrees: 0)
         drag(controller, mapping: map,
              from: CropRect(left: 0.40, top: 0.40, right: 0.60, bottom: 0.60),
              to: CGVector(dx: -5000, dy: -5000))
         let c = controller.draft.crop
-        print(String(format: "224 G3 · draft l %.6f t %.6f r %.6f b %.6f",
-                     c.left, c.top, c.right, c.bottom))
-        XCTAssertGreaterThanOrEqual(c.left, 0 - 1e-9)
-        XCTAssertGreaterThanOrEqual(c.top, 0 - 1e-9)
-        XCTAssertLessThanOrEqual(c.right, 1 + 1e-9)
-        XCTAssertLessThanOrEqual(c.bottom, 1 + 1e-9)
+        print(String(format: "224 G3 · draft l %.6f t %.6f r %.6f b %.6f · 合法区 l %.6f t %.6f r %.6f b %.6f",
+                     c.left, c.top, c.right, c.bottom,
+                     legal.left, legal.top, legal.right, legal.bottom))
+        XCTAssertGreaterThanOrEqual(c.left, legal.left - 1e-9)
+        XCTAssertGreaterThanOrEqual(c.top, legal.top - 1e-9)
+        XCTAssertLessThanOrEqual(c.right, legal.right + 1e-9)
+        XCTAssertLessThanOrEqual(c.bottom, legal.bottom + 1e-9)
         // The drag went to the top-left: the rect lands flush on the document's own edges, not on
         // the 90 % fit's letterbox (`-1/18 … 1 + 1/18`, which 213 used as the canvas).
-        XCTAssertEqual(c.left, 0, accuracy: 1e-9)
-        XCTAssertEqual(c.top, 0, accuracy: 1e-9)
+        XCTAssertEqual(c.left, legal.left, accuracy: 1e-9)
+        XCTAssertEqual(c.top, legal.top, accuracy: 1e-9)
     }
 
     // MARK: - ② an angle: blank corners are legal, the canvas edge is not
 
     /// At 8° the frame may cover the turned-out corner — the photograph's black corner — but it may
-    /// **not** leave the document canvas `[0,1]²` (224). The old 188/190 reading measured the frame
-    /// against the viewport's window and let it hang a quarter off; that is exactly what made the
-    /// excursion grow with the zoom and, at 45°, unbounded.
+    /// **not** leave the document canvas (2026-11-02; the canvas at 8° on 3000 × 2000 is
+    /// `-0.041525…1.041525 × -0.099514…1.099514`). The old 188/190 reading measured the frame against
+    /// the viewport's window and let it hang a quarter off; that is exactly what made the excursion grow
+    /// with the zoom and, at 45°, unbounded. The numbers below are derived from `legalRect`, not
+    /// hard-coded, so the same expression produced 224's `0…1` upright.
     func testAtEightDegreesTheFrameIsPulledInsideTheCanvas() throws {
         let (controller, _) = try makeController()
         // 0.2× on a 3000×2000 source in a 900×600 canvas: the viewport is a window of the document.
         let state = LoupeViewState(mode: .actual, zoom: 0.2, centerX: 1500, centerY: 1000)
         let map = mapping(state)
+        let legal = legalRect(degrees: 8)
 
         controller.draft = CropToolController.Draft(
             crop: CropRect(left: 0.40, top: 0.40, right: 0.60, bottom: 0.60),
@@ -175,17 +217,25 @@ final class CropBoundsTests: XCTestCase {
                        controller.draft.crop.top, controller.draft.crop.right,
                        controller.draft.crop.bottom)
               + " · quad AABB \(NSStringFromRect(frame))"
-              + String(format: " · centre (%.2f, %.2f)", frame.midX, frame.midY))
+              + String(format: " · centre (%.2f, %.2f)", frame.midX, frame.midY)
+              + String(format: " · 合法区 l %.6f t %.6f r %.6f b %.6f",
+                       legal.left, legal.top, legal.right, legal.bottom))
 
         let crop = controller.draft.crop
-        // 224 — the document is the bound: all four edges stay in `0…1`, and the far drag lands
-        // flush on at least one of them.
-        XCTAssertGreaterThanOrEqual(crop.left, 0 - 1e-9, "the frame leaves [0,1]² on the left")
-        XCTAssertGreaterThanOrEqual(crop.top, 0 - 1e-9, "the frame leaves [0,1]² on the top")
-        XCTAssertLessThanOrEqual(crop.right, 1 + 1e-9, "the frame leaves [0,1]² on the right")
-        XCTAssertLessThanOrEqual(crop.bottom, 1 + 1e-9, "the frame leaves [0,1]² on the bottom")
-        XCTAssertEqual(min(crop.left, crop.top, 1 - crop.right, 1 - crop.bottom), 0,
-                       accuracy: 1e-9, "the far drag did not reach the document's edge")
+        // 2026-11-02 — the document canvas is the bound: all four edges inside it, and the far drag
+        // lands flush on the edge it crossed (down-right ⇒ right and bottom).
+        XCTAssertGreaterThanOrEqual(crop.left, legal.left - 1e-9, "the frame leaves the canvas on the left")
+        XCTAssertGreaterThanOrEqual(crop.top, legal.top - 1e-9, "the frame leaves the canvas on the top")
+        XCTAssertLessThanOrEqual(crop.right, legal.right + 1e-9, "the frame leaves the canvas on the right")
+        XCTAssertLessThanOrEqual(crop.bottom, legal.bottom + 1e-9, "the frame leaves the canvas on the bottom")
+        XCTAssertEqual(min(crop.left - legal.left, crop.top - legal.top,
+                           legal.right - crop.right, legal.bottom - crop.bottom),
+                       0, accuracy: 1e-9, "the far drag did not reach the canvas' edge")
+        XCTAssertEqual(crop.right, legal.right, accuracy: 1e-9, "the drag went down-right: right edge")
+        XCTAssertEqual(crop.bottom, legal.bottom, accuracy: 1e-9, "…and the bottom edge")
+        // Never reshaped by the pull-back: the seed's 0.2 × 0.2 survives.
+        XCTAssertEqual(crop.width, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(crop.height, 0.2, accuracy: 1e-9)
         // …and the turned-out corner is allowed: the frame sits on the picture's blank pixels, which
         // is a red warning, not a clamp.
         XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
