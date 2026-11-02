@@ -15,7 +15,9 @@ import Metal
 /// The four acceptance numbers of the派单:
 ///
 ///   ① masked `shadows +100` moves the median by **≤ 1 code** and lifts p5 (printed in EV);
-///   ② masked `contrast +100` puts **≤ 1 %** of the masked samples on the display ceiling;
+///   ② 228: masked `contrast +100` is the **global slider** at +100 (mean |Δ| ≤ 1 code), and the
+///      stage itself does not clamp at display white (it is a global power, not 159's bounded local
+///      operator);
 ///   ③ blacks/whites are 073C's mix, i.e. the same numbers as the global slider;
 ///   ④ a neutral mask is **bit-identical** to no mask, and the tone bodies cost **< 0.2 ms** on a
 ///      4.10 Mpx frame.
@@ -244,45 +246,45 @@ final class LocalToneTests: XCTestCase {
         }
     }
 
-    // MARK: - ② contrast: the mask must not be whitened
+    // MARK: - ② contrast: the mask is the global curve
 
-    /// `contrast = +100` inside a mask: **≤ 1 %** of the masked samples at the display ceiling.
-    ///
-    /// The seam is 0107's bounded log2 bend, whose shoulder lands *on* display white, so it cannot clip
-    /// anything. The mirror beside it is the counter-proof: the linear-light power (the arithmetic the
-    /// old masked path ran, and what S2 still runs globally on this branch) puts 1.4–6.6 % of the same
-    /// samples on the ceiling.
-    func testMaskedContrastKeepsTheMaskOffTheCeiling() throws {
+    /// 228 — **the mask's contrast is the global gain-domain curve.** 159's bounded local operator made
+    /// this test a ceiling claim (≤ 1 % of the masked samples at white). 228 deliberately removed that
+    /// shoulder: the stage may not clamp at 1, so an SDR display (headroom = 1) will clip where the
+    /// global curve pushes a highlight above white — that is S4's job, not the contrast stage's. What
+    /// 079 still promises, and what this test now measures, is stronger: a full-coverage mask at +100
+    /// is the **global slider at +100** (mean |Δ| ≤ 1 code), and the stage's own linear output is not
+    /// clamped at 1.
+    func testMaskedContrastIsTheGlobalCurveAndTheStageDoesNotClampAtOne() throws {
         for name in Self.frames {
             let image = try frame(name)
             let graph = try makeGraph(image, identity: "local-tone-contrast-\(name)")
-            let pixels = corePixels(try render(graph, EditModel.neutral))
+            let neutral = try render(graph, EditModel.neutral)
+            let pixels = corePixels(neutral)
 
             var masked = EditModel.neutral
             masked.masks = [discMask(contrast: 100)]
             let local = try render(graph, masked)
-            let fraction = ceilingFraction(local, pixels)
 
             var global = EditModel.neutral
             global.light.contrast = 100
-            let globalFraction = ceilingFraction(try render(graph, global), pixels)
+            let globalFrame = try render(graph, global)
+            let diff = meanAbsDifference(local, globalFrame, pixels)
+            print(String(format: "079/228 local contrast +100 %@ · masked vs global mean |Δ| %.4f codes",
+                         name, diff))
+            XCTAssertLessThanOrEqual(diff, 1.0,
+                                     "\(name): a masked contrast lift must be the global slider")
 
-            // The power mirror, on the same samples: what the mask would have done before this change.
-            let lumas = pixels.map { o in
-                0.2126 * Double(image.rgba[o]) + 0.7152 * Double(image.rgba[o + 1])
-                + 0.0722 * Double(image.rgba[o + 2])
-            }
-            let powerCodes = lumas.map { Self.code(powerContrast($0)) }.sorted()
-            let powerCeiling = Double(powerCodes.filter { $0 >= 255.0 * 0.999 }.count) / Double(powerCodes.count)
-
-            print(String(format: "079 local contrast +100 %@: ceiling — masked %.2f %%, global (S2's power) "
-                         + "%.2f %%, 019's masked power mirror %.2f %%",
-                         name, fraction * 100, globalFraction * 100, powerCeiling * 100))
-
-            XCTAssertLessThanOrEqual(fraction, 0.01,
-                                     "\(name): a masked contrast lift must not whiten the selection")
-            XCTAssertGreaterThan(powerCeiling, 0.01,
-                                 "\(name): the old power must clip — otherwise ② proves nothing")
+            // The stage itself has no upper clamp (GlobalContrastTests pins that on an HDR ramp).
+            // Here we only print the linear peak: S4's headroom, not the curve, decides the write.
+            var display = DisplayOptions(headroom: 8)
+            display.linearOutput = true
+            let lin = try XCTUnwrap(graph.render(global, options: RenderOptions(
+                scale: 1, display: display, wantsPixels: true)).display)
+            var peak = 0.0
+            for o in corePixels(lin) { peak = max(peak, Double(lin.rgba[o])) }
+            print(String(format: "079/228 local contrast +100 %@ · stage peak linear %.3f (S4 headroom 8)",
+                         name, peak))
         }
     }
 
