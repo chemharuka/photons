@@ -25,6 +25,9 @@
 #   · 从当前照片新建预设 → 应用预设 changes the loupe's pixel hash and adds exactly one history
 #     snapshot and one `asset_history` row, and ⌘Z puts the pre-apply hash back;
 #   · the 导出… menu item validates to disabled with an empty selection.
+#   · 250: the sheet's real `export.ppi.enabled` / `export.size.noUpscale` checkboxes are clicked with
+#     real mouse events (probe frame, not a binding) and `export.size.percent` is typed through the
+#     field editor: 240 → nil → 240, noUpscale true ↔ false, percent 100 → 50 — then restored.
 #
 # Masks (Q22) are driven through the shipped event path — synthesised mouse events into
 # `LoupeCanvasView` → `LoupeController` → `MaskCanvasController` → the document:

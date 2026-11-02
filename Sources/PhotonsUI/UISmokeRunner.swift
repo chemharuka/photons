@@ -562,6 +562,10 @@ public final class UISmokeRunner {
               window.attachedSheet != nil && window.attachedSheet === sheet.sheetWindow
               && sheet.model.selectionCount == good.count && sheet.items.count == good.count)
 
+        // 250 — the three checkboxes/fields are operated in the real sheet before the batch runs,
+        // then the preset is put back so the export assertions below see exactly what they used to.
+        checkExportSheetCheckboxes(sheet: sheet, window: window)
+
         sheet.model.outputDirectory = exportDir
         sheet.model.preset = ExportPreset(name: "Smoke Web", format: .jpeg, longEdge: 512,
                                           quality: 0.85, colorSpace: .sRGB, writeXMP: false,
@@ -755,6 +759,135 @@ public final class UISmokeRunner {
         }
 
         loupe.autoRenderEnabled = true
+    }
+
+    // MARK: - export sheet checkboxes (250)
+
+    /// 250 — the smoke harness clicks the real controls, not the bindings.
+    ///
+    /// SwiftUI's checkbox `Toggle` has no `NSButton` leaf and the system AX tree does not expose our
+    /// own process under `swift test` (`AXUIElementCreateApplication(getpid())` = 1 empty node), so
+    /// the same zero-hit `ExportSliderRowProbe` locator the unit test uses is mounted on the Toggle:
+    /// its frame is the checkbox's real frame, and a real mouse event at `minX + 7` flips it. Typing
+    /// goes through the field editor, because assigning `stringValue` skips the formatter.
+    private func checkExportSheetCheckboxes(sheet: ExportSheetController, window: NSWindow) {
+        log("导出面板勾选框 (250)")
+        let original = sheet.model.preset
+        guard let sheetWindow = sheet.sheetWindow ?? window.attachedSheet,
+              let content = sheetWindow.contentView else {
+            fail("250：拿不到导出 sheet 的内容视图")
+            return
+        }
+
+        func descendants(of root: NSView) -> [NSView] {
+            var found: [NSView] = []
+            for sub in root.subviews {
+                found.append(sub)
+                found += descendants(of: sub)
+            }
+            return found
+        }
+        func toggleProbe(_ rowID: String) -> ExportSliderRowProbe? {
+            descendants(of: content).compactMap { $0 as? ExportSliderRowProbe }
+                .first { $0.kind == .toggle && $0.rowID == rowID }
+        }
+        func click(_ probe: ExportSliderRowProbe) {
+            let point = probe.convert(NSPoint(x: probe.bounds.minX + 7, y: probe.bounds.midY),
+                                      to: nil)
+            let timestamp = ProcessInfo.processInfo.systemUptime
+            guard let down = NSEvent.mouseEvent(
+                    with: .leftMouseDown, location: point, modifierFlags: [], timestamp: timestamp,
+                    windowNumber: sheetWindow.windowNumber, context: nil, eventNumber: 1,
+                    clickCount: 1, pressure: 1),
+                  let up = NSEvent.mouseEvent(
+                    with: .leftMouseUp, location: point, modifierFlags: [],
+                    timestamp: timestamp + 0.15, windowNumber: sheetWindow.windowNumber,
+                    context: nil, eventNumber: 2, clickCount: 1, pressure: 0)
+            else { return }
+            sheetWindow.sendEvent(down)
+            pump(0.15)
+            sheetWindow.sendEvent(up)
+            pump(0.2)
+        }
+        func type(_ text: String, into field: NumberTextField) -> Bool {
+            guard sheetWindow.makeFirstResponder(field),
+                  let editor = field.currentEditor() as? NSTextView else { return false }
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            editor.insertNewline(nil)
+            pump(0.2)
+            return true
+        }
+
+        // 1. PPI checkbox: non-nil → nil → back. `setPPI(240)` first so a recalled draft with no
+        // tag still exercises the non-nil → nil direction.
+        if sheet.model.preset.ppi == nil { sheet.model.setPPI(240) }
+        pump(0.3)
+        let ppiBefore = sheet.model.preset.ppi
+        if let probe = toggleProbe("export.ppi.enabled") {
+            click(probe)
+            let off = sheet.model.preset.ppi
+            check("250 · export.ppi.enabled 点击 \(ppiBefore.map(String.init) ?? "nil") → \(off.map(String.init) ?? "nil")（nil = 不写入 PPI）",
+                  ppiBefore != nil && off == nil)
+            if let again = toggleProbe("export.ppi.enabled") {
+                click(again)
+                check("250 · export.ppi.enabled 再点回来 → \(sheet.model.preset.ppi.map(String.init) ?? "nil")（非 nil = 重新写入）",
+                      sheet.model.preset.ppi != nil)
+            } else {
+                fail("250 · export.ppi.enabled 第二次找不到探针")
+            }
+        } else {
+            fail("250 · export.ppi.enabled 找不到 toggle 探针")
+        }
+
+        // 2. 长边 不扩大: switch the real row, let it build, click the box twice.
+        let originalUpscale = sheet.model.preset.noUpscale
+        sheet.model.selectSizingMode(.longEdge)
+        sheet.model.preset.noUpscale = true
+        pump(0.5)
+        content.layoutSubtreeIfNeeded()
+        let upscaleBefore = sheet.model.preset.noUpscale
+        if let probe = toggleProbe("export.size.noUpscale") {
+            click(probe)
+            let off = sheet.model.preset.noUpscale
+            check("250 · export.size.noUpscale 点击 \(upscaleBefore) → \(off)（false = 允许放大）",
+                  upscaleBefore && !off)
+            if let again = toggleProbe("export.size.noUpscale") {
+                click(again)
+                check("250 · export.size.noUpscale 再点回来 → \(sheet.model.preset.noUpscale)",
+                      sheet.model.preset.noUpscale == upscaleBefore)
+            } else {
+                fail("250 · export.size.noUpscale 第二次找不到探针")
+            }
+        } else {
+            fail("250 · export.size.noUpscale 找不到 toggle 探针")
+        }
+
+        // 3. 百分比行 typing through the field editor: 100 → 50.
+        sheet.model.selectSizingMode(.percent)
+        sheet.model.preset.percent = 100
+        pump(0.5)
+        content.layoutSubtreeIfNeeded()
+        let percentFields = descendants(of: content).compactMap { $0 as? NumberTextField }
+        if let field = percentFields.first(where: { $0.accessibilityIdentifier() == "export.size.percent" }) {
+            let typed = type("50", into: field)
+            check("250 · export.size.percent 真 field editor 输入 100 → \(sheet.model.preset.percent.map(String.init) ?? "nil")",
+                  typed && sheet.model.preset.percent == 50)
+        } else {
+            fail("250 · export.size.percent 找不到 NumberTextField")
+        }
+
+        // Restore every knob this check touched: the existing export assertions below must not be
+        // coloured by it.
+        var restored = sheet.model.preset
+        restored.ppi = original.ppi
+        restored.sizingMode = original.sizingMode
+        restored.percent = original.percent
+        restored.longEdge = original.longEdge
+        restored.noUpscale = originalUpscale
+        sheet.model.preset = restored
+        pump(0.2)
+        content.layoutSubtreeIfNeeded()
+        log("250 · 复原 ppi=\(restored.ppi.map(String.init) ?? "nil") sizing=\(restored.sizingMode.rawValue) percent=\(restored.percent.map(String.init) ?? "nil") noUpscale=\(restored.noUpscale)")
     }
 
     // MARK: - grid thumbnails
