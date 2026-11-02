@@ -926,13 +926,21 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         // 238 removed the row flip inside `HDREncoding` (PQ exports were upside down). Until then
         // that flip had been cancelling this one for HD thumbnails, which is why the grid only
         // turned upside down after 238.
-        let rowHalfCount = width * 4
+        let rowBytes = width * 8
         if height > 1 {
-            halves.withUnsafeMutableBufferPointer { rows in
+            halves.withUnsafeMutableBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                // One row of scratch, then three whole-row copies per pair. Swapping element by
+                // element cost 18 ms under debug on a 326×242 buffer and pushed `decodeHD` past
+                // its 8 ms budget; `memcpy` keeps this step well under 1 ms.
+                let scratch = UnsafeMutableRawPointer.allocate(byteCount: rowBytes, alignment: 8)
+                defer { scratch.deallocate() }
                 for y in 0..<(height / 2) {
-                    let a = y * rowHalfCount
-                    let b = (height - 1 - y) * rowHalfCount
-                    for i in 0..<rowHalfCount { rows.swapAt(a + i, b + i) }
+                    let a = base + y * rowBytes
+                    let b = base + (height - 1 - y) * rowBytes
+                    memcpy(scratch, a, rowBytes)
+                    memcpy(a, b, rowBytes)
+                    memcpy(b, scratch, rowBytes)
                 }
             }
         }

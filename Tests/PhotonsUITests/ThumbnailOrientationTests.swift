@@ -19,8 +19,9 @@ import PhotonsExport
 /// (the `CAMetalLayer` upload and its pass-through shader) assumes CGImage's row order: row 0 = top.
 ///
 /// 238 removed the row flip inside `HDREncoding` (the export was upside down); that flip had been
-/// cancelling this read-back flip for HD thumbnails since 227, which is why the grid only turned
-/// upside down after 238 landed.
+/// cancelling this read-back flip for HD thumbnails ever since HD went through the CI → texture
+/// read-back (the read-back code exists from `5aa312a`, before 227 merged), which is why the grid
+/// only turned upside down after 238 landed.
 final class ThumbnailOrientationTests: XCTestCase {
 
     private var root: URL!

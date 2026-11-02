@@ -118,6 +118,9 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertNotEqual(base.digest, edited.digest, "an edit must produce a new cache key")
         XCTAssertTrue(base.keyString.contains("hd1920q75p3pq10"))
         XCTAssertTrue(base.keyString.contains("sv2"))
+        XCTAssertEqual(base.spec.schemaVersion, 2)
+        // Legacy (8-bit JPEG, no row-order change) must not be invalidated by the HD bump.
+        XCTAssertEqual(ThumbSpec.legacy.schemaVersion, 1)
         XCTAssertEqual(base.spec, .hd)
         XCTAssertEqual(base.spec.longEdge, 1920)
         XCTAssertEqual(base.spec.quality, 0.75)
