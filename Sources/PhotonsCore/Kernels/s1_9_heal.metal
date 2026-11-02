@@ -132,7 +132,13 @@ struct HealSpotU {
 
 struct HealParamsU {
     float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
-    float4 b;   // spotCount, boundaryMatch (1 = fit the plane), 0, 0
+    // spotCount, boundaryMatch (1 = fit the plane), dispatchOrigin.xy. 257 C2: the apply pass is
+    // dispatched once per spot over its bbox, and the kernel starts from `thread_position_in_grid +
+    // dispatchOrigin`; the pre-257 whole-canvas dispatch passes (0, 0), so its math is untouched.
+    float4 b;
+    // 257 C0: frequencySeparation (1/0), gaussian sigma (canvas px), lowpassOrigin.xy. Zero in the
+    // pre-257 path, which is that path's uniform byte for byte.
+    float4 c;
 };
 
 /// The fitted correction, one record per spot. `cN` = (a₀, a₁, b₁, 0) for channel N (R, G, B).
@@ -210,15 +216,61 @@ kernel void s1_9_heal_stats(texture2d<float, access::read> src [[texture(0)]],
     stats[sid] = out;
 }
 
+// MARK: - 257 C0: the horizontal half of the frequency-separation membrane
+//
+// Ported from LightCraft (MIT) — crates/pipeline/src/spots.rs, heal branch.
+//
+// `outside = (alpha < 0.02) ? 1 : 0`, and this pass writes the horizontal Gaussian of
+// `(target − source)·outside` (rgb) and of `outside` (a) into `hbuf`. The apply pass finishes the
+// vertical Gaussian and divides: `low = G(diff) / max(G(outside), 1e-4)`, `out = source + low`.
+// Two separable passes, no iteration, no convergence test. `spots[0]` is the current spot (the
+// Swift side passes a one-element array), so the same reduction order is used for every pixel.
+kernel void s1_9_heal_lowpass(texture2d<float, access::read> src [[texture(0)]],
+                              texture2d<float, access::sample> samp [[texture(1)]],
+                              texture2d<float, access::write> hbuf [[texture(2)]],
+                              constant HealSpotU *spots [[buffer(0)]],
+                              constant HealParamsU &p [[buffer(1)]],
+                              uint2 gid0 [[thread_position_in_grid]]) {
+    HealSpotU spot = spots[0];
+    float r = max(spot.a.z, 1e-3);
+    float sigma = max(p.c.y, 1.0);
+    int radius = int(ceil(3.0 * sigma));
+    float inv = 1.0 / (2.0 * sigma * sigma);
+    float2 size = float2(src.get_width(), src.get_height());
+    int2 origin = int2(round(p.c.zw));
+    int2 c = origin + int2(gid0);
+
+    float3 dsum = float3(0.0);
+    float msum = 0.0;
+    for (int k = -radius; k <= radius; ++k) {
+        int2 q = clamp(int2(c.x + k, c.y), int2(0), int2(size) - 1);
+        float2 qf = float2(q) + 0.5;
+        float3 target = src.read(uint2(q)).rgb;
+        float3 source = samp.sample(kHealSampler, (qf + spot.b.xy) / size).rgb;
+        float t = length(qf - spot.a.xy) / r;
+        float alpha = spot.b.z * (1.0 - heal_smoothstep(1.0 - spot.a.w, 1.0, t));
+        float outside = alpha < 0.02 ? 1.0 : 0.0;
+        float wgt = exp(-float(k * k) * inv);
+        dsum += (target - source) * outside * wgt;
+        msum += outside * wgt;
+    }
+    hbuf.write(float4(dsum, msum), gid0);
+}
+
 // MARK: - pass 2: every canvas pixel, every spot in order
 
 kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             texture2d<float, access::sample> samp [[texture(2)]],
+                            texture2d<float, access::read> low [[texture(3)]],
                             constant HealSpotU *spots [[buffer(0)]],
                             constant HealParamsU &p [[buffer(1)]],
                             constant HealStatU *stats [[buffer(2)]],
-                            uint2 gid [[thread_position_in_grid]]) {
+                            uint2 gid0 [[thread_position_in_grid]]) {
+    // 257 C2 — the only change to this kernel's coordinates: a per-spot dispatch starts at the
+    // spot's bbox corner. The whole-canvas dispatch passes (0, 0), so every line below is the
+    // pre-257 line with the same `gid`.
+    uint2 gid = gid0 + uint2(uint(round(p.b.z)), uint(round(p.b.w)));
     float4 v = src.read(gid);
     float2 size = float2(src.get_width(), src.get_height());
     float2 local = float2(gid) + 0.5 - p.a.xy;
@@ -261,13 +313,42 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
         float3 s4 = samp.sample(kHealSampler, q / size).rgb;
 
         if (spot.b.w < 0.5 || redeye) {
-            // heal / redeye — add the plane. (u, v) is the offset **inside the disk**, in radii, so
-            // the plane reproduces the rim's own mean and gradient where the blend hands over.
-            float2 uv = rel / r;
-            HealStatU st = stats[s];
-            s4.r += st.c0.x + st.c0.y * uv.x + st.c0.z * uv.y;
-            s4.g += st.c1.x + st.c1.y * uv.x + st.c1.z * uv.y;
-            s4.b += st.c2.x + st.c2.y * uv.x + st.c2.z * uv.y;
+            bool frequency = (p.c.x > 0.5) && spot.b.w < 0.5;
+            if (frequency) {
+                // 257 C0 — frequency separation. `low` holds the **horizontal** half of
+                // gaussian((target − source)·outside) and gaussian(outside) (rgb = the first, a =
+                // the second), written by `s1_9_heal_lowpass`; this finishes the vertical half and
+                // divides (normalized convolution = the membrane interpolation).
+                //
+                // Ported from LightCraft (MIT) — crates/pipeline/src/spots.rs, heal branch.
+                // https://github.com/lightcraft/lightcraft — `low = gaussian(diff, σ) /
+                // max(gaussian(outside, σ), 1e-4); out = source + low`, σ = max(r·0.6, 1).
+                float sigma = max(p.c.y, 1.0);
+                int radius = int(ceil(3.0 * sigma));
+                int2 origin = int2(round(p.c.zw));
+                int2 l = int2(gid) - origin;
+                int lw = int(low.get_width()) - 1;
+                int lh = int(low.get_height()) - 1;
+                float3 dsum = float3(0.0);
+                float msum = 0.0;
+                float inv = 1.0 / (2.0 * sigma * sigma);
+                for (int j = -radius; j <= radius; ++j) {
+                    int yy = clamp(l.y + j, 0, lh);
+                    float4 h = low.read(uint2(uint(clamp(l.x, 0, lw)), uint(yy)));
+                    float wgt = exp(-float(j * j) * inv);
+                    dsum += h.rgb * wgt;
+                    msum += h.a * wgt;
+                }
+                s4 += dsum / max(msum, 1e-4);
+            } else {
+                // heal / redeye — add the plane. (u, v) is the offset **inside the disk**, in radii, so
+                // the plane reproduces the rim's own mean and gradient where the blend hands over.
+                float2 uv = rel / r;
+                HealStatU st = stats[s];
+                s4.r += st.c0.x + st.c0.y * uv.x + st.c0.z * uv.y;
+                s4.g += st.c1.x + st.c1.y * uv.x + st.c1.z * uv.y;
+                s4.b += st.c2.x + st.c2.y * uv.x + st.c2.z * uv.y;
+            }
         }
 
         if (redeye) {
