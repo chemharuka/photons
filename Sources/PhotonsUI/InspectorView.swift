@@ -321,7 +321,18 @@ public struct InspectorView: View {
             }
         }
         .onChange(of: workspaces.selection) { _, workspace in
+            // 253 — a workspace switch is a **tool exit**, not a pause: no eyedropper / spot tool /
+            // brush may stay armed behind a card the user can no longer see. The same call also
+            // restores the default cursor and throws away a half-painted stroke (no snapshot).
+            loupe?.disarmAllTools()
             loupe?.setCropWorkspaceActive(workspace.showsCropCard)
+        }
+        .onChange(of: loupe?.isEyedropperArmed) { _, armed in
+            // Esc (handled by the canvas) or `disarmAllTools` clears the loupe's flag without a
+            // SwiftUI event. Follow it so neither dropper button stays blue after the tool exited.
+            guard armed == false else { return }
+            if eyedropperArmed { eyedropperArmed = false }
+            if pointDropperArmed { pointDropperArmed = false }
         }
     }
 
@@ -928,12 +939,6 @@ public struct InspectorView: View {
                 pointDropperArmed = false
                 pointHint = nil
             }
-        }
-        .onChange(of: loupe?.isEyedropperArmed) { _, armed in
-            // Esc is handled by the canvas (`LoupeCanvasView.keyDown`), which disarms the loupe
-            // without calling this card. Follow the loupe's own flag so the button does not stay
-            // highlighted after the user cancelled.
-            if armed == false, pointDropperArmed { pointDropperArmed = false }
         }
     }
 
@@ -2386,7 +2391,8 @@ public struct InspectorView: View {
             .disabled(loupe == nil)
             .help("吸管：点击画布上的中性灰取样（Esc 取消）")
             .accessibilityIdentifier("inspector.whiteBalance.eyedropper")
-            .foregroundStyle(eyedropperArmed ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            // 253 — armed = accent fill + white glyph; off = secondary glyph + clear fill.
+            .toolActive(eyedropperArmed)
 
             Text(eyedropperArmed ? "点击画布取样 · Esc 取消" : "吸管")
                 .font(.system(size: 10))

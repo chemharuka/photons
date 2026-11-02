@@ -576,6 +576,10 @@ public final class WorkspaceRootView: NSView {
     // MARK: modules
 
     public func showModule(for mode: CatalogSession.Mode) {
+        // 253 — leaving the editor (网格) is a workspace switch too: no armed brush / eyedropper may
+        // survive behind a canvas that is no longer on screen. The inspector's own workspace switch
+        // is handled in `InspectorView`; this is the mode half.
+        if mode != .loupe { loupeController.disarmAllTools() }
         let target: NSView = mode == .grid ? gridController.view : loupeController.view
         let current = canvasHost.subviews.first
         guard current !== target else {

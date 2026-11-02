@@ -190,7 +190,9 @@ public struct MaskListPanel: View {
         let selected = session.selectedMaskID == mask.id
         return HStack(spacing: 6) {
             RoundedRectangle(cornerRadius: 2, style: .continuous)
-                .fill(selected ? Color.accentColor : Color.clear)
+                // 253 — the same accent/clear decision as every tool button, one implementation.
+                // The visual is unchanged: this is the list's selected-mask marker, not a new colour.
+                .fill(ToolActiveStyle.fill(selected))
                 .frame(width: 3, height: 13)
             Text(mask.name)
                 .font(.system(size: 10, weight: selected ? .semibold : .regular))
@@ -620,14 +622,17 @@ public struct MaskListPanel: View {
     private var tools: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Picker("", selection: toolBinding) {
-                    Text("浏览").tag(MaskTool.off)
-                    Text("画笔").tag(MaskTool.brush)
-                    Text("擦除").tag(MaskTool.erase)
+                // 253 — the same tool-button style as 修复 / 红眼: the armed brush (or eraser) is an
+                // accent fill, 浏览 is the inactive state. `toolBinding` still writes the one
+                // `session.maskTool` field, so the canvas' gesture decision is untouched.
+                HStack(spacing: 2) {
+                    ForEach(MaskTool.allCases, id: \.rawValue) { tool in
+                        ToolSegmentButton(title: tool.label,
+                                          active: session.maskTool == tool) {
+                            toolBinding.wrappedValue = tool
+                        }
+                    }
                 }
-                .pickerStyle(.segmented)
-                .controlSize(.mini)
-                .labelsHidden()
                 .disabled(session.selectedMaskID == nil)
             }
             Toggle(isOn: showBinding) {

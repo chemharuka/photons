@@ -83,7 +83,8 @@ public struct MaskEyedropperRow: View {
             .disabled(!enabled)
             .help(kind.help)
             .accessibilityIdentifier(kind.accessibilityID)
-            .foregroundStyle(isArmed ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            // 253 — the mask pickers are the same armed tool as the other droppers.
+            .toolActive(isArmed)
 
             Text(isArmed ? "点击画布取样 · Esc 取消" : kind.label)
                 .font(.system(size: 10))

@@ -98,9 +98,11 @@ public struct HealCardPanel: View {
                     Label("修复", systemImage: "bandage")
                         .font(.system(size: 10, weight: .medium))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .controlSize(.mini)
-                .tint(session.healTool ? Color.accentColor : Color.secondary)
+                // 253 — the visible blue is the fill, not `.tint` (a bordered button's tint never
+                // paints its bezel). One style for every tool button: `ToolActiveStyle`.
+                .toolActive(session.healTool)
                 .accessibilityIdentifier("inspector.heal.tool")
                 .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径。⌥+滚轮 或 [ / ] 调大小")
                 // Its frame is the button's, so a hosted test can click the real SwiftUI button
@@ -125,14 +127,17 @@ public struct HealCardPanel: View {
                 }
             }
             // 229 — 修复 / 红眼. One card, two presets of the same spot tool.
-            Picker("", selection: healToolModeBinding) {
+            //
+            // 253 — built from `ToolSegmentButton` instead of the native segmented Picker so the
+            // selected preset is the same accent fill + white text as every other armed tool.
+            HStack(spacing: 2) {
                 ForEach(HealToolMode.allCases, id: \.rawValue) { mode in
-                    Text(mode.label).tag(mode)
+                    ToolSegmentButton(title: mode.label,
+                                      active: session.healToolMode == mode) {
+                        healToolModeBinding.wrappedValue = mode
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-            .controlSize(.mini)
-            .labelsHidden()
             .accessibilityIdentifier("inspector.redeye.mode")
             .help("红眼是 修复 的一个预设：点一次找红瞳并修正，拖动连续修补")
             if session.healToolMode == .redeye {
