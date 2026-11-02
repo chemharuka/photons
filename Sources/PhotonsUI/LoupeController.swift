@@ -6274,9 +6274,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // thread, next to the pixels it belongs to — because the catalog row's `PixelWidth/PixelHeight`
         // are the *stored* dimensions, which are transposed for EXIF 5…8 and made a portrait drag
         // render as a landscape-shaped ellipse.
-        if let graphAtFrame, let assetID = session?.anchorAsset?.id {
-            session?.ingestedSourceFrame = (assetID, graphAtFrame.sourceSize)
-        }
+        //
+        // 231 — **full-resolution source pixels, not the rung's.** `graphAtFrame.sourceSize` is the
+        // size of the *buffer* this frame was made from (the 0.5 preview rung is half-size), while
+        // `framing()` divides by `decodeScale` and describes the whole file. The crop tool takes its
+        // frame from this publication (`maskSourceSize`) and its projection from `framing()`, so
+        // publishing the rung's size made the two disagree by exactly the rung's scale factor: on the
+        // 0.5 rung a `.full` crop was projected as a top-left quarter and only jumped to the whole
+        // picture once the 1.0 rung landed. Dividing here makes the publication rung-independent and
+        // value-for-value the same frame `framing()` draws.
+        publishIngestedSource(graphAtFrame?.sourceSize, decodeScale: Double(frame.decodeScale))
         let canvas = viewportPixels
         // 068: **while the hand is moving, nothing new goes on the canvas.** A frame that lands now was
         // either rendered for a canvas the hand has already left, or for this one — but fitted into a
@@ -6395,6 +6402,38 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if let caps = frame.capabilities { session?.recordCapabilities(caps) }
         canvasView.metalLayer.setNeedsDisplay()
+    }
+
+    /// 231 — the rung-free version of the size above: the buffer's pixels divided by
+    /// the scale it was decoded at, i.e. the **whole file's** upright frame. That is the frame
+    /// `framing()` already describes (`decoded / decodedScale`), so publishing this makes the crop
+    /// tool's source and the projection's source the same number at every rung.
+    static func fullSourceSize(rung: ImageSize, decodeScale: Double) -> ImageSize {
+        let ds = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
+        return ImageSize(width: max(1, Int((Double(rung.width) / ds).rounded())),
+                         height: max(1, Int((Double(rung.height) / ds).rounded())))
+    }
+
+    /// The one writer of `session.ingestedSourceFrame`, so the rung → source division cannot be
+    /// forgotten on one path and remembered on another.
+    private func publishIngestedSource(_ rung: ImageSize?, decodeScale: Double) {
+        guard let rung, let assetID = session?.anchorAsset?.id else { return }
+        session?.ingestedSourceFrame = (assetID, Self.fullSourceSize(rung: rung,
+                                                                    decodeScale: decodeScale))
+    }
+
+    /// 231 test seam — drive the **shipped** publication without a Metal present (the harness has no
+    /// presenter), so a test can prove the crop entry sees the full frame on the 0.5 rung.
+    func publishIngestedSourceForTesting(rung: ImageSize, decodeScale: Double) {
+        publishIngestedSource(rung, decodeScale: decodeScale)
+    }
+
+    /// 231 test seam — install a decoded rung (and the identity it belongs to) the way `makeFrame`
+    /// leaves it, so `framing()` can describe a real file from a tiny synthetic buffer.
+    func installDecodedRungForTesting(_ image: LinearImage, scale: Double) {
+        decoded = image
+        decodedScale = scale
+        decodedIdentity = backdropPhotoKey
     }
 
     public var decodeSeconds: Double { decodeMilliseconds / 1000 }

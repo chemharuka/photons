@@ -36,12 +36,10 @@ final class CropOverlayZoomFollowTests: XCTestCase {
     /// A frame small enough to be legal at **1:1 and at 12.5 %** in this harness, so ⑦'s clamp never
     /// moves the draft while the animation is being measured.
     ///
-    /// The harness decodes the 9520×6336 fixture at a preview rung (4760×3168), and `maskSourceSize`
-    /// reports the *ingested* size — so the crop space here is the half-size one and a frame that is
-    /// legal at 1:1 is a small part of the picture. The claim under test is about the **similarity**
-    /// (does the overlay sit on the picture on every frame), not about where the frame is, so a small
-    /// frame is the honest way to keep the clamp out of the measurement.
-    private static let crop = CropRect(left: 0.48, top: 0.50, right: 0.56, bottom: 0.56)
+    /// 231: the ingested frame is now published in **full-resolution** source pixels, so the crop space
+    /// is the whole 9520×6336 file at every decode rung (it used to be the 4760×3168 preview rung's).
+    /// At 1:1 this frame is 476 × 317 device pixels inside the 640 × 400 viewport.
+    private static let crop = CropRect(left: 0.475, top: 0.475, right: 0.525, bottom: 0.525)
     private static let tolerance: CGFloat = 1.0
 
     private var workDir: URL!
@@ -116,14 +114,9 @@ final class CropOverlayZoomFollowTests: XCTestCase {
         loupe.scheduleRender()
         XCTAssertTrue(waitFor { loupe.lastFrame != nil }, "no first frame")
         pump(0.1)
-        // NOTE for the numbers below: this harness renders through a `frameSource`, and the renderer
-        // ingests the fixture at a preview rung (4760×3168), which the session then reports as
-        // `maskSourceSize` — while `framing()` reports the full 9520×6336. The crop layout is therefore
-        // expressed in the *rung's* space here while the projection is the full frame's, so the frame
-        // sits off to one side of the canvas in these screenshots. That shifts **where** the frame is
-        // drawn, never **whether it travels with the picture** — which is the claim, and it is measured
-        // against the bridge's own map (`deviation(drawn:from:bridge:…)`). `testElevenProgresses…`
-        // gives the same table on a projection with a single source size, i.e. on-screen numbers.
+        // 231: `present` publishes the full upright frame (the rung divided by its decode scale), so
+        // the crop layout and `framing()` describe the same 9520×6336 source no matter which rung is
+        // on screen. The screenshots below are therefore on-screen numbers, not rung-space ones.
         return (loupe, session, window)
     }
 
@@ -132,11 +125,11 @@ final class CropOverlayZoomFollowTests: XCTestCase {
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session), "裁切 mode did not open")
         XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "the entry zoom never finished")
         XCTAssertEqual(loupe.viewState.mode, .fit, "entering 裁切 goes to fit")
-        // 091 (diagnosed 2026-10-28): the frame goes in **before** the camera moves. With the draft
-        // still `.full`, 082's `cropZoomLimit()` caps the camera at `min(640/4760, 400/3168)` =
-        // 0.12626, so `zoom(to: 1)` silently landed at 0.12626 and the "zoom-out" the tests below
-        // measure started from there — i.e. it was a 4× zoom-*in* and the frame legitimately grew.
-        // Product code is right; this prelude was the bug.
+        // 091 (diagnosed 2026-10-28): the frame goes in **before** the camera moves. 082's
+        // `cropZoomLimit()` then caps the camera at the level where the frame is inscribed, so with
+        // the draft still `.full` `zoom(to: 1)` would silently land short. 231: the ingested frame is
+        // full-resolution now, so this 5 % frame's ceiling is `min(640/476, 400/317)` ≈ 1.26 and
+        // `1:1` is reachable; the draft is still written first because the clamp reads it.
         loupe.cropTool.clampsFrameToView = false
         loupe.cropTool.draft = CropToolController.Draft(crop: Self.crop)
         loupe.refreshCropTool()

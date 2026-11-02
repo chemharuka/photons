@@ -154,12 +154,10 @@ final class CropWindowResizeTests: XCTestCase {
         loupe.presentForTesting(frame)
         CropUITestSupport.pump(0.05)
         XCTAssertNotNil(loupe.lastPresented, "nothing was presented to resize")
-        // `present` publishes the *decode rung's* size as the ingested frame; the crop tool and the
-        // projection both mean the full upright frame here, so restore it before measuring.
-        if let asset = session.anchorAsset {
-            session.ingestedSourceFrame = (asset.id,
-                                           ImageSize(width: asset.width ?? 1, height: asset.height ?? 1))
-        }
+        // 231: `present` publishes the full upright frame (the rung divided by its decode scale), so
+        // the crop tool and the projection already mean the same 9520×6336 here — no restore needed.
+        XCTAssertEqual(session.maskSourceSize, CropUITestSupport.stored,
+                       "the 0.5 rung's publication must be the full frame")
         loupe.refreshCropTool()
         CropUITestSupport.pump(0.02)
 
