@@ -97,6 +97,11 @@ public struct HealCardPanel: View {
                 } label: {
                     Label("修复", systemImage: "bandage")
                         .font(.system(size: 10, weight: .medium))
+                        // 276 — under `.plain` the hit area is the label's **content** (icon and the
+                        // text block), not its bounds: a click in the gap between them (the button's
+                        // geometric centre) fell through. This explicit rectangle makes the
+                        // whole label clickable without changing what `.plain` draws.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .controlSize(.mini)
