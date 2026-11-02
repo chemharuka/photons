@@ -235,7 +235,7 @@ public enum WhiteBalanceEstimate {
     /// that puts its 6500 K point on D65. Without this, every balanced frame would measure a ~+98
     /// tint (D65's Duv divided by `tintPerUnit`) and an explicit 6500 K would not be the identity.
     ///
-    /// The range is `WhiteBalanceSolver.searchRange`, the same 2000…12000 K the sliders offer, so the
+    /// The range is `WhiteBalanceSolver.searchRange`, the same 2000…50000 K the sliders offer, so the
     /// analytic model and the document cannot disagree about "the end of the travel".
     public static func planckianUV(_ kelvin: Double) -> (u: Double, v: Double) {
         let t = min(max(kelvin, WhiteBalanceSolver.searchRange.lowerBound),
@@ -578,7 +578,7 @@ public enum WhiteBalanceEstimate {
 
     /// Closest Planckian point to a measured illuminant, as `(temperature, tint)`.
     ///
-    /// A coarse sweep finds the basin (the distance function is single-moded over 2000…12000 for any
+    /// A coarse sweep finds the basin (the distance function is single-moded over 2000…50000 for any
     /// plausible white), then a golden-section refinement finds the minimum. `tint` is the signed
     /// perpendicular distance divided by `tintPerUnit`, so it round-trips through `illuminantXYZ`.
     public static func planckianProjection(of illuminant: Illuminant) -> (temperature: Double, tint: Double) {

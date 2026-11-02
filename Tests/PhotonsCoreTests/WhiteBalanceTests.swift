@@ -254,18 +254,18 @@ final class WhiteBalanceTests: XCTestCase {
     // MARK: - 5. quantization: a drag is one rung
 
     func testQuantizationCollapsesADragIntoOneDevelopment() {
-        // 12 ticks inside one 25 K bucket (3562.5…3587.5 → 3575) — the thumb moves, the document
-        // does not.
-        let ticks = stride(from: 3563.0, through: 3585.0, by: 2.0).map {
+        // 242: the grid is mired, not 25 K. These 11 ticks all live in the 280-mired bucket
+        // (mired 280.03 → 3571 K) — the thumb moves, the document does not.
+        let ticks = stride(from: 3566.0, through: 3576.0, by: 1.0).map {
             WhiteBalance(temperature: $0, tint: 30.4).quantized()
         }
         XCTAssertEqual(Set(ticks.map { $0.keyString ?? "as-shot" }).count, 1,
-                       "ticks 3562…3585 K did not collapse into one development: "
+                       "ticks 3566…3576 K did not collapse into one development: "
                        + "\(Set(ticks.map { $0.keyString ?? "as-shot" }))")
-        XCTAssertEqual(ticks.first?.temperature, 3575)
+        XCTAssertEqual(ticks.first?.temperature, 3571)
 
-        XCTAssertEqual(WhiteBalance(temperature: 3537).quantized().temperature, 3525)
-        XCTAssertEqual(WhiteBalance(temperature: 3551).quantized().temperature, 3550)
+        XCTAssertEqual(WhiteBalance(temperature: 3537).quantized().temperature, 3534)
+        XCTAssertEqual(WhiteBalance(temperature: 3551).quantized().temperature, 3546)
         XCTAssertEqual(WhiteBalance(tint: 30.4).quantized().tint, 30)
         XCTAssertEqual(WhiteBalance(tint: -0.4).quantized().tint, 0)   // -0.0 would key differently
         // Clamped, not wrapped, and as shot stays as shot.

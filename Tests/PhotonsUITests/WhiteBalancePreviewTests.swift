@@ -142,23 +142,23 @@ final class WhiteBalancePreviewTests: XCTestCase {
 
         let newFrame = try develop(loupe, url, session.edit)
         XCTAssertEqual(newFrame.editRevision, committedRevision)
-        XCTAssertEqual(decodeTotal(), decodesBefore, "a white-balance release must not decode again")
+        // 194/242: the settled pair is a decode input now, so the release re-develops the RAW once
+        // (the drag above rendered S1 only); this test is about the swap, not about a decode budget.
+        XCTAssertEqual(decodeTotal(), decodesBefore + 1,
+                       "a white-balance release is exactly one development")
         var settled = false
         loupe.onWhiteBalancePreviewSettled = { settled = true }
         loupe.presentForTesting(newFrame, state: .fit)
 
         XCTAssertTrue(settled, "the badge's callback must fire when the real frame lands")
         XCTAssertFalse(loupe.isWhiteBalancePreviewActive)
-        let committed = WhiteBalanceEstimate.gain(
-            for: WhiteBalance(temperature: 3800, tint: 8),
-            asShot: loupe.measuredAsShotIlluminant)
-        XCTAssertEqual(newFrame.whiteBalanceGain, SIMD3(committed.r, committed.g, committed.b),
-                       "the settled frame applies the committed pair")
+        XCTAssertEqual(newFrame.whiteBalanceGain, SIMD3(1, 1, 1),
+                       "the settled buffer already carries 3800 K/+8; S1 must be the identity")
         XCTAssertNotEqual(newFrame.displayHash, frame.displayHash,
                           "the committed white balance must change the picture")
 
-        print("WB preview release: history +1 · decode +0 · gain \(newFrame.whiteBalanceGain) "
-              + "on revision \(committedRevision)")
+        print("WB preview release: history +1 · decode +1 (the settle) · "
+              + "gain \(newFrame.whiteBalanceGain) on revision \(committedRevision)")
     }
 
     /// A release that wrote nothing has no frame to wait for: the preview ends immediately.

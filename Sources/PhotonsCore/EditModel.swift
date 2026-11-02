@@ -1393,7 +1393,7 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// `nil` = as shot on this axis: the decoder is left alone and the inspector shows the number the
     /// file reports (`DecoderCapabilities.asShotTemperature`). The literal `6500` is **not** a sentinel;
     /// `nil` is distinct from it, and `nil` is the only spelling that appends nothing to a decode key.
-    public var temperature: Double?      // 2000…12000, default nil (as shot)
+    public var temperature: Double?      // 2000…50000, default nil (as shot); stored in Kelvin
     /// Absolute tint (−150…150, positive = magenta), same rules as `temperature`.
     public var tint: Double?             // default nil (as shot)
     /// Soft shoulder for values above ~0.8; 0 = untouched, 1 = asymptote at 1.0.

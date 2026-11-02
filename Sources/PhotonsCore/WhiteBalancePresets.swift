@@ -96,12 +96,15 @@ public struct WhiteBalancePreset: Sendable, Equatable, Hashable, Identifiable {
 
     /// Does this entry describe the document's current pair?
     ///
-    /// Compared after quantization (25 K / 1 tint), because that is the resolution the sliders
-    /// commit at: a document holding 5500 K must not show "自定义" next to a 5500 K preset.
+    /// Compared on the slider's own grid (242: **mired** for temperature, one unit for tint),
+    /// because that is the resolution the sliders commit at: a document holding 5500 K must not show
+    /// "自定义" next to a 5500 K preset, and a 7500 K preset quantizes to ~7519 K without ceasing to
+    /// be 阴影.
     public func matches(_ wb: WhiteBalance) -> Bool {
-        guard kind == .fixed, let t = wb.temperature, let i = wb.tint else { return false }
-        return abs(t - (temperature ?? .nan)) <= WhiteBalance.temperatureStep / 2
-            && abs(i - (tint ?? .nan)) <= WhiteBalance.tintStep / 2
+        guard kind == .fixed, let t = wb.temperature, let i = wb.tint,
+              let presetTemperature = temperature, let presetTint = tint else { return false }
+        return TemperatureScale.isWithinOneStep(t, presetTemperature)
+            && abs(i - presetTint) <= WhiteBalance.tintStep / 2
     }
 
     /// `"5500 K / 0"` — the value column of the report and of the menu's help text.
@@ -163,7 +166,7 @@ public enum WhiteBalancePresets {
 
 /// Result of asking "which Kelvin/tint makes this pixel neutral?".
 public struct WhiteBalanceSolve: Sendable, Equatable {
-    /// The pair to write into the document (already quantized to the slider's 25 K / 1 tint).
+    /// The pair to write into the document (already quantized to the slider's mired / 1 tint grid).
     public let whiteBalance: WhiteBalance
     /// Largest channel deviation from the mean **after** the model's gain is applied, as a fraction.
     /// 0 = the model can neutralize this sample exactly; the model is a Planckian fit, so a strongly
@@ -175,7 +178,7 @@ public struct WhiteBalanceSolve: Sendable, Equatable {
     public let predicted: RGBSample
     /// Bisection steps used for the temperature; 0 when the tint alone had to do.
     public let iterations: Int
-    /// True when the sample asked for something outside 2000–12000 K or ±150 tint and the answer is
+    /// True when the sample asked for something outside 2000–50000 K or ±150 tint and the answer is
     /// the nearest legal pair rather than a solution — the UI must say so ("近似") rather than imply
     /// this point can be made neutral.
     public let clamped: Bool
@@ -208,7 +211,7 @@ public struct WhiteBalanceSolve: Sendable, Equatable {
 ///
 ///   1. **Kelvin** — the model's gains are normalized so green is 1, so neutrality needs
 ///      `gainR/gainB = B/R` of the sample. That ratio is strictly increasing in temperature, so a
-///      bisection on 2000…12000 K finds the single root (40 iterations, exact to ~1 K).
+///      bisection on 2000…50000 K finds the single root (40 iterations, exact to ~1 K).
 ///   2. **Tint** — with Kelvin fixed, the tint term scales R,B by √s and divides G by s, so `R' = G'`
 ///      has the closed form `s = (G·gainG / (R·gainR))^(2/3)`; the model's `s = (1 + Δ/300)²` inverts
 ///      to `Δtint = 300·(√s − 1)`, relative to the reference tint.
@@ -219,7 +222,9 @@ public struct WhiteBalanceSolve: Sendable, Equatable {
 ///      `CIRAWFilter`, not this one. The tests print both numbers.
 public enum WhiteBalanceSolver {
 
-    public static let searchRange = 2000.0...12000.0
+    /// The same range the slider offers. 242 raised it from 12000 to 50000 K, so a drag above the old
+    /// ceiling still gets a real S1 preview and the dropper/auto solve can answer there too.
+    public static let searchRange = WhiteBalance.temperatureRange
     private static let iterations = 40
 
     /// The nominal white point this model is centred on — and, since 143, the reference of the
@@ -310,7 +315,7 @@ public enum WhiteBalanceSolver {
     public static let localReference = Reference(temperature: localAnchorKelvin, tint: 0)
 
     /// The mask's `temperature` units as Kelvin, clamped to the slider's own ±100 (a hand-edited
-    /// document cannot ask for 30000 K; `gain` clamps the pair to 2000…12000 as well).
+    /// document cannot ask for 30000 K; `gain` clamps the pair to 2000…50000 as well).
     public static func localKelvin(_ units: Double) -> Double {
         localAnchorKelvin + min(max(units, -100), 100) * localKelvinPerUnit
     }
@@ -345,7 +350,7 @@ public enum WhiteBalanceSolver {
         var lo = searchRange.lowerBound, hi = searchRange.upperBound
         var clamped = false
         if ratio(lo) >= target { hi = lo; clamped = true }        // redder than 2000 K can explain
-        else if ratio(hi) <= target { lo = hi; clamped = true }   // bluer than 12000 K
+        else if ratio(hi) <= target { lo = hi; clamped = true }   // bluer than 50000 K
         else {
             for _ in 0..<iterations {
                 let mid = (lo + hi) / 2

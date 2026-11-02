@@ -75,8 +75,10 @@ final class SliderStyleTests: XCTestCase {
         let body = try Self.body(of: "private func whiteBalanceRow",
                                  upTo: "private var dropperRow",
                                  in: Self.inspectorSource)
-        XCTAssertTrue(body.contains("Self.shapeSlider(Binding(get: { shown }"),
+        XCTAssertTrue(body.contains("Self.shapeSlider(Binding(get: { row.sliderPosition(of: shown) },"),
                       "色温/色调 也必须走面板那唯一一个滑杆视图（055 的自绘气泡已删除）")
+        XCTAssertTrue(body.contains("in: row.sliderRange"),
+                      "242: 色温滑杆的行程是 mired（0…1），不是 Kelvin 数值框的行程")
         XCTAssertTrue(body.contains("shape: row.shape"),
                       "颜色从 shape 来 —— 不在这里写死一个颜色")
         XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: body), 0,

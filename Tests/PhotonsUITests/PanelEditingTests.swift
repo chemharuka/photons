@@ -60,9 +60,44 @@ final class PanelEditingTests: XCTestCase {
         // 细节 is 0…100.
         XCTAssertEqual(SliderValueInput.resolve("-1", in: 0 ... 100), .value(0))
         XCTAssertEqual(SliderValueInput.resolve("140", in: 0 ... 100), .value(100))
-        // 色温's travel is the decoder's, so 20000 K clamps to 12000.
+        // 色温's travel is the decoder's own 2000…50000 K (242), so 20000 K is inside it now and
+        // 60000 K clamps to the new upper end.
         XCTAssertEqual(SliderValueInput.resolve("20000", in: WhiteBalance.temperatureRange),
+                       .value(20000))
+        XCTAssertEqual(SliderValueInput.resolve("60000", in: WhiteBalance.temperatureRange),
                        .value(WhiteBalance.temperatureRange.upperBound))
+    }
+
+    /// 242: the 色温 row's *slider* travel is mired (0 = 2000 K, 1 = 50000 K), while its number
+    /// field and document value stay Kelvin. 色调 is untouched by this task.
+    func testTemperatureRowTravelsThroughMiredWhileNumbersStayKelvin() {
+        let temperature = InspectorView.whiteBalanceRows[0]
+        let tint = InspectorView.whiteBalanceRows[1]
+
+        XCTAssertEqual(temperature.range, 2000...50000)
+        XCTAssertEqual(temperature.sliderRange, 0...1)
+        XCTAssertEqual(tint.sliderRange, WhiteBalance.tintRange)
+
+        let keyPoints: [(Double, Double)] = [(2000, 0), (5000, 0.625),
+                                             (12000, 0.868), (50000, 1)]
+        for (kelvin, expected) in keyPoints {
+            let position = temperature.sliderPosition(of: kelvin)
+            XCTAssertEqual(position, expected, accuracy: 0.01,
+                           "\(kelvin) K must sit at \(expected) on the mired track")
+            // Round-trip through the row's own position, not through the rounded key-point literal.
+            XCTAssertEqual(temperature.value(atSliderPosition: position), kelvin, accuracy: 1)
+        }
+        // Typed values (still K) land where the owner asked: 30000 K is far right, 2500 K is left.
+        XCTAssertEqual(temperature.sliderPosition(of: 30000), 0.972, accuracy: 0.01)
+        XCTAssertEqual(temperature.sliderPosition(of: 2500), 0.208, accuracy: 0.01)
+        XCTAssertEqual(temperature.sliderPosition(of: 60000), 1, "out-of-range K clamps right")
+        XCTAssertEqual(temperature.sliderPosition(of: 1000), 0, "out-of-range K clamps left")
+
+        // Tint stays a direct value → position mapping (240 owns that axis).
+        XCTAssertEqual(tint.sliderPosition(of: 12), 12)
+        XCTAssertEqual(tint.value(atSliderPosition: -7), -7)
+        XCTAssertEqual(temperature.value(atSliderPosition: 1), 50000,
+                       "the slider's right end is the document's Kelvin, never a mired number")
     }
 
     // MARK: - 2. 编辑时显示的是"干净"的数字
