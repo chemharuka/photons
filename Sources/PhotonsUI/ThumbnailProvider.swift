@@ -195,6 +195,14 @@ public final class ThumbnailProvider: @unchecked Sendable {
     private var runsPerContent: [String: Int] = [:]
     private var decoder: RAWDecoder?
     private var decoderUnavailable = false
+    /// 258 — decoded whole-picture stand-ins, keyed by the thumbnail key's digest. The grid's memory
+    /// LRU holds display-sized **crops**, not the aspect-preserved picture the loupe's stand-in needs,
+    /// so it cannot serve this path; without a small cache of its own every photo switch paid the
+    /// disk read + JPEG decode again (measured 28 ms in debug for a 640×427 preview). Warm switches
+    /// are now a dictionary lookup, which is the ≤ 5 ms the acceptance asks for.
+    private var placeholderImages: [String: CGImage] = [:]
+    private var placeholderOrder: [String] = []
+    private static let placeholderLimit = 8
 
     public init(cache: ThumbnailCache, maxConcurrent: Int = ThumbnailProvider.defaultConcurrency) {
         let adapter = ProducerAdapter()
@@ -457,16 +465,35 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// into the canvas without stretching.
     public func cachedCanvasPlaceholder(for asset: Asset, document: EditModel) -> CGImage? {
         let hd = ThumbnailProvider.hdKey(for: asset, document: document)
+        if let cached = placeholderImage(for: hd.digest) { return cached }
         if cache.exists(hd), let data = cache.data(for: hd),
            let image = ThumbnailProvider.decodeHDForPlaceholder(data) {
+            rememberPlaceholder(image, for: hd.digest)
             return image
         }
         let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
         let preview = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
+        if let cached = placeholderImage(for: preview.digest) { return cached }
         if cache.exists(preview), let data = cache.data(for: preview) {
-            return ThumbnailCache.decode(data)
+            guard let image = ThumbnailCache.decode(data) else { return nil }
+            rememberPlaceholder(image, for: preview.digest)
+            return image
         }
         return nil
+    }
+
+    private func placeholderImage(for digest: String) -> CGImage? {
+        lock.lock(); defer { lock.unlock() }
+        return placeholderImages[digest]
+    }
+
+    private func rememberPlaceholder(_ image: CGImage, for digest: String) {
+        lock.lock(); defer { lock.unlock() }
+        if placeholderImages[digest] == nil { placeholderOrder.append(digest) }
+        placeholderImages[digest] = image
+        while placeholderOrder.count > Self.placeholderLimit {
+            placeholderImages.removeValue(forKey: placeholderOrder.removeFirst())
+        }
     }
 
     /// Work the service has queued *or* running. Exposed so `--ui-smoke` can assert the queue does

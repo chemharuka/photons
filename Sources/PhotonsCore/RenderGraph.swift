@@ -667,6 +667,14 @@ public final class RenderResult {
     /// for as shot). Carried out of the render so "the preview and the settled frame used the same
     /// triple" is a fact about the frame, not a recomputation the caller could get subtly wrong.
     public let whiteBalanceGain: SIMD3<Double>
+    /// 258 — the plan's own answer to "did this frame fill the canvas, or was it letterboxed?".
+    /// `frameInCanvas` is `plan.frameInCanvas` (the picture's size when the frame is not a window),
+    /// `frameOrigin` is S0's content-space origin, and `expandedCanvas` is non-nil only for a
+    /// straightened document. Diagnostics for the photo-switch acceptance; no stage reads them.
+    public let frameInCanvas: ImageSize
+    public let frameOrigin: SIMD2<Float>
+    public let expandedCanvas: ImageSize?
+    public let neverUpscalesContent: Bool
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, canvasRect: ImageRect? = nil,
          window: ImageRect,
@@ -674,7 +682,9 @@ public final class RenderResult {
          maskReport: MaskStageReport? = nil, showsMask: Bool = false,
          histogram: Histogram? = nil, histogramMilliseconds: Double = 0,
          histogramSample: LinearSample? = nil, histogramCost: HistogramCost = .zero,
-         whiteBalanceGain: SIMD3<Double> = SIMD3(1, 1, 1)) {
+         whiteBalanceGain: SIMD3<Double> = SIMD3(1, 1, 1),
+         frameInCanvas: ImageSize? = nil, frameOrigin: SIMD2<Float> = .zero,
+         expandedCanvas: ImageSize? = nil, neverUpscalesContent: Bool = false) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -694,6 +704,10 @@ public final class RenderResult {
         self.histogramSample = histogramSample
         self.histogramCost = histogramCost
         self.whiteBalanceGain = whiteBalanceGain
+        self.frameInCanvas = frameInCanvas ?? content
+        self.frameOrigin = frameOrigin
+        self.expandedCanvas = expandedCanvas
+        self.neverUpscalesContent = neverUpscalesContent
     }
 }
 
@@ -1765,6 +1779,11 @@ public final class RenderGraph {
         /// Equal to `drawnRect` without a window and at every right angle, so nothing that reads it
         /// changes at θ = 0 or 适应.
         let canvasRect: ImageRect
+        /// 258 — diagnostics: whether this render was of the whole canvas or of a letterboxed
+        /// `content` rect, and the expanded canvas when the document is straightened. Carried on the
+        /// result so a photo-switch trace can say "the first frame was 90 %, not the canvas" without
+        /// re-deriving the plan.
+        let expandedCanvas: ImageSize?
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
@@ -2040,7 +2059,8 @@ public final class RenderGraph {
                     s0Identity: untransformed && !caOn && !lensWarp,
                     s0PureCA: untransformed && caOn && !lensWarp,
                     s0PureTurn: s0PureTurn && !lensWarp,
-                    s0LensWarp: lensWarp, drawnRect: drawnRect, canvasRect: canvasRect)
+                    s0LensWarp: lensWarp, drawnRect: drawnRect, canvasRect: canvasRect,
+                    expandedCanvas: expandedCanvas)
     }
 
     // MARK: - S1's key (073)
@@ -2711,7 +2731,10 @@ public final class RenderGraph {
                                 histogramMilliseconds: histogramMilliseconds,
                                 histogramSample: histogramSample,
                                 histogramCost: histogramCost,
-                                whiteBalanceGain: appliedWhiteBalance)
+                                whiteBalanceGain: appliedWhiteBalance,
+                                frameInCanvas: plan.frameInCanvas, frameOrigin: plan.frameOrigin,
+                                expandedCanvas: plan.expandedCanvas,
+                                neverUpscalesContent: options.neverUpscalesContent)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
                             drawnRect: plan.drawnRect, canvasRect: plan.canvasRect,
@@ -2721,7 +2744,10 @@ public final class RenderGraph {
                             histogramMilliseconds: histogramMilliseconds,
                             histogramSample: histogramSample,
                             histogramCost: histogramCost,
-                            whiteBalanceGain: appliedWhiteBalance)
+                            whiteBalanceGain: appliedWhiteBalance,
+                            frameInCanvas: plan.frameInCanvas, frameOrigin: plan.frameOrigin,
+                            expandedCanvas: plan.expandedCanvas,
+                            neverUpscalesContent: options.neverUpscalesContent)
     }
 
     /// Return a texture handed out by `render(..., wantsPixels: false)`.
