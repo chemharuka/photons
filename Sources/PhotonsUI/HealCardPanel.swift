@@ -97,12 +97,17 @@ public struct HealCardPanel: View {
                 } label: {
                     Label("修复", systemImage: "bandage")
                         .font(.system(size: 10, weight: .medium))
+                        // 276 — under `.plain` the hit area is the label's **content** (icon and the
+                        // text block), not its bounds: a click in the gap between them (the button's
+                        // geometric centre) fell through. This explicit rectangle makes the
+                        // whole label clickable without changing what `.plain` draws.
+                        .contentShape(Rectangle())
                 }
-                // 276 — `.plain` drew no AppKit button leaf, so the hosted test's synthetic click
-                // reached only the hosting view and never the SwiftUI action. `.borderless` keeps
-                // 253's look (no bezel; the fill is ours) but keeps the real clickable control —
-                // the same style the card's other tool buttons already use.
-                .buttonStyle(.borderless)
+                // 276 — `.borderless` made the test pass but shifted the glyph by ~1 px (706–720 of
+                // 3672 pixels differ against `.plain`, max channel delta 183), and 253's contract is
+                // that the fill carries the state, not the button style. `.plain` plus the label's
+                // explicit `contentShape` above is clickable *and* pixel-identical to 253.
+                .buttonStyle(.plain)
                 .controlSize(.mini)
                 // 253 — the visible blue is the fill, not `.tint` (a bordered button's tint never
                 // paints its bezel). One style for every tool button: `ToolActiveStyle`.
