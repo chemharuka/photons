@@ -5543,8 +5543,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
                        measure: Bool) throws -> (result: RenderResult, ms: Double) {
             let t = CFAbsoluteTimeGetCurrent()
             // 一次请求 = 一个值：字段和 `RenderOptions` 一一对应，映射只在 `LoupeFrameRequest` 里有一份。
-            // 132 §9: the crop workspace's fit is a deliberate 90 %; do not let the renderer
-            // scale that margin back up to the viewport (`neverUpscalesContent`).
+            // 132 §9 / 234: 适应 in **both** workspaces is a deliberate 90 % of the viewport fit.
+            // The camera has always asked for that size (`fitZoom` → `scale` → `frame`), but the
+            // renderer's default branch treats the request as content to fill the canvas and scales
+            // it back up to 100 % — the user's 「动画按 90 %，适应看到的还是全屏」. `neverUpscalesContent`
+            // keeps the requested rect (centred, letterboxed) when it already fits, and still shrinks
+            // it if the canvas is genuinely smaller. The crop workspace had this since 162; ordinary
+            // 适应 needs the same rule now that 213 made it 90 %.
+            let neverUpscales = cropTool.isActive || state.mode == .fit
             let request = LoupeFrameRequest(
                 identity: cacheIdentity,
                 documentHash: "",
@@ -5555,7 +5561,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 canvas: viewport,
                 scale: s.scale,
                 display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
-                neverUpscalesContent: cropTool.isActive)
+                neverUpscalesContent: neverUpscales)
             var options = request.renderOptions()
             options.useCache = useCache
             options.collectHistogram = measure
