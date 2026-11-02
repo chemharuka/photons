@@ -1138,6 +1138,40 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public private(set) var lastTimings: FrameTimings?
     public private(set) var lastPresentError: String?
 
+    // MARK: 235 — what the editor showed before the first frame
+
+    /// The one enum the cold-start acceptance reads. It is deliberately about **what the eye saw**,
+    /// not about which renderer produced it:
+    ///
+    ///   · `blank` — the matte alone (the reported 「首帧空白」);
+    ///   · `previousPhoto` — the previous photo's frame was still on the layer;
+    ///   · `displayThumbnail` — the grid/filmstrip thumbnail stood in;
+    ///   · `lowResFullFrame` — a cached whole-picture backdrop was already available.
+    public enum FirstFrameContent: String, Sendable {
+        case blank
+        case previousPhoto
+        case displayThumbnail
+        case lowResFullFrame
+    }
+
+    /// What was on the canvas when the first frame for the current photo was actually presented.
+    public private(set) var firstFrameContent: FirstFrameContent = .blank
+    /// Intentionally false only in the reverse-gate test: with it off the cold open is the old blank.
+    var armsColdStartPlaceholder = true
+    /// Milliseconds from the photo change (cold open included) to the stand-in being installed.
+    public private(set) var firstFramePlaceholderMilliseconds: Double = 0
+    /// `true` while the stand-in is on screen and no frame has replaced it.
+    public var firstFramePlaceholderVisible: Bool { canvasView.isShowingFirstFramePlaceholder }
+
+    /// The photo the stand-in belongs to, and the request that may still be fetching one.
+    private var firstFramePlaceholderPhoto: String?
+    private var firstFramePlaceholderToken: ThumbnailRequest?
+    /// Set on a photo change; cleared by the first successful `present` for that photo, which is the
+    /// only moment `firstFrameContent` is meaningful.
+    private var awaitingFirstFrameContent = false
+    /// The photo whose frame is actually on the layer (nil before the first present).
+    private var presentedPhoto: String?
+
     /// True between a `scheduleRender` and the first frame it puts up. A cold open presents nothing
     /// until the preview rung lands (there is no buffer to draw), so "first frame" cannot be "index
     /// 0 of a loop" any more — it is the first frame after a request, whenever that arrives.
@@ -4778,6 +4812,77 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let now = CACurrentMediaTime()
         photoSwitchTime = now
         backdropWantedAt = now
+        awaitingFirstFrameContent = true
+        // 235: on a cold start the first frame is still a full development away, so the canvas would
+        // be the matte alone. Put the photo's already-cached thumbnail up **now** — same photo, same
+        // aspect — and let the first `present` replace it. This is the same instant an open/switch is
+        // noticed, so there is no second path that could disagree about which photo is on screen.
+        armFirstFramePlaceholder()
+    }
+
+    /// 235 — the picture between 「enter the editor」 and the first real frame.
+    ///
+    /// `065b` made the *low-resolution whole picture* start at the open, but that render is served by
+    /// the first frame (it needs the frame graph), so it cannot cover the cold start: before the first
+    /// frame there is nothing at all. The grid and filmstrip already have a thumbnail for this photo,
+    /// so this reads that cache synchronously (a few ms, once per open) and draws it aspect-fit.
+    ///
+    /// Two rules keep it a stand-in rather than a second picture path:
+    ///   · it never generates a thumbnail ahead of the frame — cache hit or an `onScreen` request that
+    ///     the grid would have made anyway, never a synchronous render;
+    ///   · the first `present` for this photo takes it down, so it can never outlive the real frame.
+    private func armFirstFramePlaceholder() {
+        guard armsColdStartPlaceholder else { return }
+        // Only the module that is actually on screen: a selection in the grid must not decode a
+        // thumbnail for a canvas nobody is looking at.
+        guard session?.mode == .loupe else { return }
+        // The tests and the bench name their photo through `frameSource`; this stand-in is the
+        // catalog path (grid/filmstrip thumbnails keyed by an `Asset`).
+        guard frameSource == nil, let session, let asset = session.anchorAsset else { return }
+        let identity = ladderIdentity(asset)
+        // A frame for this photo is already on the layer, or the stand-in is already up/on its way.
+        guard presentedPhoto != identity else { return }
+        if firstFramePlaceholderPhoto == identity,
+           canvasView.isShowingFirstFramePlaceholder || firstFramePlaceholderToken != nil {
+            return
+        }
+        // A new photo invalidates the previous stand-in immediately; the old completion is guarded by
+        // `firstFramePlaceholderPhoto`.
+        firstFramePlaceholderToken?.cancel()
+        firstFramePlaceholderToken = nil
+        firstFramePlaceholderPhoto = identity
+        canvasView.hideFirstFramePlaceholder()
+        let started = CACurrentMediaTime()
+        guard let cache = session.thumbnailCache else { return }
+        let provider = ThumbnailProvider.shared(for: cache)
+        if let image = provider.cachedCanvasPlaceholder(for: asset, document: session.edit) {
+            installFirstFramePlaceholder(image, photo: identity, startedAt: started)
+            return
+        }
+        // Cache is cold (a library's first scan): ask for the cheap embedded preview. It shares the
+        // grid's service, so this is an `onScreen` request, not a competing decode of its own. A row
+        // with a handful of bytes cannot carry a preview (the fixture libraries use such rows), so it
+        // asks for nothing rather than queueing a decode that can only fail.
+        guard asset.size > 1024, let url = session.fileURL(for: asset) else { return }
+        let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
+        firstFramePlaceholderToken = provider.request(index: 0, asset: asset, fileURL: url,
+                                                      document: session.edit, tier: tier,
+                                                      spec: .legacy, priority: .onScreen) {
+            [weak self] _, _, image in
+            guard let self else { return }
+            if self.firstFramePlaceholderPhoto == identity { self.firstFramePlaceholderToken = nil }
+            guard let image else { return }
+            self.installFirstFramePlaceholder(image, photo: identity, startedAt: started)
+        }
+    }
+
+    private func installFirstFramePlaceholder(_ image: CGImage, photo: String,
+                                              startedAt: CFTimeInterval) {
+        // The photo may have moved on while the thumbnail was being read or generated.
+        guard firstFramePlaceholderPhoto == photo, presentedPhoto != photo else { return }
+        firstFramePlaceholderToken = nil
+        canvasView.showFirstFramePlaceholder(image)
+        firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
     }
 
     /// Developments the queue has run, requests it has folded into one, deliveries it made and
@@ -5279,6 +5384,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // a model change (a window created with the photo already anchored). Cheap and idempotent: it
         // returns immediately unless the photo actually moved.
         notePhotoIdentity(backdropPhotoKey)
+        // 235: entering the module is itself a cold open even when the identity did not move (the
+        // selection was made in the grid). This is the shipped entry point `showModule` calls, so the
+        // stand-in is armed here as well as on a photo change.
+        armFirstFramePlaceholder()
         guard autoRenderEnabled else { return }
         guard var job = makeJob(kind: .scheduled) else { return }
         // A different photo: the old one's queued developments are waste, and finishing them would
@@ -6173,6 +6282,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 065 (H2) / 065b: a frame landing is the frame graph moving on — the new photo's first frame,
         // which is exactly when the bottom image this photo asked for at the open can be made. The
         // request is answered here, behind that frame, never in front of it.
+        //
+        // 235: the ask must survive the open itself. A cold start can run `cancelPendingFrames` from
+        // the grid-mode observation *after* the open armed it (the module switch and the selection
+        // arrive in two turns), and that function clears `backdropWanted`. The first frame of the
+        // photo is the moment the ask is due, so it is re-stated here — one render, not a loop.
+        if awaitingFirstFrameContent { backdropWanted = true }
         serveWantedBackdrop()
         if let at = photoSwitchTime {
             photoSwitchTime = nil
@@ -6309,6 +6424,29 @@ public final class LoupeController: NSViewController, HeadroomSource {
             retryPresentLater()
             return
         }
+        // 235 — the real frame is on the layer. Record what the eye saw until this instant (the
+        // acceptance's content enum) and then take the stand-in down. Both happen only on a
+        // successful present: a refused drawable must keep the thumbnail, not uncover the matte.
+        let currentPhoto = graphPhoto ?? backdropPhotoKey
+        if awaitingFirstFrameContent {
+            if firstFramePlaceholderPhoto != nil, canvasView.isShowingFirstFramePlaceholder {
+                firstFrameContent = .displayThumbnail
+            } else if let presented = presentedPhoto, presented != currentPhoto {
+                firstFrameContent = .previousPhoto
+            } else if lowResFullFrame != nil {
+                firstFrameContent = .lowResFullFrame
+            } else {
+                firstFrameContent = .blank
+            }
+            awaitingFirstFrameContent = false
+        }
+        if firstFramePlaceholderPhoto != nil {
+            canvasView.hideFirstFramePlaceholder()
+            firstFramePlaceholderToken?.cancel()
+            firstFramePlaceholderToken = nil
+            firstFramePlaceholderPhoto = nil
+        }
+        presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = (frame.texture, graphAtFrame)

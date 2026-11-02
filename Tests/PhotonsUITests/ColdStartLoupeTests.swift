@@ -1,0 +1,260 @@
+import XCTest
+import AppKit
+import CoreGraphics
+import ImageIO
+import PhotonsCatalog
+import PhotonsCore
+@testable import PhotonsUI
+
+/// 235 — 冷启动 → 打开第一张 → 进编辑：首帧不能是空白。
+///
+/// The user's report is about the **process-cold** moment, not 065b's photo switch: on the first open
+/// there is no frame graph yet, so the low-resolution whole picture 065b asks for cannot be made
+/// until the first real frame lands. Between entering the loupe and that frame the canvas was the
+/// matte alone.
+///
+/// The fix under test is the grid/filmstrip thumbnail standing in (aspect-fit) until the first
+/// `present`. The tests assert the two halves the acceptance names:
+///
+///   1. a **cold** open has a non-blank first frame, and the content enum says what it was;
+///   2. the reverse gate: with the arm disabled the same cold open is blank again.
+///
+/// A real RAW (the same fixture the loupe suites use) is referenced, and a thumbnail for the row is
+/// written into the library's cache — that is the state a cold app start finds: no memory, warm disk.
+@MainActor
+final class ColdStartLoupeTests: XCTestCase {
+
+    private var workDir: URL!
+    private var windows: [NSWindow] = []
+
+    override func setUpWithError() throws {
+        workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photons-coldstart-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        for window in windows { window.orderOut(nil) }
+        windows.removeAll()
+        if let workDir { try? FileManager.default.removeItem(at: workDir) }
+        workDir = nil
+    }
+
+    // MARK: - fixtures
+
+    private func fixture(_ name: String) throws -> URL {
+        let candidates = [
+            ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"],
+            NSString(string: "~/Desktop/test/\(name)").expandingTildeInPath,
+        ].compactMap { $0 }
+        for c in candidates where FileManager.default.isReadableFile(atPath: c) {
+            // `PHOTONS_TEST_RAW` names one file; only use it for the first slot.
+            if c.hasSuffix(name) { return URL(fileURLWithPath: c) }
+        }
+        throw XCTSkip("no RAW fixture \(name); set PHOTONS_TEST_RAW")
+    }
+
+    private func pump(_ seconds: TimeInterval = 0.005) {
+        RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    @discardableResult
+    private func waitFor(_ timeout: TimeInterval = 60, _ condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if condition() { return true }
+            pump()
+        }
+        return condition()
+    }
+
+    // MARK: - the cold start
+
+    func testColdOpenShowsACachedThumbnailBeforeTheFirstFrame() throws {
+        let raw = try fixture("L1030433.dng")
+        let (editor, assets) = try makeEditor(files: [raw])
+        let loupe = editor.rootView.loupeController
+        XCTAssertNil(loupe.lastFrame, "a cold controller has presented nothing")
+
+        // Settle the selection while the grid is still the visible module, then enter the loupe — the
+        // user's path (a double-click) publishes these two facts in the same order.
+        editor.session.selectOnly(assets[0].id)
+        pump(0.05)
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+
+        // The arm is synchronous, so the stand-in must be up before any decode can finish.
+        XCTAssertTrue(loupe.firstFramePlaceholderVisible,
+                      "cold open: the canvas had no thumbnail before the first frame")
+        let placeholderMs = loupe.firstFramePlaceholderMilliseconds
+        XCTAssertGreaterThanOrEqual(placeholderMs, 0)
+
+        // The real frame eventually replaces it; the content enum records what was there first.
+        guard waitFor(90, { loupe.lastFrame != nil }) else {
+            return XCTFail("no first frame (last error: \(loupe.lastPresentError ?? "—"))")
+        }
+        XCTAssertEqual(loupe.firstFrameContent, .displayThumbnail,
+                       "the first presented frame replaced the thumbnail; until then it was blank")
+        XCTAssertFalse(loupe.firstFramePlaceholderVisible, "the stand-in outlived the real frame")
+
+        guard waitFor(90, { loupe.lowResFullFrame != nil }) else {
+            return XCTFail("the open's low-resolution whole picture never arrived")
+        }
+        print(String(format: "235 cold open: stand-in %.1f ms · first real frame %.1f ms · low-res %.1f ms · first content %@",
+                     placeholderMs,
+                     loupe.lastPhotoSwitchFirstFrameMilliseconds,
+                     loupe.lastPhotoSwitchBackdropMilliseconds,
+                     loupe.firstFrameContent.rawValue))
+    }
+
+    /// 反向门: the same cold open, with the arm switched off, is the pre-fix blank canvas.
+    ///
+    /// This is the assertion that goes red if the arm call is deleted: the positive test above cannot
+    /// pass on a blank canvas, and this one pins the exact mechanism it depends on.
+    func testWithoutTheColdStartArmTheCanvasIsBlank() throws {
+        let raw = try fixture("L1030433.dng")
+        let (editor, assets) = try makeEditor(files: [raw])
+        let loupe = editor.rootView.loupeController
+        loupe.armsColdStartPlaceholder = false
+
+        editor.session.selectOnly(assets[0].id)
+        pump(0.05)
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+
+        XCTAssertFalse(loupe.firstFramePlaceholderVisible,
+                       "the reverse gate did not disable the arm")
+
+        guard waitFor(90, { loupe.lastFrame != nil }) else {
+            return XCTFail("no first frame (last error: \(loupe.lastPresentError ?? "—"))")
+        }
+        XCTAssertEqual(loupe.firstFrameContent, .blank,
+                       "without the arm the first frame had nothing to stand in")
+    }
+
+    /// The control the acceptance compares against: a **running** switch must arm the same stand-in
+    /// immediately. 065b's low-resolution replacement is unchanged — this only says the first thing
+    /// on screen is never the previous photo's blank/old pixels.
+    func testRunningPhotoSwitchAlsoShowsTheNewThumbnailAtOnce() throws {
+        let first = try fixture("L1030433.dng")
+        let second = try fixture("L1030402.dng")
+        let (editor, assets) = try makeEditor(files: [first, second])
+        let loupe = editor.rootView.loupeController
+
+        editor.session.selectOnly(assets[0].id)
+        pump(0.05)
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+        XCTAssertTrue(waitFor(90, { loupe.lastFrame != nil }), "no first frame")
+        XCTAssertTrue(waitFor(90, { loupe.lowResFullFrame != nil }), "no cold low-res picture")
+        let cold = loupe.lastPhotoSwitchBackdropMilliseconds
+
+        let frameBefore = loupe.lastPhotoSwitchFirstFrameMilliseconds
+        editor.session.activate(assets[1].id)
+        editor.rootView.showModule(for: .loupe)
+        XCTAssertTrue(loupe.firstFramePlaceholderVisible,
+                      "a photo switch must put the new thumbnail up at once")
+
+        XCTAssertTrue(waitFor(90, { loupe.lastPhotoSwitchFirstFrameMilliseconds != frameBefore }),
+                      "the switched photo never presented")
+        XCTAssertTrue(waitFor(90, {
+            loupe.lastPhotoSwitchBackdropMilliseconds > 0
+                && loupe.lastPhotoSwitchBackdropMilliseconds != cold
+        }), "the switched photo's low-res picture never arrived")
+        XCTAssertEqual(loupe.firstFrameContent, .displayThumbnail)
+        // The acceptance's T2 rule: the cold open may not be more than 1.5× the running switch.
+        let warm = loupe.lastPhotoSwitchBackdropMilliseconds
+        let ratio = warm > 0 ? cold / warm : 0
+        XCTAssertLessThanOrEqual(ratio, 1.5,
+                                 "cold low-res \(cold) ms vs running switch \(warm) ms")
+        print(String(format: "235 running switch: stand-in %.1f ms · first real frame %.1f ms · low-res %.1f ms · cold low-res %.1f ms · cold/warm %.2f",
+                     loupe.firstFramePlaceholderMilliseconds,
+                     loupe.lastPhotoSwitchFirstFrameMilliseconds,
+                     warm, cold, ratio))
+    }
+
+    // MARK: - a library whose row points at a real file, with a warm thumbnail cache
+
+    private struct ColdLibrary {
+        let package: URL
+        let assets: [Asset]
+    }
+
+    private func makeLibrary(files: [URL]) throws -> ColdLibrary {
+        _ = NSApplication.shared
+        let package = workDir.appendingPathComponent("Cold.\(LibraryLayout.packageExtension)")
+        let catalog = try Catalog.create(at: package)
+        let source = workDir.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let root = try catalog.ensureRoot(for: source, mode: .reference)
+
+        var ids: [String] = []
+        for (index, file) in files.enumerated() {
+            let name = "cold\(index).dng"
+            let destination = source.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: file)
+            let size = try pixelSize(of: file)
+            let id = UUID().uuidString
+            ids.append(id)
+            try catalog.dbQueue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO assets (id, source_root_id, rel_path, filename, ext, kind, size, mtime,
+                                        content_hash, width, height, camera_make, camera_model, lens,
+                                        imported_at, missing)
+                    VALUES ('\(id)', '\(root.id)', '\(name)', '\(name)', 'dng', 'raw', 1, 0,
+                            '\(UUID().uuidString)',
+                            \(size.width), \(size.height),
+                            'Leica Camera AG', 'Leica SL3', 'Vario-Elmarit-SL 24-90',
+                            '2026-11-02T00:00:00Z', 0)
+                    """)
+            }
+        }
+        let assets = try ids.map { try XCTUnwrap(try catalog.asset(id: $0)) }
+        return ColdLibrary(package: package, assets: assets)
+    }
+
+    private func makeEditor(files: [URL]) throws -> (EditorWindowController, [Asset]) {
+        let library = try makeLibrary(files: files)
+        let editor = EditorWindowController(size: NSSize(width: 1200, height: 800))
+        windows.append(editor.window!)
+        try editor.openLibrary(at: library.package)
+        let cache = try XCTUnwrap(editor.session.thumbnailCache,
+                                  "the library has no thumbnail cache")
+        for asset in library.assets { try seedPreview(asset, cache: cache) }
+
+        editor.window?.orderFront(nil)
+        editor.window?.contentView?.layoutSubtreeIfNeeded()
+        editor.rootView.needsLayout = true
+        editor.rootView.layoutSubtreeIfNeeded()
+        pump(0.05)
+        return (editor, library.assets)
+    }
+
+    /// A small, aspect-correct JPEG, written under the legacy preview key the first-frame stand-in
+    /// falls back to. The grid would have this for a library opened before; here it is seeded so the
+    /// test measures the cold-code path rather than a RAW development.
+    private func seedPreview(_ asset: Asset, cache: ThumbnailCache) throws {
+        let width = 640, height = 427
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height,
+                                              bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(red: 0.72, green: 0.45, blue: 0.22, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+        let data = try XCTUnwrap(NSBitmapImageRep(cgImage: image)
+            .representation(using: .jpeg, properties: [.compressionFactor: 0.8]))
+        let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
+        try cache.store(data, for: .preview(contentHash: asset.contentHash, tier: tier))
+    }
+
+    private func pixelSize(of url: URL) throws -> ImageSize {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let width = try XCTUnwrap(properties[kCGImagePropertyPixelWidth] as? Int)
+        let height = try XCTUnwrap(properties[kCGImagePropertyPixelHeight] as? Int)
+        return ImageSize(width: width, height: height)
+    }
+}
