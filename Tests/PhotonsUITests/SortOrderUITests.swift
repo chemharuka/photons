@@ -363,8 +363,11 @@ final class SortOrderUITests: XCTestCase {
         let newest = try XCTUnwrap(library.idOf["L1030408.dng"].flatMap { id in
             session.assets.first { $0.id == id }
         })
-        let tier = harness.grid.currentThumbnailTier
-        let pixelsBefore = try XCTUnwrap(provider.memoryImage(contentHash: newest.contentHash, tier: tier),
+        // 218/223: the grid, the list and the filmstrip share the **hd** key, and the memory layer
+        // is keyed by that digest plus the display size — the old `preview` key is a different key
+        // family and is never written by a grid request, so probing it only ever read `nil`.
+        let keyBefore = ThumbnailProvider.hdKey(for: newest, document: session.edit)
+        let pixelsBefore = try XCTUnwrap(provider.memoryImage(for: keyBefore, display: nil),
                                          "缩略图没有进内存层，后面的「不重解码」无从谈起")
         let hashBefore = Self.pixelHash(pixelsBefore)
 
@@ -379,7 +382,8 @@ final class SortOrderUITests: XCTestCase {
         harness.settle(10)
 
         let statsAfter = harness.grid.thumbnailStats
-        let pixelsAfter = try XCTUnwrap(provider.memoryImage(contentHash: newest.contentHash, tier: tier))
+        let pixelsAfter = try XCTUnwrap(provider.memoryImage(for: keyBefore, display: nil),
+                                        "排序之后内存层丢了这一帧")
         let hashAfter = Self.pixelHash(pixelsAfter)
 
         XCTAssertEqual(harness.gridOrder.count, gridCountBefore)
