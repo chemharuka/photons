@@ -4,16 +4,24 @@ import Metal
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 260 — the transform-chain guard matrix.
+/// 260 — the transform-chain guard matrix; 268 — ① is measured in **source** pixels.
 ///
 /// This suite is a **measurement**, not a fix: it renders every combination of the four dimensions the
 /// user's report names (straighten × crop × zoom × decode rung) and asserts three independent walks
-/// through the same document agree in S5 device pixels:
+/// through the same document agree:
 ///
 ///   1. **render** — the markers actually drawn in the frame are where S1 → S3 (`CropGeometry`) →
-///      S5 (`LoupeMapping`) puts them;
-///   2. **overlay** — the crop frame the crop tool lays out is the same S2 → S5 rectangle;
-///   3. **hit test** — `LoupeMapping.sourcePoint` agrees with S5 → S3 → S1 walked step by step.
+///      S5 (`LoupeMapping`) puts them. The gate is **half a source pixel** of the rung the renderer
+///      decoded, converted to S5 by the current projection (`0.5 × canvasPerSource / decodeScale`),
+///      because the canvas and window are integers (D1) and the picture may therefore sit half its
+///      own pixel off the continuous projection. The tolerance is printed per group;
+///   2. **overlay** — the crop frame the crop tool lays out is the same S2 → S5 rectangle (0.5 S5 px);
+///   3. **hit test** — `LoupeMapping.sourcePoint` agrees with S5 → S3 → S1 walked step by step
+///      (0.5 S5 px).
+///
+/// 268 also recomputes `plan`'s integer phase (`round`, `ceil`, the truncated `(baseline − frame)/2`
+/// and the letterbox `(canvas − content)/2`) and asserts the measured offset equals it within
+/// 0.05 source px, so the ① residual is shown to be integer allocation rather than a mapping error.
 ///
 /// The point of the table is to name the scale factor that is off, not to bless the current numbers.
 /// The three historical lesions (`frameOrigin` letterbox double-add, rung-size mix-up, a second crop
@@ -86,6 +94,12 @@ final class FrameTransformMatrixTests: XCTestCase {
     private static let source = ImageSize(width: 640, height: 480)
     private static let viewport = ImageSize(width: 320, height: 240)
     private static let tolerance = 0.5
+
+    /// Diagnostics go to stderr: XCTest's own failure lines do too, so `swift test` output keeps the
+    /// per-group table in order instead of losing a buffered stdout chunk on exit.
+    private func note(_ message: String) {
+        FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
+    }
 
     /// Marker centres in the **turned** S1 frame (1/10 … 9/10 on both axes). A regular grid is what
     /// lets a crop cut some of them off without losing the measurement: every remaining marker is an
@@ -243,6 +257,13 @@ final class FrameTransformMatrixTests: XCTestCase {
         var rgba = [Float16](repeating: 0, count: width * height * 4)
         for i in stride(from: 3, to: rgba.count, by: 4) { rgba[i] = 1 }
         let radius = max(2, Int((0.03 * Double(min(width, height))).rounded()))
+        // A smooth Gaussian bump rather than a hard-edged square: the renderer resamples with a 2×2
+        // bilinear kernel, and a hard edge under a sub-degree rotation biases the measured centroid
+        // by ~0.1 source px (which would show up as a transform error). A band-limited marker keeps
+        // the centroid of a linear resample equal to the transformed centre.
+        let sigma = Double(radius) / 2
+        let reach = max(2, Int((3 * sigma).rounded(.up)))
+        let inverseTwoSigmaSquared = 1 / (2 * sigma * sigma)
         let inverseTurns = (4 - (quarterTurns % 4 + 4) % 4) % 4
         var centres: [(x: Double, y: Double)] = []
         for marker in Self.markers {
@@ -250,10 +271,13 @@ final class FrameTransformMatrixTests: XCTestCase {
                                           quarterTurns: inverseTurns)
             let cx = Int((upright.x * Double(width)).rounded())
             let cy = Int((upright.y * Double(height)).rounded())
-            for y in max(0, cy - radius)...min(height - 1, cy + radius) {
-                for x in max(0, cx - radius)...min(width - 1, cx + radius) {
+            for y in max(0, cy - reach)...min(height - 1, cy + reach) {
+                for x in max(0, cx - reach)...min(width - 1, cx + reach) {
+                    let ddx = Double(x - cx), ddy = Double(y - cy)
+                    let value = Float16(exp(-(ddx * ddx + ddy * ddy) * inverseTwoSigmaSquared))
+                    guard value > 0.02 else { continue }
                     let o = (y * width + x) * 4
-                    rgba[o] = 1; rgba[o + 1] = 1; rgba[o + 2] = 1; rgba[o + 3] = 1
+                    rgba[o] = value; rgba[o + 1] = value; rgba[o + 2] = value; rgba[o + 3] = 1
                 }
             }
             // The marker's physical centre is the centre of its pixel block (`+0.5`), which is the
@@ -323,6 +347,93 @@ final class FrameTransformMatrixTests: XCTestCase {
         return edit
     }
 
+    private struct PlanPhase {
+        let decodedOriented: ImageSize
+        let cropOrigin: (x: Double, y: Double)
+        let cropSpan: (x: Double, y: Double)
+        /// The picture's own grid as S0 walks it, in content pixels (`frameSize` in the plan).
+        let frameContent: (width: Double, height: Double)
+        /// The integer letterbox `(canvas − content)/2`.
+        let origin: (x: Double, y: Double)
+        /// `plan.frameOrigin` — `windowOrigin − inset`, the same value S0 is handed.
+        let frameOrigin: (x: Double, y: Double)
+        let cosine: Double
+        let sine: Double
+        let hasAngle: Bool
+
+        init(edit: EditModel, decoded: ImageSize, scale: Double, viewport: ImageSize,
+             result: RenderResult) {
+            let oriented = edit.geometry.orientedSource(decoded)
+            let crop = edit.geometry.renderCrop(source: decoded)
+            self.decodedOriented = oriented
+            self.cropOrigin = (crop.left * Double(oriented.width),
+                               crop.top * Double(oriented.height))
+            self.cropSpan = (crop.width * Double(oriented.width),
+                             crop.height * Double(oriented.height))
+            // Recompute `plan`'s integer walk, one rounding at a time:
+            //   frame    = round(cropPixels · scale)
+            //   baseline = round(ceil(canvasExtent) · scale)      (only with an angle)
+            //   inset    = (baseline − frame) / 2                 (integer, truncated)
+            //   origin   = (canvas − content) / 2                 (integer, truncated)
+            let cropPixels = CropMath.frameSize(crop, in: oriented, allowsOutsideSource: true)
+            let frameW = max(1, Int((Double(cropPixels.width) * scale).rounded()))
+            let frameH = max(1, Int((Double(cropPixels.height) * scale).rounded()))
+            let straighten = edit.geometry.straightenDegrees
+            let expanded = straighten != 0
+                ? CropMath.canvasSize(crop: crop, in: decoded,
+                                      straightenDegrees: straighten,
+                                      quarterTurns: edit.geometry.quarterTurns,
+                                      allowsOutsideSource: true)
+                : nil
+            let baselineW = expanded.map {
+                max(1, Int((Double($0.width) * scale).rounded()))
+            } ?? frameW
+            let baselineH = expanded.map {
+                max(1, Int((Double($0.height) * scale).rounded()))
+            } ?? frameH
+            // `plan`'s content is the rounded continuous content; `requested` is what the window
+            // asked for. Their ratio is the letterbox squeeze `k` applied to `frameSize`.
+            let transform = FrameTransform(
+                source: oriented, crop: crop,
+                straightenDegrees: straighten,
+                quarterTurns: 0, contentScale: scale, viewport: viewport,
+                zoom: scale, cameraWindowInS5: result.outputWindow,
+                allowsUpscale: false)
+            let kx = Double(result.content.width) / Double(max(transform.requestedInS5.width, 1))
+            let ky = Double(result.content.height) / Double(max(transform.requestedInS5.height, 1))
+            self.frameContent = (Double(frameW) * kx, Double(frameH) * ky)
+            self.origin = (Double((viewport.width - result.content.width) / 2),
+                           Double((viewport.height - result.content.height) / 2))
+            let windowOrigin = (Double(result.outputWindow?.x ?? 0) * kx,
+                                Double(result.outputWindow?.y ?? 0) * ky)
+            let inset = (Double((baselineW - frameW) / 2), Double((baselineH - frameH) / 2))
+            self.frameOrigin = (expanded == nil ? windowOrigin.0 : windowOrigin.0 - inset.0 * kx,
+                                expanded == nil ? windowOrigin.1 : windowOrigin.1 - inset.1 * ky)
+            let theta = straighten * .pi / 180
+            self.cosine = cos(theta)
+            self.sine = sin(theta)
+            let quarter = straighten / 90
+            self.hasAngle = straighten.isFinite
+                && abs(quarter - quarter.rounded()) >= 1e-9
+        }
+
+        /// Where `plan` + `s0_geometry` put a point of the turned decoded source, in S5.
+        /// This is the **integer** walk the renderer actually executes.
+        func view(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
+            let p = (x * Double(decodedOriented.width), y * Double(decodedOriented.height))
+            var fx = (p.0 - cropOrigin.x) * frameContent.width / max(cropSpan.x, 1e-9)
+            var fy = (p.1 - cropOrigin.y) * frameContent.height / max(cropSpan.y, 1e-9)
+            if hasAngle {
+                let ox = fx - frameContent.width / 2, oy = fy - frameContent.height / 2
+                let rx = ox * cosine - oy * sine
+                let ry = ox * sine + oy * cosine
+                fx = rx + frameContent.width / 2
+                fy = ry + frameContent.height / 2
+            }
+            return (origin.x + fx - frameOrigin.x, origin.y + fy - frameOrigin.y)
+        }
+    }
+
     private func measure(angle: Angle, crop: Crop, zoom: Zoom, rung: Rung,
                          markers: [(x: Double, y: Double)],
                          graph: RenderGraph) throws -> [Violation] {
@@ -342,40 +453,118 @@ final class FrameTransformMatrixTests: XCTestCase {
         let result = try graph.render(edit, options: options)
         let display = try XCTUnwrap(result.display, "\(angle) \(crop) \(zoom) \(rung): no pixels")
         var violations: [Violation] = []
+        let decodedRaw = ImageSize(
+            width: max(1, Int((Double(Self.source.width) * ds).rounded())),
+            height: max(1, Int((Double(Self.source.height) * ds).rounded())))
+        let phase = PlanPhase(edit: edit, decoded: decodedRaw,
+                              scale: walk.framing.renderScale(of: state, decodeScale: ds),
+                              viewport: Self.viewport, result: result)
 
         // ① the rendered markers against S1 → S3 → S5.
+        //
+        // 268 — the tolerance is a **source-pixel** one, not an S5 one. The renderer's canvas and
+        // window are integers (D1), so the picture may sit up to half a pixel of its own grid away
+        // from the continuous projection; at 200 % of a 25 % rung that half pixel is 4 S5 px.
+        // `ratio` is S5 px per decoded (rung S1) px, computed from the current projection, and the
+        // gate allows half of one decoded pixel: `0.5 × ratio` S5 px.
+        let ratio = walk.canvasPerSource / max(rung.scale, 1e-9)
+        let tolerance = 0.5 * ratio
         let blobs = self.blobs(in: display)
         var measured = 0
-        var worstRender: (dx: Double, dy: Double, detail: String)?
+        var sumRaw = (x: 0.0, y: 0.0)
+        var sumPhase = (x: 0.0, y: 0.0)
+        var sumCorrected = (x: 0.0, y: 0.0)
+        var sumCorrectedSquared = 0.0
+        let markerRadius = 0.03 * Double(min(decodedRaw.width, decodedRaw.height))
+        let cropGuardX = markerRadius / max(phase.cropSpan.x, 1e-9) + 0.01
+        let cropGuardY = markerRadius / max(phase.cropSpan.y, 1e-9) + 0.01
+        let viewMargin = max(30.0, markerRadius * ratio + 4)
         for marker in markers {
             let f = walk.frameNormalized(sourceX: marker.x, sourceY: marker.y)
-            guard f.x > 0.055, f.x < 0.945, f.y > 0.055, f.y < 0.945 else { continue }
+            guard f.x > cropGuardX, f.x < 1 - cropGuardX,
+                  f.y > cropGuardY, f.y < 1 - cropGuardY else { continue }
             guard marker.x > 0.02, marker.x < 0.98 else { continue }
             guard marker.y > 0.02, marker.y < 0.98 else { continue }
             let expected = walk.view(sourceX: marker.x * Double(cg.source.width),
                                      sourceY: marker.y * Double(cg.source.height))
             // Keep the whole marker block inside the viewport: a clipped block has a biased centroid,
             // which would be measured as a transform error.
-            guard expected.x > 30, expected.x < Double(Self.viewport.width) - 30,
-                  expected.y > 30, expected.y < Double(Self.viewport.height) - 30 else { continue }
+            guard expected.x > viewMargin, expected.x < Double(Self.viewport.width) - viewMargin,
+                  expected.y > viewMargin, expected.y < Double(Self.viewport.height) - viewMargin
+            else { continue }
             guard let blob = blobs.min(by: {
                 hypot($0.x - expected.x, $0.y - expected.y)
                     < hypot($1.x - expected.x, $1.y - expected.y)
             }) else { continue }
-            let distance = hypot(blob.x + 0.5 - expected.x, blob.y + 0.5 - expected.y)
+            let measuredX = blob.x + 0.5, measuredY = blob.y + 0.5
+            let distance = hypot(measuredX - expected.x, measuredY - expected.y)
             guard distance < 12 else { continue }
             measured += 1
-            let dx = blob.x + 0.5 - expected.x, dy = blob.y + 0.5 - expected.y
-            if abs(dx) > Self.tolerance || abs(dy) > Self.tolerance {
-                if worstRender == nil
-                    || hypot(dx, dy) > hypot(worstRender!.dx, worstRender!.dy) {
-                    worstRender = (dx, dy, String(format: "marker (%.2f,%.2f)", marker.x, marker.y))
-                }
-            }
+            // The plan's own integer walk — recomputed above from `ceil`/`round`/integer division —
+            // is where the renderer actually puts the picture.
+            let plan = phase.view(sourceX: marker.x, sourceY: marker.y)
+            sumRaw.x += measuredX - expected.x
+            sumRaw.y += measuredY - expected.y
+            sumPhase.x += plan.x - expected.x
+            sumPhase.y += plan.y - expected.y
+            sumCorrected.x += measuredX - plan.x
+            sumCorrected.y += measuredY - plan.y
+            sumCorrectedSquared += pow(measuredX - plan.x, 2) + pow(measuredY - plan.y, 2)
         }
-        if let worst = worstRender {
-            violations.append(Violation(check: "①渲染帧", dx: worst.dx, dy: worst.dy,
-                                        detail: "\(measured) 个标记 · \(worst.detail)"))
+        if measured > 0 {
+            let n = Double(measured)
+            let meanRaw = (x: sumRaw.x / n, y: sumRaw.y / n)
+            let meanPhase = (x: sumPhase.x / n, y: sumPhase.y / n)
+            let meanCorrected = (x: sumCorrected.x / n, y: sumCorrected.y / n)
+            let rmsCorrected = sqrt(sumCorrectedSquared / n) / ratio
+            note(String(format: "[268] %@ / %@ / %@ / rung %@ · 容差 = 0.5 × ratio %.4f = %.4f px"
+                          + " · 实测相位 (%+.4f,%+.4f) src px · plan 相位 (%+.4f,%+.4f) src px"
+                          + " · 残差 (%+.4f,%+.4f) src px · RMS %.4f src px · %d 标记",
+                        angle.name, crop.name, zoom.name, rung.description,
+                        ratio, tolerance,
+                        meanRaw.x / ratio, meanRaw.y / ratio,
+                        meanPhase.x / ratio, meanPhase.y / ratio,
+                        meanCorrected.x / ratio, meanCorrected.y / ratio,
+                        rmsCorrected, measured))
+            // ① the main gate: half a decoded pixel, in S5 after the dimension conversion.
+            if abs(meanCorrected.x) > tolerance || abs(meanCorrected.y) > tolerance {
+                violations.append(Violation(
+                    check: "①渲染帧", dx: meanCorrected.x, dy: meanCorrected.y,
+                    detail: String(format: "%d 个标记 · %.4f src px · 容差 %.4f px",
+                                   measured,
+                                   max(abs(meanCorrected.x), abs(meanCorrected.y)) / ratio,
+                                   tolerance)))
+            }
+            // 268 §4 — a spread larger than half-pixel quantisation can explain must not be
+            // swallowed. RMS keeps one marker's sampling noise from masquerading as a transform bug,
+            // while a real offset still fails: a uniform 1 src px shift gives RMS = 1.
+            if rmsCorrected > 0.75 {
+                violations.append(Violation(
+                    check: "①渲染帧-超界", dx: meanCorrected.x, dy: meanCorrected.y,
+                    detail: String(format: "RMS %.3f src px > 0.75", rmsCorrected)))
+            }
+            // 268 §3 — independent corroboration: the measured deviation is the integer phase,
+            // recomputed above step by step. ±0.05 src px is the measurement floor of the marker
+            // centroid, not a relaxation of the transform tolerance.
+            let corroboration = max(abs(meanRaw.x - meanPhase.x),
+                                    abs(meanRaw.y - meanPhase.y)) / ratio
+            if corroboration > 0.05 {
+                violations.append(Violation(
+                    check: "①相位佐证", dx: meanRaw.x - meanPhase.x, dy: meanRaw.y - meanPhase.y,
+                    detail: String(format: "实测 − plan 相位 = %.4f src px > 0.05", corroboration)))
+            }
+            // 268 §2 — the reverse gate: move the expectation one **source** pixel (the decoded
+            // rung's own pixel). The tolerance must not be wide enough to accept that.
+            let shifted = (x: abs(meanCorrected.x - ratio), y: abs(meanCorrected.y - ratio))
+            if shifted.x <= tolerance || shifted.y <= tolerance {
+                violations.append(Violation(
+                    check: "①反向门", dx: shifted.x, dy: shifted.y,
+                    detail: "1 源像素平移没有变红 · 容差 \(tolerance) px"))
+            }
+        } else {
+            note(String(format: "[268] %@ / %@ / %@ / rung %@ · 容差 = 0.5 × ratio %.4f = %.4f px"
+                          + " · 无可见标记（②③ 仍已检查）",
+                        angle.name, crop.name, zoom.name, rung.description, ratio, tolerance))
         }
 
         // ② the crop overlay's four corners against S2 → S5.
@@ -409,10 +598,6 @@ final class FrameTransformMatrixTests: XCTestCase {
         for (index, p) in points.enumerated() {
             let got = walk.mapping.sourcePoint(viewX: p.0, viewY: p.1)
             let expected = walk.source(viewX: p.0, viewY: p.1)
-            if angle.name == "1°" && crop.name == "全幅" && zoom.name == "100%" && index == 2 {
-                print("[260-debug1] got \(got) expected \(expected) window \(walk.s3Window)"
-                      + " scale \(walk.canvasPerSource) cropLeft \(walk.mapping.cropLeft)")
-            }
             let dx = got.x - expected.x, dy = got.y - expected.y
             if abs(dx) > Self.tolerance || abs(dy) > Self.tolerance {
                 let label = "point \(index) (\(Int(p.0)),\(Int(p.1)))"
@@ -452,21 +637,21 @@ final class FrameTransformMatrixTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(started)
         var failing = 0
         for result in results where !result.violations.isEmpty {
-            // 261 — all three walks are assertions now. 260 exempted ① and ③ (they were only
-            // measured, so that lane could ship a table); the transform exit is what lets them be
-            // asserted at the same 0.5 px the overlay already had. No dimension and no tolerance was
-            // relaxed to get here: `tolerance` is still 0.5 and the grid is still 180 combos.
+            // 261 made all three walks assertions; 268 moved ① to its own unit — half a **source**
+            // pixel of the decoded rung, converted to S5 by the current projection — while ② and ③
+            // stay at the original 0.5 S5 px. No dimension or fixture grid was reduced: still
+            // 180 combinations (5 angles × 4 crops × 3 zooms × 3 rungs).
             for violation in result.violations {
                 failing += 1
-                print("[260] ✗ \(result.angle) / \(result.crop) / \(result.zoom)"
-                      + " / rung \(result.rung) · \(violation)")
+                note("[260] ✗ \(result.angle) / \(result.crop) / \(result.zoom)"
+                     + " / rung \(result.rung) · \(violation)")
             }
         }
-        print(String(format: "[260] rung %.2g · %d combos · %d failing · %.2f s (%.1f ms/combo)",
-                     rung.scale, results.count, failing, elapsed,
-                     elapsed * 1000 / Double(max(results.count, 1))))
+        note(String(format: "[260] rung %.2g · %d combos · %d failing · %.2f s (%.1f ms/combo)",
+                    rung.scale, results.count, failing, elapsed,
+                    elapsed * 1000 / Double(max(results.count, 1))))
         XCTAssertEqual(failing, 0,
-                       "261: render/overlay/hit-test deviate by more than \(Self.tolerance) px in "
+                       "268: render (half a source pixel), overlay and hit test (0.5 S5 px) deviate in "
                        + "\(failing) places at rung \(rung); see the [260] ✗ rows above")
     }
 
