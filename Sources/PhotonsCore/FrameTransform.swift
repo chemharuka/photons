@@ -34,14 +34,14 @@ public struct FrameTransform: Sendable, Equatable {
     public let quarterTurns: Int
     public let straightenDegrees: Double
     public let perspective: PerspectiveMap?
-    /// The rung the renderer actually decodes at. S3 is the **decoded** frame canvas, because that
-    /// is the pixel grid `RenderGraph` allocates and rounds (`round(crop · decoded)`), and a
-    /// full-resolution S3 would disagree with the renderer by up to one decoded pixel at 25 %.
+    /// The rung the renderer actually decodes at. It drives `decodedSource` / `imageScale`; S3 itself
+    /// is the **full-resolution** frame canvas (see the init's `cg` comment: building the canvas on
+    /// the rung grid let its `ceil` and inset drift by up to half a decoded pixel × the zoom).
     public let decodeScale: Double
     /// The decoded S1 frame.
     public let decodedSource: ImageSize
 
-    /// S3 — the frame canvas, in decoded pixels.
+    /// S3 — the frame canvas, in S1 pixels (full resolution).
     public let canvasS3: ImageSize
     /// S2 — the crop frame's bounding box in S3. At a right angle its origin is the frame's own
     /// top-left; at an angle the frame is a quad (`frameQuadInS3`) and this is its AABB.
@@ -49,7 +49,7 @@ public struct FrameTransform: Sendable, Equatable {
     /// The crop frame's four corners in S3, top-left, top-right, bottom-right, bottom-left.
     public let frameQuadInS3: [Point]
 
-    /// S1 px → S3 px (crop · flips · straighten · perspective · decode rung).
+    /// S1 px → S3 px (crop · flips · straighten · perspective).
     public let s1ToS3: Matrix3
     public let s3ToS1: Matrix3
 
@@ -90,8 +90,6 @@ public struct FrameTransform: Sendable, Equatable {
     private let contentPerRequested: Double
     /// The crop's top-left in S1 (full-resolution, turned).
     private let cropOrigin: Point
-    /// The same corner on the renderer's decoded grid, used only to compose the matrices.
-    private let decodedCropOrigin: Point
 
     /// S5 px per **S1** px — the scale `RenderGraph` calls `imageScale`.
     public var imageScale: Double {
@@ -165,27 +163,11 @@ public struct FrameTransform: Sendable, Equatable {
         let frame = cg.frameSize
         self.cropOrigin = Point(crop.left * Double(source.width),
                                 crop.top * Double(source.height))
-        self.decodedCropOrigin = Point(cg.frameOriginInPhoto.x, cg.frameOriginInPhoto.y)
-        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner -> Point in
-            let p = cg.canvasPoint(frameX: corner.0 * Double(frame.width),
-                                   frameY: corner.1 * Double(frame.height))
-            return Point(p.x, p.y)
-        }
-        self.frameQuadInS3 = corners
-        let minX = corners.map(\.x).min() ?? 0
-        let minY = corners.map(\.y).min() ?? 0
-        let maxX = corners.map(\.x).max() ?? Double(frame.width)
-        let maxY = corners.map(\.y).max() ?? Double(frame.height)
-        self.frameInS3 = CGRect(x: minX, y: minY,
-                                width: max(0, maxX - minX), height: max(0, maxY - minY))
 
         // S1 full px → decoded px, split per axis so a `round` on either dimension cannot leak in.
         let sx = Double(decoded.width) / Double(max(source.width, 1))
         let sy = Double(decoded.height) / Double(max(source.height, 1))
         let toDecoded = Matrix3(rows: [[sx, 0, 0], [0, sy, 0], [0, 0, 1]])
-        let fromDecoded = Matrix3(rows: [[1 / max(sx, 1e-12), 0, 0],
-                                         [0, 1 / max(sy, 1e-12), 0],
-                                         [0, 0, 1]])
         let photoToCanvas: Matrix3
         if let perspective = self.perspective {
             // 246's composed map is already the one definition of photo-normalized → canvas-normalized.
@@ -200,25 +182,44 @@ public struct FrameTransform: Sendable, Equatable {
                                           [0, 0, 1]])
             let flip = Self.cropFlipMatrix(crop: crop, decoded: decoded,
                                            flipH: flipHorizontal, flipV: flipVertical)
-            photoToCanvas = toCanvas * Self.matrix(pc.forward) * flip * fromPhoto
+            photoToCanvas = toCanvas * Self.matrix(pc.forward) * flip * fromPhoto * toDecoded
         } else {
-            // Sample `CropGeometry.canvasPoint` on the affine basis: the formula stays in
-            // `CropGeometry`; this file only assembles its matrix.
-            let a = cg.canvasPoint(frameX: 0, frameY: 0)
-            let bx = cg.canvasPoint(frameX: 1, frameY: 0)
-            let by = cg.canvasPoint(frameX: 0, frameY: 1)
-            let frameMatrix = Matrix3(rows: [[bx.x - a.x, by.x - a.x, a.x],
-                                             [bx.y - a.y, by.y - a.y, a.y],
-                                             [0, 0, 1]])
-            let cropToFrame = Matrix3(rows: [[1, 0, -decodedCropOrigin.x],
-                                             [0, 1, -decodedCropOrigin.y],
-                                             [0, 0, 1]])
-            let flip = Self.frameFlipMatrix(width: Double(frame.width), height: Double(frame.height),
+            // 273 — the kernel's own walk (`s0_geometry.metal`), in **photograph** pixels:
+            //
+            //     photo  = flip(P, source)              // mirror about the photo centre FIRST
+            //     canvas = inset + (R(θ, P)·photo − cropOrigin)
+            //
+            // The order is the kernel's, not a free choice: `s0_geometry` flips the photo-normalized
+            // sample and *then* turns it about `orientedSource/2`, and a mirror composed with a turn
+            // about the same point is `R·F = F·R⁻¹` — reversing them mirrors the angle's sign. At
+            // θ = 0 the two spellings coincide, which is why a flip-only document cannot see it
+            // (measured at 7.5°, 640×480, off-centre crop: 50.1 px apart; see local/REPORT.md).
+            let centre = Point(Double(source.width) / 2, Double(source.height) / 2)
+            let inset = Point(Double(cg.canvasInset.x), Double(cg.canvasInset.y))
+            let toFrame = Matrix3(rows: [[1, 0, inset.x - cropOrigin.x],
+                                         [0, 1, inset.y - cropOrigin.y],
+                                         [0, 0, 1]])
+            let flip = Self.photoFlipMatrix(centre: centre,
                                             flipH: flipHorizontal, flipV: flipVertical)
-            photoToCanvas = frameMatrix * flip * cropToFrame
+            let turn = Self.rotationAbout(centre: centre, degrees: self.straightenDegrees)
+            photoToCanvas = toFrame * turn * flip
         }
-        self.s1ToS3 = photoToCanvas * toDecoded
-        self.s3ToS1 = fromDecoded * Self.inverse(photoToCanvas)
+        self.s1ToS3 = photoToCanvas
+        self.s3ToS1 = Self.inverse(photoToCanvas)
+        // The crop frame's four corners in S3, through the same exit the pixels use. At θ = 0 this
+        // is the crop's own rectangle (the canvas *is* the frame); at an angle it is the turned quad,
+        // whose AABB is `frameInS3` (and, for an off-centre crop, no longer centred on the canvas).
+        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner -> Point in
+            Self.apply(photoToCanvas, Point((crop.left + corner.0 * crop.width) * Double(source.width),
+                                            (crop.top + corner.1 * crop.height) * Double(source.height)))
+        }
+        self.frameQuadInS3 = corners
+        let minX = corners.map(\.x).min() ?? 0
+        let minY = corners.map(\.y).min() ?? 0
+        let maxX = corners.map(\.x).max() ?? Double(frame.width)
+        let maxY = corners.map(\.y).max() ?? Double(frame.height)
+        self.frameInS3 = CGRect(x: minX, y: minY,
+                                width: max(0, maxX - minX), height: max(0, maxY - minY))
 
         // S3 → S5: the camera window at the zoom, letterboxed into the viewport.
         let windowS3: (offset: Point, size: SIMD2<Double>)
@@ -325,29 +326,15 @@ public struct FrameTransform: Sendable, Equatable {
     /// a hit test is a continuous question ("which source pixel is under the cursor"); the test
     /// matrix measures that difference separately rather than folding it into the projection.
     public func viewPointToSource(_ point: Point) -> Point {
-        let canvas = Self.apply(s5ToS3, point)
-        var frame = geometry.framePoint(canvasX: canvas.x, canvasY: canvas.y)
-        let size = geometry.frameSize
-        // The kernel flips in crop-normalized space, i.e. about the frame's own centre.
-        if flipHorizontal { frame.x = Double(size.width) - frame.x }
-        if flipVertical { frame.y = Double(size.height) - frame.y }
-        var fx = crop.left + frame.x / Double(max(size.width, 1)) * crop.width
-        var fy = crop.top + frame.y / Double(max(size.height, 1)) * crop.height
-        // `frameSize` already carries the keystone (246), so perspective needs no second step here.
-        return Point(fx * Double(source.width), fy * Double(source.height))
+        // The matrix is the kernel's own walk, inverted: S5 → S3 (`s5ToS3`) → S1 (`s3ToS1`).
+        // 273 — the crop frame's pivot is the **photograph's** centre, so an off-centre crop no longer
+        // hit-tests `(I − R)(cropCentre − photoCentre)` away from the pixel under the cursor.
+        Self.apply(s3ToS1, Self.apply(s5ToS3, point))
     }
 
     /// S1 source pixel → S5 device pixel.
     public func sourceToView(_ point: Point) -> Point {
-        var fx = point.x / Double(max(source.width, 1))
-        var fy = point.y / Double(max(source.height, 1))
-        let size = geometry.frameSize
-        var frame = Point((fx - crop.left) / max(crop.width, 1e-9) * Double(size.width),
-                          (fy - crop.top) / max(crop.height, 1e-9) * Double(size.height))
-        if flipHorizontal { frame.x = Double(size.width) - frame.x }
-        if flipVertical { frame.y = Double(size.height) - frame.y }
-        let canvas = geometry.canvasPoint(frameX: frame.x, frameY: frame.y)
-        return Self.apply(s3ToS5, Point(canvas.x, canvas.y))
+        Self.apply(s3ToS5, Self.apply(s1ToS3, point))
     }
 
     /// S5 → S2 **without** the picture rotation: the frame space the crop overlay draws in (its
@@ -425,6 +412,29 @@ public struct FrameTransform: Sendable, Equatable {
 
     private static func matrix(_ rows: [[Double]]) -> Matrix3 {
         Matrix3(rows: rows)
+    }
+
+    /// A rotation of `degrees` about an arbitrary `centre` (y-down, +θ = the picture turns clockwise).
+    private static func rotationAbout(centre: Point, degrees: Double) -> Matrix3 {
+        let r = CropGeometry.RotationMatrix(degrees: degrees)
+        return Matrix3(rows: [[r.cosine, -r.sine,
+                               centre.x - r.cosine * centre.x + r.sine * centre.y],
+                              [r.sine, r.cosine,
+                               centre.y - r.sine * centre.x - r.cosine * centre.y],
+                              [0, 0, 1]])
+    }
+
+    /// A flip of the **photograph** about its own centre (`P = source / 2`), the same pivot
+    /// `s0_geometry.metal` uses (`photo.x = 1 − photo.x` in photo-normalized space). A flip about the
+    /// crop frame's centre would be visible only on an off-centre crop, which is why it survived 248.
+    private static func photoFlipMatrix(centre: Point, flipH: Bool, flipV: Bool) -> Matrix3 {
+        let fx: Matrix3 = flipH
+            ? Matrix3(rows: [[-1, 0, 2 * centre.x], [0, 1, 0], [0, 0, 1]])
+            : .identity
+        let fy: Matrix3 = flipV
+            ? Matrix3(rows: [[1, 0, 0], [0, -1, 2 * centre.y], [0, 0, 1]])
+            : .identity
+        return fy * fx
     }
 
     private static func frameFlipMatrix(width: Double, height: Double,
