@@ -142,7 +142,7 @@ final class CacheVersionTests: XCTestCase {
         // so every stage's key moved **once**, on the day the mechanism arrived — that is the
         // documented one-time migration. What must never happen again is S0 moving because *S2* was
         // bumped, so S2's generation may not appear anywhere in S0's material or S1's:
-        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=2"), true)
+        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=3"), true)
         XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=5"), "S0 does not carry S2's generation")
         XCTAssertFalse(new.toneMap.isEmpty)
         XCTAssertNotEqual(old.geometry, new.geometry,
@@ -175,8 +175,8 @@ final class CacheVersionTests: XCTestCase {
                        "159: a mask's contrast left S1.6 for S2.5")
         XCTAssertEqual(StageAlgorithmVersion.contrast, 2,
                        "159: contrast is the display-domain residual operator (S2.5)")
-        XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 5,
-                       "167: the luminance predicate reads the whole HDR axis, not clamp(light, 0, 1)")
+        XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 6,
+                       "215: the linear gradient ramps across its whole span")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
         XCTAssertEqual(StageAlgorithmVersion.curve, 2,
@@ -188,10 +188,10 @@ final class CacheVersionTests: XCTestCase {
         // value-identical, which is why the golden images do not move.
         XCTAssertEqual(StageAlgorithmVersion.sharpen, 3,
                        "192: σ 地板删除 + 基面 stride 随尺度")
-        // 183: the keystone knobs are a 3×3 homography inside S0, so the same crop now draws
-        // different pixels — the geometry stage moves to generation 2.
-        XCTAssertEqual(StageAlgorithmVersion.geometry, 2,
-                       "183: perspective is a homography in S0")
+        // 246: perspective joins the canvas-size arithmetic and the kernel evaluates one composed
+        // `M = R · P`, so the same crop and keystone now draw different pixels — generation 3.
+        XCTAssertEqual(StageAlgorithmVersion.geometry, 3,
+                       "246: perspective is folded into the canvas AABB (P → R → AABB)")
         // …and the ones that did not, so a bump stays a statement about one stage.
         for stage in [RenderStage.color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
@@ -564,6 +564,6 @@ final class CacheVersionTests: XCTestCase {
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=5"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=8"))
-        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=2"))
+        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=3"))
     }
 }

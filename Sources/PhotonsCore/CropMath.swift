@@ -498,7 +498,7 @@ public struct PerspectiveMap: Sendable, Equatable {
         (0..<3).map { i in (0..<3).map { j in (0..<3).reduce(0.0) { $0 + a[i][$1] * b[$1][j] } } }
     }
 
-    static func apply(_ m: [[Double]], x: Double, y: Double) -> (x: Double, y: Double) {
+    public static func apply(_ m: [[Double]], x: Double, y: Double) -> (x: Double, y: Double) {
         let w = m[2][0] * x + m[2][1] * y + m[2][2]
         guard abs(w) > 1e-12 else { return (x, y) }
         return ((m[0][0] * x + m[0][1] * y + m[0][2]) / w,
@@ -523,8 +523,38 @@ public struct PerspectiveMap: Sendable, Equatable {
     }
 }
 
-// MARK: - crop math (pure, no GPU, no Metal)
+// MARK: - 246 · the perspective canvas (photo → P → R → AABB)
 
+/// The one description of a keystoned document's canvas, in **crop pixels** at 1:1.
+///
+/// The chain is the user's order and nothing else:
+///
+///     photo pixels --P (keystone)--> --R (straighten, about the crop's centre)--> --AABB--> canvas
+///
+/// `extent` is the continuous AABB (what the ≤0.5 px assertions compare against), `size` is its
+/// one `ceil` (what a texture allocates), and `sampling` is the composed 3×3 from **canvas
+/// normalized** coordinates to **turned-photo normalized** coordinates. The kernel applies exactly
+/// that matrix once per pixel; `CropMath` is the only place the composition is written down.
+///
+/// The AABB is taken with the corners **already warped**, not from the rotated AABB of the warped
+/// bounding box: `R(AABB(Q))` is bigger than `AABB(R(Q))` at θ ≠ 0, and the difference is precisely
+/// the black band the user reported as "the photo's corners were cut off".
+public struct PerspectiveCanvas: Sendable, Equatable {
+    /// The canvas in whole pixels (the `ceil` of `extent`).
+    public let size: ImageSize
+    /// The canvas in continuous pixels — the number the acceptance's ±0.5 px compares with.
+    public let extent: DSize
+    /// The AABB's top-left in rotated-crop pixel coordinates (the phase the shader walks back).
+    public let originX: Double
+    public let originY: Double
+    /// The crop's own pixel size before the warp — the frame the keystone is measured in.
+    public let frame: DSize
+    /// `canvas-normalized → turned-photo-normalized`, row-major 3×3, for S0.
+    public let sampling: [[Double]]
+    /// `turned-photo-normalized → canvas-normalized`, row-major 3×3 — the same map forward. The
+    /// photo-quad and red-frame arithmetic read it.
+    public let forward: [[Double]]
+}
 
 /// The arithmetic behind crop / straighten / aspect lock, kept out of the renderer so it can be
 /// checked against closed-form values instead of against pixels (docs/architecture-decisions.md
@@ -577,6 +607,134 @@ public enum CropMath {
         return ImageSize(width: p.width, height: p.height)
     }
 
+    // MARK: 246 · perspective canvas
+
+    /// The canvas of a keystoned document: **P → R → AABB**, in that order.
+    ///
+    /// `source` is the turned source (the frame the crop rect is measured in). The crop is the
+    /// picture the document keeps; the keystone acts in that picture's normalized box, the
+    /// straighten turns the warped pixels about the crop's centre, and the canvas is the bounding
+    /// box of the four warped-and-turned corners.
+    ///
+    /// Everything is in the crop's own pixel grid at 1:1. The composed `sampling` matrix is
+    /// `canvas-normalized → turned-photo-normalized`:
+    ///
+    ///     canvas norm → canvas px → +AABB origin → R⁻¹ about the crop centre
+    ///                 → warped norm → P⁻¹ → crop norm → photo norm
+    ///
+    /// which is one 3×3 the kernel can evaluate with one `fma` chain and one divide. No second pass
+    /// (217's single-coordinate-system rule).
+    public static func perspectiveCanvas(crop: CropRect,
+                                         in source: ImageSize,
+                                         straightenDegrees: Double,
+                                         perspective: PerspectiveMap) -> PerspectiveCanvas {
+        let c = crop.clamped(allowsOutsideSource: true)
+        let pixels = outputSize(c, in: source, allowsOutsideSource: true)
+        let frame = DSize(width: Double(pixels.width), height: Double(pixels.height))
+        let half = (x: frame.width / 2, y: frame.height / 2)
+
+        // (1) P: the crop frame's four corners in warped pixels.
+        let warped = perspective.warpedQuad().map { p in
+            (x: p.x * frame.width, y: p.y * frame.height)
+        }
+        // (2) R: turn the warped pixels about the crop's centre — the same pivot S0 has always used.
+        let rotation = CropGeometry.RotationMatrix(degrees: straightenDegrees)
+        let turned = warped.map { p -> (x: Double, y: Double) in
+            let r = rotation.apply(x: p.x - half.x, y: p.y - half.y)
+            return (x: r.x + half.x, y: r.y + half.y)
+        }
+        let minX = turned.map(\.x).min() ?? 0
+        let maxX = turned.map(\.x).max() ?? 1
+        let minY = turned.map(\.y).min() ?? 0
+        let maxY = turned.map(\.y).max() ?? 1
+        let extent = DSize(width: max(1, maxX - minX), height: max(1, maxY - minY))
+        let size = ImageSize(width: CropGeometry.canvasPixels(extent.width),
+                             height: CropGeometry.canvasPixels(extent.height))
+
+        // The forward map, one factor per line of the prose above.
+        //   crop norm → warped norm             P
+        //   warped norm → warped px             diag(frame)
+        //   warped px → turned px               T(+½) · R · T(−½)
+        //   turned px → canvas px               T(−AABB origin)
+        //   canvas px → canvas norm             diag(1/extent)
+        let toPixels = diag(frame.width, frame.height)
+        let turn = translation(half.x, half.y)
+            * rotationMatrix(rotation)
+            * translation(-half.x, -half.y)
+        let toCanvas = diag(1 / extent.width, 1 / extent.height)
+            * translation(-minX, -minY)
+        // photo norm → crop norm: `u = (photo − crop.origin) / crop.size`
+        let fromPhoto = diag(1 / max(c.width, 1e-12), 1 / max(c.height, 1e-12))
+            * translation(-c.left, -c.top)
+        let forward = toCanvas * turn * toPixels * perspective.forwardMatrix * fromPhoto
+        let sampling = PerspectiveMap.invert(forward)
+        return PerspectiveCanvas(size: size, extent: extent,
+                                 originX: minX, originY: minY, frame: frame,
+                                 sampling: sampling, forward: forward)
+    }
+
+    /// The whole photograph's four corners in **canvas normalized** coordinates, after P then R,
+    /// relative to the canvas AABB of `crop`.
+    ///
+    /// This is the one "photo quadrilateral" the red-frame predicate reads (246 §2.3): a whole
+    /// photograph corner may be far outside the crop, so its crop-normalized position is allowed to
+    /// leave `0…1²`; the composed map handles that analytically.
+    public static func perspectivePhotoQuad(crop: CropRect,
+                                            canvas: PerspectiveCanvas) -> [NormalizedPoint] {
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner in
+            let p = PerspectiveMap.apply(canvas.forward, x: corner.0, y: corner.1)
+            return NormalizedPoint(p.x, p.y)
+        }
+    }
+
+    /// Is `rect` (canvas normalized) inside the convex quadrilateral `quad`?
+    ///
+    /// A convex quad is the intersection of four half-planes, so a convex rect is inside it exactly
+    /// when its four corners are. This is the **quadrilateral** test 246 asks for — the old red
+    /// predicate used the rotated rectangle (or its AABB), which counts the black triangle outside a
+    /// keystoned picture as "inside the photo".
+    public static func quadContains(_ quad: [NormalizedPoint],
+                                    rect: CropRect,
+                                    tolerance: Double = 1e-9) -> Bool {
+        guard quad.count == 4 else { return false }
+        let corners = [(rect.left, rect.top), (rect.right, rect.top),
+                       (rect.right, rect.bottom), (rect.left, rect.bottom)]
+        return corners.allSatisfy { point in
+            quadContains(quad, x: point.0, y: point.1, tolerance: tolerance)
+        }
+    }
+
+    /// Point-in-convex-quad (either winding). A point within `tolerance` normalized units of an
+    /// edge counts as inside, so a crop flush with the picture is not painted red by a rounding.
+    public static func quadContains(_ quad: [NormalizedPoint],
+                                    x: Double, y: Double,
+                                    tolerance: Double = 1e-9) -> Bool {
+        guard quad.count == 4 else { return false }
+        var positive = false, negative = false
+        for i in 0..<4 {
+            let a = quad[i], b = quad[(i + 1) % 4]
+            let cross = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+            let scale = max(1e-12, hypot(b.x - a.x, b.y - a.y))
+            if cross > tolerance * scale { positive = true }
+            if cross < -tolerance * scale { negative = true }
+        }
+        return !(positive && negative)
+    }
+
+    // MARK: the 3×3 helpers (row-major, the same shape `PerspectiveMap` uses)
+
+    static func diag(_ x: Double, _ y: Double) -> [[Double]] {
+        [[x, 0, 0], [0, y, 0], [0, 0, 1]]
+    }
+
+    static func translation(_ x: Double, _ y: Double) -> [[Double]] {
+        [[1, 0, x], [0, 1, y], [0, 0, 1]]
+    }
+
+    static func rotationMatrix(_ r: CropGeometry.RotationMatrix) -> [[Double]] {
+        [[r.cosine, -r.sine, 0], [r.sine, r.cosine, 0], [0, 0, 1]]
+    }
+
     /// The output canvas: the crop's pixel size at a right angle, and the **exact bounding box of the
     /// rotated crop** at every other angle (162).
     ///
@@ -601,9 +759,16 @@ public enum CropMath {
         let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
             ? ImageSize(width: source.height, height: source.width)
             : source
-        // 183: the picture's own pixel size is the crop's, warped — the *inscribed rectangle* of the
-        // keystoned quad, and nothing else. At 0/0 the optional is `nil` and this is the pre-183 line
-        // byte for byte.
+        // 246 — the order is 透视 → 旋转 → 画布 AABB. The warped *and* turned quadrilateral is the
+        // picture, and the canvas is its bounding box: the whole picture fits inside it (the old
+        // 183 path took the **inscribed** rectangle of the warped quad, which threw the corners
+        // away). `perspectiveCanvas` is the one owner of that arithmetic; at 0/0 the optional is
+        // `nil` and this is the pre-183 line byte for byte.
+        if let perspective, perspective.hasWarp {
+            return perspectiveCanvas(crop: crop, in: turned,
+                                     straightenDegrees: straightenDegrees,
+                                     perspective: perspective).size
+        }
         let out = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
                             perspective: perspective)
         guard straightenDegrees.isFinite else { return out }
@@ -635,6 +800,9 @@ public enum CropMath {
                                     straightenDegrees: Double, quarterTurns: Int,
                                     allowsOutsideSource: Bool = false,
                                     perspective: PerspectiveMap? = nil) -> (x: Int, y: Int) {
+        // 246: the canvas *is* the picture's bounding box (perspective + rotation already folded),
+        // so the picture starts at its origin — there is no letterbox to centre it in.
+        if let perspective, perspective.hasWarp { return (0, 0) }
         let canvas = canvasSize(crop: crop, in: source,
                                 straightenDegrees: straightenDegrees,
                                 quarterTurns: quarterTurns,
@@ -959,7 +1127,30 @@ public enum CropMath {
     public static func frameExceedsPicture(_ crop: CropRect,
                                            in source: ImageSize,
                                            degrees: Double,
+                                           perspective: PerspectiveMap? = nil,
                                            tolerance: Double = 1e-6) -> Bool {
+        // 246 §2.3 — with a keystone the picture is a **quadrilateral**, not the turned rectangle.
+        // The crop frame is the canvas rectangle (the AABB of the warped crop), so "is the frame
+        // inside the photograph" is "is that rectangle inside the warped photo quad". AABB
+        // containment is explicitly *not* used: at 45° + perspective its corners include the black
+        // triangle and would call a red frame legal.
+        guard let perspective, perspective.hasWarp else {
+            return !fitsInsideRotatedFrame(crop, in: source, degrees: degrees, tolerance: tolerance)
+        }
+        let canvas = perspectiveCanvas(crop: crop, in: source,
+                                       straightenDegrees: degrees,
+                                       perspective: perspective)
+        let quad = perspectivePhotoQuad(crop: crop, canvas: canvas)
+        return !quadContains(quad, rect: .full, tolerance: tolerance)
+    }
+
+    /// 246's **reverse gate**, kept as a named predicate so a test can show what the old rule would
+    /// have answered on the same document. `frameExceedsPicture(... perspective:)` must disagree with
+    /// it wherever the picture's corners fall outside the AABB.
+    public static func frameExceedsRotatedRectangle(_ crop: CropRect,
+                                                    in source: ImageSize,
+                                                    degrees: Double,
+                                                    tolerance: Double = 1e-6) -> Bool {
         !fitsInsideRotatedFrame(crop, in: source, degrees: degrees, tolerance: tolerance)
     }
 
@@ -1011,4 +1202,12 @@ public enum CropMath {
         let m = CropGeometry.RotationMatrix(degrees: degrees)
         return (abs(m.cosine), abs(m.sine))
     }
+}
+
+// MARK: - 246 · row-major 3×3 composition
+
+infix operator *: MultiplicationPrecedence
+
+private func * (lhs: [[Double]], rhs: [[Double]]) -> [[Double]] {
+    PerspectiveMap.multiply(lhs, rhs)
 }

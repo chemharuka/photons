@@ -113,6 +113,21 @@ public struct CropGeometry: Sendable, Equatable {
 
     /// `true` when the frame needs no resample at all.
     public var isIdentityRotation: Bool { rotationDegrees == 0 }
+
+    /// 246 — the **one** definition of the pixel layer's shape: the whole photograph's four corners
+    /// after perspective and rotation, in canvas-normalized coordinates (the canvas' AABB is the
+    /// unit square). Red-frame detection, the export's effective region and the overlay all read
+    /// this; a caller must not re-derive it from an AABB.
+    ///
+    /// `nil` for a document without a keystone — there the pixel layer is the turned rectangle, and
+    /// `CropMath.rotatedFrameCorners` remains its definition.
+    public func perspectivePhotoQuadNormalized() -> [NormalizedPoint]? {
+        guard let perspective, perspective.hasWarp else { return nil }
+        let canvas = CropMath.perspectiveCanvas(crop: crop, in: source,
+                                                straightenDegrees: rotationDegrees,
+                                                perspective: perspective)
+        return CropMath.perspectivePhotoQuad(crop: crop, canvas: canvas)
+    }
 }
 
 // MARK: - 123: the transform session (draft → document)

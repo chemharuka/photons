@@ -144,6 +144,34 @@ final class CropClampDocument224Tests: XCTestCase {
         print("224 §1 · 十画布宽外 · " + reports.joined(separator: " ‖ "))
     }
 
+    // MARK: - 246 — the pixel layer is the perspective quadrilateral
+
+    /// A keystoned document's crop frame is painted red by the **photo quad** (not the turned
+    /// rectangle) and its canvas is the new P → R → AABB size. The controller must thread the
+    /// document's keystone into both, or the UI would show a green frame and the old canvas.
+    func testPerspectiveDrivesTheRedFrameAndTheCanvas() throws {
+        let (session, _) = try CropUITestSupport.makeSession(in: workDir,
+                                                             width: Self.source.width,
+                                                             height: Self.source.height)
+        session.applyEdit { $0.geometry.perspectiveVertical = 50 }
+        let controller = CropToolController(session: session)
+        XCTAssertTrue(controller.begin())
+        controller.draft = CropToolController.Draft(crop: .full, straighten: 0, lock: .original,
+                                                     perspectiveVertical: 50)
+
+        let expected = CropMath.canvasSize(crop: .full, in: Self.source,
+                                           straightenDegrees: 0, quarterTurns: 0,
+                                           allowsOutsideSource: true,
+                                           perspective: PerspectiveMap(vertical: 50, horizontal: 0))
+        print("246 UI · red \(controller.frameExceedsPicture(source: Self.source))"
+              + " · canvas \(controller.effectiveCanvas.width)×\(controller.effectiveCanvas.height)"
+              + " (expect \(expected.width)×\(expected.height))")
+        XCTAssertTrue(controller.frameExceedsPicture(source: Self.source),
+                      "the AABB's corners are outside the keystoned picture — red")
+        XCTAssertEqual(controller.effectiveCanvas, expected,
+                       "the workspace canvas must be the new AABB")
+    }
+
     // MARK: - 224 §3.2 — the photograph's edge is a warning, not a clamp
 
     /// At 45°, the full frame `[0,1]²` is **legal** — it covers the turned-out black corners and sits

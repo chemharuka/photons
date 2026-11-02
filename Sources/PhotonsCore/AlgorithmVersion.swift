@@ -40,14 +40,17 @@ public enum StageAlgorithmVersion {
 
     // One number per stage, in `RenderStage.order`. 2 = "the maths changed after graph-v1 was set".
 
-    /// **2** — 183: S0's map is no longer `crop ∘ rotate ∘ flip` alone; a document may carry a 3×3
-    /// keystone (`geometry.perspectiveVertical/Horizontal`) that the same pass applies to the sample
-    /// coordinate, and the canvas it allocates is the inscribed rectangle of the warped quad. A
-    /// document at 0/0 renders **byte-identical** pixels (the kernel's warp block is skipped and the
-    /// canvas is unchanged), but the stage's arithmetic now includes the warp, and the same stored
-    /// numbers would have produced different pixels on a build that did not — so the generation moves.
+    /// **3** — 246：透视并入画布尺寸计算. The order is now the user's: 先透视 → 再旋转 → 再算画布.
+    /// The canvas is the AABB of the warped **and** turned picture (the old generation took the
+    /// inscribed rectangle of the warped quad and therefore cut its corners off), and the kernel
+    /// evaluates one composed `M = R · P` sampling matrix. A document at 0/0 still renders
+    /// **byte-identical** pixels (the warp block is skipped and the canvas is unchanged), but the
+    /// same stored keystone numbers now produce different pixels — so the generation moves.
+    ///
+    /// **2** — 183: the keystone (`geometry.perspectiveVertical/Horizontal`) joined S0's sample
+    /// coordinate, with the canvas as the inscribed rectangle of the warped quad.
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic, before the keystone).
-    public static let geometry = 2
+    public static let geometry = 3
     /// **8** — 179: 原色校准 joined S1 (`CalibrationGroup`). The stage's exit now multiplies by a
     /// 3×3 primaries matrix and applies the shadows' green↔magenta tint, so a document whose seven
     /// calibration numbers are **not** all 0 renders pixels it could not render before. A document

@@ -116,11 +116,24 @@ public final class CropToolController {
         public var crop: CropRect = .full
         public var straighten: Double = 0
         public var lock: AspectLock = .original
+        /// 246 — the document's keystone, carried through the crop session so the red-frame
+        /// predicate and 应用 both see the picture the user is looking at.
+        public var perspectiveVertical: Double = 0
+        public var perspectiveHorizontal: Double = 0
 
-        public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original) {
+        public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original,
+                    perspectiveVertical: Double = 0, perspectiveHorizontal: Double = 0) {
             self.crop = crop
             self.straighten = straighten
             self.lock = lock
+            self.perspectiveVertical = perspectiveVertical
+            self.perspectiveHorizontal = perspectiveHorizontal
+        }
+
+        public var perspective: PerspectiveMap? {
+            guard perspectiveVertical != 0 || perspectiveHorizontal != 0 else { return nil }
+            return PerspectiveMap(vertical: perspectiveVertical,
+                                  horizontal: perspectiveHorizontal)
         }
 
         /// The draft as a document group, carrying `document`'s flips (the one field, §F) **and its
@@ -134,7 +147,9 @@ public final class CropToolController {
                           flipHorizontal: document.flipHorizontal,
                           flipVertical: document.flipVertical,
                           aspectLock: lock,
-                          quarterTurns: document.quarterTurns)
+                          quarterTurns: document.quarterTurns,
+                          perspectiveVertical: perspectiveVertical,
+                          perspectiveHorizontal: perspectiveHorizontal)
         }
 
         public init(geometry: GeometryGroup) {
@@ -142,7 +157,9 @@ public final class CropToolController {
             // out-of-canvas crop is shown (and edited) from its legal rect, never outside it.
             self.init(crop: geometry.cropRect.clamped(),
                       straighten: geometry.straightenDegrees,
-                      lock: geometry.aspectLock)
+                      lock: geometry.aspectLock,
+                      perspectiveVertical: geometry.perspectiveVertical,
+                      perspectiveHorizontal: geometry.perspectiveHorizontal)
         }
     }
 
@@ -328,8 +345,14 @@ public final class CropToolController {
     public func frameExceedsPicture(source: ImageSize? = nil, degrees: Double? = nil) -> Bool {
         let src = source ?? sourceSize
         let angle = CropTool.clampStraighten(degrees ?? draft.straighten)
+        // 246 §2.3 — the picture is a **quadrilateral** once a keystone is on; the predicate reads
+        // `CropGeometry`'s one definition of it, never an AABB.
+        // The live document is the source of the keystone while the tool is open — the 变换 card can
+        // move the knobs during a crop session, and the overlay must follow what is on screen.
+        let perspective = session?.edit.geometry.perspective ?? draft.perspective
         return CropMath.frameExceedsPicture(effectiveCrop(source: src, degrees: angle),
-                                            in: src, degrees: angle)
+                                            in: src, degrees: angle,
+                                            perspective: perspective)
     }
 
     /// Hand the live draft to the inspector (派单 049). One property write, no render, no document:

@@ -170,7 +170,7 @@ final class ChromaticAberrationTests: XCTestCase {
         let params = neutral.keyMaterial(.geometry, algorithmVersion: false)
         XCTAssertEqual(params, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
         let material = neutral.keyMaterial(.geometry)
-        XCTAssertEqual(material, params + ";alg=2")
+        XCTAssertEqual(material, params + ";alg=3")
         XCTAssertEqual(neutral.keyMaterial(.geometry, algorithmVersion: false), params,
                        "the parameters are byte-identical to the pre-P1f material")
         XCTAssertFalse(material.contains("car="))
@@ -180,13 +180,13 @@ final class ChromaticAberrationTests: XCTestCase {
         redOnly.optics.caRed = 0.002
         // 084: the token is integer tenths of a slider unit, not `k()`: 0.002 = position 40 = 400.
         XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=400")
-        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=2")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=3")
 
         var both = redOnly
         both.optics.caBlue = -0.0015
         XCTAssertEqual(both.keyMaterial(.geometry, algorithmVersion: false),
                        params + ";car=400;cab=-300")
-        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=2")
+        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=3")
 
         // Only non-zero is appended: setting a slider back to zero is the old document again.
         var backToZero = both
