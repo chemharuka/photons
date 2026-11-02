@@ -845,13 +845,26 @@ public final class CropToolController {
         // 123: the angle is the same value the renderer will consume, via `CropGeometry`. The
         // overlay still draws the *delta* against the document while the slider is in flight (088).
         let geometry = overlayGeometry
-        return CropTool.layout(crop: effectiveCrop(source: source),
+        // 088 says the framing handed in is the **document's** (`cropMapping` uses `canvasEdit`), so
+        // the quad's rotation is exactly the draft delta and the picture on screen is at the
+        // document's angle. A framing that already carries part of the draft angle (a draft-angle
+        // mapping, as the clamp probes build) turns the *picture* by that much too, so the total
+        // angle the drawn frame actually turns through in the source is
+        // `mapping angle + quad rotation` — not `draft.straighten` alone. The inscribed clamp has to
+        // be taken at that total, or a previewed frame is clamped for an angle it is not drawn at
+        // (9° + 9° probe: corners just outside the sensor). In the app the framing angle **is** the
+        // document's, the difference is zero, and this is `draft.straighten` bit for bit.
+        let documentAngle = session?.edit.geometry.straightenDegrees ?? 0
+        let framingAngle = mapping.transform?.straightenDegrees ?? documentAngle
+        let drawnAngle = CropTool.clampStraighten(draft.straighten) + (framingAngle - documentAngle)
+        let quadRotation = quadRotationDegrees ?? geometry.rotationDegrees
+        return CropTool.layout(crop: effectiveCrop(source: source, degrees: drawnAngle),
                         source: source ?? sourceSize,
                         mapping: mapping,
                         pointScale: pointScale,
                         showsGrid: showsGrid,
                         carry: carry,
-                        quadRotationDegrees: quadRotationDegrees ?? geometry.rotationDegrees,
+                        quadRotationDegrees: quadRotation,
                         exceedsPicture: frameExceedsPicture(source: source))
     }
 

@@ -994,12 +994,9 @@ public struct LoupeFraming: Equatable, Sendable {
     // MARK: mapping
 
     public func mapping(of state: LoupeViewState) -> LoupeMapping {
-        let content = contentSize(of: state)
         let size = windowSize(of: state)
         let centre = windowCenter(of: state)
         let theta = straightenDegrees * .pi / 180
-        let window = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
-                            width: size.width, height: size.height)
         let transform = FrameTransform(
             source: ImageSize(width: Int(sourceWidth.rounded()), height: Int(sourceHeight.rounded())),
             crop: crop,
@@ -1019,14 +1016,30 @@ public struct LoupeFraming: Equatable, Sendable {
                 ? nil : outputWindow(of: state, decodeScale: decodeScale),
             allowsUpscale: false)
         let contentInS5 = transform.contentInS5
+        // **The fit window is the integer S3 canvas, and the overlay must divide by that same
+        // window.** 261 handed `frameView` the *continuous* `windowSize` (`rotatedCropExtent`) but
+        // `contentInS5`, which is the **integer** `canvasS3 × zoom`. The two differ by the canvas'
+        // ceil, so `frameView`'s x and y scales (`contentWidth/cropWidth`, `contentHeight/cropHeight`)
+        // were no longer both `zoom`: the crop frame's on-screen aspect drifted (1.87559 instead of
+        // 1.875 at 9°, worse at 45°) and a clamped frame sampled just outside the picture. At fit the
+        // S3 window the transform (and `CropGeometry.framePoint`) uses is `canvasS3`, so the overlay's
+        // reference window is `canvasS3` too (in source pixels, centred on the crop), and the ratio
+        // `content / window` is `zoom` on both axes. The continuous extent stays the *fit* input
+        // (`fitZoom`), which is what keeps 259: a frame is `cropPixels × fitZoom` wide.
+        let windowSize: (width: Double, height: Double) = state.mode == .fit
+            ? (Double(transform.canvasS3.width), Double(transform.canvasS3.height))
+            : size
+        let window = CGRect(x: centre.x - windowSize.width / 2,
+                            y: centre.y - windowSize.height / 2,
+                            width: windowSize.width, height: windowSize.height)
         return LoupeMapping(
             viewport: viewport,
             contentWidth: contentInS5.width,
             contentHeight: contentInS5.height,
             cropLeft: window.minX,
             cropTop: window.minY,
-            cropWidth: size.width,
-            cropHeight: size.height,
+            cropWidth: windowSize.width,
+            cropHeight: windowSize.height,
             cosT: cos(theta),
             sinT: sin(theta),
             flipH: flipH,
