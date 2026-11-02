@@ -98,7 +98,11 @@ public struct HealCardPanel: View {
                     Label("修复", systemImage: "bandage")
                         .font(.system(size: 10, weight: .medium))
                 }
-                .buttonStyle(.plain)
+                // 276 — `.plain` drew no AppKit button leaf, so the hosted test's synthetic click
+                // reached only the hosting view and never the SwiftUI action. `.borderless` keeps
+                // 253's look (no bezel; the fill is ours) but keeps the real clickable control —
+                // the same style the card's other tool buttons already use.
+                .buttonStyle(.borderless)
                 .controlSize(.mini)
                 // 253 — the visible blue is the fill, not `.tint` (a bordered button's tint never
                 // paints its bezel). One style for every tool button: `ToolActiveStyle`.
