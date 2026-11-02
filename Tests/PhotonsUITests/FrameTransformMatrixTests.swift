@@ -451,30 +451,22 @@ final class FrameTransformMatrixTests: XCTestCase {
         }
         let elapsed = Date().timeIntervalSince(started)
         var failing = 0
-        var measured = 0
         for result in results where !result.violations.isEmpty {
-            // Only ② is asserted in this commit. ① and ③ are **measured and printed** — the numbers
-            // are the deliverable of this lane (the spec's table), and their assertion waits for the
-            // follow-up round that settles the bilinear-centroid noise floor at 0.1°/1° and the 45°
-            // S3 scale. Printing them instead of skipping them is the spec's "no silent skip".
+            // 261 — all three walks are assertions now. 260 exempted ① and ③ (they were only
+            // measured, so that lane could ship a table); the transform exit is what lets them be
+            // asserted at the same 0.5 px the overlay already had. No dimension and no tolerance was
+            // relaxed to get here: `tolerance` is still 0.5 and the grid is still 180 combos.
             for violation in result.violations {
-                let centralized = violation.check.hasPrefix("②")
-                if centralized {
-                    failing += 1
-                    print("[260] ✗ \(result.angle) / \(result.crop) / \(result.zoom)"
-                          + " / rung \(result.rung) · \(violation)")
-                } else {
-                    measured += 1
-                    print("[260] ○ \(result.angle) / \(result.crop) / \(result.zoom)"
-                          + " / rung \(result.rung) · \(violation)")
-                }
+                failing += 1
+                print("[260] ✗ \(result.angle) / \(result.crop) / \(result.zoom)"
+                      + " / rung \(result.rung) · \(violation)")
             }
         }
-        print(String(format: "[260] rung %.2g · %d combos · %d asserted-failing · %d measured-over-tolerance · %.2f s (%.1f ms/combo)",
-                     rung.scale, results.count, failing, measured, elapsed,
+        print(String(format: "[260] rung %.2g · %d combos · %d failing · %.2f s (%.1f ms/combo)",
+                     rung.scale, results.count, failing, elapsed,
                      elapsed * 1000 / Double(max(results.count, 1))))
         XCTAssertEqual(failing, 0,
-                       "260: the S2 → S5 overlay deviates by more than \(Self.tolerance) px in "
+                       "261: render/overlay/hit-test deviate by more than \(Self.tolerance) px in "
                        + "\(failing) places at rung \(rung); see the [260] ✗ rows above")
     }
 

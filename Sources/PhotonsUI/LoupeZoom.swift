@@ -597,6 +597,10 @@ public struct LoupeFraming: Equatable, Sendable {
     /// canvas (`CropMath.perspectiveCanvas`) instead of the turned rectangle, so entering 裁切 frames
     /// the same canvas the renderer allocates. `nil` is every pre-246 document, bit for bit.
     public var perspective: PerspectiveMap?
+    /// 261 — the rung `sourceWidth`/`sourceHeight` were divided by, and the document's quarter
+    /// turn. Both are inputs of `FrameTransform`; neither multiplies anything else here.
+    public var decodeScale: Double
+    public var quarterTurns: Int
     /// 213 (D13, user 2026-11-01) — **the one fit margin.** Ordinary 适应 is this fraction of the
     /// viewport fit, and the crop workspace uses the same number (it no longer multiplies by a second
     /// 0.90 on entry, which produced 0.81). One constant, read by `fitZoom` and by
@@ -614,7 +618,8 @@ public struct LoupeFraming: Equatable, Sendable {
     public init(viewport: ImageSize, sourceWidth: Double, sourceHeight: Double,
                 crop: CropRect = .full, straightenDegrees: Double = 0,
                 flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1,
-                perspective: PerspectiveMap? = nil) {
+                perspective: PerspectiveMap? = nil,
+                decodeScale: Double = 1, quarterTurns: Int = 0) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
@@ -625,6 +630,8 @@ public struct LoupeFraming: Equatable, Sendable {
         self.flipV = flipV
         self.fitScale = fitScale.isFinite ? min(max(fitScale, 0.1), 1) : 1
         self.perspective = perspective.flatMap { $0.hasWarp ? $0 : nil }
+        self.decodeScale = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
+        self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
     }
 
     /// The constructor the loupe uses: the same `lockedCrop` call — in the same *decoded* pixel
@@ -649,7 +656,9 @@ public struct LoupeFraming: Equatable, Sendable {
                   flipH: edit.geometry.flipHorizontal,
                   flipV: edit.geometry.flipVertical,
                   fitScale: fitScale,
-                  perspective: edit.geometry.perspective)
+                  perspective: edit.geometry.perspective,
+                  decodeScale: ds,
+                  quarterTurns: edit.geometry.quarterTurns)
     }
 
     // MARK: crop metrics
@@ -980,12 +989,33 @@ public struct LoupeFraming: Equatable, Sendable {
         let size = windowSize(of: state)
         let centre = windowCenter(of: state)
         let theta = straightenDegrees * .pi / 180
+        let window = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
+                            width: size.width, height: size.height)
+        let transform = FrameTransform(
+            source: ImageSize(width: Int(sourceWidth.rounded()), height: Int(sourceHeight.rounded())),
+            crop: crop,
+            straightenDegrees: straightenDegrees,
+            quarterTurns: quarterTurns,
+            flipHorizontal: flipH,
+            flipVertical: flipV,
+            perspective: perspective,
+            decodeScale: decodeScale,
+            contentScale: zoom(of: state) / decodeScale,
+            viewport: viewport,
+            zoom: zoom(of: state),
+            cameraOffset: .zero,
+            cameraWindowSize: nil,
+            cameraWindow: nil,
+            cameraWindowInS5: state.mode == .fit
+                ? nil : outputWindow(of: state, decodeScale: decodeScale),
+            allowsUpscale: false)
+        let contentInS5 = transform.contentInS5
         return LoupeMapping(
             viewport: viewport,
-            contentWidth: content.width,
-            contentHeight: content.height,
-            cropLeft: centre.x - size.width / 2,
-            cropTop: centre.y - size.height / 2,
+            contentWidth: contentInS5.width,
+            contentHeight: contentInS5.height,
+            cropLeft: window.minX,
+            cropTop: window.minY,
             cropWidth: size.width,
             cropHeight: size.height,
             cosT: cos(theta),
@@ -993,7 +1023,8 @@ public struct LoupeFraming: Equatable, Sendable {
             flipH: flipH,
             flipV: flipV,
             frameWidth: sourceWidth,
-            frameHeight: sourceHeight)
+            frameHeight: sourceHeight,
+            transform: transform)
     }
 
     /// Where a canvas-sized frame texture sits on the **whole picture** (058) — the input the backdrop
@@ -1160,11 +1191,34 @@ public struct LoupeMapping: Equatable, Sendable {
     /// by the width and the v axis by the height, so `R(θ)` is followed by a non-uniform scale).
     public let frameWidth: Double
     public let frameHeight: Double
+    /// 261 — the one per-frame transform this projection was assembled from. `nil` only for the
+    /// legacy direct initializer used by older tests; every product call site comes through
+    /// `LoupeFraming.mapping`, so the four methods below are `FrameTransform` calls.
+    public let transform: FrameTransform?
+
+    /// 261 — the assembled form. The four projection methods delegate to `transform`; the legacy
+    /// fields are filled from it so old readers (canvas rect, region math) keep their answers.
+    public init(transform: FrameTransform) {
+        let content = transform.contentInS5
+        self.init(viewport: transform.viewport,
+                  contentWidth: content.width, contentHeight: content.height,
+                  cropLeft: transform.crop.left * Double(transform.source.width),
+                  cropTop: transform.crop.top * Double(transform.source.height),
+                  cropWidth: transform.crop.width * Double(transform.source.width),
+                  cropHeight: transform.crop.height * Double(transform.source.height),
+                  cosT: cos(transform.straightenDegrees * .pi / 180),
+                  sinT: sin(transform.straightenDegrees * .pi / 180),
+                  flipH: false, flipV: false,
+                  frameWidth: Double(transform.source.width),
+                  frameHeight: Double(transform.source.height),
+                  transform: transform)
+    }
 
     public init(viewport: ImageSize, contentWidth: Double, contentHeight: Double,
                 cropLeft: Double, cropTop: Double, cropWidth: Double, cropHeight: Double,
                 cosT: Double, sinT: Double, flipH: Bool, flipV: Bool,
-                frameWidth: Double = 0, frameHeight: Double = 0) {
+                frameWidth: Double = 0, frameHeight: Double = 0,
+                transform: FrameTransform? = nil) {
         self.viewport = viewport
         self.contentWidth = contentWidth
         self.contentHeight = contentHeight
@@ -1178,6 +1232,7 @@ public struct LoupeMapping: Equatable, Sendable {
         self.flipV = flipV
         self.frameWidth = frameWidth > 0 ? frameWidth : max(cropWidth, 1e-9)
         self.frameHeight = frameHeight > 0 ? frameHeight : max(cropHeight, 1e-9)
+        self.transform = transform
     }
 
     public var originX: Double { (Double(viewport.width) - contentWidth) / 2 }
@@ -1262,6 +1317,10 @@ public struct LoupeMapping: Equatable, Sendable {
     /// portrait file shears the other way). `s0_geometry.metal` now turns pixel offsets for the same
     /// reason, so this really is the kernel's inverse and not merely a plausible-looking map.
     public func sourcePoint(viewX: Double, viewY: Double) -> (x: Double, y: Double) {
+        if let transform {
+            let p = transform.viewPointToSource(SIMD2(viewX, viewY))
+            return (p.x, p.y)
+        }
         // 1. view → the frame, in pixels — axis-aligned, flips and all, about the **window's own**
         //    centre. Same centre and same order as the projection this replaced, so pan/zoom anchoring
         //    and flipped documents behave exactly as they did.
@@ -1283,6 +1342,10 @@ public struct LoupeMapping: Equatable, Sendable {
 
     /// Source pixel → device pixel (the inverse of the above; `sourcePoint(viewPoint(p)) == p`).
     public func viewPoint(sourceX: Double, sourceY: Double) -> (x: Double, y: Double) {
+        if let transform {
+            let p = transform.sourceToView(SIMD2(sourceX, sourceY))
+            return (p.x, p.y)
+        }
         let cx = cropLeft + cropWidth / 2, cy = cropTop + cropHeight / 2
         let qx = sourceX - cx, qy = sourceY - cy
         // Kernel applies R(θ); the inverse applies R(−θ) — in pixels, so it is a pure rotation.
