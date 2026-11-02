@@ -1,0 +1,11 @@
+{
+  "body": "LEICA SL3",
+  "decoded_at_K": 6500.0,
+  "asn": [
+    0.51828,
+    1.0,
+    0.735308
+  ],
+  "neutral_max_spread_8bit": 1.0,
+  "iterations": 1
+}
