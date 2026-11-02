@@ -118,4 +118,19 @@ enum ForwardCompatKnownKeys {
         }
         return out
     }()
+
+    /// Names this build **reads but does not write** inside a group — the decode side's aliases.
+    ///
+    /// A name that decoding understands is not a future key. Leaving it in `forwardExtras` would make
+    /// the save write the same value under two names, and the legacy name carries *legacy* units:
+    /// `curve.rgb` is the pre-030 spelling of `curve.white`, so a `0…1` alias (0.22) would ride beside
+    /// the already-converted `0…2` value (0.44). The alias therefore only decides whether a save
+    /// **drops** the key; decoding is untouched (`CurveGroup.init(from:)` still does
+    /// `list("white") ?? list("rgb")`).
+    ///
+    /// Keep this in step with the decode side when a rename leaves an alias behind: a name missing
+    /// here is re-emitted as if it were a future key.
+    static let aliases: [String: Set<String>] = [
+        "curve": ["rgb"],
+    ]
 }

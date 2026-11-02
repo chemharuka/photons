@@ -582,7 +582,13 @@ public struct EditModel: Sendable, Equatable, Codable {
         }
         for (group, groupKnown) in ForwardCompatKnownKeys.groups {
             guard case .object(let children)? = root[group] else { continue }
-            let unknown = children.filter { !groupKnown.contains($0.key) }
+            // A key this build can *read* under an old name (`curve.rgb`) is not a future key: the
+            // decoder already lifted it into `white`, so keeping it would write one value twice — the
+            // alias in its old units. Aliases are dropped on save, never on load.
+            let aliases = ForwardCompatKnownKeys.aliases[group] ?? []
+            let unknown = children.filter {
+                !groupKnown.contains($0.key) && !aliases.contains($0.key)
+            }
             if !unknown.isEmpty { out[group] = .object(unknown) }
         }
         return out.isEmpty ? nil : out

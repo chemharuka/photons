@@ -607,13 +607,20 @@ final class CalibrationTests: XCTestCase {
                 throw XCTSkip("\(name) was recorded against a different RAW fixture")
             }
             let decodeScale = Float(max(golden.scale, 0.125))
-            let outcome = try RAWDecoder().decodeDetailed(
-                raw, options: DecodeOptions(decoderVersion: nil, scale: decodeScale))
-            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
-                                                           identity: "calibration-179-golden",
-                                                           lensProfile: outcome.lensProfile))
             let model = try EditModel.load(from: Self.repoRoot
                 .appendingPathComponent("Tests/Fixtures/\(golden.edit).json"))
+            // The production path (`photonsctl render`, which recorded these goldens): the decode is
+            // **at the document's white balance** and the graph is told the buffer already carries
+            // it. Decoding as-shot and leaving `RenderInput` at `.asShot` is a different development
+            // (194) and hashes differently — the golden is the production bytes.
+            let wb = model.light.whiteBalance
+            let outcome = try RAWDecoder().decodeDetailed(
+                raw, options: DecodeOptions(decoderVersion: nil, scale: decodeScale,
+                                            whiteBalance: wb))
+            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
+                                                           identity: "calibration-179-golden",
+                                                           sourceURL: raw,
+                                                           whiteBalance: wb))
             XCTAssertTrue(model.calibration.isIdentity)
             let result = try graph.render(model, options: RenderOptions(
                 scale: golden.scale / Double(decodeScale), wantsPixels: true))

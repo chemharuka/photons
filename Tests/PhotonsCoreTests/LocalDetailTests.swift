@@ -255,13 +255,17 @@ final class LocalDetailTests: XCTestCase {
                 throw XCTSkip("\(name) was recorded against a different RAW fixture")
             }
             let decodeScale = Float(max(golden.scale, 0.125))
-            let outcome = try RAWDecoder().decodeDetailed(raw, options: DecodeOptions(
-                decoderVersion: nil, scale: decodeScale))
-            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
-                                                           identity: "local-detail-golden",
-                                                           lensProfile: outcome.lensProfile))
             var edit = try EditModel.load(from: Self.repoRoot
                 .appendingPathComponent("Tests/Fixtures/\(golden.edit).json"))
+            // Same path as `photonsctl render` (which recorded the goldens), see `CalibrationTests`:
+            // decode at the document's white balance and tell the graph the buffer is already there.
+            let wb = edit.light.whiteBalance
+            let outcome = try RAWDecoder().decodeDetailed(raw, options: DecodeOptions(
+                decoderVersion: nil, scale: decodeScale, whiteBalance: wb))
+            let graph = try RenderGraph(input: RenderInput(image: outcome.image,
+                                                           identity: "local-detail-golden",
+                                                           sourceURL: raw,
+                                                           whiteBalance: wb))
             edit.masks = fiveMasks()
             XCTAssertEqual(edit.masks.count, 5)
             XCTAssertFalse(edit.hasLocalDetail, "two zero fields are not local detail work")
