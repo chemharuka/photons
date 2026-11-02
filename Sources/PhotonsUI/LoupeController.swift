@@ -2767,6 +2767,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         isEyedropperArmed = true
         eyedropperStaysArmed = staysArmed
         eyedropperRoute = .whiteBalance(handler)
+        // One canvas gesture at a time: arming the picker disarms the spot tool and the mask brush.
+        if let session {
+            session.healTool = false
+            session.maskTool = .off
+        }
         refreshEyedropperCursor()
     }
 
@@ -2781,6 +2786,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         isEyedropperArmed = true
         eyedropperStaysArmed = false
         eyedropperRoute = .pointColor(handler)
+        // Same mutual exclusion as the white-balance picker: only one canvas tool can be armed.
+        if let session {
+            session.healTool = false
+            session.maskTool = .off
+        }
         refreshEyedropperCursor()
     }
 

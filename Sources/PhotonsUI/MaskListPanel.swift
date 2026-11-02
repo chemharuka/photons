@@ -628,9 +628,10 @@ public struct MaskListPanel: View {
                 HStack(spacing: 2) {
                     ForEach(MaskTool.allCases, id: \.rawValue) { tool in
                         ToolSegmentButton(title: tool.label,
-                                          active: session.maskTool == tool) {
+                                          active: session.maskTool == tool && tool != .off) {
                             toolBinding.wrappedValue = tool
                         }
+                        .accessibilityIdentifier("inspector.mask.tool.\(tool.rawValue)")
                     }
                 }
                 .disabled(session.selectedMaskID == nil)
