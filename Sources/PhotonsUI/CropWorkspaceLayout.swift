@@ -38,7 +38,8 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
         public var picture: CGRect
         /// The crop frame on the canvas (axis-aligned: the frame is a window, the photo turns under it).
         public var frame: CGRect
-        /// Canvas pixels per source pixel at entry (`fit × 0.90`, or the refit beyond 6°).
+        /// Canvas pixels per source pixel at entry — `LoupeFraming.fitZoom` itself (259: the crop's
+        /// AABB at 90 %, possibly above 1:1 for a tight crop).
         public var entryZoom: Double
         /// Canvas pixels per source pixel at which the crop frame is inscribed in the canvas.
         public var maxZoom: Double
@@ -91,9 +92,11 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
     /// The one entry/arming layout: the picture and the frame at the workspace's fit, plus the two
     /// zoom numbers. `crop` is the draft's rect in the turned frame.
     ///
-    /// The arithmetic is `LoupeFraming.fitZoom`'s, spelled once: the ordinary fit of the rotated
-    /// source (never above 1:1), times `entryScale`; beyond `cropRefitDegrees` the turned crop's
-    /// AABB takes over, exactly as the live projection does at 45°.
+    /// 259 — the entry zoom is the ordinary 适应 **itself**, read from `LoupeFraming.fitZoom`: the
+    /// crop's turned AABB at the one 90 % margin (and the same full-frame 1:1 rule). It is not a
+    /// second formula and there is no extra × 0.9, so the workspace cannot show 81 %, 90 % and 100 %
+    /// for the same document. A tight crop may enter above 1:1 (the ordinary fit magnifies it); the
+    /// crop frame still occupies 90 % of the viewport on its constraining axis.
     public func entry(crop: CropRect = .full) -> Entry {
         let canvas = self.canvas.standardized
         let cw = Double(canvas.width), ch = Double(canvas.height)
@@ -101,21 +104,16 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
         let ow = Double(max(oriented.width, 1)), oh = Double(max(oriented.height, 1))
 
         let rotatedSource = LoupeFraming.rotatedExtent(width: ow, height: oh, degrees: straighten)
-        // 213 — exactly the same arithmetic (and the same single 90 %) as `LoupeFraming.fitZoom`:
-        // whole-frame fit × margin, with the turned crop's re-fit also × margin beyond 6°.
-        var zoom = min(1, min(cw / max(rotatedSource.width, 1e-9),
-                              ch / max(rotatedSource.height, 1e-9)) * Self.fitMargin)
         let rect = crop.clamped(allowsOutsideSource: true)
-        if abs(straighten) > LoupeFraming.cropRefitDegrees {
-            // Beyond 6° the workspace re-fits the **whole canvas** once instead of keeping the
-            // 90 % framing — the same rule `LoupeFraming.fitZoom` applies.
-            let rotatedCrop = LoupeFraming.rotatedExtent(width: rect.width * ow,
-                                                         height: rect.height * oh,
-                                                         degrees: straighten)
-            let fit = min(cw / max(rotatedCrop.width, 1e-9),
-                          ch / max(rotatedCrop.height, 1e-9))
-            zoom = min(zoom, min(1, fit * Self.fitMargin))
-        }
+        let rotatedCrop = LoupeFraming.rotatedExtent(width: rect.width * ow,
+                                                     height: rect.height * oh,
+                                                     degrees: straighten)
+        // The one fit function the live projection uses (259): crop AABB, one 90 % margin, the
+        // full-frame 1:1 rule for a never-cropped document, and the 4× magnification ceiling.
+        var zoom = cw.isFinite && ch.isFinite && cw > 0 && ch > 0
+            ? LoupeFraming.fitZoom(viewportWidth: cw, viewportHeight: ch,
+                                   extent: rotatedCrop, isWholeFrame: rect.coversFrame)
+            : 0
         zoom = zoom.isFinite && zoom > 0 ? zoom : 0
 
         // The crop frame is a rectangle of the **turned** frame, so it stays axis-aligned on screen.

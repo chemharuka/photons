@@ -6,9 +6,9 @@ import PhotonsCore
 
 /// 072 §A0 + §A1 — 缩放基底与确认裁切后的动画.
 ///
-/// **A0** one invariant: the zoom base is the **whole source frame** (the upright frame S0 ingested,
-/// before the crop). `fit` = whole frame fits the viewport, `1:1` = one source pixel per device pixel,
-/// `2:1` = two — crop or no crop. The 「用裁切尺寸算」 value is computed next to it as the anti-proof.
+/// **A0 (259 supersedes the fit half)** — `1:1` and `2:1` are still the **whole source frame**'s
+/// ratios (one/two source pixels per device pixel, crop or no crop), but `fit` is now the **crop's**
+/// turned AABB at 90 %: a 50 % crop fills the viewport instead of covering half of it.
 ///
 /// **A1** confirming a crop returns the camera to the framing it had **before** the tool opened: same
 /// rung, same pan, per-field equality, no auto-fit and no auto-centre — and the travel is an animation
@@ -32,8 +32,8 @@ final class CropZoomBaseTests: XCTestCase {
     // MARK: - A0
 
     /// 50 % crop of a 6000×4000 frame in a 2560×1600 viewport: three rungs, and the photo's rect on
-    /// screen at each, against the value the crop-based formula would have produced.
-    func testFitIsMeasuredOnTheWholeFrameWhateverTheCropIs() {
+    /// screen at each. Since 259 fit is the crop's AABB; 1:1/2:1 are still the source-frame ratios.
+    func testFitIsMeasuredOnTheCropAndOneToOneOnTheSource() {
         let viewport = ImageSize(width: 2560, height: 1600)
         let source = (width: 6000.0, height: 4000.0)
         let half = CropRect(left: 0.25, top: 0.25, right: 0.75, bottom: 0.75)
@@ -42,14 +42,10 @@ final class CropZoomBaseTests: XCTestCase {
         XCTAssertEqual(f.cropWidthPixels, 3000, accuracy: 1e-9)
         XCTAssertEqual(f.cropHeightPixels, 2000, accuracy: 1e-9)
 
-        // A0's rule, measured: 2560/6000 = 0.426667, 1600/4000 = 0.4; 213's 90 % margin → 0.36 for
-        // *any* crop of this frame.
-        XCTAssertEqual(f.fitZoom, 0.36, accuracy: 1e-12)
-        // Anti-proof — the 「用裁切尺寸算」 value: min(2560/3000, 1600/2000) = 0.8, i.e. twice the scale.
-        let wrong = min(Double(viewport.width) / f.cropWidthPixels,
-                        Double(viewport.height) / f.cropHeightPixels)
-        XCTAssertEqual(wrong, 0.8, accuracy: 1e-12)
-        XCTAssertNotEqual(f.fitZoom, wrong, "§A0: the crop must not enter the zoom conversion")
+        // 259: min(2560/3000, 1600/2000) × 0.90 = 0.8 × 0.90 = 0.72.
+        XCTAssertEqual(f.fitZoom, 0.72, accuracy: 1e-12)
+        // Reverse gate — the pre-259 whole-frame value is 0.36 and must no longer be fit.
+        XCTAssertNotEqual(f.fitZoom, 0.36, "the whole-frame base was the old 适应")
 
         // The photo on screen, per rung: at fit it is the crop at `fitZoom`; at a numeric stop the
         // window is `viewport / zoom` **source** pixels drawn one device pixel per canvas pixel.
@@ -58,17 +54,17 @@ final class CropZoomBaseTests: XCTestCase {
         let fitContent = f.contentSize(of: .fit)
         let oneWindow = f.windowSize(of: oneToOne)
         let twoWindow = f.windowSize(of: twoToOne)
-        print(String(format: "A0 · 50%% crop 6000×4000 in 2560×1600 · fit %.6f → %.0f×%.0f device px · "
+        print(String(format: "A0 259 · 50%% crop 6000×4000 in 2560×1600 · fit %.6f → %.0f×%.0f device px · "
                      + "1:1 window %.0f×%.0f src px (%.3f canvas px per src) · "
                      + "2:1 window %.0f×%.0f src px (%.3f)",
                      f.fitZoom, fitContent.width, fitContent.height,
                      oneWindow.width, oneWindow.height, f.mapping(of: oneToOne).canvasPerSource,
                      twoWindow.width, twoWindow.height, f.mapping(of: twoToOne).canvasPerSource))
 
-        // fit: the crop covers half of the 90 % frame (the whole frame would fill 90 % of the viewport).
-        XCTAssertEqual(fitContent.width, 2560 * 0.36 * 3000 / 2560, accuracy: 1e-9)
-        XCTAssertEqual(fitContent.width, 1080, accuracy: 1e-9)
-        XCTAssertEqual(fitContent.height, 720, accuracy: 1e-9)
+        // fit: the crop fills 90 % of the viewport on the constraining axis (height): 2000 × 0.72.
+        XCTAssertEqual(fitContent.width, 3000 * 0.72, accuracy: 1e-9)
+        XCTAssertEqual(fitContent.width, 2160, accuracy: 1e-9)
+        XCTAssertEqual(fitContent.height, 1440, accuracy: 1e-9)
         // 1:1: one source pixel per device pixel, whatever the crop is.
         XCTAssertEqual(oneWindow.width, 2560, accuracy: 1e-9)
         XCTAssertEqual(oneWindow.height, 1600, accuracy: 1e-9)
@@ -79,11 +75,12 @@ final class CropZoomBaseTests: XCTestCase {
         // The ratio between two rungs is the rung ratio, not a crop-dependent number.
         XCTAssertEqual(oneWindow.width / twoWindow.width, 2, accuracy: 1e-12)
 
-        // …and a *different* crop of the same frame keeps the same three ratios (the invariant).
+        // …while a *different* crop has its own fit: 1800×800 → min(2560/1800, 1600/800) × 0.9 = 1.28.
         let thin = LoupeFraming(viewport: viewport, sourceWidth: source.width, sourceHeight: source.height,
                                 crop: CropRect(left: 0.1, top: 0.4, right: 0.4, bottom: 0.6))
-        XCTAssertEqual(thin.fitZoom, f.fitZoom, accuracy: 1e-12,
-                       "§A0: fit does not depend on the crop rect")
+        XCTAssertEqual(thin.fitZoom, 1.28, accuracy: 1e-12,
+                       "259: fit follows the crop rect")
+        XCTAssertNotEqual(thin.fitZoom, f.fitZoom, "two crops can no longer share one fit")
     }
 
     /// The mapping the canvas actually draws with puts a source pixel on one device pixel at 1:1, for a
