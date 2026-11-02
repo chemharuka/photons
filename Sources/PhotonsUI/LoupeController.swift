@@ -1353,6 +1353,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // Same for the crop frame: a resize is a new projection, and both the frame and the tool strip
         // are laid out in view points.
         refreshCropTool()
+        // 247 — the ring's points-per-radius follows the new projection too.
+        refreshHealRing()
         // 258 — the stand-in occupies the same `content` rect as the real frame, so a resize while it
         // is up has to re-place it too. No-op when nothing is standing in.
         refreshFirstFramePlaceholderGeometry()
@@ -1441,6 +1443,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = self?.session?.highlightWarningRevision
         }, { [weak self] in
             self?.applyHighlightWarning()
+        })
+        // 247 — the ring is view state plus the selected spot's radius. It has its own signal so a
+        // radius tick never reaches the render path; the picture only re-renders when the spot's own
+        // document change bumps `editRevision`, exactly as it did before the ring existed.
+        bridge.observe({ [weak self] in
+            _ = self?.session?.healTool
+            _ = self?.session?.selectedHealSpotID
+            _ = self?.session?.healRadius
+            _ = self?.session?.editRevision
+        }, { [weak self] in
+            self?.refreshHealRing()
         })
     }
 
@@ -2422,6 +2435,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // only redrawn if a grip actually moved), so picking a gradient in the list shows its
         // control points without waiting for an edit.
         refreshMaskHandles()
+        // 247 — the ring follows the pointer and the current radius every move; a path rewrite only.
+        refreshHealRing()
     }
 
     /// The pointer left the canvas (a tracking-area exit, the view leaving its window, a photo switch):
@@ -2433,6 +2448,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         pointerSampleFrame = -1
         if pointerReadout != nil { pointerReadout = nil }
         if had { pointerReadoutTarget?.clearPointerReadout() }
+        // 247 — no pointer, no ring.
+        refreshHealRing()
     }
 
     /// Read the pixel under the pointer, once per (frame, texel).
@@ -2834,20 +2851,116 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func addHealSpot(atViewPoint point: CGPoint) -> HealSpot? {
         guard let session else { return nil }
+        // 247 — a click is a pointer position too; the ring must be at the spot that just landed even
+        // if the tracking area has not delivered a move yet (tests and the first click after entering).
+        if canvasView.bounds.contains(point) { pointerCanvasPoint = point }
         if session.healToolMode == .redeye {
-            return addRedEyeSpot(atViewPoint: point)
+            let landed = addRedEyeSpot(atViewPoint: point)
+            refreshHealRing()
+            return landed
         }
         guard let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
         let crop = session.edit.geometry.crop
         let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
         let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
-        return session.addHealSpot(at: frame)
+        let landed = session.addHealSpot(at: frame)
+        refreshHealRing()
+        return landed
     }
 
     // MARK: 229 — 红眼 clicks and drags
 
     /// True while the 修复 card is on its 红眼 segment; the canvas uses it to arm the drag path.
     public var isRedEyeMode: Bool { session?.healToolMode == .redeye }
+
+    // MARK: 247 — the 修复 brush-size ring
+
+    /// True while the 修复 tool owns the canvas. The view reads it for ⌥+wheel and `[` / `]`.
+    var healToolIsActive: Bool { session?.healTool == true }
+
+    /// The selected spot, if the panel names one that still exists.
+    private var selectedHealSpot: HealSpot? {
+        guard let session, let id = session.selectedHealSpotID else { return nil }
+        return session.edit.healSpots.first { $0.id == id }
+    }
+
+    /// The ring's radius in **view points**, or `nil` when no ring should be drawn now: the tool is
+    /// off, the pointer is not on the canvas, or there is no projection yet.
+    ///
+    /// The fraction is the selected spot's radius when one is selected, otherwise the radius the next
+    /// click will use (`CatalogSession.healRadius`) — the same two sources the card shows.
+    public var healRingRadiusInPoints: Double? {
+        guard let session, session.healTool,
+              pointerCanvasPoint != nil,
+              let framing = framing() else { return nil }
+        let mapping = framing.mapping(of: viewState)
+        let frameSize = ImageSize(width: max(1, Int(mapping.frameWidth.rounded())),
+                                  height: max(1, Int(mapping.frameHeight.rounded())))
+        let fraction = (selectedHealSpot?.clampedRadius ?? session.healRadius)
+        let radius = BrushRing.radiusInPoints(shortEdgeFraction: fraction,
+                                              frameSize: frameSize,
+                                              mapping: mapping,
+                                              backingScale: CGFloat(backingScale))
+        return radius.isFinite && radius > 0 ? radius : nil
+    }
+
+    /// The live diameter the ring view exposes (points), so its getter can follow a value written
+    /// through `session.setHealRadius` without waiting for an observation turn.
+    var liveHealRingDiameterInPoints: Double? {
+        healRingRadiusInPoints.map { $0 * 2 }
+    }
+
+    /// §3.4 — the ring exists only while the tool is armed and the pointer is over the canvas. Reading
+    /// this also takes a stale ring down, so "switched tools" reads as gone on the first query.
+    public var healRingIsVisible: Bool {
+        guard session?.healTool == true, canvasView.isHealPointerInside else {
+            canvasView.brushRing.hide()
+            return false
+        }
+        return canvasView.brushRing.isRingVisible
+    }
+
+    /// The one radius write entry the canvas' three gestures share (⌥+wheel, `[`/`]`, and any future
+    /// one). Clamped to `HealSpot.radiusRange`.
+    ///
+    /// A selected spot is the document, so it is written through with `commit: false` — the gesture
+    /// decides when the one row lands (`adjustHealRadius` commits coalesced). With nothing selected
+    /// this is the **next** spot's default: view state only, no document write, no history.
+    public func setHealRadius(_ radius: Double) {
+        guard let session, radius.isFinite else { return }
+        let clamped = min(max(radius, HealSpot.radiusRange.lowerBound),
+                          HealSpot.radiusRange.upperBound)
+        if let spot = selectedHealSpot {
+            session.setHealRadius(clamped, for: spot.id, commit: false)
+        } else {
+            session.healRadius = clamped
+        }
+        refreshHealRing()
+    }
+
+    /// Multiply the current radius by `factor` — the wheel and the two keys both land here.
+    ///
+    /// With a selected spot the change is a document edit: every tick commits with coalescing, so a
+    /// run of wheel events is **one** history row, not one per event. Unselected it never commits.
+    public func adjustHealRadius(by factor: Double) {
+        guard factor.isFinite, factor > 0, let session else { return }
+        let current = selectedHealSpot?.clampedRadius ?? session.healRadius
+        let selected = selectedHealSpot != nil
+        setHealRadius(current * factor)
+        if selected { session.commitEdit(label: "修复 半径") }
+    }
+
+    /// Redraw the ring from the current radius and pointer. Pure overlay work: no render request,
+    /// no decode, no history.
+    func refreshHealRing() {
+        guard session?.healTool == true,
+              let point = pointerCanvasPoint,
+              let radius = healRingRadiusInPoints else {
+            canvasView.brushRing.hide()
+            return
+        }
+        canvasView.brushRing.show(center: point, diameter: CGFloat(radius * 2))
+    }
 
     /// The card's 0.5…8 pt slider → short-edge units through the **live projection**, so 3 pt is
     /// the same distance on screen at fit and at 1:1. Falls back to `points / 100` when no framing

@@ -76,7 +76,8 @@ extension CatalogSession {
     /// frame each and **one** snapshot at the end — the mask card's rule); the mouse-up commits.
     public func setHealRadius(_ radius: Double, for id: String, commit: Bool = true) {
         guard let index = edit.healSpots.firstIndex(where: { $0.id == id }) else { return }
-        let clamped = min(max(radius, 0.002), 0.5)
+        let clamped = min(max(radius, HealSpot.radiusRange.lowerBound),
+                          HealSpot.radiusRange.upperBound)
         applyEdit { $0.healSpots[index].radius = clamped }
         if commit { commitEdit(label: "修复 半径") }
     }

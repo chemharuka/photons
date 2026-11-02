@@ -102,7 +102,7 @@ public struct HealCardPanel: View {
                 .controlSize(.mini)
                 .tint(session.healTool ? Color.accentColor : Color.secondary)
                 .accessibilityIdentifier("inspector.heal.tool")
-                .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径")
+                .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径。⌥+滚轮 或 [ / ] 调大小")
                 // Its frame is the button's, so a hosted test can click the real SwiftUI button
                 // (AX is empty under `swift test`). `hitTest` is nil: the probe never eats a click.
                 .background(HealToolProbeHost(isArmed: session.healTool))
@@ -206,7 +206,7 @@ public struct HealCardPanel: View {
                 .frame(width: 26, alignment: .leading)
             Slider(value: Binding(get: { spot.radius },
                                   set: { session.setHealRadius($0, for: spot.id, commit: false) }),
-                   in: 0.002 ... 0.2,
+                   in: HealSpot.radiusRange,
                    onEditingChanged: { editing in
                        if !editing { session.commitEdit(label: "修复 半径") }
                    })

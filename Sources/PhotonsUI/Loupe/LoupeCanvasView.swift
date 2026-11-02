@@ -15,7 +15,9 @@ public final class LoupeCanvasView: NSView {
     public var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
 
     /// The controller that owns the zoom/pan state. Weak: the controller owns the view.
-    public weak var controller: LoupeController?
+    public weak var controller: LoupeController? {
+        didSet { brushRing.controller = controller }
+    }
 
     /// 235 — what the canvas shows between 「enter the loupe」 and the first real frame.
     ///
@@ -35,6 +37,14 @@ public final class LoupeCanvasView: NSView {
     /// 缓存」. This sheet is synchronous, full-canvas and the same `#0F0F0F` as the matte, so the old
     /// photo can never be the first thing the new selection shows.
     private let canvasCover = NSView()
+
+    /// 247 — the 修复 brush-size ring. It is the **last** subview, so it composites above both the
+    /// matte cover and the stand-in. `hitTest` is nil, so it never takes a click.
+    public let brushRing = BrushRingView()
+
+    /// 247 — true while the pointer is over the canvas. The ring's visibility is this **and** the
+    /// heal tool; tests read it without having to synthesise an AppKit tracking area.
+    public var isHealPointerInside: Bool { controller?.pointerCanvasPoint != nil }
 
     /// `true` only while a stand-in is actually drawn (an image was installed and no frame has
     /// replaced it). Read by the cold-start test and by `LoupeController.firstFrameContent`.
@@ -123,6 +133,11 @@ public final class LoupeCanvasView: NSView {
         firstFramePlaceholder.isHidden = true
         firstFramePlaceholder.frame = .zero
         addSubview(firstFramePlaceholder)
+        // 247 — above both 258 sheets, hidden until a heal pointer move asks for it.
+        brushRing.frame = bounds
+        brushRing.autoresizingMask = [.width, .height]
+        brushRing.isHidden = true
+        addSubview(brushRing)
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -249,6 +264,14 @@ public final class LoupeCanvasView: NSView {
             default:
                 break
             }
+        }
+        // 247 — bare `[` / `]` resize the 修复 brush. The menu's `⌘[` / `⌘]` (90° rotation) keeps its
+        // path: a modifier means "not this gesture", and the switch below is otherwise untouched.
+        if controller?.healToolIsActive == true,
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+           key == "[" || key == "]" {
+            controller?.adjustHealRadius(by: key == "]" ? 1.1 : 1.0 / 1.1)
+            return
         }
         switch key {
         case "z", " ":
@@ -418,6 +441,19 @@ public final class LoupeCanvasView: NSView {
     /// by `setViewState` → `syncCropOverlay` in the same turn. Locking the picture down while the tool
     /// was on never protected the document either: nothing here can write one.
     public override func scrollWheel(with event: NSEvent) {
+        // 247 — ⌥+wheel resizes the 修复 brush instead of panning. A mouse wheel steps one notch per
+        // event; a trackpad's precise deltas are proportional, so a slow two-finger turn is a fine
+        // adjustment and a flick is a big one.
+        if controller?.healToolIsActive == true,
+           event.modifierFlags.contains(.option) {
+            let delta = event.scrollingDeltaY
+            guard delta != 0 else { return }
+            let raw = event.hasPreciseScrollingDeltas
+                ? exp(Double(delta) * 0.01)
+                : (delta > 0 ? 1.1 : 1.0 / 1.1)
+            controller?.adjustHealRadius(by: min(max(raw, 0.5), 2))
+            return
+        }
         controller?.scrollPan(deltaX: event.scrollingDeltaX,
                              deltaY: event.scrollingDeltaY,
                              precise: event.hasPreciseScrollingDeltas,
