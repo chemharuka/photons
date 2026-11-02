@@ -78,7 +78,12 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     /// The colour space the HD file is tagged with: **Display P3 PQ**, not Rec.2020 PQ.
     public var colorSpaceName: String? { self == .hd ? "displayP3_PQ" : nil }
     /// Bumped when the meaning of a spec changes without changing its spelling.
-    public var schemaVersion: Int { 1 }
+    ///
+    /// 241 — v2: the row order the cell decodes was corrected (Core Image's texture read-back is
+    /// bottom-row-first). Files written before this build by the **same** spec spelling can be
+    /// upside down (238 removed the encoder flip that used to cancel it), so the version moves to
+    /// make every one of them unreachable; the LRU reclaims them.
+    public var schemaVersion: Int { self == .hd ? 2 : 1 }
 }
 
 /// The constants that decide pixels, plus the digest that enters the cache key.
