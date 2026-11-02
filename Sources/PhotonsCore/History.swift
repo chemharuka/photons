@@ -833,14 +833,11 @@ private extension EditHistory {
         if rest.hasSuffix(".count") {
             let name = String(rest.dropLast(".count".count))
             guard let path = curvePath(name) else { return }
-            let source = previous[keyPath: path]
-            var current = doc[keyPath: path]
-            if current.count > source.count {
-                current.removeLast(current.count - source.count)
-            } else if current.count < source.count {
-                current.append(contentsOf: source[current.count...])
-            }
-            doc[keyPath: path] = current
+            // A count change means the whole list was re-shaped, and the point may have been added or
+            // removed **anywhere** (a middle insertion is the usual UI gesture). Trimming/appending
+            // by count alone therefore put the wrong points back; the previous snapshot is the exact
+            // inverse of the structural step.
+            doc[keyPath: path] = previous[keyPath: path]
             return
         }
         guard let open = rest.firstIndex(of: "["),
