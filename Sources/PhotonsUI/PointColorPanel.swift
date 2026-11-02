@@ -216,8 +216,8 @@ public struct PointColorSwatchStrip: View {
             .buttonStyle(.borderless)
             .help("点颜色吸管：点击画布上要调的颜色（Esc 取消）")
             .accessibilityIdentifier("inspector.pointColor.dropper")
-            .foregroundStyle(dropperArmed
-                             ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+            // 253 — the same armed fill as the white-balance dropper.
+            .toolActive(dropperArmed)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("inspector.pointColor.swatches")

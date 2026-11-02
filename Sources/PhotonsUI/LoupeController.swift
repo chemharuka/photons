@@ -2797,6 +2797,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
         canvasView.window?.invalidateCursorRects(for: canvasView)
     }
 
+    /// 253 — **the one exit for every canvas tool.**
+    ///
+    /// The user's ask (2026-11-03): 「各种画笔/吸管在切换工作栏后就退出」. A workspace switch (or
+    /// leaving the editor for 网格) calls this, so a tool the user can no longer see cannot keep the
+    /// next canvas click: the white-balance / point-colour / mask eyedropper, the 修复 / 红眼 spot
+    /// tool, the mask brush or eraser, an armed 新建 gradient, and a control-point drag all return to
+    /// browse. Coming back does **not** re-arm anything — the exit is an exit, not a pause.
+    ///
+    /// View state only: no `commitEdit`, no snapshot, no history row. A stroke or handle drag that is
+    /// in flight is thrown away exactly like Esc (`maskCanvas.cancel()` / `cancelHandleDrag()`), not
+    /// committed on the way out.
+    public func disarmAllTools() {
+        cancelEyedropper()
+        // Drop a half-painted mask stroke instead of committing it: leaving is a cancellation.
+        maskCanvas.cancel()
+        cancelMaskHandleDrag()
+        cancelShapeDrag()
+        endRedEyeDrag()
+        if let session {
+            session.healTool = false
+            session.maskTool = .off
+            session.pendingMaskShape = nil
+        }
+        // The brush / shape / eyedropper cursor all read these flags, so a plain arrow has to be
+        // re-asked for even when the eyedropper was not the armed tool.
+        canvasView.window?.invalidateCursorRects(for: canvasView)
+    }
+
     /// The click route. `LoupeCanvasView` calls it on mouse-down while the tool is armed; the tests
     /// call it directly (there is no window in `swift test`).
     ///
