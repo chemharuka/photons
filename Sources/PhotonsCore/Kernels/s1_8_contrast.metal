@@ -65,11 +65,20 @@ struct LocalAdjustDesc {
 ///
 /// `contrast == 0` returns `1.0` before the log, which is the bit-exact identity the neutral document
 /// needs. There is no clamp in either direction: the power is defined on the whole positive axis.
+///
+/// **The pivot is quantised to the buffer's grid.** This stage reads a 16-bit-float texture, so the
+/// flat a document calls "0.18" is stored as `half(0.18)` = 0.1800537109375 — 3.0e-4 above the
+/// Double. Anchoring `P` on the Double leaves `G − P = +4.3e-4` at the pivot itself; the resulting
+/// `gain` is 0.99985 at −100 (0.22 of a 16F code), and the implicit float→half store **truncates
+/// toward zero**, so the flat lost a whole code on the negative side (1474/1475 = 0.9993220) while
+/// every positive contrast kept its code. On the half grid the anchor is the number the stage can
+/// actually read: `G == P` at the flat, `gain == 1` exactly, and both signs are byte-identical.
+/// This is not a compensation for the measured ratio — it removes the offset that produced it.
 static inline float s2_5_global_gain(float Y, float contrast, float pivot,
                                      float exposureGain, float travel) {
     if (contrast == 0.0) { return 1.0; }
     float G = log2(max(Y, 1e-9) / max(exposureGain, 1e-9));
-    float P = log2(max(pivot, 1e-6));
+    float P = log2(max(float(half(pivot)), 1e-6));
     float gamma = exp2(contrast / 100.0 * travel);
     return exp2((gamma - 1.0) * (G - P));
 }
