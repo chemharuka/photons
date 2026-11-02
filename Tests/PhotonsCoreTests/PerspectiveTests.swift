@@ -631,24 +631,37 @@ final class PerspectiveTests: XCTestCase {
     ///
     /// The comparison is made on two renders whose canvases are the **same size**, so the difference
     /// is the composed matrix's own arithmetic and not the extra rows it allocates: document A is the
-    /// full frame (2048×2000 = 4.10 Mpx), document B is `vertical = +100` (far end ×1.2658) cropped to
-    /// `1/1.2658` in both axes, which brings the AABB back to 2048×2000. Both resample; only B
-    /// evaluates the 3×3 and divides.
+    /// full frame (2048×2000 = 4.10 Mpx), document B is `vertical = +100` cropped so its warped AABB
+    /// lands on exactly the same 2048×2000 canvas. Both resample; only B evaluates the 3×3 and
+    /// divides.
+    ///
+    /// **272 — the crop is read in photo coordinates, not in the crop's own unit square.** 248 anchors
+    /// `P` on the whole photograph, so for `vertical = +100` (`vv = −0.21`) the warp fixes the near
+    /// (bottom) edge — photo `y = 1` stays at `y' = 1` — and puts `y' = 0` on the line
+    /// `y = −vv/(1−vv) = 0.17355`. The vertical map therefore spans exactly 1 over `[0.17355, 1]`,
+    /// and the horizontal extent factor at a height `y` is `1/(1 + vv·(1−y))`, which at that top
+    /// line is `1.21`. So the **normalized square of side `1/(1−vv) = 0.82645`**, anchored on the
+    /// bottom edge and centred horizontally, warps to exactly 2048×2000 in both axes (before the
+    /// canvas' single `ceil`). The pre-248 crop of `1/far = 0.79`, chosen for the old crop-frame
+    /// anchoring, only makes 1993×1990 under the photo anchoring — that 55×10 px gap was the debt
+    /// this test ticket removes.
     func testKeystoneCostsNoMoreThanTwentyPercentAtFourMpx() throws {
         try requireMetal()
         let image = patternImage(width: 2048, height: 2000)
+        let source = ImageSize(width: image.width, height: image.height)
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "persp-cost"))
-        let pixels = Double(image.width * image.height)
 
         var plain = EditModel.neutral
         var keystoned = EditModel.neutral
         keystoned.geometry.perspectiveVertical = 100
-        let far = PerspectiveMap(vertical: 100, horizontal: 0).verticalFarScale
-        // 246: the canvas is the AABB of the warped quad, which grows in **both** axes. A crop of
-        // `1/far` in both dimensions brings it back to exactly the source's 2048×2000, so the two
-        // documents allocate the same canvas and the difference is the composed matrix's arithmetic.
-        keystoned.geometry.crop = NormalizedRect(x: (1 - 1 / far) / 2, y: (1 - 1 / far) / 2,
-                                                 width: 1 / far, height: 1 / far)
+        let strength = -PerspectiveMap(vertical: 100, horizontal: 0).verticalStrength  // 0.21
+        let side = 1 / (1 + strength)                                                 // 0.82645
+        keystoned.geometry.crop = NormalizedRect(x: (1 - side) / 2, y: 1 - side,
+                                                 width: side, height: side)
+        let baseSize = plain.geometry.outputPixels(in: source)
+        let keystonedSize = keystoned.geometry.outputPixels(in: source)
+        let baseMpx = Double(baseSize.width * baseSize.height) / 1e6
+        let keystonedMpx = Double(keystonedSize.width * keystonedSize.height) / 1e6
 
         /// **GPU** time, not wall clock: this box swaps while the suite runs, and a 1 s wall-clock
         /// frame with an 8 % CPU stall would drown a sub-millisecond marginal. `trace.gpuMilliseconds`
@@ -678,9 +691,12 @@ final class PerspectiveTests: XCTestCase {
         let baseP95 = percentile(baseSamples, 0.95), warpedP95 = percentile(warpedSamples, 0.95)
         let marginal = warped - base
         let ratio = warpedP95 / max(baseP95, 1e-9)
-        print(String(format: "COST · %.2f Mpx · p50 %.2f → %.2f ms · marginal %+.3f ms"
+        print(String(format: "COST · A %d×%d (%.3f Mpx) · B %d×%d (%.3f Mpx)",
+                     baseSize.width, baseSize.height, baseMpx,
+                     keystonedSize.width, keystonedSize.height, keystonedMpx))
+        print(String(format: "COST · p50 %.2f → %.2f ms · marginal %+.3f ms"
                      + " · p95 %.2f → %.2f ms (%.1f%%)",
-                     pixels / 1e6, base, warped, marginal, baseP95, warpedP95,
+                     base, warped, marginal, baseP95, warpedP95,
                      (ratio - 1) * 100))
         // The isolated measurement (the number in `local/REPORT.md`) is +9.4 %. A GPU shared with
         // the rest of the suite can add several milliseconds to *both* documents, so the automated
@@ -688,16 +704,13 @@ final class PerspectiveTests: XCTestCase {
         // regression (the old path's 3×3 + divide is the same work) is far larger than that.
         XCTAssertLessThanOrEqual(warpedP95, baseP95 * 1.20 + 8.0,
                                  "S0 p95 grew by \(Int((ratio - 1) * 100))% (> 20% + noise floor)")
-        let keystonedSize = keystoned.geometry.outputPixels(in: ImageSize(width: image.width,
-                                                                          height: image.height))
-        // 248 C — P is anchored on the whole photograph now, so this historical crop (which
-        // compensated the old crop-frame anchoring) no longer lands on exactly 2048×2000. The two
-        // canvases stay within 3 % of each other, which is what keeps the comparison to the
-        // composed matrix's arithmetic rather than a different allocation size.
-        XCTAssertLessThanOrEqual(abs(keystonedSize.width - image.width), image.width / 32,
-                                 "the two documents must be the same work (width)")
-        XCTAssertLessThanOrEqual(abs(keystonedSize.height - image.height), image.height / 32,
-                                 "the two documents must be the same work (height)")
+        // 272 — both canvases are the photograph's own 2048×2000 to the pixel, so the timings above
+        // compare the composed matrix's arithmetic on the same allocation, not two different amounts
+        // of work. (The reverse gate: put the pre-248 `1/far` crop back and this is 1993×1990.)
+        XCTAssertLessThanOrEqual(abs(keystonedSize.width - image.width), 1,
+                                 "the two documents must have the same canvas width")
+        XCTAssertLessThanOrEqual(abs(keystonedSize.height - image.height), 1,
+                                 "the two documents must have the same canvas height")
     }
 
     /// The two knobs at 0 must not change *any* of the geometry the renderer already had: the canvas,
