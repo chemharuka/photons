@@ -533,20 +533,21 @@ final class ExposureEquivarianceTests: XCTestCase {
         "whites·0": "ca29dd99716d62f978a01f429fac8bc8f6b2637752dc688d70a82684efed8f80",
         "whites·50": "df77d410c7c3fcdc4b78054d46c13ba7dda559ccc0f30ca96639ba13582669eb",
         "whites·100": "171d3efc32fed68f151157287de9d053e1c6c8221b5625c0671f1631e092f755",
-        "contrast·-100": "4a1c72dc944bb6a2d394dc865b8a99f5238ffcdf1576c8db978d1c457f93a382",
-        "contrast·-50": "cbcd950b1eaac55ebf1c36207b00436d6d4654317569226c024e265e5d9a0843",
-        "contrast·50": "271a3f578304f6a7f14f9f20503b6ab473a06a41d3ae3eb5ea7148f1516c94c6",
-        "contrast·100": "eeae358246cacdb0cc8e1806c5106252b102103b0e606d1cacba5614e0a6537d",
-        // **187 重钉这四个 contrast 档（gate 9b）。先判后录，判据是"动的只有跑 S2.5 的那些渲染":**
-        // (1) `whites·*` 五档与 `atlas` 仍是 147/167 的字节 —— `whites·0` 就是一份 contrast = 0
-        //     的文档，它没动，所以中性文档没有回归；(2) 蒙版入口把蒙版线性增益折进 `G` 之后
-        //     （`s1_8_contrast.metal` 的 `maskGain`），无蒙版文档的 `maskGain` 恒为 1，逐字节比较
-        //     过：带/不带该修复，下面四个 SHA 与 whites 五档完全相同；(3) 因此动的是 187 的边界
-        //     归一（`clamp_to_edge` 复制边像素 → 按真实样本数归一），它必然改变每一个真的执行了
-        //     S2.5 的渲染，且 ±50 也动（边界行在每个非零档上都略有不同，而 SHA 没有容差）。
-        // 旧 → 新：-100 370c5ea4…36f89ac → 4a1c72dc…f93a382，-50 b199f90f…ca019df →
-        // cbcd950b…d9a0843，+50 057b4eec…4dd94f389 → 271a3f57…516c94c6，
-        // +100 2afccef2…ef6c79e6a → eeae3582…e0a6537d。这几档是"新算式重录"，不是回归。
+        "contrast·-100": "942e973a97e9bf115a37cb440807faeade533fb3d0d5cee0d47dbab30c466269",
+        "contrast·-50": "987bdb88fe0a2fe0c3a59df005d750987a7aafcf40be6ea3f5b4100054bbbf89",
+        "contrast·50": "c671cb270d37f00a1eac6ecc65bade0dc59d5e3725bf7e8e53262313e011d53d",
+        "contrast·100": "39979df257481b60497c04d39727545510be1b28e4892fe6d3e32eaa2ceaef87",
+        // **265（2026-11-03）重钉这四个 contrast 档。** 228 把 159 的多尺度局部算子换成显示域的全局
+        // 幂曲线，`contrast` 段必然整段变；265 又修了这条曲线的锚点：它读的是 **16F** 缓冲，文档里的
+        // 0.18 平场实际存成 `half(0.18)` = 0.1800537，而 Double 锚点留下 4.3e-4 的偏移，曲线在枢轴上
+        // 的位移只有 0.22 个码；隐式 float→half 存盘**向零截断**，于是负对比度白丢一码
+        // （1474/1475 = 0.9993220，−1/−50/−100 全一样），正对比度却留在原码。修法：锚点取同一张
+        // 半精度网格上的中灰 `half(0.18)`（`s1_8_contrast.metal#s2_5_global_gain`），平场处 G == P，
+        // `gain == 1` 精确成立，两侧逐字节相等。
+        // 旧（187 记录的 159 局部算子值）→ 新：-100 4a1c72dc…93a382 → 942e973a…c466269，
+        // -50 cbcd950b…d9a0843 → 987bdb88…bbbf89，+50 271a3f57…516c94c6 → c671cb27…11d53d，
+        // +100 eeae3582…e0a6537d → 39979df2…ceaef87。`whites·*` 五档与 `atlas` **未动**：它们的
+        // 文档 contrast = 0，S2.5 根本不编码，仍是 147/167 的逐字节值。
         // 167: the atlas digest below moved **only** because the luma predicate's axis no longer
         // folds HDR light to `L = 1`; at E = 0 the global gain is still exactly 1, so this remains a
         // check of 147's "unexposed tick" invariant for the same document. Old → new:

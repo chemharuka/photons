@@ -41,6 +41,14 @@ public enum GlobalContrast {
     /// The linear display light the power curve is anchored to: mid-grey, the same 0.18 the old
     /// global bend used before 0107. `contrast = 0` is the identity at every pivot, so this number is
     /// only visible at a non-zero slider.
+    ///
+    /// 265 — the kernel can only see the 16-bit-float picture, where mid-grey is `half(0.18)` =
+    /// 0.1800537, not this Double. `s1_8_contrast.metal` therefore rounds the pivot to that grid
+    /// before taking `log2`: otherwise the flat is 4.3e-4 EV above its own pivot, the sub-code gain is
+    /// stored with a truncating float→half write, and a flat frame loses one code on the negative
+    /// side (measured 1474/1475 = 0.9993220 at every negative contrast). The CPU reference here stays
+    /// on the exact Double so `gain(0.18, c) == 1`; the two differ by < 3e-4 relative, i.e. below one
+    /// display code over the whole slider range.
     public static let pivot: Double = 0.18
 
     /// Full-scale travel in EV: the exponent is `2^(contrast/100 · travelEV)`. It is not a new magic
