@@ -112,13 +112,15 @@ final class CropToolProjectionTests: XCTestCase {
         let w = abs(c[1].x - c[0].x), h = abs(c[3].y - c[0].y)
         XCTAssertEqual(h / w, (crop.height * 1200) / (crop.width * 800), accuracy: 1e-9,
                        "a portrait frame is tall on screen, not transposed")
-        // 132: 适应 fits the *rotated whole frame* into the viewport, so the crop's on-screen width
-        // is its pixel width × that zoom. The pre-132 assertion wrote `× (800/800)` — i.e. zoom = 1,
-        // which is no longer the fit at 9° (it is 0.8181 → 327.24 px, not 400).
+        // 259: 适应 fits the **crop's** rotated AABB (not the whole 800×1200 source), so the crop's
+        // on-screen width is its pixel width × that zoom. At 9° the crop AABB is
+        // 400·cos + 720·sin × 400·sin + 720·cos, and the fit is min(800/thatW, 1200/thatH) × 0.90.
         let theta = 9.0 * .pi / 180
-        let frameW = 800 * cos(theta) + 1200 * sin(theta)
-        let frameH = 800 * sin(theta) + 1200 * cos(theta)
-        let fitZoom = min(800 / frameW, 1200 / frameH) * LoupeFraming.fitMargin
+        let cropW = crop.width * 800
+        let cropH = crop.height * 1200
+        let aabbW = cropW * cos(theta) + cropH * sin(theta)
+        let aabbH = cropW * sin(theta) + cropH * cos(theta)
+        let fitZoom = min(800 / aabbW, 1200 / aabbH) * LoupeFraming.fitMargin
         XCTAssertEqual(w, crop.width * 800 * fitZoom, accuracy: 1e-6)
     }
 

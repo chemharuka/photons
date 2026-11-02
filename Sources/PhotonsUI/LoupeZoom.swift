@@ -15,8 +15,9 @@ import QuartzCore
 ///   · `zoom` is **canvas (device) pixels per source pixel**: `1` is 1:1, `4` is 4:1.
 ///   · `centerX/centerY` is the source pixel that lands on the middle of the viewport.
 ///
-/// `mode == .fit` keeps the old M3 behaviour (whole crop, letterboxed, never magnified) and the
-/// stored centre is ignored; `zoom` is then only a memory of what to return to.
+/// `mode == .fit` shows the whole crop letterboxed (since 259 at the crop's own fit, so a tight crop
+/// may be magnified up to 4×; a never-cropped frame keeps M3's never-magnify rule). The stored centre
+/// is ignored; `zoom` is then only a memory of what to return to.
 public struct LoupeViewState: Equatable, Sendable {
 
     public enum Mode: String, Sendable, Codable {
@@ -605,8 +606,9 @@ public struct LoupeFraming: Equatable, Sendable {
     /// Retained for call sites that ask "is this the crop workspace?"; **never a multiplier** since
     /// 213. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
     public var fitScale: Double
-    /// The angle above which the crop workspace re-fits the whole canvas once instead of keeping the
-    /// 90 % framing (§9/§10 12). In between, the 90 % framing wins — the accepted trade.
+    /// The angle above which 132 §9/§10 12 used to re-fit the whole canvas once. **259 subsumes the
+    /// rule**: fit is now always the crop's AABB, so the > 6° branch is gone and this constant is
+    /// kept only as the threshold older callers/tests still name.
     public static let cropRefitDegrees = 6.0
 
     public init(viewport: ImageSize, sourceWidth: Double, sourceHeight: Double,
@@ -684,7 +686,10 @@ public struct LoupeFraming: Equatable, Sendable {
                   height: max(1, Int(sourceHeight.rounded())))
     }
 
-    /// The whole source turned by the document's angle — what ordinary 适应 frames.
+    /// The whole source turned by the document's angle — the whole-picture AABB (S4).
+    ///
+    /// Since 259 适应 frames `rotatedCropExtent` (the crop's AABB, S2/S3) instead; this remains the
+    /// whole-frame geometry for callers that need it, and it is what a full crop's extent equals.
     ///
     /// 246: with a keystone this is the **P → R → AABB** of the whole picture, the same canvas the
     /// renderer allocates. Without one it is `rotatedExtent`, bit for bit.
@@ -715,46 +720,52 @@ public struct LoupeFraming: Equatable, Sendable {
                                   degrees: straightenDegrees)
     }
 
-    /// Canvas pixels per source pixel when the **whole source frame** is fitted into the viewport.
+    /// 259 — the fit ceiling. A small crop's quadrilateral can be far smaller than the viewport, so
+    /// 适应 has to magnify it; 4× is the same ceiling as the zoom ladder and the point past which a
+    /// 60 MP frame has nothing left to reveal. The readout prints the real ratio (`适应 217%`); it is
+    /// never silently pulled back to 100 %, which would make 适应 stop touching the viewport edge.
+    public static let maximumFitZoom: Double = 4
+
+    /// 259 — 适应 = the **crop's** post-perspective/post-rotation AABB at 90 % of the viewport.
     ///
-    /// 072 §A0 — the base is the full frame (`sourceWidth`/`sourceHeight`: the upright frame S0
-    /// ingested, before any crop), and the crop is only the *visible window*. It used to be measured
-    /// on the crop (`cropWidthPixels`), which made fit mean "blow the kept part up to the viewport":
-    /// a 50 % crop was drawn at twice the scale of the picture it was cut out of, so `fit`, `1:1` and
-    /// `2:1` were three different ratios depending on the document's crop rect. One invariant now:
+    /// The extent is `rotatedCropExtent`, i.e. the same `CropMath.perspectiveCanvas` /
+    /// `CropGeometry.rotatedExtent` definition the renderer allocates (246): the fit and the canvas
+    /// the loupe frames are one geometry, not two. At 0° it is the crop's pixel rectangle.
     ///
-    ///     fit  = the whole frame fits the viewport      (a 50 % crop covers half of it)
-    ///     1:1  = one source pixel → one device pixel    (crop or no crop)
-    ///     2:1  = two device pixels per source pixel     (crop or no crop)
+    /// This is deliberately **crop only**, never `min(crop fit, whole-frame fit)`: at 45° the whole
+    /// source's AABB is larger than the crop's, so taking the smaller would undo the new semantics and
+    /// return to the old whole-frame framing (the reverse gate in `FitToCrop259Tests` is written on
+    /// exactly that difference).
     ///
-    /// `min(1, …)`: an image smaller than the viewport is shown at 1:1, never blown up — the M3 rule.
-    /// The result is therefore always in `(0, 1]`, and it is usually **not** one of the zoom stops:
-    /// 0.31 for a 60 MP frame in a 2560-px viewport, 0.72 for a 24 MP one, exactly 1.0 for a file that
-    /// already fits. It is also not *in* the ladder — `fit` is a mode, and its ratio is only ever used
-    /// to lay the frame out and to label the readout (`适应 31%`). Nothing may assume fit sits below
-    /// 25 %, below 50 %, or below the current zoom.
-    public var fitZoom: Double {
-        // 132: 适应 is the **rotated** source's bounding box, so a 45° document shows its whole
-        // picture (the corners are inside the viewport instead of being cut off). At 0° the extent is
-        // exactly (sourceWidth, sourceHeight), so this is the old expression bit for bit.
-        let base = rotatedSourceExtent
-        let z = min(Double(viewport.width) / max(base.width, 1e-9),
-                    Double(viewport.height) / max(base.height, 1e-9))
+    /// `isWholeFrame` is the one exception, and it is **not** the old min rule: a document that has
+    /// never been cropped is a pre-259 document, and its 适应 must stay bit-for-bit what M3 drew — a
+    /// source smaller than the viewport is shown at 1:1, never blown up. A real crop may magnify up
+    /// to `maximumFitZoom`; a full frame may not.
+    ///
+    /// 1:1 and 2:1 are **not** here: they stay source-pixel definitions (`zoom(of:)`), so the same
+    /// document reads the same ratio at 100 % / 200 % whether or not it is cropped.
+    public static func fitZoom(viewportWidth: Double, viewportHeight: Double,
+                               extent: (width: Double, height: Double),
+                               isWholeFrame: Bool) -> Double {
+        let z = min(viewportWidth / max(extent.width, 1e-9),
+                    viewportHeight / max(extent.height, 1e-9))
         guard z.isFinite, z > 0 else { return 1 }
-        // 213 — exactly one 90 %: `fitMargin` is the ordinary 适应 and, in the crop workspace, the
-        // entry framing too. 132's second multiplication (`fitScale`) is gone; the property is only
-        // a "which workspace am I in?" flag now.
-        var zoom = min(1, z * Self.fitMargin)
-        // 132 §9 — beyond `cropRefitDegrees` the **whole canvas** is re-fitted once, because the
-        // turned crop no longer fits at the 90 % framing (§10 12). The same 90 % applies to that
-        // re-fit; taking the min with the whole-frame framing keeps the smaller of the two.
-        if abs(straightenDegrees) > Self.cropRefitDegrees {
-            let aabb = rotatedCropExtent
-            let fit = min(Double(viewport.width) / max(aabb.width, 1e-9),
-                          Double(viewport.height) / max(aabb.height, 1e-9))
-            if fit.isFinite, fit > 0 { zoom = min(zoom, min(1, fit * Self.fitMargin)) }
-        }
-        return zoom
+        let fitted = z * fitMargin
+        let bounded = isWholeFrame ? min(1, fitted) : fitted
+        return min(maximumFitZoom, bounded)
+    }
+
+    /// 适应 fits the **crop's** turned quadrilateral (S2/S3), not the whole source (S4) — 259.
+    ///
+    /// The result may be greater than 1 for a small crop (up to `maximumFitZoom`), and it is usually
+    /// **not** one of the zoom stops: it is a mode ratio used to lay the frame out and to label the
+    /// readout (`适应 31%`, or `适应 217%` after a tight crop). It is not in the ladder, and nothing
+    /// may assume fit sits below 25 %, below 50 %, or below 1.
+    public var fitZoom: Double {
+        Self.fitZoom(viewportWidth: Double(viewport.width),
+                     viewportHeight: Double(viewport.height),
+                     extent: rotatedCropExtent,
+                     isWholeFrame: crop.coversFrame)
     }
 
     public func zoom(of state: LoupeViewState) -> Double {
