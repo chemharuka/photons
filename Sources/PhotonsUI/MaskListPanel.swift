@@ -51,13 +51,16 @@ public struct MaskListPanel: View {
 
     private var masks: [Mask] { session.edit.masks }
 
+    /// 221 — this card's declaration (title + reset scope). The 修复 card next to it is
+    /// `MaskWorkspaceCardSpec.heal`, whose reset is explicitly `.none`.
+    private var card: MaskWorkspaceCardSpec { .mask }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
             list
             divider
             tools
-            healSection
             if let mask = selectedMask {
                 maskSection(mask)
                 // 2026-10-30（用户）：「亮度选择 / 色彩选择这些应该放在更加上方的位置」。
@@ -85,7 +88,9 @@ public struct MaskListPanel: View {
         .background(
             MaskPanelProbeHost(rows: parameterLabels,
                                listOrder: masks.map(\.name),
-                               selectedName: selectedMask?.name ?? "")
+                               selectedName: selectedMask?.name ?? "",
+                               title: card.title,
+                               maskCount: masks.count)
                 .frame(width: 1, height: 1)
         )
         // 139 — the picker is a mode on the canvas, so leaving the mask (or the photo) must not leave
@@ -101,10 +106,13 @@ public struct MaskListPanel: View {
         HStack(spacing: 6) {
             // 双击卡片标题 = 整张卡复位（其它卡一样）：这张卡没有「整组」的 `PanelResets.Group`
             // 分支（蒙版是列表），默认是**这一张蒙版**的参数面（见 `PanelResets.maskCard(_:)`）。
-            Text("蒙版")
+            // 221: title and reset come from `MaskWorkspaceCardSpec`, so the 修复 card's `.none` is a
+            // declaration next to this card's `.selectedMask`, not an omission.
+            Text(card.title)
                 .font(.system(size: 11, weight: .bold))
+                .accessibilityIdentifier("inspector.card.masks.title")
                 .modifier(ResetOnDoubleClick(
-                    action: { if let id = session.selectedMaskID { resets.maskCard(id) } },
+                    action: card.resetAction(session: session),
                     help: InspectorView.resetGroupHelp))
             Text("\(masks.count)/\(Mask.maxCount)")
                 .font(.system(size: 9, design: .monospaced))
@@ -162,10 +170,13 @@ public struct MaskListPanel: View {
 
     @ViewBuilder private var list: some View {
         if masks.isEmpty {
-            Text("还没有蒙版。新建一个，然后在画面里拖动画笔。")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+            // 221: the card stays (header + 新建 menu are outside this branch); only the body says
+            // there is nothing yet.
+            Text("还没有蒙版")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("inspector.mask.empty")
         } else {
             VStack(spacing: 1) {
                 ForEach(masks, id: \.id) { mask in
@@ -631,121 +642,6 @@ public struct MaskListPanel: View {
         }
     }
 
-    // MARK: 修复画笔 (078 P0-1)
-
-    /// The tool button, the list, and two numbers per spot — nothing else.
-    ///
-    /// What is deliberately **not** here, so the next reader does not go looking: a drag handle on the
-    /// canvas, a hand-placed source point, and a "remove" (content-aware) mode. Spot removal's first
-    /// version is clone + heal with the default source one radius to the right; the kernel and the
-    /// model already carry the fields the rest would need (`HealSpot.sourceOffset` is editable in the
-    /// document, just not by a handle yet).
-    private var healSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Button {
-                    session.healTool.toggle()
-                    // One canvas gesture at a time: arming the spot tool disarms the brush.
-                    if session.healTool { session.maskTool = .off }
-                } label: {
-                    Label("修复", systemImage: "bandage")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .tint(session.healTool ? Color.accentColor : Color.secondary)
-                .accessibilityIdentifier("inspector.heal.tool")
-                .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径")
-
-                Text("\(session.edit.healSpots.count)/\(HealSpot.maxCount)")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                Spacer(minLength: 4)
-                Picker("", selection: healModeBinding) {
-                    ForEach(HealMode.allCases, id: \.rawValue) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.mini)
-                .labelsHidden()
-                .frame(width: 86)
-            }
-            Toggle("自动取源", isOn: Binding(get: { session.autoHealSource },
-                                            set: { session.autoHealSource = $0 }))
-                .toggleStyle(.checkbox)
-                .font(.system(size: 10))
-                .controlSize(.mini)
-                .accessibilityIdentifier("inspector.heal.autoSource")
-                .help("搜索缺陷周围 2–4 个半径的环形带，取边界最像的一块做源；关掉 = 老行为（右移一个半径）")
-            if let source = session.lastHealSource {
-                Text(healSourceStatus(source))
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("inspector.heal.sourceStatus")
-            }
-            ForEach(session.edit.healSpots) { spot in
-                healRow(spot)
-            }
-        }
-    }
-
-    private func healRow(_ spot: HealSpot) -> some View {
-        HStack(spacing: 6) {
-            Text(spot.mode.label)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .frame(width: 26, alignment: .leading)
-            Slider(value: Binding(get: { spot.radius },
-                                  set: { session.setHealRadius($0, for: spot.id, commit: false) }),
-                   in: 0.002 ... 0.2,
-                   onEditingChanged: { editing in
-                       if !editing { session.commitEdit(label: "修复 半径") }
-                   })
-            .controlSize(.mini)
-            Text(String(format: "%.3f", spot.radius))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 40, alignment: .trailing)
-            Button {
-                session.deleteHealSpot(spot.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.mini)
-            .accessibilityIdentifier("inspector.heal.delete.\(spot.id)")
-            .help("删除这个修复点")
-        }
-        .accessibilityIdentifier("inspector.heal.row.\(spot.id)")
-    }
-
-    /// One line of truth about where the last new spot's source came from — the search never
-    /// silently falls back, so the panel says which answer the user actually got.
-    private func healSourceStatus(_ source: HealSourceResult) -> String {
-        switch source.status {
-        case .found:
-            return String(format: "源：自动（%.1f 个半径）", source.distanceInRadii)
-        case .noCandidateAccepted:
-            return "源：带内无可用源，用默认"
-        case .searchSkipped:
-            return "源：默认"
-        }
-    }
-
-    private var healModeBinding: Binding<HealMode> {
-        Binding(get: { session.healMode },
-                set: { mode in
-                    session.healMode = mode
-                    // A mode picked in the panel applies to the spot the panel is pointed at too —
-                    // otherwise the segmented control would look like it did nothing on an existing
-                    // spot.
-                    if let id = session.selectedHealSpotID ?? session.edit.healSpots.last?.id {
-                        session.setHealMode(mode, for: id)
-                    }
-                })
-    }
-
     private var dividers: some View {
         VStack(alignment: .leading, spacing: 4) {
             brushRow("大小", value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f",
@@ -829,15 +725,22 @@ public final class MaskPanelProbe: NSView {
     public private(set) var listOrder: [String] = []
     /// The selected mask's document name (what the rename field committed to).
     public private(set) var selectedName: String = ""
+    /// 221: the card's declared title and how many masks it holds — enough for a hosted test to
+    /// prove the empty card is still on screen (the AX tree is empty in `swift test`).
+    public private(set) var title: String = ""
+    public private(set) var maskCount: Int = 0
 
     /// Never a hit target and never drawn: it exists to be read.
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
     public override var isOpaque: Bool { false }
 
-    public func publish(rows: [String], listOrder: [String], selectedName: String) {
+    public func publish(rows: [String], listOrder: [String], selectedName: String,
+                        title: String, maskCount: Int) {
         self.rows = rows
         self.listOrder = listOrder
         self.selectedName = selectedName
+        self.title = title
+        self.maskCount = maskCount
     }
 }
 
@@ -845,15 +748,19 @@ struct MaskPanelProbeHost: NSViewRepresentable {
     var rows: [String]
     var listOrder: [String]
     var selectedName: String
+    var title: String
+    var maskCount: Int
 
     func makeNSView(context: Context) -> MaskPanelProbe {
         let probe = MaskPanelProbe()
-        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName)
+        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName,
+                      title: title, maskCount: maskCount)
         return probe
     }
 
     func updateNSView(_ probe: MaskPanelProbe, context: Context) {
-        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName)
+        probe.publish(rows: rows, listOrder: listOrder, selectedName: selectedName,
+                      title: title, maskCount: maskCount)
     }
 }
 

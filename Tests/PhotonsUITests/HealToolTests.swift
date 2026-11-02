@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 import PhotonsCore
 @testable import PhotonsUI
 
@@ -122,17 +123,142 @@ final class HealToolTests: XCTestCase {
 
     // MARK: - 4. the panel draws it
 
-    func testTheMaskCardCarriesTheHealToolAndItsRows() throws {
-        let url = URL(fileURLWithPath: #filePath)
+    func testTheHealCardCarriesTheHealToolAndItsRows() throws {
+        let heal = try Self.source("Sources/PhotonsUI/HealCardPanel.swift")
+        XCTAssertTrue(heal.contains("InspectorCardShell"), "修复卡要用同一套卡头与玻璃底")
+        XCTAssertTrue(heal.contains("inspector.heal.tool"),
+                      "工具按钮带读回点，--ui-smoke 才能证明它在树里")
+        XCTAssertTrue(heal.contains("session.deleteHealSpot(spot.id)"), "每一行可以删除")
+        XCTAssertTrue(heal.contains("session.setHealRadius("), "每一行可以调半径")
+
+        let mask = try Self.source("Sources/PhotonsUI/MaskListPanel.swift")
+        XCTAssertFalse(mask.contains("inspector.heal."), "蒙版卡里不许再有修复的任何节点")
+    }
+
+    // MARK: - 5. 221: 两张卡、空状态、无复位声明
+
+    func testTheMaskWorkspaceDeclaresBothCardsAndTheHealCardHasNoReset() {
+        XCTAssertEqual(MaskWorkspaceCardSpec.all.map(\.title), ["蒙版", "修复"],
+                       "蒙版工作区里上下两张卡")
+        XCTAssertEqual(MaskWorkspaceCardSpec.all.map(\.reset), [.selectedMask, .none],
+                       "修复卡显式登记为「无复位」")
+        XCTAssertTrue(MaskWorkspaceCardSpec.mask.resetAction(session: session()) != nil)
+        XCTAssertNil(MaskWorkspaceCardSpec.heal.resetAction(session: session()),
+                     "修复卡没有双击复位：声明就是 nil，不是漏写")
+    }
+
+    /// 221 验收 2/3/4/5: an **empty** mask workspace still draws both cards, the heal tool in the
+    /// empty 修复 card is clickable, and a spot lands in the 修复 card — not in 蒙版.
+    ///
+    /// The AX tree is empty under `swift test` (it is not a trusted accessibility client), so the
+    /// titles come from each card's own `NSView` readback seam; the click targets the real SwiftUI
+    /// button through the frame the button's own probe reports. The AX identifiers are still
+    /// asserted on the sources, which is the form the existing card tests use.
+    func testEmptyWorkspaceShowsBothCardsAndTheHealToolWorks() throws {
+        let s = session()
+        let (window, host) = Self.host(
+            VStack(spacing: 8) {
+                MaskListPanel(session: s)
+                HealCardPanel(session: s)
+            },
+            size: CGSize(width: 330, height: 700))
+        defer { window.contentView = nil }
+
+        let maskProbe = try XCTUnwrap(Self.view(of: "MaskPanelProbe", in: host) as? MaskPanelProbe)
+        let healProbe = try XCTUnwrap(Self.view(of: "HealCardProbe", in: host) as? HealCardProbe)
+        XCTAssertEqual(maskProbe.title, "蒙版", "空的蒙版卡仍在")
+        XCTAssertEqual(maskProbe.maskCount, 0, "空的蒙版卡真的没有蒙版")
+        XCTAssertEqual(healProbe.title, "修复", "空的修复卡仍在")
+        XCTAssertTrue(healProbe.isEmpty, "空的修复卡真的没有修复点")
+
+        // Both empty-state lines are part of the shipped sources (Text has no AppKit leaf).
+        let maskSource = try Self.source("Sources/PhotonsUI/MaskListPanel.swift")
+        let healSource = try Self.source("Sources/PhotonsUI/HealCardPanel.swift")
+        XCTAssertTrue(maskSource.contains("还没有蒙版"))
+        XCTAssertTrue(healSource.contains("还没有修复点"))
+        XCTAssertTrue(maskSource.contains("inspector.card.masks.title"))
+        XCTAssertTrue(healSource.contains("inspector.card.heal.title"))
+        XCTAssertTrue(maskSource.contains("newMaskMenu"), "空蒙版卡仍保留新建入口")
+
+        // 3. the empty card is usable: click the real button, through its own probe's frame.
+        let tool = try XCTUnwrap(Self.view(of: "HealToolProbe", in: host))
+        XCTAssertFalse((tool as? HealToolProbe)?.isArmed ?? true)
+        Self.click(tool, in: window)
+        XCTAssertTrue(s.healTool, "空修复卡上的「修复」按钮必须可点")
+        XCTAssertEqual(s.maskTool, .off, "修复与画笔互斥")
+
+        // 4. a click on the canvas lands the row in 修复, not in 蒙版.
+        _ = try XCTUnwrap(s.addHealSpot(at: NormalizedPoint(0.4, 0.5), radius: 0.03))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(healProbe.spotCount, 1, "新点出现在修复卡")
+
+        // 5. a mask does not push the 修复 card away or change what it holds.
+        _ = try XCTUnwrap(s.addMask(kind: .linearGradient))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(maskProbe.maskCount, 1, "蒙版卡有了一个蒙版")
+        XCTAssertEqual(healProbe.title, "修复", "有蒙版时修复卡仍在")
+        XCTAssertEqual(healProbe.spotCount, 1, "修复卡内容不因蒙版存在而变化")
+
+        let maskOnly = Self.host(MaskListPanel(session: s),
+                                 size: CGSize(width: 330, height: 700))
+        defer { maskOnly.0.contentView = nil }
+        XCTAssertNil(Self.view(of: "HealCardProbe", in: maskOnly.1),
+                     "蒙版卡里不应出现修复卡")
+        XCTAssertFalse(maskSource.contains("inspector.heal."),
+                       "蒙版卡里不应出现任何 inspector.heal.* 节点")
+    }
+
+    // MARK: - helpers
+
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()      // PhotonsUITests
             .deletingLastPathComponent()      // Tests
             .deletingLastPathComponent()      // repo
-            .appendingPathComponent("Sources/PhotonsUI/MaskListPanel.swift")
-        let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("healSection"), "蒙版卡里必须有一段 修复")
-        XCTAssertTrue(source.contains("inspector.heal.tool"),
-                      "工具按钮带读回点，--ui-smoke 才能证明它在树里")
-        XCTAssertTrue(source.contains("session.deleteHealSpot(spot.id)"), "每一行可以删除")
-        XCTAssertTrue(source.contains("session.setHealRadius("), "每一行可以调半径")
+    }
+
+    private static func source(_ path: String) throws -> String {
+        try String(contentsOf: repoRoot.appendingPathComponent(path), encoding: .utf8)
+    }
+
+    private static func host<V: View>(_ view: V, size: CGSize) -> (NSWindow, NSHostingView<V>) {
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: true)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        host.layoutSubtreeIfNeeded()
+        return (window, host)
+    }
+
+    private static func view(of className: String, in root: NSView) -> NSView? {
+        if String(describing: type(of: root)) == className { return root }
+        for child in root.subviews {
+            if let found = view(of: className, in: child) { return found }
+        }
+        return nil
+    }
+
+    /// A real left click at the covered view's centre. The probe's `hitTest` is nil, so the event
+    /// lands on the SwiftUI button it sits behind.
+    private static func click(_ target: NSView, in window: NSWindow) {
+        window.makeKeyAndOrderFront(nil)
+        let point = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)
+        for (type, pressure) in [(NSEvent.EventType.leftMouseDown, Float(1)),
+                                 (NSEvent.EventType.leftMouseUp, Float(0))] {
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 1, clickCount: 1,
+                                                 pressure: pressure) else { continue }
+            window.sendEvent(event)
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     }
 }
