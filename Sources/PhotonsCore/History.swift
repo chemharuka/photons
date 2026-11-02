@@ -735,6 +735,8 @@ private extension EditHistory {
             if let v = number(change.from) { doc.light.contrast = v }
         case "light.highlights":
             if let v = number(change.from) { doc.light.highlights = v }
+        case "light.midtones":
+            if let v = number(change.from) { doc.light.midtones = v }
         case "light.shadows":
             if let v = number(change.from) { doc.light.shadows = v }
         case "light.whites":
@@ -756,6 +758,12 @@ private extension EditHistory {
             if let v = number(change.from) { doc.color.saturation = v }
         case "color.blackAndWhite":
             if let v = flag(change.from) { doc.color.blackAndWhite = v }
+        case "color.global.hue":
+            if let v = number(change.from) { doc.color.global.hue = v }
+        case "color.global.saturation":
+            if let v = number(change.from) { doc.color.global.saturation = v }
+        case "color.global.luminance":
+            if let v = number(change.from) { doc.color.global.luminance = v }
 
         case "detail.sharpening":
             if let v = number(change.from) { doc.detail.sharpening = v }
@@ -820,6 +828,21 @@ private extension EditHistory {
             if let v = number(change.from) { doc.optics.caRed = v }
         case "optics.caBlue":
             if let v = number(change.from) { doc.optics.caBlue = v }
+
+        case "calibration.shadowTint":
+            if let v = number(change.from) { doc.calibration.shadowTint = v }
+        case "calibration.redHue":
+            if let v = number(change.from) { doc.calibration.redHue = v }
+        case "calibration.redSat":
+            if let v = number(change.from) { doc.calibration.redSat = v }
+        case "calibration.greenHue":
+            if let v = number(change.from) { doc.calibration.greenHue = v }
+        case "calibration.greenSat":
+            if let v = number(change.from) { doc.calibration.greenSat = v }
+        case "calibration.blueHue":
+            if let v = number(change.from) { doc.calibration.blueHue = v }
+        case "calibration.blueSat":
+            if let v = number(change.from) { doc.calibration.blueSat = v }
 
         default:
             break
@@ -953,6 +976,18 @@ private extension EditHistory {
             return
         }
         guard let index = doc.masks.firstIndex(where: { $0.id == id }) else { return }
+        // 267 — a component's geometry. The row's text is a label+hash; the exact inverse is the
+        // whole component from the previous snapshot, so a new shape field never needs a branch.
+        if field.hasPrefix("components["), field.hasSuffix("].shape"),
+           let open = field.firstIndex(of: "["),
+           let close = field.firstIndex(of: "]"), open < close,
+           let componentIndex = Int(field[field.index(after: open)..<close]),
+           let saved = previous.masks.first(where: { $0.id == id }),
+           saved.components.indices.contains(componentIndex),
+           doc.masks[index].components.indices.contains(componentIndex) {
+            doc.masks[index].components[componentIndex] = saved.components[componentIndex]
+            return
+        }
         switch field {
         case "isEnabled": if let v = flag(change.from) { doc.masks[index].isEnabled = v }
         case "opacity": if let v = number(change.from) { doc.masks[index].opacity = v }
@@ -980,6 +1015,8 @@ private extension EditHistory {
             case "blacks": adjustments.blacks = v
             case "hue": adjustments.hue = v
             case "saturation": adjustments.saturation = v
+            case "texture": adjustments.texture = v
+            case "sharpen": adjustments.sharpen = v
             default: return
             }
             doc.masks[index].adjustments = adjustments
@@ -1020,6 +1057,14 @@ private extension EditHistory {
             if let v = text(change.from), let mode = HealMode(rawValue: v) {
                 doc.healSpots[index].mode = mode
             }
+        case "kind":
+            if let v = text(change.from), let kind = HealSpotKind(rawValue: v) {
+                doc.healSpots[index].kind = kind
+            }
+        case "redThreshold":
+            if let v = number(change.from) { doc.healSpots[index].redThreshold = v }
+        case "redSoftness":
+            if let v = number(change.from) { doc.healSpots[index].redSoftness = v }
         default:
             break
         }
