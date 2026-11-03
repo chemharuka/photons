@@ -102,6 +102,79 @@ final class CropCommitRegion248Tests: XCTestCase {
         return Double(image.rgba[(yy * image.width + xx) * 4 + c])
     }
 
+    // MARK: - 286 · the test's own 279 projection
+
+    /// `|w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, written here rather than called from the product.
+    private func rotatedExtent(width: Double, height: Double,
+                               degrees: Double) -> (width: Double, height: Double) {
+        guard degrees.isFinite, degrees != 0 else { return (width, height) }
+        let quarter = degrees / 90
+        if abs(quarter - quarter.rounded()) < 1e-9 {
+            return Int(quarter.rounded()) % 2 != 0 ? (height, width) : (width, height)
+        }
+        let radians = degrees * .pi / 180
+        let c = abs(cos(radians)), s = abs(sin(radians))
+        return (width * c + height * s, width * s + height * c)
+    }
+
+    /// The one `ceil` the renderer's canvas uses.
+    private func canvasPixels(_ value: Double) -> Int {
+        max(1, Int((value - 1e-9).rounded(.up)))
+    }
+
+    /// 279's integer origin of the crop inside its turned AABB, recomputed in the test:
+    ///
+    ///     origin = (I − R)·(cropCentre − photoCentre) + (extent − frame)/2
+    ///
+    /// A centred crop keeps the historical integer half difference; a right angle is `(0, 0)`.
+    private func inset279(crop: CropRect, in turned: ImageSize,
+                          degrees: Double) -> (x: Int, y: Int) {
+        let quarter = degrees / 90
+        guard degrees.isFinite, abs(quarter - quarter.rounded()) >= 1e-9 else { return (0, 0) }
+        let frame = CropMath.frameSize(crop, in: turned, allowsOutsideSource: true)
+        let extent = rotatedExtent(width: Double(frame.width),
+                                   height: Double(frame.height), degrees: degrees)
+        let w = Double(turned.width), h = Double(turned.height)
+        let dx = crop.centerX * w - w / 2, dy = crop.centerY * h - h / 2
+        if dx == 0 && dy == 0 {
+            return ((canvasPixels(extent.width) - frame.width) / 2,
+                    (canvasPixels(extent.height) - frame.height) / 2)
+        }
+        let radians = degrees * .pi / 180
+        let c = cos(radians), s = sin(radians)
+        let turnedOffset = (x: dx * c - dy * s, y: dx * s + dy * c)
+        let continuous = (
+            x: dx - turnedOffset.x + (extent.width - Double(frame.width)) / 2,
+            y: dy - turnedOffset.y + (extent.height - Double(frame.height)) / 2)
+        return (Int(continuous.x.rounded()), Int(continuous.y.rounded()))
+    }
+
+    /// Turned source pixel → canvas coordinate, the kernel's forward walk.
+    private func canvasPoint(photo: (x: Double, y: Double), crop: CropRect,
+                             in turned: ImageSize, degrees: Double,
+                             inset: (x: Int, y: Int)) -> (x: Double, y: Double) {
+        let cx = Double(turned.width) / 2, cy = Double(turned.height) / 2
+        let dx = photo.x - cx, dy = photo.y - cy
+        let radians = degrees * .pi / 180
+        let c = cos(radians), s = sin(radians)
+        let qx = dx * c - dy * s + cx, qy = dx * s + dy * c + cy
+        return (Double(inset.x) + qx - crop.left * Double(turned.width),
+                Double(inset.y) + qy - crop.top * Double(turned.height))
+    }
+
+    /// Canvas pixel → turned source pixel, the inverse of `canvasPoint`.
+    private func photoPoint(canvas: (x: Double, y: Double), crop: CropRect,
+                            in turned: ImageSize, degrees: Double,
+                            inset: (x: Int, y: Int)) -> (x: Double, y: Double) {
+        let cx = Double(turned.width) / 2, cy = Double(turned.height) / 2
+        let qx = canvas.x - Double(inset.x) + crop.left * Double(turned.width)
+        let qy = canvas.y - Double(inset.y) + crop.top * Double(turned.height)
+        let dx = qx - cx, dy = qy - cy
+        let radians = degrees * .pi / 180
+        let c = cos(radians), s = sin(radians)
+        return (dx * c + dy * s + cx, -dx * s + dy * c + cy)
+    }
+
     /// The acceptance's 4 × 4 matrix: the pixels under the box equal the committed render's pixels.
     ///
     /// Both sides are rendered at 1:1. The session side is the crop workspace's document (`crop:
@@ -128,51 +201,41 @@ final class CropCommitRegion248Tests: XCTestCase {
                 let committed = try XCTUnwrap(committedResult.display)
 
                 let draw = document.geometry.renderCrop(source: source)
-                let inset = CropMath.canvasOrigin(crop: draw, in: source,
-                                                  straightenDegrees: angle.straighten,
-                                                  quarterTurns: angle.quarterTurns)
-                let sessionInset = CropMath.canvasOrigin(crop: .full, in: source,
-                                                         straightenDegrees: angle.straighten,
-                                                         quarterTurns: angle.quarterTurns)
+                // 286 — the two integer origins and the two projections are written **in this
+                // test** from 279's geometry (turn about the photograph's centre, then translate
+                // by the crop's own origin, then snap the AABB origin once). Neither side calls
+                // `FrameTransform.sourceToView` or reads the product's continuous inset, so a
+                // wrong origin cannot agree with itself.
+                let inset = self.inset279(crop: draw, in: turned,
+                                          degrees: angle.straighten)
+                let sessionInset = self.inset279(crop: .full, in: turned,
+                                                 degrees: angle.straighten)
                 let frame = CropMath.outputSize(draw, in: turned, allowsOutsideSource: true)
                 let cropOrigin = (x: draw.left * Double(turned.width),
                                   y: draw.top * Double(turned.height))
                 XCTAssertEqual(committed.size, document.geometry.outputPixels(in: source),
                                "\(angle) / \(crop): the export canvas is not the render's")
 
-                // 279 — the frame is the **turned** crop quad, so the sample is picked through the
-                // one S1 → S3 exit, not at `inset + fraction·frame` (the frame-centred spelling that
-                // was only valid for a full crop). Both sides use the same source point; the two
-                // canvases differ only by their own AABB origin.
-                let committedTransform = FrameTransform(
-                    source: turned, crop: draw, straightenDegrees: angle.straighten,
-                    quarterTurns: 0, viewport: nil, zoom: 1)
-                let sessionTransform = FrameTransform(
-                    source: turned, crop: .full, straightenDegrees: angle.straighten,
-                    quarterTurns: 0, viewport: nil, zoom: 1)
-                // `FrameTransform` is continuous; the renderer's grid is the integer
-                // `CropMath.canvasOrigin`. Shift both by the same rounded-minus-continuous amount
-                // so the sampled pixel centres are the ones the two renders actually wrote.
-                let committedInset = CropGeometry(geometry: document.geometry, source: source).canvasInset
-                let sessionInsetContinuous = CropGeometry(geometry: session.geometry, source: source).canvasInset
-                let committedShift = SIMD2(Double(inset.x) - committedInset.x,
-                                           Double(inset.y) - committedInset.y)
-                let sessionShift = SIMD2(Double(sessionInset.x) - sessionInsetContinuous.x,
-                                         Double(sessionInset.y) - sessionInsetContinuous.y)
-
+                // Pick points in the committed crop, take their committed canvas pixel centres,
+                // then walk each centre **back** to the turned source and **forward** to the
+                // session canvas. Both walks are the test's own formula above.
                 var worst = 0.0
                 for iy in 0..<10 {
                     for ix in 0..<10 {
                         let rx = 0.05 + 0.1 * Double(ix)
                         let ry = 0.05 + 0.1 * Double(iy)
-                        let sourcePoint = SIMD2(cropOrigin.x + rx * Double(frame.width),
-                                                cropOrigin.y + ry * Double(frame.height))
-                        let c = committedTransform.sourceToView(sourcePoint) + committedShift
-                        let s = sessionTransform.sourceToView(sourcePoint) + sessionShift
-                        // The two canvases have different integer origins, so their pixel grids
-                        // cannot share a phase. Sample the continuous coordinate instead — the
-                        // fixture is a linear ramp, so this compares the same source point without
-                        // pretending one canvas' pixel centre is the other's.
+                        let photo = (x: cropOrigin.x + rx * Double(frame.width),
+                                     y: cropOrigin.y + ry * Double(frame.height))
+                        let raw = self.canvasPoint(photo: photo, crop: draw, in: turned,
+                                                   degrees: angle.straighten, inset: inset)
+                        // The renderer's grid is integral; sample the pixel centre it wrote.
+                        let c = (x: (raw.x - 0.5).rounded() + 0.5,
+                                 y: (raw.y - 0.5).rounded() + 0.5)
+                        let sourcePoint = self.photoPoint(canvas: c, crop: draw, in: turned,
+                                                          degrees: angle.straighten, inset: inset)
+                        let s = self.canvasPoint(photo: sourcePoint, crop: .full, in: turned,
+                                                 degrees: angle.straighten,
+                                                 inset: sessionInset)
                         let a = sampleLinear(committed, x: c.x, y: c.y)
                         let b = sampleLinear(sessionDisplay, x: s.x, y: s.y)
                         worst = max(worst, abs(a.r - b.r), abs(a.g - b.g),
