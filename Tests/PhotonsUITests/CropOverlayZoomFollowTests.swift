@@ -459,31 +459,37 @@ final class CropOverlayZoomFollowTests: XCTestCase {
         }
 
         // (a) **No jump back at the splice.** The two frames are not the same instant (the ticker runs
-        // at 120 Hz and the retarget lands between two ticks), so the honest comparison is against the
-        // *motion* the bridges themselves are making: the splice's step may not be larger than the
-        // biggest single-tick step either bridge took on its own. A retarget that re-started from the
-        // old endpoints would break this by an order of magnitude.
+        // at 120 Hz and the retarget lands between two ticks), so compare the splice against the
+        // motion the *expectations* make between those two instants — never against a measured step,
+        // which is itself a ticker artefact and made the old threshold drift with it. Every frame is
+        // already within `tolerance` of its expected rect, so `splice ≤ budget + 2·tolerance` is a
+        // bound the test can always justify; a retarget that re-started from the old endpoints would
+        // break it by an order of magnitude.
         let lastOfFirst = try XCTUnwrap(first.last?.layout.map(rect))
         let firstOfSecond = try XCTUnwrap(second.first?.layout.map(rect))
         let splice = max(abs(lastOfFirst.minX - firstOfSecond.minX),
                          abs(lastOfFirst.minY - firstOfSecond.minY),
                          abs(lastOfFirst.width - firstOfSecond.width),
                          abs(lastOfFirst.height - firstOfSecond.height))
-        func biggestStep(_ frames: [LoupeController.CropOverlayFollowFrame]) -> CGFloat {
-            let rects = frames.compactMap { $0.layout.map(rect) }
-            return zip(rects, rects.dropFirst()).map { a, b in
-                max(abs(a.minX - b.minX), abs(a.minY - b.minY),
-                    abs(a.width - b.width), abs(a.height - b.height))
-            }.max() ?? 0
-        }
-        let worstStep = max(biggestStep(first), biggestStep(second))
+        let wantLast = try XCTUnwrap(trajectory.last(where: { $0.serial == firstSerial })?.want)
+        let wantFirst = try XCTUnwrap(trajectory.first(where: { $0.serial == secondSerial })?.want)
+        let budget = max(abs(wantLast.minX - wantFirst.minX),
+                         abs(wantLast.minY - wantFirst.minY),
+                         abs(wantLast.width - wantFirst.width),
+                         abs(wantLast.height - wantFirst.height))
         print(String(format: "② splice: last of bridge 1 %@ → first of bridge 2 %@ · Δ %.4f pt "
-                     + "(biggest single-tick step %.4f pt)",
-                     NSStringFromRect(lastOfFirst), NSStringFromRect(firstOfSecond), splice, worstStep))
+                     + "(expected budget %.4f pt)",
+                     NSStringFromRect(lastOfFirst), NSStringFromRect(firstOfSecond), splice, budget))
         XCTAssertLessThanOrEqual(firstOfSecond.width, lastOfFirst.width + 0.5,
                                  "② the retarget rewound the frame (\(lastOfFirst.width) → \(firstOfSecond.width) pt)")
-        XCTAssertLessThanOrEqual(splice, max(Self.tolerance, worstStep * 1.5),
-                                 "② the splice moved the frame \(splice) pt in one step — 回跳/抽动")
+        XCTAssertLessThanOrEqual(splice, budget + 2 * Self.tolerance,
+                                 "② the splice moved the frame \(splice) pt in one step "
+                                 + "(expected at most \(budget + 2 * Self.tolerance) pt) — 回跳/抽动")
+        // An absolute ceiling as well, so a swollen `budget` cannot blunt the gate: one retarget may
+        // not move the frame by more than 35 % of its own width.
+        XCTAssertLessThanOrEqual(splice, 0.35 * lastOfFirst.width + 2 * Self.tolerance,
+                                 "② the splice moved the frame \(splice) pt, more than 35 % of its "
+                                 + "\(lastOfFirst.width) pt width — 回跳/抽动")
 
         // (b) **No ringing**: the camera is zooming *out*, so the frame never grows, on either bridge or
         // across the splice, and never collapses faster than the picture could (the biggest step is
