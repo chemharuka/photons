@@ -65,6 +65,18 @@ RawCamera.metallib (2.6MB)
 **但要补一条反证（2026-10-25 晚，真机实测）**：在 Fuji **X-Trans** 的太阳能板细网格（迷宫伪色压力测试）上，v9 的解马赛克**确实更好**——线条更直更连续、伪色/摩尔纹更少、拖影更轻（`local/research/v9-vs-v8-measured.md` §6.6，1:1 目视确认）。
 所以准确说法是：**没有名为 `deBayer_v9` 的独立 kernel，但 v9 这条渲染路径在 raw 域上确实改善了 X-Trans 的解马赛克产物**；Bayer 侧则主要表现为降噪。不要再简单地说"v9 与去马赛克无关"。
 
+
+## 2b. 许可政策（2026-11-02 用户改口径）
+
+**可以用 MIT 兼容的第三方代码/库**：MIT / BSD-2/3 / Apache-2.0（Apache-2.0 需保留 `NOTICE`）。
+**仍然禁止 copyleft**：GPL / LGPL / AGPL —— 那是"进不了 Mac App Store + 传染"的问题，与"MIT 兼容"不是一回事。
+
+落实：
+- 依赖清单不再是"只有 GRDB"；新增依赖须在此登记（名称 / 版本 / 许可证 / 用途 / 是否改动）。
+- **LightCraft 是 MIT**：`crates/pipeline/src/spots.rs`（heal = 频率分离、fill = PatchMatch、自动寻源 = 环带打分）
+  现在**可以直接移植**（保留版权声明与出处），不必"只取思路"。
+- LibRaw（LGPL/CDDL）、Exiv2（GPL）、libheif（LGPL）、lensfun（LGPL）仍按 D1 拒绝。
+
 ## 3. 已定决策（含依据与代价）
 
 | # | 决策 | 依据 | 代价 / 风险 |
