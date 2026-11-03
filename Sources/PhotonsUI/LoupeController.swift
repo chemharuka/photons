@@ -1193,6 +1193,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The photo the stand-in belongs to, and the request that may still be fetching one.
     private var firstFramePlaceholderPhoto: String?
     private var firstFramePlaceholderToken: ThumbnailRequest?
+    /// 283 — the thumbnail's own pixel size, kept so a canvas resize can re-derive the same fallback
+    /// rectangle when the projection is still unavailable (`framing() == nil`).
+    private var firstFramePlaceholderPixelSize: ImageSize?
     /// Set on a photo change; cleared by the first successful `present` for that photo, which is the
     /// only moment `firstFrameContent` is meaningful.
     private var awaitingFirstFrameContent = false
@@ -5381,6 +5384,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         firstFramePlaceholderToken?.cancel()
         firstFramePlaceholderToken = nil
         firstFramePlaceholderPhoto = identity
+        firstFramePlaceholderPixelSize = nil
         canvasView.hideFirstFramePlaceholder()
         let started = CACurrentMediaTime()
         guard let cache = session.thumbnailCache else { return }
@@ -5411,44 +5415,60 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The photo may have moved on while the thumbnail was being read or generated.
         guard firstFramePlaceholderPhoto == photo, presentedPhoto != photo else { return }
         firstFramePlaceholderToken = nil
+        let pixels = ImageSize(width: image.width, height: image.height)
+        firstFramePlaceholderPixelSize = pixels
         canvasView.showFirstFramePlaceholder(image,
-                                            contentRect: firstFramePlaceholderContentRect(image: image))
+                                            contentRect: firstFramePlaceholderContentRect(imageSize: pixels))
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
     }
 
-    /// 258 — the rectangle the stand-in occupies: the **same `content`** the real 适应 frame is laid
-    /// out in (`LoupeFraming.contentPixels` → `plan.content`), centred in the canvas, never the full
-    /// canvas. This is the whole geometry half of the task: a thumbnail drawn in the canvas made the
-    /// first frame look 100 % and the real frame then jumped to 90 %.
+    /// 283 — the rectangle the stand-in occupies, in canvas points. It is the **photograph's** rect
+    /// on S5, from the one `FrameTransform` the real frame is composed with, and it is deliberately
+    /// **not** clamped to the canvas: at 12.5 % the picture is smaller than the window, at 400 % only
+    /// its centre is on screen, and in both cases the stand-in must show exactly that (the layer's
+    /// own `masksToBounds` is what crops the overflow, not a second geometry).
     ///
-    /// `image` is only the fallback when the projection is not available yet (no asset dimensions,
-    /// no decode): then the thumbnail's own aspect is fitted with the same `fitMargin` instead of
-    /// being stretched to the viewport.
-    private func firstFramePlaceholderContentRect(image: CGImage? = nil) -> CGRect {
+    /// 258's 适应 case is the same line: at `fit` the crop's rect *is* the 0.90 content rect, so
+    /// existing acceptance keeps its number.
+    ///
+    /// `imageSize` is only the fallback when the projection is not available yet (no asset
+    /// dimensions, no decode): the thumbnail is then treated as the photo's own S1 size, which keeps
+    /// its aspect and the current camera instead of collapsing to the canvas' shape.
+    private func firstFramePlaceholderContentRect(imageSize: ImageSize? = nil,
+                                                  state: LoupeViewState? = nil) -> CGRect {
         let canvas = canvasView.bounds.size
         guard canvas.width > 1, canvas.height > 1 else { return canvasView.bounds }
-        let scale = max(1, backingScale)
-        var content: (width: Double, height: Double)?
-        if let framing = framing() {
-            let pixels = framing.contentPixels(of: viewState)
-            content = (Double(pixels.width), Double(pixels.height))
-        } else if let image {
-            let margin = CGFloat(LoupeFraming.fitMargin)
-            let fit = min(canvas.width * margin / CGFloat(image.width),
-                          canvas.height * margin / CGFloat(image.height))
-            content = (Double(image.width) * Double(fit), Double(image.height) * Double(fit))
+        let scale = CGFloat(max(1, backingScale))
+        let viewport = ImageSize(width: max(1, Int((canvas.width * scale).rounded())),
+                                 height: max(1, Int((canvas.height * scale).rounded())))
+        let layout: LoupeFraming
+        if let current = framing(viewport: viewport) {
+            layout = current
+        } else if let imageSize {
+            layout = LoupeFraming(viewport: viewport,
+                                  decoded: imageSize,
+                                  decodeScale: 1,
+                                  edit: .neutral)
+        } else {
+            return canvasView.bounds
         }
-        guard let content else { return canvasView.bounds }
-        // Device pixels → points, and never larger than the canvas itself.
-        let w = min(canvas.width, CGFloat(content.width) / CGFloat(scale))
-        let h = min(canvas.height, CGFloat(content.height) / CGFloat(scale))
-        return CGRect(x: (canvas.width - w) / 2, y: (canvas.height - h) / 2, width: w, height: h)
+        let pixels = layout.contentRectInS5(of: state ?? viewState)
+        return CGRect(x: pixels.minX / scale, y: pixels.minY / scale,
+                      width: pixels.width / scale, height: pixels.height / scale)
     }
 
-    /// 258 — a canvas resize while the stand-in is up re-places it on the same 90 % content rect.
+    /// 283 — the acceptance's seam: the same rectangle the install path uses, for an explicit camera
+    /// and/or thumbnail size. Internal so the eight cells can be measured without eight decodes.
+    func placeholderContentRectForTesting(state: LoupeViewState? = nil,
+                                          imageSize: ImageSize? = nil) -> CGRect {
+        firstFramePlaceholderContentRect(imageSize: imageSize, state: state)
+    }
+
+    /// 258 — a canvas resize while the stand-in is up re-places it on the same content rect.
     private func refreshFirstFramePlaceholderGeometry() {
         guard canvasView.isShowingFirstFramePlaceholder else { return }
-        canvasView.setFirstFramePlaceholderContentRect(firstFramePlaceholderContentRect())
+        canvasView.setFirstFramePlaceholderContentRect(
+            firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize))
     }
 
     /// Developments the queue has run, requests it has folded into one, deliveries it made and
@@ -7035,6 +7055,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             firstFramePlaceholderToken?.cancel()
             firstFramePlaceholderToken = nil
             firstFramePlaceholderPhoto = nil
+            firstFramePlaceholderPixelSize = nil
         }
         // 258 — the new photo's pixels are on the layer now; the matte cover is no longer hiding
         // anything (and leaving it up would hide the picture itself).

@@ -63,12 +63,15 @@ public final class LoupeCanvasView: NSView {
     public var isCoveringCanvas: Bool { !canvasCover.isHidden }
 
     /// 258 — where the stand-in is drawn, in canvas points. The real frame draws its photograph in
-    /// the same `content` rect (0.90 fit), so this is the number the no-jump assertion reads.
+    /// the same rectangle the projection gives, so this is the number the no-jump assertion reads.
+    /// 283 — it may be larger than the canvas (a 400 % picture); the canvas' `masksToBounds` crops it.
     public var firstFramePlaceholderRect: CGRect { firstFramePlaceholder.frame }
 
-    /// Draw `image` over the matte until the first frame arrives. The image keeps its own aspect and
-    /// is fitted inside `contentRect` (`scaleProportionallyUpOrDown`, centred) — the same 0.90-fit
-    /// rectangle the real frame's photograph occupies, so the replacement does not move or resize it.
+    /// Draw `image` over the matte until the first frame arrives. The rectangle comes from the same
+    /// `FrameTransform` as the real frame's photograph (0.90 content at 适应, the photograph's own
+    /// `pixels × zoom` at a numeric stop), so the image **fills** it rather than being fitted inside
+    /// it: the thumbnail's aspect and the rectangle's aspect are the photograph's, and a second
+    /// fit would shrink a portrait into the shape of a landscape (283).
     public func showFirstFramePlaceholder(_ image: CGImage, contentRect: CGRect) {
         firstFramePlaceholder.image = NSImage(cgImage: image,
                                              size: NSSize(width: image.width, height: image.height))
@@ -515,7 +518,7 @@ public final class LoupeCanvasView: NSView {
 final class FirstFramePlaceholderView: NSImageView {
     init() {
         super.init(frame: .zero)
-        imageScaling = .scaleProportionallyUpOrDown
+        imageScaling = .scaleAxesIndependently
         imageAlignment = .alignCenter
         isEditable = false
         animates = false

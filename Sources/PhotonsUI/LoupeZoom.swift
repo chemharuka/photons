@@ -906,6 +906,24 @@ public struct LoupeFraming: Equatable, Sendable {
         return ImageSize(width: Int(content.width.rounded()), height: Int(content.height.rounded()))
     }
 
+    /// 283 — the **photograph's** rectangle on the canvas, in S5 device pixels, at `state`.
+    ///
+    /// This is the same geometry the real frame is composed with, but measured on the picture rather
+    /// than on the camera window: `frameRectInS5` maps the crop's four corners through the one
+    /// `FrameTransform` the projection already owns. At 适应 it is exactly the 0.90 content rect; at a
+    /// numeric stop it is `photo pixels × zoom` **including the part outside the viewport**, which is
+    /// what the eye sees around a cropped thumbnail. Clamping this to the canvas was the 283 bug:
+    /// 12.5 % and 400 % both collapsed to "the whole window", so the stand-in was the full photo and
+    /// the real frame then jumped to the magnified detail (or the small picture).
+    ///
+    /// `contentPixels(of:)` cannot answer this: it is the camera window (`viewport ÷ zoom`) times
+    /// `zoom`, which is always the viewport by construction and therefore says nothing about how large
+    /// the photograph is on screen.
+    public func contentRectInS5(of state: LoupeViewState) -> CGRect {
+        mapping(of: state).transform?.frameRectInS5()
+            ?? CGRect(x: 0, y: 0, width: Double(viewport.width), height: Double(viewport.height))
+    }
+
     /// The window as `RenderOptions.outputWindow`: **content pixels** of the whole output at the
     /// state's `scale`, i.e. of the **expanded canvas** when the document is straightened. `nil` for
     /// `fit`, which is the whole output by definition.
