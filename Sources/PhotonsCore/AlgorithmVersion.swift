@@ -160,6 +160,10 @@ public enum StageAlgorithmVersion {
     public static let localColor = 1
     /// Unchanged (S3.6's OKLCh bands).
     public static let hsl = 1
+    /// **3 stays** — 285 changed the window from the 158 YUV box to an OKLCh platform + shoulder.
+    /// Its generation marker lives in the stage material instead (`PointColor.keyString` is prefixed
+    /// `s3.6b/285/`), because every pre-285 render key must miss; the pinned version vector in
+    /// `SharpenScaleTests` still records only the stages whose number moved.
     /// **3** — 173: the luma is read with the working primaries' weights
     /// (`ColorPrimaries.working.luminanceWeights` / `kWorkingLumaWeights` in `primaries.metal`)
     /// instead of a hard-coded Rec.709 `0.2126/0.7152/0.0722`. The encoded triple is the same, so

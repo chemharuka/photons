@@ -336,7 +336,8 @@ final class PointColorTests: XCTestCase {
         fence.range = 120
         fence.feather = 120
         fence.hue = 100
-        XCTAssertEqual(fence.weight(yuv: yuv), 0)
+        let paleLCh = OKLCh.fromLinear(PointColor.linearWorking(from: yuv))
+        XCTAssertEqual(fence.weight(l: paleLCh.L, c: paleLCh.C, hue: paleLCh.hue), 0)
         XCTAssertEqual(PointColorSet(swatches: [fence], active: 0).apply(
             PointColor.linearWorking(from: yuv)), PointColor.linearWorking(from: yuv))
 
