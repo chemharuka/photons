@@ -284,7 +284,41 @@ final class FrameTransformMatrixTests: XCTestCase {
         }
 
         /// The picture's place in the canvas: `inset + A + R(θ)(source − P)`, the walk S0 executes.
-        private var canvasInset: (x: Double, y: Double) { geometry.canvasInset }
+        ///
+        /// 286 / 294 — re-derived here from 279's geometry, not read out of the product: the
+        /// hit-test inverse must not call the same continuous origin the overlay/renderer use.
+        private var independentCanvasInset: (x: Double, y: Double) {
+            let cg = geometry
+            if cg.perspective?.hasWarp == true { return (0, 0) }
+            let degrees = cg.rotationDegrees
+            let quarter = degrees / 90
+            guard degrees.isFinite, abs(quarter - quarter.rounded()) >= 1e-9 else { return (0, 0) }
+            let frame = cg.frameSize
+            let extent = PlanPhase.rotatedExtent(width: Double(frame.width),
+                                                 height: Double(frame.height),
+                                                 degrees: degrees)
+            let w = Double(cg.source.width), h = Double(cg.source.height)
+            var dx = cg.crop.centerX * w - w / 2
+            var dy = cg.crop.centerY * h - h / 2
+            // 274 — the pivot is the crop offset about the photograph's centre, mirrored first
+            // (kernel order: flip, then turn).
+            if cg.flipHorizontal { dx = -dx }
+            if cg.flipVertical { dy = -dy }
+            if dx == 0 && dy == 0 {
+                return ((Double(canvasPixels(extent.width)) - Double(frame.width)) / 2,
+                        (Double(canvasPixels(extent.height)) - Double(frame.height)) / 2)
+            }
+            let radians = degrees * .pi / 180
+            let c = cos(radians), s = sin(radians)
+            let turned = (x: dx * c - dy * s, y: dx * s + dy * c)
+            return (dx - turned.x + (extent.width - Double(frame.width)) / 2,
+                    dy - turned.y + (extent.height - Double(frame.height)) / 2)
+        }
+
+        /// The one `ceil` the canvas uses, written here rather than borrowed.
+        private func canvasPixels(_ value: Double) -> Int {
+            max(1, Int((value - 1e-9).rounded(.up)))
+        }
 
         /// S1 source pixel → S5 device pixel, the **prediction** that picks the nearest rendered blob.
         ///
@@ -325,12 +359,12 @@ final class FrameTransformMatrixTests: XCTestCase {
             if flip.vertical { turnedY = h - turnedY }
 
             // 3. Crop → frame pixels, then the 279 AABB inset into S3. The inset is the renderer's
-            //    own painted origin (`geometry.canvasInset`), not the frame-centred half margin:
+            //    own painted origin (independently re-derived), not the frame-centred half margin:
             //    with an off-centre crop the two differ by `(I − R)·(cropCentre − photoCentre)`,
             //    which is exactly the 279 correction. The *flip/turn order* above stays hand-written
             //    so it cannot hide behind the product's composition.
             let cropX = crop.left * w, cropY = crop.top * h
-            let inset = canvasInset
+            let inset = independentCanvasInset
             let s3 = (x: inset.x + turnedX - cropX, y: inset.y + turnedY - cropY)
             return view(canvasX: s3.x, canvasY: s3.y)
         }
@@ -344,8 +378,9 @@ final class FrameTransformMatrixTests: XCTestCase {
             let s3 = canvas(viewX: x, viewY: y)
             let p = photoCentre
             let a = photoCentreInFrame
-            let ux = s3.x - canvasInset.x - a.x
-            let uy = s3.y - canvasInset.y - a.y
+            let inset = independentCanvasInset
+            let ux = s3.x - inset.x - a.x
+            let uy = s3.y - inset.y - a.y
             var sx = ux + p.x, sy = uy + p.y
             if flip.horizontal { sx = Double(cg.source.width) - sx }
             if flip.vertical { sy = Double(cg.source.height) - sy }
@@ -475,6 +510,21 @@ final class FrameTransformMatrixTests: XCTestCase {
         let flipHorizontal: Bool
         let flipVertical: Bool
 
+        /// The test's own `|w·cos| + |h·sin|` — the formula is written here so the expected origin
+        /// cannot borrow the product's copy of it.
+        static func rotatedExtent(width: Double, height: Double,
+                                  degrees: Double) -> (width: Double, height: Double) {
+            guard degrees.isFinite, degrees != 0 else { return (width, height) }
+            let quarter = degrees / 90
+            if abs(quarter - quarter.rounded()) < 1e-9 {
+                return Int(quarter.rounded()) % 2 != 0
+                    ? (height, width) : (width, height)
+            }
+            let radians = degrees * .pi / 180
+            let c = abs(cos(radians)), s = abs(sin(radians))
+            return (width * c + height * s, width * s + height * c)
+        }
+
         init(edit: EditModel, decoded: ImageSize, scale: Double, viewport: ImageSize,
              result: RenderResult) {
             let oriented = edit.geometry.orientedSource(decoded)
@@ -520,11 +570,53 @@ final class FrameTransformMatrixTests: XCTestCase {
             self.frameContent = (Double(frameW) * kx, Double(frameH) * ky)
             self.origin = (Double((viewport.width - result.content.width) / 2),
                            Double((viewport.height - result.content.height) / 2))
-            // 279 — the origin is the plan's own reported `frameOrigin` (the turned crop's AABB
-            // origin, snapped at this scale). Re-deriving it here with the frame-centred
-            // `(baseline − frame) / 2` is what let the pre-279 spelling pass this diagnostic while
-            // the render used another number at 45° + an off-centre crop.
-            self.frameOrigin = (Double(result.frameOrigin.x), Double(result.frameOrigin.y))
+            let windowOrigin = (x: Double(result.outputWindow?.x ?? 0) * kx,
+                                y: Double(result.outputWindow?.y ?? 0) * ky)
+            // 286 / 294 — re-derive the 279 origin **inside the test**, never from the plan:
+            //
+            //     frame    = round(cropPixels · scale)
+            //     extent   = |w·cos| + |h·sin| by |w·sin| + |h·cos|   (unscaled frame: the
+            //                renderer rotates first and snaps the origin once, so scaling the
+            //                continuous extent is the number `plan` actually rounds)
+            //     pivot    = flip(cropCentre − photoCentre) · source
+            //     origin   = (I − R)·pivot + (extent − frame)/2
+            //
+            // A centred crop is the historical integer half difference; a right angle is (0, 0).
+            // No `FrameTransform`, no `CropGeometry`, no `plan.frameOrigin` enters this value.
+            let centred = abs(crop.centerX - 0.5) < 1e-12
+                && abs(crop.centerY - 0.5) < 1e-12
+            let inset: (x: Double, y: Double)
+            if expanded == nil {
+                inset = (0, 0)
+            } else if centred {
+                inset = (Double((baselineW - frameW) / 2),
+                         Double((baselineH - frameH) / 2))
+            } else {
+                let extent = Self.rotatedExtent(width: Double(cropPixels.width),
+                                                height: Double(cropPixels.height),
+                                                degrees: straighten)
+                let photoCentre = (x: Double(oriented.width) / 2,
+                                   y: Double(oriented.height) / 2)
+                var pivot = (x: crop.centerX * Double(oriented.width) - photoCentre.x,
+                             y: crop.centerY * Double(oriented.height) - photoCentre.y)
+                // 274 — a flip mirrors the crop offset about the photograph's centre first
+                // (kernel order: flip, then turn).
+                if flipHorizontal { pivot.x = -pivot.x }
+                if flipVertical { pivot.y = -pivot.y }
+                let radians = straighten * .pi / 180
+                let c = cos(radians), s = sin(radians)
+                let turned = (x: pivot.x * c - pivot.y * s,
+                              y: pivot.x * s + pivot.y * c)
+                let continuous = (
+                    x: pivot.x - turned.x
+                        + (extent.width - Double(cropPixels.width)) / 2,
+                    y: pivot.y - turned.y
+                        + (extent.height - Double(cropPixels.height)) / 2)
+                inset = ((continuous.x * scale).rounded(),
+                         (continuous.y * scale).rounded())
+            }
+            self.frameOrigin = (windowOrigin.x - inset.x * kx,
+                                windowOrigin.y - inset.y * ky)
             let theta = straighten * .pi / 180
             self.cosine = cos(theta)
             self.sine = sin(theta)
