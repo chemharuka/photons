@@ -1912,15 +1912,35 @@ public final class RenderGraph {
         // Where the picture's own frame starts inside the baseline, in baseline pixels. Zero — and
         // therefore free — for every un-straightened document.
         //
-        // 2026-11-01 (D1) — **integer**, i.e. the odd half-pixel is truncated. The window indexes this
-        // baseline with integer pixels, and `s0_geometry` samples `framePx = windowX + local − inset`;
-        // a fractional inset made every windowed frame sample the picture at a half-pixel phase, so a
-        // 1:1 plate could not equal the same-region cut of the whole-frame render (`CropFullResCanvas`
-        // measured 75 codes of difference). With the truncation both renders take the identical walk,
-        // at the price of the picture sitting up to half a pixel off the canvas' exact centre — which
-        // no caller can see, because the canvas is our own construction.
-        let inset = SIMD2<Float>(Float((baseline.width - frame.width) / 2),
+        // 279 — the origin is the **turned crop's** AABB origin, not the frame-centred
+        // `(baseline − frame)/2`: the kernel turns about the photograph's centre (248), so an
+        // off-centre crop's AABB is `(I − R)·(cropCentre − photoCentre)` away from the centred
+        // spelling. `CropGeometry.canvasInsetOrigin` is the one owner of that number;
+        // `CanvasSpaces.canvasInset` and `CropMath.canvasOrigin` read it, so the overlay and the
+        // renderer cannot disagree. At θ = 0 it is exactly zero, hence every un-straightened key is
+        // unchanged.
+        //
+        // 2026-11-01 (D1) — **integer**, one snap. The window indexes this baseline with integer
+        // pixels, and `s0_geometry` samples `framePx = windowX + local − inset`; a fractional inset
+        // made every windowed frame sample the picture at a half-pixel phase, so a 1:1 plate could
+        // not equal the same-region cut of the whole-frame render (`CropFullResCanvas` measured 75
+        // codes of difference). Keep the snap; the pivot correction rides inside the same integer.
+        let insetContinuous = CropGeometry.canvasInsetOrigin(
+            crop: crop, in: orientedSource, degrees: edit.geometry.straightenDegrees,
+            flipH: edit.geometry.flipHorizontal, flipV: edit.geometry.flipVertical)
+        // A centred crop (full included) keeps D1's integer `(baseline − frame)/2` bit for bit;
+        // only the off-centre pivot correction is new, and it snaps at the same one place.
+        let centred = abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12
+        let inset: SIMD2<Float>
+        if expandedCanvas == nil {
+            inset = SIMD2<Float>(0, 0)
+        } else if centred {
+            inset = SIMD2<Float>(Float((baseline.width - frame.width) / 2),
                                  Float((baseline.height - frame.height) / 2))
+        } else {
+            inset = SIMD2<Float>(Float((insetContinuous.x * scale).rounded()),
+                                 Float((insetContinuous.y * scale).rounded()))
+        }
         let baselineRect = ImageRect(x: 0, y: 0, width: baseline.width, height: baseline.height)
 
         // A window covering the baseline *is* no window: normalizing here means "1:1 on a picture

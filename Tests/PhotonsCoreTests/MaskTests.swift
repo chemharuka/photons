@@ -1041,12 +1041,15 @@ final class MaskTests: XCTestCase {
                                              in: ImageSize(width: image.width, height: image.height),
                                              allowsOutsideSource: true)
         let fx = Double(framePixels.width), fy = Double(framePixels.height)
-        // 2026-11-01 (D1) — the frame sits at an **integer** offset inside the canvas: `plan` truncates
-        // `(baseline − frame)/2` so that a windowed render and the whole-frame render sample the
-        // picture at the same pixel phase. The forward model here has to use that same truncation, or
-        // it describes a picture half a pixel away from the one the atlas was drawn for.
-        let ox = Double((dump.width - framePixels.width) / 2)
-        let oy = Double((dump.height - framePixels.height) / 2)
+        // 279 — the frame sits at the **turned crop's AABB origin**, snapped to an integer exactly
+        // as `plan` does (`CropGeometry.canvasInsetOrigin`). The old frame-centred
+        // `(baseline − frame)/2` is only the θ = 0 spelling; with flips and a 7° turn this model
+        // described a picture that was `(I−R)F(cropCentre−photoCentre)` away from the atlas.
+        let origin = CropGeometry.canvasInsetOrigin(
+            crop: CropRect(clamped), in: ImageSize(width: image.width, height: image.height),
+            degrees: rotation, flipH: true, flipV: false)
+        let ox = origin.x.rounded()
+        let oy = origin.y.rounded()
 
         var worst = 0.0
         for y in 0..<dump.height {

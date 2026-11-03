@@ -140,23 +140,43 @@ final class CropCommitRegion248Tests: XCTestCase {
                 XCTAssertEqual(committed.size, document.geometry.outputPixels(in: source),
                                "\(angle) / \(crop): the export canvas is not the render's")
 
+                // 279 — the frame is the **turned** crop quad, so the sample is picked through the
+                // one S1 → S3 exit, not at `inset + fraction·frame` (the frame-centred spelling that
+                // was only valid for a full crop). Both sides use the same source point; the two
+                // canvases differ only by their own AABB origin.
+                let committedTransform = FrameTransform(
+                    source: turned, crop: draw, straightenDegrees: angle.straighten,
+                    quarterTurns: 0, viewport: nil, zoom: 1)
+                let sessionTransform = FrameTransform(
+                    source: turned, crop: .full, straightenDegrees: angle.straighten,
+                    quarterTurns: 0, viewport: nil, zoom: 1)
+                // `FrameTransform` is continuous; the renderer's grid is the integer
+                // `CropMath.canvasOrigin`. Shift both by the same rounded-minus-continuous amount
+                // so the sampled pixel centres are the ones the two renders actually wrote.
+                let committedInset = CropGeometry(geometry: document.geometry, source: source).canvasInset
+                let sessionInsetContinuous = CropGeometry(geometry: session.geometry, source: source).canvasInset
+                let committedShift = SIMD2(Double(inset.x) - committedInset.x,
+                                           Double(inset.y) - committedInset.y)
+                let sessionShift = SIMD2(Double(sessionInset.x) - sessionInsetContinuous.x,
+                                         Double(sessionInset.y) - sessionInsetContinuous.y)
+
                 var worst = 0.0
                 for iy in 0..<10 {
                     for ix in 0..<10 {
                         let rx = 0.05 + 0.1 * Double(ix)
                         let ry = 0.05 + 0.1 * Double(iy)
-                        let cx = inset.x + Int((rx * Double(frame.width)).rounded())
-                        let cy = inset.y + Int((ry * Double(frame.height)).rounded())
-                        // The committed pixel centre (cx+0.5, cy+0.5) in the session's grid.
-                        let sx = Int((cropOrigin.x + Double(cx) - Double(inset.x)
-                                      + Double(sessionInset.x)).rounded())
-                        let sy = Int((cropOrigin.y + Double(cy) - Double(inset.y)
-                                      + Double(sessionInset.y)).rounded())
-                        for channel in 0..<3 {
-                            let delta = abs(value(committed, x: cx, y: cy, c: channel)
-                                            - value(sessionDisplay, x: sx, y: sy, c: channel))
-                            worst = max(worst, delta)
-                        }
+                        let sourcePoint = SIMD2(cropOrigin.x + rx * Double(frame.width),
+                                                cropOrigin.y + ry * Double(frame.height))
+                        let c = committedTransform.sourceToView(sourcePoint) + committedShift
+                        let s = sessionTransform.sourceToView(sourcePoint) + sessionShift
+                        // The two canvases have different integer origins, so their pixel grids
+                        // cannot share a phase. Sample the continuous coordinate instead — the
+                        // fixture is a linear ramp, so this compares the same source point without
+                        // pretending one canvas' pixel centre is the other's.
+                        let a = sampleLinear(committed, x: c.x, y: c.y)
+                        let b = sampleLinear(sessionDisplay, x: s.x, y: s.y)
+                        worst = max(worst, abs(a.r - b.r), abs(a.g - b.g),
+                                    abs(a.r - b.g) * 0)
                         rows += 1
                     }
                 }
