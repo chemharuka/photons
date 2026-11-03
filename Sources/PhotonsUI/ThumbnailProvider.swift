@@ -132,6 +132,13 @@ public final class ThumbnailProvider: @unchecked Sendable {
         public var imageIOThumbnailDecodes = 0
         /// 223 — decodes that went through Core Image → `MTLTexture` (the HD HEIC path).
         public var gpuDecodes = 0
+        /// 284 — first-frame stand-in decodes, split by the bitmap they produced. The EDR counter is
+        /// the shipped path; the SDR counter is the no-Metal fallback. `placeholderSRGBDecodes` is
+        /// deliberately never incremented: the stand-in is a P3 picture, and a non-zero value would
+        /// mean the old sRGB door came back.
+        public var placeholderEDRDecodes = 0
+        public var placeholderSDRDecodes = 0
+        public var placeholderSRGBDecodes = 0
         /// Policy downgrades by reason (`dngCeiling`), 006 §6.1. Printed, not estimated.
         public var skipReasons: [String: Int] = [:]
 
@@ -452,13 +459,18 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
     // MARK: - 235: the frame before the first frame
 
-    /// The cached thumbnail for a photo, at its **own** aspect and already decoded to displayable
-    /// sRGB — the picture the loupe puts up while the real frame is still being developed.
+    /// The cached thumbnail for a photo, at its **own** aspect and already decoded to the display's
+    /// colour space — the picture the loupe puts up while the real frame is still being developed.
+    ///
+    /// 284 — the HD family is decoded as **EDR** (`RGBAh`, extended linear Display P3, measured
+    /// headroom): the grid and the filmstrip already show the same PQ file through a `CAMetalLayer`,
+    /// so the stand-in has to carry the same light or the switch flashes from HDR to SDR white.
+    /// Without a Metal device the stand-in is 8-bit Display P3 (not sRGB: the file is P3, and a P3 →
+    /// sRGB conversion would flatten exactly the saturated colours the user is comparing).
     ///
     /// Deliberately cache-only: generating one here would put a second decode in front of the frame
-    /// the user is waiting for, which is the opposite of the fix. The HD family (the grid/filmstrip's
-    /// shared key) is preferred because it is the whole picture at 1920; the legacy preview JPEG is
-    /// the fallback for a library that still has one from an earlier build. `nil` means neither is on
+    /// the user is waiting for, which is the opposite of the fix. The legacy preview JPEG is the
+    /// fallback for a library that still has one from an earlier build. `nil` means neither is on
     /// disk, and the caller then asks the service for a fresh preview asynchronously.
     ///
     /// The returned `CGImage` is never cropped: its aspect is the photo's, so the caller can fit it
@@ -468,6 +480,13 @@ public final class ThumbnailProvider: @unchecked Sendable {
         if let cached = placeholderImage(for: hd.digest) { return cached }
         if cache.exists(hd), let data = cache.data(for: hd),
            let image = ThumbnailProvider.decodeHDForPlaceholder(data) {
+            note {
+                if image.bitsPerComponent == 16 {
+                    $0.placeholderEDRDecodes += 1
+                } else {
+                    $0.placeholderSDRDecodes += 1
+                }
+            }
             rememberPlaceholder(image, for: hd.digest)
             return image
         }
@@ -475,7 +494,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
         let preview = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
         if let cached = placeholderImage(for: preview.digest) { return cached }
         if cache.exists(preview), let data = cache.data(for: preview) {
-            guard let image = ThumbnailCache.decode(data) else { return nil }
+            guard let decoded = ThumbnailCache.decode(data),
+                  let image = ThumbnailProvider.displayP3Image(decoded) else { return nil }
             rememberPlaceholder(image, for: preview.digest)
             return image
         }
@@ -735,10 +755,34 @@ public final class ThumbnailProvider: @unchecked Sendable {
         ThumbnailHDRDecoder.shared.decode(data, display: display)
     }
 
-    /// 235 — the HD file as a **whole-picture sRGB** bitmap, for the loupe's first-frame stand-in.
+    /// 284 — the HD file as a **whole-picture EDR** bitmap, for the loupe's first-frame stand-in.
     /// No aspect-fill here: the caller fits it, so cropping it would show the wrong composition.
+    ///
+    /// The preferred exit is `decodeWholePictureEDR`: half-float extended linear Display P3 with the
+    /// file's measured headroom, the same colour path the grid/filmstrip cells use. Only a machine
+    /// without a Metal device falls back to `decodeWholePictureSDR` (8-bit Display P3, still no sRGB
+    /// narrowing) — there is no EDR surface to put a float bitmap on then.
     static func decodeHDForPlaceholder(_ data: Data) -> CGImage? {
-        ThumbnailHDRDecoder.shared.decodeWholePictureSRGB(data)
+        if ThumbnailMetalRenderer.shared.isAvailable {
+            return ThumbnailHDRDecoder.shared.decodeWholePictureEDR(data)
+        }
+        return ThumbnailHDRDecoder.shared.decodeWholePictureSDR(data)
+    }
+
+    /// 284 — redraw any bitmap into 8-bit Display P3. The placeholder must never be sRGB: the HD
+    /// cache is a P3 picture, and the legacy preview fallback is colour-managed into the same space
+    /// so the stand-in and the cells agree about its saturation.
+    static func displayP3Image(_ image: CGImage) -> CGImage? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.displayP3),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            return nil
+        }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
     }
 
     private func rawDecoder() -> RAWDecoder? {
@@ -865,6 +909,7 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
     private let queue: MTLCommandQueue?
     private let context: CIContext
     private let pool: TexturePool?
+    private let device: MTLDevice?
 
     init() {
         let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
@@ -879,12 +924,14 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         }
         if let device = MTLCreateSystemDefaultDevice(),
            let queue = device.makeCommandQueue() {
+            self.device = device
             self.queue = queue
             self.context = CIContext(mtlCommandQueue: queue, options: options)
             self.pool = TexturePool(device: device)
         } else {
             // No Metal: Core Image still decodes correctly, just through its CPU renderer. Keeping
             // this branch means a headless/VM machine shows thumbnails instead of empty cells.
+            self.device = nil
             self.queue = nil
             self.context = CIContext(options: options)
             self.pool = nil
@@ -910,11 +957,68 @@ final class ThumbnailHDRDecoder: @unchecked Sendable {
         return CIImage(data: data)
     }
 
-    /// 235 — the whole picture, aspect preserved, encoded as ordinary sRGB.
+    /// 284 — the whole picture in the **same** colour path as `decode(_:display:)`: half-float
+    /// extended linear Display P3 with the measured content headroom, but no aspect-fill crop.
     ///
-    /// A cell always wants one display-sized crop, but the loupe's stand-in is the whole photograph:
-    /// the canvas fits it and a cropped grid bitmap would show the wrong framing. SDR (sRGB) on
-    /// purpose — this is a placeholder drawn by `NSImageView`, which has no EDR surface of its own.
+    /// The stand-in has to match what the grid and filmstrip put on screen for the same PQ file, or
+    /// the switch shows a brightness step (the reported 284 defect). A cell's bitmap is a crop of
+    /// this one at display pixels; here the extent *is* the picture, so the caller can fit it into
+    /// the 283 rectangle without losing the photograph's own aspect.
+    func decodeWholePictureEDR(_ data: Data) -> CGImage? {
+        guard let space = outputSpace, let image = Self.sourceImage(data) else { return nil }
+        guard let (placed, bounds) = Self.wholePicture(image) else { return nil }
+        let width = Int(bounds.width), height = Int(bounds.height)
+
+        // A whole photograph is 1920 px on its long edge, far larger than any cell. Rendering it
+        // through the cell pool would park up to four ~20 MB textures per photo aspect in the shared
+        // pool, so this one-off read-back texture is deliberate: the stand-in is decoded once per
+        // switch, never scrolled through.
+        if let device, let queue,
+           let texture = Self.makeReadbackTexture(device: device, width: width, height: height),
+           let command = queue.makeCommandBuffer() {
+            context.render(placed, to: texture, commandBuffer: command, bounds: bounds,
+                           colorSpace: space)
+            command.commit()
+            command.waitUntilCompleted()
+            guard command.status == .completed, command.error == nil else { return nil }
+            return makeCGImage(from: texture, space: space)
+        }
+        return context.createCGImage(placed, from: bounds, format: .RGBAh, colorSpace: space)
+    }
+
+    private static func makeReadbackTexture(device: MTLDevice, width: Int,
+                                            height: Int) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        descriptor.storageMode = .shared
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    /// 284 — the no-Metal fallback: whole picture, 8-bit **Display P3**. Still no sRGB narrowing;
+    /// the file's own primaries are kept, only the extended range is gone.
+    func decodeWholePictureSDR(_ data: Data) -> CGImage? {
+        guard let image = Self.sourceImage(data),
+              let space = CGColorSpace(name: CGColorSpace.displayP3),
+              let (placed, bounds) = Self.wholePicture(image) else { return nil }
+        return context.createCGImage(placed, from: bounds, format: .RGBA8, colorSpace: space)
+    }
+
+    /// The picture moved to the origin and its integral extent, so a texture render and a
+    /// `createCGImage` agree about which pixels are the whole photograph.
+    private static func wholePicture(_ image: CIImage) -> (CIImage, CGRect)? {
+        let extent = image.extent
+        guard extent.width >= 1, extent.height >= 1 else { return nil }
+        let width = max(1, Int(extent.width.rounded())), height = max(1, Int(extent.height.rounded()))
+        let placed = image.transformed(by: CGAffineTransform(translationX: -extent.minX,
+                                                             y: -extent.minY))
+        return (placed, CGRect(x: 0, y: 0, width: width, height: height))
+    }
+
+    /// 235 — the legacy whole-picture sRGB door. Since 284 no placeholder path calls it: the stand-in
+    /// is EDR when Metal is available and 8-bit Display P3 otherwise. Kept as the historical exit
+    /// other callers may still name; the acceptance's "no sRGB in the placeholder path" is about the
+    /// two doors above.
     func decodeWholePictureSRGB(_ data: Data) -> CGImage? {
         guard let image = Self.sourceImage(data),
               let srgb = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }

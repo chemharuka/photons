@@ -5417,9 +5417,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The photo may have moved on while the thumbnail was being read or generated.
         guard firstFramePlaceholderPhoto == photo, presentedPhoto != photo else { return }
         firstFramePlaceholderToken = nil
-        let pixels = ImageSize(width: image.width, height: image.height)
+        // 284 — a legacy preview (and the empty-cache path's generated JPEG) is 8-bit sRGB. Redraw
+        // it into Display P3 so every stand-in bitmap is in the same space as the HD cache; the
+        // EDR surface would colour-manage it anyway, but keeping the bitmap honest is what the
+        // acceptance can count.
+        let placeholder = image.bitsPerComponent == 16
+            ? image
+            : (ThumbnailProvider.displayP3Image(image) ?? image)
+        let pixels = ImageSize(width: placeholder.width, height: placeholder.height)
         firstFramePlaceholderPixelSize = pixels
-        canvasView.showFirstFramePlaceholder(image,
+        canvasView.showFirstFramePlaceholder(placeholder,
                                             contentRect: firstFramePlaceholderContentRect(imageSize: pixels))
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
     }

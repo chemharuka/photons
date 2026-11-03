@@ -58,6 +58,12 @@ public final class LoupeCanvasView: NSView {
         !firstFramePlaceholder.isHidden && firstFramePlaceholder.image != nil
     }
 
+    /// 284 — the installed stand-in bitmap, for the colour/headroom acceptance.
+    var firstFramePlaceholderImage: CGImage? { firstFramePlaceholder.image }
+
+    /// 284 — the stand-in's surface. `CAMetalLayer` whenever Metal is available.
+    var firstFramePlaceholderLayer: CAMetalLayer? { firstFramePlaceholder.layer as? CAMetalLayer }
+
     /// 258 — `true` between a photo change and the new photo's first present, even when the stand-in
     /// itself is still being fetched.
     public var isCoveringCanvas: Bool { !canvasCover.isHidden }
@@ -73,21 +79,17 @@ public final class LoupeCanvasView: NSView {
     /// it: the thumbnail's aspect and the rectangle's aspect are the photograph's, and a second
     /// fit would shrink a portrait into the shape of a landscape (283).
     public func showFirstFramePlaceholder(_ image: CGImage, contentRect: CGRect) {
-        firstFramePlaceholder.image = NSImage(cgImage: image,
-                                             size: NSSize(width: image.width, height: image.height))
-        firstFramePlaceholder.frame = contentRect
-        firstFramePlaceholder.isHidden = false
+        firstFramePlaceholder.show(image, in: contentRect)
     }
 
     /// Re-place the stand-in after a canvas resize without changing the picture it shows.
     public func setFirstFramePlaceholderContentRect(_ rect: CGRect) {
-        firstFramePlaceholder.frame = rect
+        firstFramePlaceholder.setContentRect(rect)
     }
 
     /// The real frame is on the layer (or the photo went away): take the stand-in down.
     public func hideFirstFramePlaceholder() {
-        firstFramePlaceholder.isHidden = true
-        firstFramePlaceholder.image = nil
+        firstFramePlaceholder.clear()
     }
 
     /// 258 — cover the layer with the matte at a photo change. Idempotent; the first present for the
@@ -515,18 +517,101 @@ public final class LoupeCanvasView: NSView {
 /// The loupe canvas owns every click (pan, zoom, crop, mask), so a stand-in drawn above it must be
 /// transparent to hit testing or the first click after entering the editor would be swallowed by a
 /// dead picture.
-final class FirstFramePlaceholderView: NSImageView {
+///
+/// 284 — the stand-in is a `CAMetalLayer` surface, not an `NSImageView`: the HD cache is a Display P3
+/// PQ file, and `NSImageView` could only draw it through an 8-bit SDR bitmap, so the switch from the
+/// stand-in to the (EDR) real frame changed brightness. Reuse `ThumbnailMetalSurface`, the same
+/// texture/pipeline the grid and filmstrip already run, so all three views agree about the light.
+/// The rectangle comes from 283 and is the photograph's own aspect; direct aspect-fill is therefore
+/// the right fit (and when a crop edit changes the rect's aspect, a centred fill is closer than the
+/// old `scaleAxesIndependently` stretch).
+final class FirstFramePlaceholderView: NSView {
+    private(set) var image: CGImage?
+    private var surface: ThumbnailMetalSurface?
+
     init() {
         super.init(frame: .zero)
-        imageScaling = .scaleAxesIndependently
-        imageAlignment = .alignCenter
-        isEditable = false
-        animates = false
         wantsLayer = true
-        layer?.masksToBounds = true
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var isOpaque: Bool { false }
+
+    override func makeBackingLayer() -> CALayer {
+        if ThumbnailMetalRenderer.shared.isAvailable {
+            return CAMetalLayer()
+        }
+        let fallback = CALayer()
+        fallback.contentsGravity = .resizeAspectFill
+        fallback.masksToBounds = true
+        return fallback
+    }
+
+    /// A **fresh layer per picture**. `CAMetalLayer` keeps its last drawable until a new one is
+    /// presented; reusing the stand-in's layer across a photo switch could therefore show the old
+    /// thumbnail while the new texture is in flight. A new layer starts with no drawable, so the
+    /// view can be made visible in the same turn as the install (the 235/258 tests depend on that)
+    /// without ever flashing the previous picture. Once a layer is reused, `ThumbnailMetalSurface`'s
+    /// `onPresented` callback (used by `ThumbnailEDRView`) is the equivalent guard.
+    private func installSurface() {
+        let fresh = makeBackingLayer()
+        fresh.frame = bounds
+        layer = fresh
+        if let metal = fresh as? CAMetalLayer {
+            surface = ThumbnailMetalSurface(layer: metal, cornerRadius: 0)
+        } else {
+            surface = nil
+            fresh.contentsGravity = .resizeAspectFill
+            fresh.masksToBounds = true
+        }
+    }
+
+    func show(_ image: CGImage, in rect: CGRect) {
+        self.image = image
+        frame = rect
+        installSurface()
+        if let surface {
+            surface.setImage(image)
+        } else {
+            layer?.contents = image
+        }
+        isHidden = false
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    func setContentRect(_ rect: CGRect) {
+        frame = rect
+        needsLayout = true
+    }
+
+    func clear() {
+        image = nil
+        surface?.setImage(nil)
+        surface = nil
+        layer?.contents = nil
+        isHidden = true
+    }
+
+    override func layout() {
+        super.layout()
+        let scale = window?.backingScaleFactor ?? 2
+        layer?.contentsScale = scale
+        surface?.layout(size: bounds.size, scale: scale)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
