@@ -23,13 +23,16 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case localApply = "s1.6-local"
     /// 2026-10-28 (078 P0-1 / B9) — **修复 / 克隆**: the spot list of the 修复画笔.
     ///
-    /// Placed between S1.6 (the mask adjustments) and S1.7 (the curve), for three reasons that are
-    /// spelled out where the arithmetic is (`Kernels/s1_9_heal.metal`): it is a repair of the picture
-    /// and not a look (so it goes before the curve/tone map/colour), it needs the pixels S1.6 wrote
-    /// (so it goes after the local stage, and its 「源点」 is the texture the user is looking at), and
-    /// it has to work on the canvas grid S0 produced (so a disk is a disk at every scale and in every
-    /// loupe window). **Conditional** like the mask stages: it exists only when the document carries a
-    /// spot, so a document without one keeps its pre-S1.9 trace, key chain and pixels byte for byte.
+    /// **249 — it runs first, before S0, on S1 source pixels.** A spot is an object of the decoded
+    /// photograph, not of the frame canvas: the pass repairs the original pixels and S0 then applies
+    /// perspective → rotation → crop to the repaired picture. The reasons and the “when to revisit
+    /// (252 structural repair)” note live in `Kernels/s1_9_heal.metal` and `HealSpot`'s header.
+    ///
+    /// Consequences: masks (S1.6) now act on the already-repaired picture (requested, no
+    /// compensation layer), and a document's spot survives a crop/straighten/90° turn unchanged.
+    /// **Conditional** like the mask stages: it exists only when the document carries a spot, so a
+    /// document without one keeps its pre-heal trace, key chain and pixels byte for byte. The
+    /// `s1.9-heal` spelling is historical (it names the pass, not its position).
     case heal = "s1.9-heal"
     /// 派单 030: **the** tone curve, in the HDR (scene-linear, log1p-shaped) domain.
     ///
@@ -185,7 +188,10 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         // 159 — contrast left the linear chain entirely: it runs **after S2 and before S3**, on the
         // tone-mapped display values. 228 keeps that position and restores the global operator as a
         // gain-domain power curve, so the exposure normalisation still makes E × C commute.
-        [.geometry, .sceneLinear, .maskAtlas, .localApply, .heal, .curve, .dehaze,
+        // 249 — 修复 moved to **before S0**: it repairs S1 source pixels and only then does the
+        // transform card (perspective → rotation → crop) see them. S3.4 (`bw`), S3.5 (`localColor`),
+        // S3.6 (`hsl`) and S3.7 (`grain`) stay where they were.
+        [.heal, .geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .dehaze,
          .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl, .pointColour, .grade,
          .detailFX, .sharpen, .grain, .display]
     }
@@ -241,7 +247,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .sceneLinear: return "s1"
         case .maskAtlas: return "s1.5"
         case .localApply: return "s1.6"
-        case .heal: return "s1.9"
+        case .heal: return "s1-heal"
         case .curve: return "s1.7"
         case .contrast: return "s2.5"
         case .dehaze: return "s1.9-dz"
@@ -474,9 +480,9 @@ public enum RenderKeyChain {
         public var maskAtlas: String?
         /// `H(maskAtlasKey | "local" | applyKey…)`.
         public var localApply: String?
-        /// `H(localApply-or-sceneLinear key | "heal" | healMaterial)`; `nil` when the document carries
-        /// no spot, in which case S1.9 does not exist for this render at all (2026-10-28, 078 P0-1)
-        /// and the curve is seeded exactly as before.
+        /// `H(identity | sourceSize | healMaterial)`; **first in the chain since 249**, because the
+        /// repair runs on S1 source pixels and S0 consumes its output. `nil` when the document carries
+        /// no spot, in which case the geometry key is seeded by the identity exactly as before.
         public var heal: String?
         public var toneMap: String
         public var curve: String
@@ -564,8 +570,25 @@ public enum RenderKeyChain {
         func mat(_ stage: RenderStage) -> String {
             edit.keyMaterial(stage, algorithmVersion: !materialWithoutAlgorithmVersion)
         }
-        var geometryKey = KeyBuilder("photons-render-v1")
-            .add(identity)
+        // 249 — **the heal link comes first, before geometry**, because the pass now runs on S1
+        // source pixels and S0 consumes its output. With no spot the link is `nil` and the geometry
+        // key is seeded by the identity exactly as before, so a document that never used the 修复画笔
+        // keeps its whole key chain byte for byte (§3.2 discipline). The heal link depends only on the
+        // decoded bytes and the spots — not on canvas/content, which is the point of moving it.
+        var heal: String?
+        let geometrySeed: String
+        if edit.hasHeal {
+            let link = KeyBuilder("photons-render-v1")
+                .add(identity)
+                .add(sourceSize)
+                .add(mat(.heal))
+                .canonical
+            heal = link
+            geometrySeed = KeyBuilder.digest(of: link)
+        } else {
+            geometrySeed = identity
+        }
+        var geometryKey = KeyBuilder("photons-render-v1").add(geometrySeed)
             .add(sourceSize)
             .add(canvas)
             .add(content)
@@ -599,12 +622,6 @@ public enum RenderKeyChain {
         var localApply: String?
         var toneMap: String
         var curve: String
-        // 2026-10-28 (078 P0-1): **the S1.9 link**, and the reason it is computed here rather than in
-        // the two branches below: S1.9 sits between S1.6 and S1.7, so the curve's seed is either the
-        // local link, S1's own, or — when the document carries a spot — the heal link. With no spot
-        // the link does not exist at all and the curve is seeded exactly as before, which is what
-        // keeps every pre-S1.9 key byte for byte (§3.2 discipline, the sixth stage to use it).
-        var heal: String?
         var curveSeed: String
         if edit.hasActiveMasks {
             // The explicit exception of §3.2: with masks the chain is nine links, and every link
@@ -625,21 +642,9 @@ public enum RenderKeyChain {
         } else {
             curveSeed = sceneLinear
         }
-        // 2026-10-28 (078 P0-1): S1.9 exists **only** when the document carries a spot. When it does
-        // not, the link is `nil` and the curve is seeded by the local link (or S1's) exactly as
-        // before — so a document that has never used the 修复画笔 keeps its whole key chain byte for
-        // byte.
-        if edit.hasHeal {
-            let link = KeyBuilder(KeyBuilder.digest(of: curveSeed))
-                .add("heal")
-                .add(mat(.heal))
-                .canonical
-            heal = link
-            curveSeed = link
-        }
         // 030: the curve reads whatever the stage above produced, and S2 reads the curve. A curve
-        // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6/S1.9, which
-        // is the whole reason the curve has its own stage instead of riding on S1's key (§3.2 of 030).
+        // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6, which is the
+        // whole reason the curve has its own stage instead of riding on S1's key (§3.2 of 030).
         curve = KeyBuilder(KeyBuilder.digest(of: curveSeed)).add(mat(.curve)).canonical
         // 117: S1.9 (dehaze) sits between the curve and the vignette in `RenderStage.order`, i.e. at
         // the end of the linear chain; S2 therefore reads the dehaze link when it exists. Neutral
@@ -846,8 +851,8 @@ public struct StageKeys: Sendable, Equatable {
     public var maskAtlas: String?
     /// `H(maskAtlasKey | "local" | applyKey…)`; `nil` when no mask is enabled.
     public var localApply: String?
-    /// `H(localApply-or-sceneLinear key | "heal" | healMaterial)`; `nil` when the document carries no
-    /// spot (2026-10-28, 078 P0-1), in which case S1.9 does not exist for this render.
+    /// `H(identity | sourceSize | healMaterial)`; **first in the chain since 249**, because the repair
+    /// runs on S1 source pixels and S0 consumes its output. `nil` when the document carries no spot.
     public var heal: String?
     public var toneMap: String
     public var curve: String

@@ -25,9 +25,9 @@ public enum BrushRing {
 
     /// The ring radius in **device pixels**.
     ///
-    /// `shortEdgeFraction` is a `HealSpot.radius` (short-edge units of the S2 frame). `frameSize`
-    /// is that frame in source pixels and `mapping.canvasPerSource` is the one isotropic projection
-    /// scale (device px per source px) — deliberately not two per-axis ratios.
+    /// `shortEdgeFraction` is a `HealSpot.radius` (short-edge units of **S1 source pixels** since
+    /// 249). `frameSize` is that S1 frame in source pixels and `mapping.canvasPerSource` is the one
+    /// isotropic projection scale (device px per source px) — deliberately not two per-axis ratios.
     public static func radiusInDevicePixels(shortEdgeFraction: Double,
                                             frameSize: ImageSize,
                                             mapping: LoupeMapping) -> Double {

@@ -166,15 +166,16 @@ final class CacheVersionTests: XCTestCase {
     // MARK: - ② the version is derived, and scoped
 
     func testTheVersionIsDerivedFromTheStagesAndTheBumpIsScoped() throws {
-        // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2,
-        // so its generation moved again to 4; 124 moved 高光's white closure above the HDR range).
+        // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2;
+        // 159/228 gave it the display-domain residual operator; 124 moved 高光's white closure above
+        // the HDR range).
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 5, "124: 高光 covers the whole HDR range")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 8,
                        "179: 原色校准 joined S1 (a 3×3 primaries matrix at its exit)")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
                        "159: a mask's contrast left S1.6 for S2.5")
-        XCTAssertEqual(StageAlgorithmVersion.contrast, 2,
-                       "159: contrast is the display-domain residual operator (S2.5)")
+        XCTAssertEqual(StageAlgorithmVersion.contrast, 3,
+                       "159/228: contrast is the display-domain residual operator (S2.5)")
         XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 6,
                        "215: the linear gradient ramps across its whole span")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
