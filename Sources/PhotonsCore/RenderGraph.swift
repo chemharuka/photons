@@ -260,11 +260,11 @@ public struct RenderOptions: Sendable {
     /// `DehazeLinearTests`' halo counterproof. Never set by the app, never part of a key.
     public var legacyDehazeBlockVeil: Bool
 
-    /// **Tests only.** Keep S1.9's **pre-2026-10-31 fog participation**: `w = 1 − smoothstep(A, k·A, L)`
-    /// with no resolution fade about the airlight. It reads `DehazeParamsU.l.w`; `t`, `D` and `A` are
-    /// the same in both renders, so the difference between them is the participation and nothing else.
-    /// The `J/I ≥ 0.97` acceptance needs it twice: as the counterproof (the unbounded recovery is the
-    /// 20 % sky darkening) and as the only place the *stage's own* `t` can be read back — the
+    /// **Tests only.** Disable S1.9's **symmetric fade about the airlight** (the `2σ … k·2σ` lower-side
+    /// resolution window). It reads `DehazeParamsU.l.w`; `t`, `D`, `A` and 280's upper edge are the same
+    /// in both renders, so the difference between them is the lower-side participation and nothing
+    /// else. The `J/I ≥ 0.97` acceptance needs it twice: as the counterproof (the unbounded recovery is
+    /// the 20 % sky darkening) and as the only place the *stage's own* `t` can be read back — the
     /// acceptance's bands are §4.2's `t < 0.15` / `t ∈ 0.3…0.6`, and inverting the bounded render
     /// would report 1 wherever the fade reaches (the correction is zero there, so `t` has nothing to
     /// invert). Never set by the app, never part of a key.

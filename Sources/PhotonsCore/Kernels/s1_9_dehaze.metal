@@ -72,6 +72,20 @@ using namespace metal;
 //      that second fade the sky — 3 % below `A` at `t ≈ 0.12` — lost 20 % of its light. See
 //      `s1_9_dehaze_apply`.
 //
+// **280 — the upper edge is the estimator's resolution too, not `2A`.** `L` between `A` and `2A` used
+// to take the full `1/t` recovery while the symmetric fade had already ended, so at `t ≈ 0.12` a
+// pixel only 20–50 % above the airlight was multiplied by 1.6–2.2×. On `L1030433` at `dehaze = 20`
+// that put the p99–p99.9 band at 1.11× and the p99.9–p100 band at 1.20× (max 1.23×); at 100 the
+// same bands reached 1.55×/2.00× (max 2.17×). The user's "去雾把高光抬亮" is exactly this band: a
+// bright sky/snow/water frame pushes `A` to 135's cap (`A = 0.95·p99`), so `2A` lands at `1.9·p99`
+// and the whole highlight tail participates. The ownership is the **edge**, not the measured `A`:
+// the correction is evidence about a pixel only within the airlight estimate's own error bar, so the
+// upper edge now ends at `A + 2σ` (the same `σ = 2 %·A` as the lower side's `2σ … k·2σ`). Combined
+// with the symmetric fade this leaves `w = 0` for every `L ≥ A` and keeps `L < A` bit-identical.
+// The fog is untouched: `A` is still measured, `t` still reads the guided veil, and `J < I` below the
+// airlight. A different owner (the `A` estimate itself) would be a separate change; this one only
+// narrows who counts as fully participating.
+//
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
 // **Twelve passes (117's three, 135's bound, the veil's seven, and 160's proxy upsample):**
@@ -539,28 +553,34 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         } else {
             // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
             // and let the correction fade out where the veil cannot be a meaningful part of the
-            // pixel: `w = 0` for `L ≥ k·A`, and `w = 0` again within the airlight's own resolution.
+            // pixel: `w = 0` outside the airlight estimate's own resolution.
             //
-            // The second fade is 2026-10-31's. It used to be only the upper one — full participation
-            // at or below `A` — and at or below `A` the veil's *whole* evidence is `A − L`, which the
-            // recovery then multiplies by `1/t`. At the sky `t ≈ 0.12`, so the 3 % by which the
-            // airlight estimate sits above the sky (`L/A = 0.971` on `_1263309`) came out as a 20 %
-            // darkening (`J/I = 0.797`). `A` is a measurement, not a constant: over this frame's sky
-            // band it spreads 0.405…0.438, i.e. ±4 % of `A`, so a 3 % offset is inside the
-            // estimator's own error bar. A correction whose evidence is smaller than the estimator's
-            // resolution is not evidence, so participation fades in over `2σ … k·2σ` of `A`
-            // (`σ = sqrt(kDehazeAirEpsRel)·A = 2 %·A`, the guided filter's own regularization — one
-            // number, two readers). The fade is **symmetric**: a pixel a few percent *above* the
-            // airlight is not lifted either, and everything further than `8 %·A` from `A` — the whole
-            // mid-ground band is at 37 % — keeps exactly the correction it had.
+            // The fade is 2026-10-31's, narrowed by 280. It used to be only the upper one — full
+            // participation at or below `A` — and at or below `A` the veil's *whole* evidence is
+            // `A − L`, which the recovery then multiplies by `1/t`. At the sky `t ≈ 0.12`, so the
+            // 3 % by which the airlight estimate sits above the sky (`L/A = 0.971` on `_1263309`)
+            // came out as a 20 % darkening (`J/I = 0.797`). `A` is a measurement, not a constant:
+            // over this frame's sky band it spreads 0.405…0.438, i.e. ±4 % of `A`, so a 3 % offset
+            // is inside the estimator's own error bar. A correction whose evidence is smaller than
+            // the estimator's resolution is not evidence, so participation fades in over
+            // `2σ … k·2σ` of `A` (`σ = sqrt(kDehazeAirEpsRel)·A = 2 %·A`, the guided filter's own
+            // regularization — one number, two readers). The fade is **symmetric**: a pixel a few
+            // percent *above* the airlight is not lifted either.
+            //
+            // 280: the upper edge is the same resolution, not 130's `2A`. `A … 2A` used to keep the
+            // full `1/t` (up to 10×) while the symmetric fade had already ended; on `L1030433` at
+            // `dehaze = 20` that lifted the p99.9–p100 band by 1.20× (max 1.23×) and at 100 by
+            // 2.00× (max 2.17×). With `w = 0` from `A + 2σ` on, the upper edge is the estimator's
+            // error bar and `L ≥ A` is left alone. Below `A` the expression is unchanged, so the fog
+            // the slider is for keeps exactly the recovery it had.
             float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
             float k = max(p.e.x, 1.0);
-            float w = 1.0 - smoothstep(A, k * A, L);
-            // Tests only (`legacyDehazeUnboundedRecovery`): the pre-2026-10-31 upper fade alone, so the
-            // counterproof can measure the darkening this test exists to prevent.
+            float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
+            float w = 1.0 - smoothstep(A, A + res, L);
+            // Tests only (`legacyDehazeUnboundedRecovery`): disable the symmetric lower-side fade, so
+            // the counterproof can measure the darkening this test exists to prevent.
             if (p.l.w < 0.5) {
-                float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
                 w *= smoothstep(res, k * res, fabs(L - A));      // …full again at 8 %
             }
             float Lout = mix(L, recovered, w);

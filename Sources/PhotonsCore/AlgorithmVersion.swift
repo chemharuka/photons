@@ -246,7 +246,16 @@ public enum StageAlgorithmVersion {
     /// with `effects.dehaze != 0` — including a **negative** amount, whose haze-adding branch uses the
     /// measured `A` — renders different pixels for the same stored number; `dehaze == 0` is
     /// bit-identical to 8.
-    public static let dehaze = 9
+    /// **10** — 280: the **upper** participation edge is the airlight estimator's own resolution
+    /// (`A … A + 2σ`, `σ = 2 %·A`) instead of 130's `A … 2A`. `L` between `A` and `2A` used to take
+    /// the full `1/t` recovery after the symmetric lower-side fade had ended, so at `t ≈ 0.12` a pixel
+    /// 20–50 % above `A` was multiplied by 1.6–2.2×. On `L1030433` at `dehaze = 20` the p99–p99.9
+    /// band gained 1.11× and p99.9–p100 1.20× (max 1.23×); at 100 they reached 1.55×/2.00×
+    /// (max 2.17×). With the edge at `A + 2σ` (combined with the existing symmetric fade) `w = 0` for
+    /// every `L ≥ A`; `L < A` is bit-identical, so the fog and the sky keep their pixels. Every
+    /// document with `effects.dehaze > 0` renders different pixels for the same stored number;
+    /// `dehaze < 0` and `dehaze == 0` are bit-identical to 9.
+    public static let dehaze = 10
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a

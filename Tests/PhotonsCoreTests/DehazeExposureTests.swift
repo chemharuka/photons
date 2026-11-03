@@ -273,9 +273,9 @@ final class DehazeExposureTests: XCTestCase {
         "foggy·100": "3211033044ff7f526fbadd0f621595b0073442e4a6f302879dca3406347b3e57",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
-        "chroma·20": "3a29821b67bca34a2773bebb569ef01579c8c3026bb8c35266bf008a01f51592",
-        "chroma·60": "fdce68d4ce11440541831c6b132d39e9e49c8f3c88cefd4cf0ef6f9bca0a7877",
-        "chroma·100": "fd7aed92dfcd15f81778ab05ae17c44a05011949c4742836b255ff1808382191",
+        "chroma·20": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
+        "chroma·60": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
+        "chroma·100": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
     ]
 
     func testZeroExposureKeepsTheStageByteIdentical() throws {
