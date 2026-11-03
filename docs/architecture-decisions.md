@@ -620,3 +620,25 @@ Metal 源码形状的断言。
 4. 先把 281（次序）、286（守卫独立性）、287（覆盖层字面版本）做完再评估——否则重构会在红守卫上动刀。
 
 **本声明不产生任何派单**；动手前需要用户重新拍板。
+
+### 调研结论（`local/research/291-transform-model.md`，2026-11-04 只读调研）
+
+| 实现 | 许可 | 存几个数 | 单一入口 |
+|---|---|---|---|
+| darktable | GPLv3 | clipping 21 个（角度 + 归一化 cx/cy/cw/ch + 梯形 10 + 角点 8）；flip 单独一个 **8 值枚举** | 有：`dt_dev_distort_transform_plus/_backtransform_plus`（有序模块链 + 5 方向窗口） |
+| ansel | GPLv3 | 同 darktable | 有且已抽出：`dt_geometry_transform/_backtransform/_module_transform` + generation 计数 |
+| RawTherapee | GPLv3 | 旋转/翻转/crop 像素/透视 | **无**：`transformPixel` 手写 3 遍 + 6 个 GUI 转换器 |
+| ART | GPLv3+ | 同 RT | 半个：`ImageDimensions::transform` 只收尺寸/矩形 |
+| RapidRAW | AGPLv3 | crop(px) + rotation + orientationSteps + 2 flip + 透视 | **无**：两份逆变换且其中一份漏 unwarp |
+| LightCraft | MIT/Apache | `CropGeometry{rect 归一化, angle ±45}` + 2 flip + **Orientation 8 值** + 7 个透视滑杆 | 有：`Frame::out_to_oriented()`，逆 = 同一仿射 `.inverse()` |
+
+三条对本项目有用的结论：
+
+1. **没有任何一家用「quarterTurns + flipH + flipV」三个独立字段**，全部收成 EXIF **8 值 `Orientation`**。我们的 16 元表示（4 整转 × 4 翻转）有双覆盖（例如 `quarterTurns=0, flipH` 与 `quarterTurns=2, flipV` 描述同一张画面），这正是 274「守卫矩阵缺 flip 轴就看不见次序错」的结构性原因。
+2. **单一入口有两种可行形态**：模块链 + 反变换（darktable/ansel），或单个 Frame 组装点 + 逆仿射（LightCraft）。反面教材是 RawTherapee / RapidRAW（与我们现状一样手写多份，且已经出现「两份逆变换行为不一致」）。
+3. **ansel 的 `doc/geometry-service.md` 是一次同类重构的复盘**，其三条 trap 与我们的 279/287 一一对应（尤其「裁切在 ROI 回调里改状态」「按 preview 生效的精度 hack」），结论是全路径 `factor=1`。但不值得照搬 5 段链式 fold（ansel 花了 G1–G16）。
+
+**记录一种候选形态（未定案）**：`Orientation` 8 值枚举 + `GeometryFrame.composed(outputSize)` 作为唯一组装点（`canvasInsetOrigin` / `rotatedExtent` 退化为它的派生量），透视保持独立单应并与之共用一次采样；配套纪律采 ansel 的「shadow 双跑 + 单一构造函数 + 精度按全路径」。
+
+**一条校核**：调研报告提出「`crs:Crop*` 需要反向旋转 + orientation 的逆，这一步今天不存在」——**实际上已经存在**：`EditModel.sourceCrop`（`:1260`）= `CropMath.sourceRect(cropRect, quarterTurns:)`，`XMP.swift:365-379` 就写在这个「文件自己的帧」里，`crs:CropAngle` 取负。所以导出侧不是缺口，别按缺口重做。
+
