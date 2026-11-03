@@ -584,3 +584,39 @@ Metal 源码形状的断言。
 **构建坑**：`Kernels` 是 `.copy` 资源，`swift test` 不会因为 `.metal` 源文件改动而刷新已有测试 bundle 里的副本
 （症状：`photonsctl` 给出新结果，测试仍算出改动前的哈希）。改 kernel 后先删
 `.build/out/Products/*/*.xctest` 再跑。
+
+## 17. 变换（geometry）重构声明 —— 2026-11-04，**只声明，未排期，不许动手**
+
+用户口径（2026-11-04）：「变换功能要重构，现在只做一个声明，等后续想办法重构」。
+
+### 为什么
+
+2026-11-03 夜到 11-04 凌晨，五单缺陷全部落在变换链的**同一个病根**上：同一份几何在多个地方各写一遍。
+
+| 单 | 症状 | 病根 |
+|---|---|---|
+| 279 | 45° + 偏心裁切，输出与裁切框无关（四边偏 83.5/74.8/64/95 px） | 画布原点 `(canvas − frame)/2` 假定绕裁切框中心，而 kernel 绕**照片中心**转 ⇒ 差 `(I − R)·F(c−p)` |
+| 281 | flip 打开时命中偏最多 979 px | `FrameTransform` 的组合次序与 kernel 相反 |
+| 274 | 守卫矩阵抓出 216/720 组红 | 矩阵原本没有 flip 轴，次序问题看不见 |
+| 287（未做） | 覆盖层「字面」版本与渲染各说一套 | 框用 `FrameTransform`、渲染用 kernel，无共同真值声明 |
+| 249/283 | 修复落点、占位矩形要各自接一次逆变换 | 逆变换只有 `FrameTransform` 一处，但每个新入口都要手动接 |
+
+### 现状（已核实）
+
+- **存 5 个数**：`crop`（归一化、相对于**转过的帧**）、`rotationDegrees`（±45 微调）、`quarterTurns`（0…3，同时是 XMP orientation 的唯一来源）、`flipHorizontal/Vertical`、`perspective`（±100）。
+- **派生量散在几处**：`CropMath.canvasSize`（AABB）、`CropGeometry.rotatedExtent`（已收成一处）、`CropGeometry.canvasInsetOrigin`（279 新收）、`FrameTransform`（S1→S3→S5）、`LoupeFraming`（S5 取景）、`s0_geometry.metal`（8 个编译期 entry：turn × rot × lens × flip，外加 identity / pureCA / pureTurn 三条快路径）。
+- **快路径是字节级兼容的代价**：`s0_geometry` 为了老金值逐位不变，保留了「不旋转就完全不含乘除」的独立 entry（`fma(o,1,0.5)` 那段），重构时必须正面处理，不能顺手抹平。
+- **守卫已经铺开**：`FrameTransformMatrixTests`（720 组 × ①渲染/②叠层/③命中）、`RotateCropFortyFiveTests`、`CropCommitRegion248Tests`、`Crop*` 系列、`LoupeZoom*`。重构的前提是这些守卫先全部真绿（含 286 恢复独立推导、281 修次序）。
+
+### 重构目标（待讨论，未定案）
+
+把「文档 5 个数 → S1/S2/S3/S5 的坐标映射」收敛成**一个可逆的变换代数**（一条点链 + 一次矩阵组装 + 一个投影入口），CPU 与 kernel 读同一组参数、同一份次序；`quarterTurns` 与 `crop` 的关系、透视前置、AABB 原点的枢轴约定都写进那一个地方。目标不是改观感，而是让「下一单几何 bug」无法出现在第二处拼法里。
+
+### 约束（任何方案都必须守住）
+
+1. 存储语义与 XMP 映射不变；要改 schema 必须带迁移（学 249 的 `HealSpotSpace` 做法：无标记按旧空间）。
+2. 老金值要么逐位不变，要么有 A/B 证明「变的只是修正」；重录只能在 main 上做。
+3. 快路径（identity / pureCA / pureTurn / 无旋转 entry）是字节兼容设施，重构方案必须给出它们的去留与等价证明。
+4. 先把 281（次序）、286（守卫独立性）、287（覆盖层字面版本）做完再评估——否则重构会在红守卫上动刀。
+
+**本声明不产生任何派单**；动手前需要用户重新拍板。
