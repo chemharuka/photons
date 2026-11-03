@@ -49,7 +49,7 @@ public struct FrameTransform: Sendable, Equatable {
     /// The crop frame's four corners in S3, top-left, top-right, bottom-right, bottom-left.
     public let frameQuadInS3: [Point]
 
-    /// S1 px → S3 px (crop · flips · straighten · perspective).
+    /// S1 px → S3 px (crop · straighten · flips · perspective; 281 — flip after turn, as in S0).
     public let s1ToS3: Matrix3
     public let s3ToS1: Matrix3
 
@@ -184,16 +184,25 @@ public struct FrameTransform: Sendable, Equatable {
                                            flipH: flipHorizontal, flipV: flipVertical)
             photoToCanvas = toCanvas * Self.matrix(pc.forward) * flip * fromPhoto * toDecoded
         } else {
-            // 273 — the kernel's own walk (`s0_geometry.metal`), in **photograph** pixels:
+            // 281 — the kernel's own walk (`s0_geometry.metal`), in **photograph** pixels:
             //
-            //     photo  = flip(P, source)              // mirror about the photo centre FIRST
-            //     canvas = inset + (R(θ, P)·photo − cropOrigin)
+            //     photo  = R(θ, P)·p                    // turn about the photo centre FIRST
+            //     canvas = inset + (F(photo) − cropOrigin)
             //
-            // The order is the kernel's, not a free choice: `s0_geometry` flips the photo-normalized
-            // sample and *then* turns it about `orientedSource/2`, and a mirror composed with a turn
-            // about the same point is `R·F = F·R⁻¹` — reversing them mirrors the angle's sign. At
-            // θ = 0 the two spellings coincide, which is why a flip-only document cannot see it
-            // (measured at 7.5°, 640×480, off-centre crop: 50.1 px apart; see local/REPORT.md).
+            // The order is the kernel's, not a free choice: S0 samples canvas → source as
+            // `R(−θ)(flip(frame))` — it mirrors the photo-normalized sample **first**, then un-turns
+            // it about `orientedSource/2` — and the forward walk (source → canvas) is its inverse,
+            // `flip ∘ turn`. A mirror and a turn about the same point do **not** commute
+            // (`R·F = F·R⁻¹`: reversing them mirrors the angle's sign), so this must be
+            // `toFrame · flip · turn`, not `toFrame · turn · flip`. 274 measured the difference at
+            // 640×480, 45°, flip H, rung 1: the rendered marker lands 0.69 S5 px from `F(R(θ)·p)`
+            // and 112.91 S5 px from the old spelling `R(θ)·F(p)`; the guard matrix was red in
+            // 216/720 combinations (every `flip × angle ≠ 0`), worst 979.00 px. At θ = 0 the two
+            // orders coincide, which is why a flip-only document could not see it.
+            //
+            // The perspective branch above is deliberately **not** touched here: it still flips in
+            // canvas-normalised space, and 274 records that difference (36.97 px at 45° / off-centre
+            // / flip H) for the "kernel 透视路径统一到 S1/S3" task.
             let centre = Point(Double(source.width) / 2, Double(source.height) / 2)
             let inset = Point(Double(cg.canvasInset.x), Double(cg.canvasInset.y))
             let toFrame = Matrix3(rows: [[1, 0, inset.x - cropOrigin.x],
@@ -202,7 +211,7 @@ public struct FrameTransform: Sendable, Equatable {
             let flip = Self.photoFlipMatrix(centre: centre,
                                             flipH: flipHorizontal, flipV: flipVertical)
             let turn = Self.rotationAbout(centre: centre, degrees: self.straightenDegrees)
-            photoToCanvas = toFrame * turn * flip
+            photoToCanvas = toFrame * flip * turn
         }
         self.s1ToS3 = photoToCanvas
         self.s3ToS1 = Self.inverse(photoToCanvas)

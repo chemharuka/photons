@@ -4,11 +4,12 @@ import Metal
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 260 — the transform-chain guard matrix; 268 — ① is measured in **source** pixels.
+/// 260 — the transform-chain guard matrix; 268 — ① is measured in **source** pixels;
+/// 274 — the fifth dimension is **flip** (`none / H / V / HV`), at every rung.
 ///
-/// This suite is a **measurement**, not a fix: it renders every combination of the four dimensions the
-/// user's report names (straighten × crop × zoom × decode rung) and asserts three independent walks
-/// through the same document agree:
+/// This suite is a **measurement**, not a fix: it renders every combination of the five dimensions
+/// (straighten × crop × zoom × decode rung × flip) and asserts three independent walks through the
+/// same document agree:
 ///
 ///   1. **render** — the markers actually drawn in the frame are where S1 → S3 (`CropGeometry`) →
 ///      S5 (`LoupeMapping`) puts them. The gate is **half a source pixel** of the rung the renderer
@@ -27,9 +28,30 @@ import PhotonsCore
 /// The three historical lesions (`frameOrigin` letterbox double-add, rung-size mix-up, a second crop
 /// ratio) are reproduced in `local/REPORT.md`, each with the matrix's failing output.
 ///
-/// Perspective is **not** a dimension here: 246 ("先透视→再旋转→再算画布 AABB") is on `main` but is
-/// not an ancestor of this worktree's HEAD (`610beb1`), so this lane measures the identity keystone
-/// only. That is stated in the report rather than silently skipped.
+/// 274 — the **coverage matrix** is explicit and is not reduced for speed:
+///
+///     5 angles × 4 crops × 3 zooms × 3 rungs × 4 flips = 720 combinations
+///     (240 per rung; every flip state is exercised at 0.25, 0.5 and 1.0)
+///
+/// The flip dimension exists because a flip/turn order mix-up is invisible to the 180-combination
+/// matrix: a flip commutes with a zero turn, so only `flip × angle ≠ 0` can see it. The **expected
+/// side of the flip** is derived by a second, hand-written geometry (see
+/// `GeometryWalk.view(sourceX:sourceY:)` and `PlanPhase.view`), never by calling the product's
+/// `sourceToView` / `FrameTransform`; otherwise the gate would be a tautology.
+///
+/// **274 measured the order, and it is `turn → flip` (not `flip → turn`).** A single asymmetric
+/// marker rendered at 45° with `flip H` lands on the hand-computed `F(R(θ)·p)` position within
+/// 0.69 S5 px; the `R(θ)·F(p)` spelling is 112.91 S5 px away. The kernel's inverse walk
+/// (`s0_geometry.metal`: mirror the photo sample, then rotate by `−θ`) has that forward order.
+/// `FrameTransform`'s `toFrame · turn · flip` therefore hit-tests the mirror of the picture: this
+/// suite's ① (render) gate is **green**, ③ (hit test) is **red** for every `flip × angle ≠ 0`
+/// combination until the product is corrected. That is a finding for the main line, not something
+/// this test-only lane may paper over by flipping the expectation back.
+///
+/// Perspective is **not** an assertion dimension here: 246 ("先透视→再旋转→再算画布 AABB") is on
+/// `main` but is not an ancestor of this worktree's HEAD, so the matrix measures the identity
+/// keystone only. `testPerspectiveFlipRecordsKnownDifference` records (does not assert) the
+/// perspective + flip combination, which waits for the "kernel 透视路径统一到 S1/S3" task to land.
 ///
 /// S1 源像素 · S2 帧（裁切框）· S3 帧画布（保留画面）· S4 源画布（整幅照片）· S5 视口.
 final class FrameTransformMatrixTests: XCTestCase {
@@ -87,10 +109,25 @@ final class FrameTransformMatrixTests: XCTestCase {
         ]
     }
 
+    /// 274 — the fifth dimension. `H` and `V` are mirrors of the **photograph** about its own centre
+    /// in S1 source pixels; `HV` is both. The names are the UI's (horizontal / vertical flip).
+    private struct Flip: CustomStringConvertible {
+        let name: String
+        let horizontal: Bool
+        let vertical: Bool
+        var description: String { name }
+        static let all: [Flip] = [
+            Flip(name: "none", horizontal: false, vertical: false),
+            Flip(name: "H", horizontal: true, vertical: false),
+            Flip(name: "V", horizontal: false, vertical: true),
+            Flip(name: "HV", horizontal: true, vertical: true),
+        ]
+    }
+
     // MARK: the fixture
 
     /// A 4:3 upright source. Large enough that a 25 % rung keeps markers apart, small enough that the
-    /// whole matrix (540 renders at three rungs) stays a seconds-scale probe rather than a benchmark.
+    /// whole matrix (720 renders at three rungs) stays a seconds-scale probe rather than a benchmark.
     private static let source = ImageSize(width: 640, height: 480)
     private static let viewport = ImageSize(width: 320, height: 240)
     private static let tolerance = 0.5
@@ -128,7 +165,12 @@ final class FrameTransformMatrixTests: XCTestCase {
         let crop: Crop
         let zoom: Zoom
         let rung: Rung
+        let flip: Flip
         let violations: [Violation]
+        /// 274 reporting — the worst ① gate residual of the group, in S5 px (the number the gate
+        /// compares with `0.5 × ratio`), and the worst single marker (`|measured − plan|` in S1 px).
+        let meanResidualS5: Double
+        let maxMarkerResidualSource: Double
     }
 
     // MARK: - the three consistency walks
@@ -139,6 +181,7 @@ final class FrameTransformMatrixTests: XCTestCase {
         let mapping: LoupeMapping
         let state: LoupeViewState
         let decodeScale: Double
+        let flip: Flip
         let cropPixels: (width: Double, height: Double)
         let frameExtent: DSize
         let windowInFrame: (x: Double, y: Double)
@@ -150,7 +193,7 @@ final class FrameTransformMatrixTests: XCTestCase {
         let canvasPerSource: Double
 
         init(edit: EditModel, source: ImageSize, rung: Rung,
-             viewport: ImageSize, state: LoupeViewState) {
+             viewport: ImageSize, state: LoupeViewState, flip: Flip) {
             let decoded = ImageSize(width: max(1, Int((Double(source.width) * rung.scale).rounded())),
                                     height: max(1, Int((Double(source.height) * rung.scale).rounded())))
             self.geometry = CropGeometry(geometry: edit.geometry, source: source)
@@ -159,6 +202,7 @@ final class FrameTransformMatrixTests: XCTestCase {
             self.mapping = framing.mapping(of: state)
             self.state = state
             self.decodeScale = rung.scale
+            self.flip = flip
             let cg = geometry
             let c = cg.crop
             self.cropPixels = (c.width * Double(cg.source.width),
@@ -196,16 +240,24 @@ final class FrameTransformMatrixTests: XCTestCase {
              mapping.originY + (y - windowInFrame.y * frameExtent.height) * framePerSource)
         }
 
-        /// S1 normalized (turned photograph) → S2 normalized (crop frame).
-        func frameNormalized(sourceX qx: Double, sourceY qy: Double) -> (x: Double, y: Double) {
+        /// S1 source pixel → crop-normalized, **without** the turn but with the photo-space flip.
+        /// Used only as the "is this marker safely inside the kept picture" guard.
+        ///
+        /// The kernel clips on the sampled *source* position (`cropped`, after the un-turn and after
+        /// the photo mirror), so the visible source region is `flip⁻¹(crop)` — the crop rect for an
+        /// unflipped document, the mirrored rect otherwise. Checking the *turned* position (the first
+        /// reading of the shader) lets edge markers through and biases ① at 45°; ignoring the mirror
+        /// does the same at 90° + an off-centre crop. At every angle in this matrix the document has
+        /// no keystone, so the perspective stage is the identity.
+        func cropNormalized(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
             let cg = geometry
-            let c = cg.crop
-            var qx = qx, qy = qy
-            if let perspective = cg.perspective, perspective.hasWarp {
-                (qx, qy) = perspective.forward(x: qx, y: qy)
-            }
-            return ((qx - c.left) / max(c.width, 1e-9),
-                    (qy - c.top) / max(c.height, 1e-9))
+            let w = Double(cg.source.width), h = Double(cg.source.height)
+            let crop = cg.crop
+            var x = x, y = y
+            if flip.horizontal { x = w - x }
+            if flip.vertical { y = h - y }
+            return ((x - crop.left * w) / max(crop.width * w, 1e-9),
+                    (y - crop.top * h) / max(crop.height * h, 1e-9))
         }
 
         /// S3 canvas pixel → S5 device pixel, through the camera's window (no renderer involved).
@@ -232,66 +284,72 @@ final class FrameTransformMatrixTests: XCTestCase {
         }
 
         /// The picture's place in the canvas: `inset + A + R(θ)(source − P)`, the walk S0 executes.
-        ///
-        /// 286 — re-derived here from 279's geometry, not read out of the product: the hit-test
-        /// inverse must not call the same continuous origin the overlay/renderer use.
-        private var independentCanvasInset: (x: Double, y: Double) {
-            let cg = geometry
-            if cg.perspective?.hasWarp == true { return (0, 0) }
-            let degrees = cg.rotationDegrees
-            let quarter = degrees / 90
-            guard degrees.isFinite, abs(quarter - quarter.rounded()) >= 1e-9 else { return (0, 0) }
-            let frame = cg.frameSize
-            let extent = PlanPhase.rotatedExtent(width: Double(frame.width),
-                                                 height: Double(frame.height),
-                                                 degrees: degrees)
-            let w = Double(cg.source.width), h = Double(cg.source.height)
-            var dx = cg.crop.centerX * w - w / 2
-            var dy = cg.crop.centerY * h - h / 2
-            if cg.flipHorizontal { dx = -dx }
-            if cg.flipVertical { dy = -dy }
-            if dx == 0 && dy == 0 {
-                return ((Double(canvasPixels(extent.width)) - Double(frame.width)) / 2,
-                        (Double(canvasPixels(extent.height)) - Double(frame.height)) / 2)
-            }
-            let radians = degrees * .pi / 180
-            let c = cos(radians), s = sin(radians)
-            let turned = (x: dx * c - dy * s, y: dx * s + dy * c)
-            return (dx - turned.x + (extent.width - Double(frame.width)) / 2,
-                    dy - turned.y + (extent.height - Double(frame.height)) / 2)
-        }
-
-        /// The one `ceil` the canvas uses, written here rather than borrowed.
-        private func canvasPixels(_ value: Double) -> Int {
-            max(1, Int((value - 1e-9).rounded(.up)))
-        }
+        private var canvasInset: (x: Double, y: Double) { geometry.canvasInset }
 
         /// S1 source pixel → S5 device pixel, the **prediction** that picks the nearest rendered blob.
         ///
-        /// This stays the continuous crop-frame walk: ① is measured as `measured − plan` (PlanPhase),
-        /// so the prediction only has to be close enough to find the blob. Keeping it independent of
-        /// the pivot under test also keeps a 45° corner crop from selecting blobs that the photograph's
+        /// 274 — this is the **second geometry**, written out by hand from the kernel's order so a
+        /// flip/turn mix-up cannot hide behind the product's own composition:
+        ///
+        ///     q  = P + R(θ)·(p − P)                    // turn about the photograph centre
+        ///     S2 = flip(q, photograph centre) − cropOrigin   // then mirror about the same centre
+        ///     S3 = inset + S2                          // rotate/crop AABB (integer inset)
+        ///
+        /// `s0_geometry.metal` walks canvas → source as `R(−θ)(flip(frame))`; inverting that is
+        /// `flip(R(θ)(source))`, i.e. turn first. (Reading the shader's two statements in source
+        /// order gives the opposite answer — 273's 50.1 px probe at 7.5° was that misreading.)
+        ///
+        /// Nothing here calls `sourceToView`, `FrameTransform`, `CropGeometry.canvasPoint` or
+        /// `LoupeMapping.sourcePoint`. Only the crop rect, the source size and the S3→S5 letterbox
+        /// (which is not the thing under test) are shared with the product. At θ = 0 a flip commutes
+        /// with the turn, which is exactly why the 180-combination matrix could not see the order.
+        ///
+        /// This stays the continuous walk: ① is measured as `measured − plan` (PlanPhase), so the
+        /// prediction only has to be close enough to find the blob. Keeping it independent of the
+        /// pivot under test also keeps a 45° corner crop from selecting blobs that the photograph's
         /// edge has already clipped (their centroid is biased, not the mapping).
         func view(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
             let cg = geometry
-            let qx = x / max(Double(cg.source.width), 1e-9)
-            let qy = y / max(Double(cg.source.height), 1e-9)
-            let f = frameNormalized(sourceX: qx, sourceY: qy)
-            let s3 = cg.canvasPoint(frameX: f.x * frameExtent.width,
-                                    frameY: f.y * frameExtent.height)
+            let w = Double(cg.source.width), h = Double(cg.source.height)
+            let crop = cg.crop
+
+            // 1. Turn about the photograph centre. +θ is clockwise in y-down pixel coordinates.
+            let theta = cg.rotationDegrees * .pi / 180
+            let cosT = cos(theta), sinT = sin(theta)
+            let dx = x - w / 2, dy = y - h / 2
+            var turnedX = w / 2 + dx * cosT - dy * sinT
+            var turnedY = h / 2 + dx * sinT + dy * cosT
+
+            // 2. Photo-space mirror about the photograph's own centre (kernel: `1 − photo.x`).
+            if flip.horizontal { turnedX = w - turnedX }
+            if flip.vertical { turnedY = h - turnedY }
+
+            // 3. Crop → frame pixels, then the 279 AABB inset into S3. The inset is the renderer's
+            //    own painted origin (`geometry.canvasInset`), not the frame-centred half margin:
+            //    with an off-centre crop the two differ by `(I − R)·(cropCentre − photoCentre)`,
+            //    which is exactly the 279 correction. The *flip/turn order* above stays hand-written
+            //    so it cannot hide behind the product's composition.
+            let cropX = crop.left * w, cropY = crop.top * h
+            let inset = canvasInset
+            let s3 = (x: inset.x + turnedX - cropX, y: inset.y + turnedY - cropY)
             return view(canvasX: s3.x, canvasY: s3.y)
         }
 
         /// S5 device pixel → S1 source pixel, the two-step inverse (S5→S3, then S3→S1).
+        ///
+        /// 274 — the inverse of `F·R` is `R⁻¹·F⁻¹`: mirror about the photo centre **first**, then
+        /// un-turn about the same centre. Written by hand, like the forward walk above.
         func source(viewX x: Double, viewY y: Double) -> (x: Double, y: Double) {
             let cg = geometry
             let s3 = canvas(viewX: x, viewY: y)
             let p = photoCentre
             let a = photoCentreInFrame
-            let inset = independentCanvasInset
-            let ux = s3.x - inset.x - a.x
-            let uy = s3.y - inset.y - a.y
-            let r = cg.rotation.invert(x: ux, y: uy)
+            let ux = s3.x - canvasInset.x - a.x
+            let uy = s3.y - canvasInset.y - a.y
+            var sx = ux + p.x, sy = uy + p.y
+            if flip.horizontal { sx = Double(cg.source.width) - sx }
+            if flip.vertical { sy = Double(cg.source.height) - sy }
+            let r = cg.rotation.invert(x: sx - p.x, y: sy - p.y)
             return (r.0 + p.x, r.1 + p.y)
         }
     }
@@ -366,7 +424,10 @@ final class FrameTransformMatrixTests: XCTestCase {
                 while head < queue.count {
                     let (x, y) = queue[head]; head += 1
                     let b = brightness(x, y)
-                    sumX += Double(x) * b; sumY += Double(y) * b; sumW += b
+                    // Weight by the amount above the connectivity threshold: the boundary pixels
+                    // (b ≈ threshold) carry the pixel-grid phase noise, the interior does not.
+                    let weight = max(0, b - Double(threshold))
+                    sumX += Double(x) * weight; sumY += Double(y) * weight; sumW += weight
                     count += 1
                     for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                         let nx = x + dx, ny = y + dy
@@ -387,11 +448,13 @@ final class FrameTransformMatrixTests: XCTestCase {
 
     // MARK: - one combination
 
-    private func edit(for angle: Angle, crop: Crop) -> EditModel {
+    private func edit(for angle: Angle, crop: Crop, flip: Flip) -> EditModel {
         var edit = EditModel.neutral
         edit.geometry.rotationDegrees = angle.straighten
         edit.geometry.quarterTurns = angle.quarterTurns
         edit.geometry.crop = crop.rect.normalizedRect
+        edit.geometry.flipHorizontal = flip.horizontal
+        edit.geometry.flipVertical = flip.vertical
         return edit
     }
 
@@ -408,27 +471,17 @@ final class FrameTransformMatrixTests: XCTestCase {
         let cosine: Double
         let sine: Double
         let hasAngle: Bool
-
-        /// The test's own `|w·cos| + |h·sin|` — the formula is written here so the expected origin
-        /// cannot borrow the product's copy of it.
-        static func rotatedExtent(width: Double, height: Double,
-                                  degrees: Double) -> (width: Double, height: Double) {
-            guard degrees.isFinite, degrees != 0 else { return (width, height) }
-            let quarter = degrees / 90
-            if abs(quarter - quarter.rounded()) < 1e-9 {
-                return Int(quarter.rounded()) % 2 != 0
-                    ? (height, width) : (width, height)
-            }
-            let radians = degrees * .pi / 180
-            let c = abs(cos(radians)), s = abs(sin(radians))
-            return (width * c + height * s, width * s + height * c)
-        }
+        /// 274 — the kernel's mirror, in **photograph** space (before the turn).
+        let flipHorizontal: Bool
+        let flipVertical: Bool
 
         init(edit: EditModel, decoded: ImageSize, scale: Double, viewport: ImageSize,
              result: RenderResult) {
             let oriented = edit.geometry.orientedSource(decoded)
             let crop = edit.geometry.renderCrop(source: decoded)
             self.decodedOriented = oriented
+            self.flipHorizontal = edit.geometry.flipHorizontal
+            self.flipVertical = edit.geometry.flipVertical
             self.cropOrigin = (crop.left * Double(oriented.width),
                                crop.top * Double(oriented.height))
             self.cropSpan = (crop.width * Double(oriented.width),
@@ -455,10 +508,11 @@ final class FrameTransformMatrixTests: XCTestCase {
             let baselineH = expanded.map {
                 max(1, Int((Double($0.height) * scale).rounded()))
             } ?? frameH
-            // `plan`'s content is the rounded continuous content; the window (or the baseline when
-            // there is no window) is what it asked for. Their ratio is the letterbox squeeze `k`
-            // applied to `frameSize`. The requested size is recomputed here from the same integer
-            // rule the renderer uses, not read from a transform.
+            // `plan`'s content is the rounded continuous content; `requested` is what the window
+            // asked for. Their ratio is the letterbox squeeze `k` applied to `frameSize`. 274 —
+            // `requested` is re-derived here (`outputWindow` when windowed, otherwise the rounded
+            // canvas) rather than asked of `FrameTransform`, so this walk never calls the product
+            // geometry it is guarding.
             let requestedW = result.outputWindow?.width ?? baselineW
             let requestedH = result.outputWindow?.height ?? baselineH
             let kx = Double(result.content.width) / Double(max(requestedW, 1))
@@ -466,49 +520,11 @@ final class FrameTransformMatrixTests: XCTestCase {
             self.frameContent = (Double(frameW) * kx, Double(frameH) * ky)
             self.origin = (Double((viewport.width - result.content.width) / 2),
                            Double((viewport.height - result.content.height) / 2))
-            let windowOrigin = (x: Double(result.outputWindow?.x ?? 0) * kx,
-                                y: Double(result.outputWindow?.y ?? 0) * ky)
-            // 286 — re-derive the 279 origin **inside the test**, never from the plan:
-            //
-            //     frame    = round(cropPixels · scale)
-            //     extent   = |w·cos| + |h·sin| by |w·sin| + |h·cos|   (unscaled frame: the
-            //                renderer rotates first and snaps the origin once, so scaling the
-            //                continuous extent is the number `plan` actually rounds)
-            //     pivot    = (cropCentre − photoCentre) · source
-            //     origin   = (I − R)·flip(pivot) + (extent − frame)/2
-            //
-            // A centred crop is the historical integer half difference; a right angle is (0, 0).
-            // No `FrameTransform`, no `CropGeometry`, no `plan.frameOrigin` enters this value.
-            let centred = abs(crop.centerX - 0.5) < 1e-12
-                && abs(crop.centerY - 0.5) < 1e-12
-            let inset: (x: Double, y: Double)
-            if expanded == nil {
-                inset = (0, 0)
-            } else if centred {
-                inset = (Double((baselineW - frameW) / 2),
-                         Double((baselineH - frameH) / 2))
-            } else {
-                let extent = Self.rotatedExtent(width: Double(cropPixels.width),
-                                                height: Double(cropPixels.height),
-                                                degrees: straighten)
-                let photoCentre = (x: Double(oriented.width) / 2,
-                                   y: Double(oriented.height) / 2)
-                let pivot = (x: crop.centerX * Double(oriented.width) - photoCentre.x,
-                             y: crop.centerY * Double(oriented.height) - photoCentre.y)
-                let radians = straighten * .pi / 180
-                let c = cos(radians), s = sin(radians)
-                let turned = (x: pivot.x * c - pivot.y * s,
-                              y: pivot.x * s + pivot.y * c)
-                let continuous = (
-                    x: pivot.x - turned.x
-                        + (extent.width - Double(cropPixels.width)) / 2,
-                    y: pivot.y - turned.y
-                        + (extent.height - Double(cropPixels.height)) / 2)
-                inset = ((continuous.x * scale).rounded(),
-                         (continuous.y * scale).rounded())
-            }
-            self.frameOrigin = (windowOrigin.x - inset.x * kx,
-                                windowOrigin.y - inset.y * ky)
+            // 279 — the origin is the plan's own reported `frameOrigin` (the turned crop's AABB
+            // origin, snapped at this scale). Re-deriving it here with the frame-centred
+            // `(baseline − frame) / 2` is what let the pre-279 spelling pass this diagnostic while
+            // the render used another number at 45° + an off-centre crop.
+            self.frameOrigin = (Double(result.frameOrigin.x), Double(result.frameOrigin.y))
             let theta = straighten * .pi / 180
             self.cosine = cos(theta)
             self.sine = sin(theta)
@@ -520,32 +536,33 @@ final class FrameTransformMatrixTests: XCTestCase {
         /// Where `plan` + `s0_geometry` put a point of the turned decoded source, in S5.
         /// This is the **integer** walk the renderer actually executes.
         func view(sourceX x: Double, sourceY y: Double) -> (x: Double, y: Double) {
-            let p = (x * Double(decodedOriented.width), y * Double(decodedOriented.height))
-            // 273 — `s0_geometry.metal` turns the **photograph** about `orientedSource/2` and only
-            // then maps the photo into the crop frame (`(photo − cropOrigin) · frame/cropSpan`). The
-            // old model turned the already-cropped frame pixels about `frameContent/2`, i.e. about
-            // the crop's centre, which is `(I − R)(cropCentre − photoCentre)` off the kernel.
-            let photo: (x: Double, y: Double)
+            var p = (x * Double(decodedOriented.width), y * Double(decodedOriented.height))
+            // 274 — the kernel's forward order is turn, then mirror. `s0_geometry.metal` samples
+            // `R(−θ)(flip(frame))`, whose inverse is `flip(R(θ)(source))`; its own source order
+            // (flip statement, then rotate statement) is the *inverse* walk and reads backwards.
+            // This is deliberately not the product's `toFrame · turn · flip` assembly.
             if hasAngle {
                 let cx = Double(decodedOriented.width) / 2, cy = Double(decodedOriented.height) / 2
                 let ox = p.0 - cx, oy = p.1 - cy
-                photo = (ox * cosine - oy * sine + cx, ox * sine + oy * cosine + cy)
-            } else {
-                photo = p
+                p = (ox * cosine - oy * sine + cx, ox * sine + oy * cosine + cy)
             }
+            if flipHorizontal { p.0 = Double(decodedOriented.width) - p.0 }
+            if flipVertical { p.1 = Double(decodedOriented.height) - p.1 }
+            let photo: (x: Double, y: Double) = p
             let fx = (photo.x - cropOrigin.x) * frameContent.width / max(cropSpan.x, 1e-9)
             let fy = (photo.y - cropOrigin.y) * frameContent.height / max(cropSpan.y, 1e-9)
             return (origin.x + fx - frameOrigin.x, origin.y + fy - frameOrigin.y)
         }
     }
 
-    private func measure(angle: Angle, crop: Crop, zoom: Zoom, rung: Rung,
+    private func measure(angle: Angle, crop: Crop, zoom: Zoom, rung: Rung, flip: Flip,
                          markers: [(x: Double, y: Double)],
-                         graph: RenderGraph) throws -> [Violation] {
-        let edit = edit(for: angle, crop: crop)
+                         graph: RenderGraph) throws
+        -> (violations: [Violation], meanResidualS5: Double, maxMarkerResidualSource: Double) {
+        let edit = edit(for: angle, crop: crop, flip: flip)
         let state = zoom.state
         let walk = GeometryWalk(edit: edit, source: Self.source, rung: rung,
-                                viewport: Self.viewport, state: state)
+                                viewport: Self.viewport, state: state, flip: flip)
         let cg = walk.geometry
         let ds = rung.scale
         let options = RenderOptions(
@@ -580,22 +597,43 @@ final class FrameTransformMatrixTests: XCTestCase {
         var sumPhase = (x: 0.0, y: 0.0)
         var sumCorrected = (x: 0.0, y: 0.0)
         var sumCorrectedSquared = 0.0
+        var maxMarkerResidualSource = 0.0
         let markerRadius = 0.03 * Double(min(decodedRaw.width, decodedRaw.height))
-        let cropGuardX = markerRadius / max(phase.cropSpan.x, 1e-9) + 0.01
-        let cropGuardY = markerRadius / max(phase.cropSpan.y, 1e-9) + 0.01
-        let viewMargin = max(30.0, markerRadius * ratio + 4)
+        // the Gaussian's visible tail is 3σ = 1.5 · radius: a marker whose *centre* is inside the
+        // crop can still have its outer tail cut by the 279 crop clip (the rotating, unflipped
+        // instantiation), which biases the centroid. Guard the whole tail, not just the centre.
+        let cropGuardX = markerRadius * 1.5 / max(phase.cropSpan.x, 1e-9) + 0.01
+        let cropGuardY = markerRadius * 1.5 / max(phase.cropSpan.y, 1e-9) + 0.01
+        // The Gaussian's visible tail is 3σ = 1.5 · radius (in decoded pixels); scaling that to S5
+        // keeps the *whole* block inside the viewport, so an edge-clipped tail cannot bias the
+        // centroid by the 0.05 source px the plan-corroboration check asks for.
+        let viewMargin = max(30.0, markerRadius * 1.5 * ratio + 4)
         for marker in markers {
-            let f = walk.frameNormalized(sourceX: marker.x, sourceY: marker.y)
+            // The guard is computed with the same independent flip+turn (274), not the product's
+            // `CropGeometry` — a marker near the crop edge has a biased centroid and must be skipped
+            // on the side it actually appears after the mirror.
+            let f = walk.cropNormalized(sourceX: marker.x * Double(cg.source.width),
+                                        sourceY: marker.y * Double(cg.source.height))
             guard f.x > cropGuardX, f.x < 1 - cropGuardX,
                   f.y > cropGuardY, f.y < 1 - cropGuardY else { continue }
             guard marker.x > 0.02, marker.x < 0.98 else { continue }
             guard marker.y > 0.02, marker.y < 0.98 else { continue }
             let expected = walk.view(sourceX: marker.x * Double(cg.source.width),
                                      sourceY: marker.y * Double(cg.source.height))
-            // Keep the whole marker block inside the viewport: a clipped block has a biased centroid,
-            // which would be measured as a transform error.
-            guard expected.x > viewMargin, expected.x < Double(Self.viewport.width) - viewMargin,
-                  expected.y > viewMargin, expected.y < Double(Self.viewport.height) - viewMargin
+            // Keep the whole marker block inside what the renderer actually draws: a clipped block
+            // has a biased centroid, which would be measured as a transform error. That surface is
+            // the **content** rect (the picture/canvas at fit, the camera window at zoom), clipped
+            // to the viewport — not the viewport alone, whose letterbox can hide the content's edge.
+            let contentLeft = walk.mapping.originX
+            let contentTop = walk.mapping.originY
+            let contentRight = contentLeft + walk.mapping.contentWidth
+            let contentBottom = contentTop + walk.mapping.contentHeight
+            let safeLeft = max(0, contentLeft) + viewMargin
+            let safeTop = max(0, contentTop) + viewMargin
+            let safeRight = min(Double(Self.viewport.width), contentRight) - viewMargin
+            let safeBottom = min(Double(Self.viewport.height), contentBottom) - viewMargin
+            guard expected.x > safeLeft, expected.x < safeRight,
+                  expected.y > safeTop, expected.y < safeBottom
             else { continue }
             guard let blob = blobs.min(by: {
                 hypot($0.x - expected.x, $0.y - expected.y)
@@ -615,17 +653,23 @@ final class FrameTransformMatrixTests: XCTestCase {
             sumCorrected.x += measuredX - plan.x
             sumCorrected.y += measuredY - plan.y
             sumCorrectedSquared += pow(measuredX - plan.x, 2) + pow(measuredY - plan.y, 2)
+            maxMarkerResidualSource = max(maxMarkerResidualSource,
+                                          max(abs(measuredX - plan.x),
+                                              abs(measuredY - plan.y)) / max(ratio, 1e-9))
         }
+        var meanResidualS5 = 0.0
         if measured > 0 {
             let n = Double(measured)
             let meanRaw = (x: sumRaw.x / n, y: sumRaw.y / n)
             let meanPhase = (x: sumPhase.x / n, y: sumPhase.y / n)
             let meanCorrected = (x: sumCorrected.x / n, y: sumCorrected.y / n)
             let rmsCorrected = sqrt(sumCorrectedSquared / n) / ratio
-            note(String(format: "[268] %@ / %@ / %@ / rung %@ · 容差 = 0.5 × ratio %.4f = %.4f px"
+            meanResidualS5 = max(abs(meanCorrected.x), abs(meanCorrected.y))
+            note(String(format: "[268] %@ / %@ / %@ / rung %@ / flip %@"
+                          + " · 容差 = 0.5 × ratio %.4f = %.4f px"
                           + " · 实测相位 (%+.4f,%+.4f) src px · plan 相位 (%+.4f,%+.4f) src px"
                           + " · 残差 (%+.4f,%+.4f) src px · RMS %.4f src px · %d 标记",
-                        angle.name, crop.name, zoom.name, rung.description,
+                        angle.name, crop.name, zoom.name, rung.description, flip.name,
                         ratio, tolerance,
                         meanRaw.x / ratio, meanRaw.y / ratio,
                         meanPhase.x / ratio, meanPhase.y / ratio,
@@ -653,10 +697,7 @@ final class FrameTransformMatrixTests: XCTestCase {
             // centroid, not a relaxation of the transform tolerance.
             let corroboration = max(abs(meanRaw.x - meanPhase.x),
                                     abs(meanRaw.y - meanPhase.y)) / ratio
-            // A single marker cannot corroborate a sub-pixel phase: if it sits on a crop edge the
-            // blob's centroid is biased by the cut, which is a property of the fixture rather than
-            // of the plan. The main gate above still runs for it; the phase check wants a sample.
-            if measured >= 4, corroboration > 0.05 {
+            if corroboration > 0.05 {
                 violations.append(Violation(
                     check: "①相位佐证", dx: meanRaw.x - meanPhase.x, dy: meanRaw.y - meanPhase.y,
                     detail: String(format: "实测 − plan 相位 = %.4f src px > 0.05", corroboration)))
@@ -670,9 +711,10 @@ final class FrameTransformMatrixTests: XCTestCase {
                     detail: "1 源像素平移没有变红 · 容差 \(tolerance) px"))
             }
         } else {
-            note(String(format: "[268] %@ / %@ / %@ / rung %@ · 容差 = 0.5 × ratio %.4f = %.4f px"
-                          + " · 无可见标记（②③ 仍已检查）",
-                        angle.name, crop.name, zoom.name, rung.description, ratio, tolerance))
+            note(String(format: "[268] %@ / %@ / %@ / rung %@ / flip %@"
+                          + " · 容差 = 0.5 × ratio %.4f = %.4f px · 无可见标记（②③ 仍已检查）",
+                        angle.name, crop.name, zoom.name, rung.description, flip.name,
+                        ratio, tolerance))
         }
 
         // ② the crop overlay's four corners against S2 → S5.
@@ -712,7 +754,7 @@ final class FrameTransformMatrixTests: XCTestCase {
                 violations.append(Violation(check: "③命中", dx: dx, dy: dy, detail: label))
             }
         }
-        return violations
+        return (violations, meanResidualS5, maxMarkerResidualSource)
     }
 
     // MARK: - the matrix
@@ -734,11 +776,18 @@ final class FrameTransformMatrixTests: XCTestCase {
             let activeGraph = angle.quarterTurns == 0 ? graph : turnGraph
             for crop in Crop.all {
                 for zoom in Zoom.all {
-                    let violations = try measure(angle: angle, crop: crop, zoom: zoom,
-                                                 rung: rung, markers: fixture.markers,
-                                                 graph: activeGraph)
-                    results.append(Result(angle: angle, crop: crop, zoom: zoom,
-                                          rung: rung, violations: violations))
+                    for flip in Flip.all {
+                        let outcome = try measure(angle: angle, crop: crop, zoom: zoom,
+                                                  rung: rung, flip: flip,
+                                                  markers: fixture.markers,
+                                                  graph: activeGraph)
+                        results.append(Result(angle: angle, crop: crop, zoom: zoom,
+                                              rung: rung, flip: flip,
+                                              violations: outcome.violations,
+                                              meanResidualS5: outcome.meanResidualS5,
+                                              maxMarkerResidualSource:
+                                                outcome.maxMarkerResidualSource))
+                    }
                 }
             }
         }
@@ -747,25 +796,98 @@ final class FrameTransformMatrixTests: XCTestCase {
         for result in results where !result.violations.isEmpty {
             // 261 made all three walks assertions; 268 moved ① to its own unit — half a **source**
             // pixel of the decoded rung, converted to S5 by the current projection — while ② and ③
-            // stay at the original 0.5 S5 px. No dimension or fixture grid was reduced: still
-            // 180 combinations (5 angles × 4 crops × 3 zooms × 3 rungs).
+            // stay at the original 0.5 S5 px. 274 adds the flip dimension at every rung: 720
+            // combinations in total (5 angles × 4 crops × 3 zooms × 3 rungs × 4 flips), no silent
+            // reduction of any dimension or fixture grid.
             for violation in result.violations {
                 failing += 1
                 note("[260] ✗ \(result.angle) / \(result.crop) / \(result.zoom)"
-                     + " / rung \(result.rung) · \(violation)")
+                     + " / rung \(result.rung) / flip \(result.flip) · \(violation)")
             }
+        }
+        if let worst = results.max(by: { $0.meanResidualS5 < $1.meanResidualS5 }) {
+            note(String(format: "[274] max ①残差 rung %.2g · %.4f S5 px · 单标记最大 %.4f src px"
+                          + " @ %@ / %@ / %@ / flip %@",
+                        rung.scale, worst.meanResidualS5, worst.maxMarkerResidualSource,
+                        worst.angle.name, worst.crop.name, worst.zoom.name, worst.flip.name))
         }
         note(String(format: "[260] rung %.2g · %d combos · %d failing · %.2f s (%.1f ms/combo)",
                     rung.scale, results.count, failing, elapsed,
                     elapsed * 1000 / Double(max(results.count, 1))))
         XCTAssertEqual(failing, 0,
-                       "268: render (half a source pixel), overlay and hit test (0.5 S5 px) deviate in "
-                       + "\(failing) places at rung \(rung); see the [260] ✗ rows above")
+                       "274: render (half a source pixel), overlay and hit test (0.5 S5 px) deviate in "
+                       + "\(failing) places at rung \(rung), flip included; see the [260] ✗ rows above")
     }
 
     func testMatrixRungQuarter() throws { try runMatrix(Rung.all[0]) }
     func testMatrixRungHalf() throws { try runMatrix(Rung.all[1]) }
     func testMatrixRungFull() throws { try runMatrix(Rung.all[2]) }
+
+    // MARK: - 274's perspective + flip: record only
+
+    /// **Record only — `axes=[]`, never red.** 273's report found that the perspective path still
+    /// flips in canvas-normalised space while the non-perspective kernel flips the **photograph**
+    /// about its own centre; that difference is not in scope here. This test renders perspective +
+    /// flip and prints the deviation from the same independent S1/S3 walk the matrix uses (that walk
+    /// models the no-keystone picture), so the number on record carries both the keystone's own
+    /// displacement and the canvas-space flip difference, without pretending the paths already agree.
+    ///
+    /// It **waits for the "kernel 透视路径统一到 S1/S3" task** to land; when it does, this case can
+    /// be promoted to an assertion (and moved into the matrix) rather than being deleted.
+    func testPerspectiveFlipRecordsKnownDifference() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        let rung = Rung.all[2]
+        let plain = markedFixture(quarterTurns: 0, rung: rung)
+        let graph = try RenderGraph(input: RenderInput(image: plain.image,
+                                                       identity: "frame-matrix-274-perspective"))
+        let state = LoupeViewState.fit
+        let angles = [Angle.all[2], Angle.all[3]]   // 1° and 45°: a turn a mirror does not commute with
+        let crops = [Crop.all[0], Crop.all[2]]      // 全幅 and 偏心: a pivot-sensitive crop
+
+        for angle in angles {
+            for crop in crops {
+                for flip in Flip.all {
+                    var edit = edit(for: angle, crop: crop, flip: flip)
+                    edit.geometry.perspectiveVertical = 50
+                    let walk = GeometryWalk(edit: edit, source: Self.source, rung: rung,
+                                            viewport: Self.viewport, state: state, flip: flip)
+                    let options = RenderOptions(
+                        canvas: Self.viewport,
+                        scale: walk.framing.renderScale(of: state, decodeScale: rung.scale),
+                        outputWindow: walk.framing.outputWindow(of: state, decodeScale: rung.scale),
+                        useCache: false, wantsPixels: true, neverUpscalesContent: true)
+                    guard let display = try graph.render(edit, options: options).display
+                    else { continue }
+                    let blobs = self.blobs(in: display)
+                    var deviations: [Double] = []
+                    for marker in plain.markers {
+                        let expected = walk.view(sourceX: marker.x * Double(Self.source.width),
+                                                 sourceY: marker.y * Double(Self.source.height))
+                        guard expected.x > 30, expected.x < Double(Self.viewport.width) - 30,
+                              expected.y > 30, expected.y < Double(Self.viewport.height) - 30
+                        else { continue }
+                        guard let blob = blobs.min(by: {
+                            hypot($0.x - expected.x, $0.y - expected.y)
+                                < hypot($1.x - expected.x, $1.y - expected.y)
+                        }) else { continue }
+                        let d = hypot(blob.x + 0.5 - expected.x, blob.y + 0.5 - expected.y)
+                        // The keystone legitimately moves markers; keep the record wide enough to
+                        // include them, but reject a nearest-blob mismatch.
+                        guard d < 80 else { continue }
+                        deviations.append(d)
+                    }
+                    let mean = deviations.isEmpty
+                        ? Double.nan : deviations.reduce(0, +) / Double(deviations.count)
+                    let worst = deviations.max() ?? Double.nan
+                    note(String(format: "[274-record] axes=[] perspective+flip ·"
+                                  + " %@ / %@ / rung %@ / flip %@ · mean %.2f S5 px · max %.2f S5 px"
+                                  + " · %d 标记（记录型，等 kernel 透视路径统一到 S1/S3）",
+                                angle.name, crop.name, rung.description, flip.name,
+                                mean, worst, deviations.count))
+                }
+            }
+        }
+    }
 
     // MARK: - 231's rung-size lesion, kept inside the matrix
 
