@@ -601,7 +601,8 @@ extension HealSpot {
                                     center: NormalizedPoint,
                                     radius: Double,
                                     downsample: Int = 16,
-                                    shortlist: Int = 4) -> HealSourceResult {
+                                    shortlist: Int = 4,
+                                    options: HealSourceSearchOptions = .standard) -> HealSourceResult {
         let w = image.width
         let h = image.height
         let shortEdge = Double(min(w, h))
@@ -779,12 +780,100 @@ extension HealSpot {
             //    contrast** of the best — a difference no one can see — ordered far first. On a flat
             //    wall hundreds of sources tie at the noise floor, and the tie has to be broken by
             //    where the user would have dragged: away from the defect.
+            //
+            //    262 widens this list (the alignment runs on it) but keeps the far-first order, so
+            //    the pre-262 tie rule still decides between candidates the phase pass cannot tell
+            //    apart.
             let tieBand = coarseBest.score.squareRoot() + 0.1 * sigmaD
-            var shortlisted = ranked.filter { $0.score.squareRoot() <= tieBand }.sorted { $0.d > $1.d }
-            let take = min(max(shortlist, 1), 12)
-            if shortlisted.count > take { shortlisted.removeLast(shortlisted.count - take) }
+            let alignmentTake = min(max(options.alignmentShortlist, shortlist), 64)
+            var shortlisted = ranked.filter { $0.score.squareRoot() <= tieBand }
+                .sorted { $0.d > $1.d }
+            if shortlisted.count > alignmentTake {
+                shortlisted.removeLast(shortlisted.count - alignmentTake)
+            } else if shortlisted.count < alignmentTake {
+                // 262 — the rim pass is allowed to be wrong: a phase-shifted source can sit just
+                // outside the tie band and still be the right texture once its disk is compared.
+                // Hand the aligner the next-best candidates by rim score as well, so the decision
+                // is made on the disk rather than by a rim cut-off. Bounded by `alignmentTake`.
+                let remaining = ranked.filter { $0.score.squareRoot() > tieBand }
+                    .sorted {
+                        if $0.score != $1.score { return $0.score < $1.score }
+                        return $0.d > $1.d
+                    }
+                shortlisted.append(contentsOf: remaining.prefix(alignmentTake - shortlisted.count))
+            }
 
-            // 5. Full resolution: 8 concentric circles × 24 angles, nearest texel — the ring the
+            // 262 — the two C4 measures. The aligner reads the same buffer as `luma`; the
+            // destination's interior energy is computed once, not per candidate.
+            let aligner = SourceAligner(width: w, height: h, buffer: buf,
+                                        dstX: cx, dstY: cy, radius: r,
+                                        levels: options.pyramidLevels,
+                                        iterations: options.iterations,
+                                        patchSide: options.patchSize)
+            let sigmaDstInterior = aligner.interiorSigma(cx, cy)
+            let penaltyEpsilon = HealSpot.contrastFloor
+            let lambda = max(0, options.variancePenalty)
+
+            /// 4 × 12 rings: enough to rank the aligned candidates cheaply before the full 8 × 24
+            /// measurement. Same plane-corrected form, only shorter.
+            func mediumResolution(_ px: Double, _ py: Double) -> Double {
+                let rings = 4, angles = 12
+                let count = Double(rings * angles)
+                var s0 = 0.0, s1 = 0.0, s2 = 0.0, q2 = 0.0
+                for ring in 0..<rings {
+                    let rr = r * (1.03 + 0.44 * Double(ring) / Double(rings - 1))
+                    for a in 0..<angles {
+                        let theta = 2.0 * Double.pi * Double(a) / Double(angles)
+                        let ux = cos(theta)
+                        let vy = sin(theta)
+                        let dst = luma(Int((cx + rr * ux).rounded()), Int((cy + rr * vy).rounded()))
+                        let src = luma(Int((px + rr * ux).rounded()), Int((py + rr * vy).rounded()))
+                        let diff = dst - src
+                        s0 += diff
+                        s1 += diff * ux
+                        s2 += diff * vy
+                        q2 += diff * diff
+                    }
+                }
+                let residual = q2 - s0 * s0 / count - 2 * s1 * s1 / count - 2 * s2 * s2 / count
+                return max(0, residual) / count
+            }
+
+            // 5. Phase alignment. Each shortlisted candidate gets a local PatchMatch-lite pass; the
+            //    displacement the previous candidate accepted is the propagation seed. The pass is
+            //    skipped entirely when the caller asked for the pre-262 answer.
+            var refined: [(px: Double, py: Double, d: Double,
+                           medium: Double, sigma: Double, penalty: Double)] = []
+            refined.reserveCapacity(shortlisted.count)
+            var seedX = 0.0
+            var seedY = 0.0
+            for candidate in shortlisted {
+                var px = candidate.px
+                var py = candidate.py
+                if options.phaseAlignment {
+                    let aligned = aligner.align(candidate.px, candidate.py,
+                                                seedX: seedX, seedY: seedY,
+                                                key: refined.count)
+                    px = aligned.x
+                    py = aligned.y
+                    seedX = px - candidate.px
+                    seedY = py - candidate.py
+                }
+                // A moved centre still has to hold the whole ring on the picture.
+                let ringReach = 1.5 * r
+                guard px - ringReach >= 0, px + ringReach <= Double(w),
+                      py - ringReach >= 0, py + ringReach <= Double(h) else { continue }
+
+                let sigmaSrc = aligner.interiorSigma(px, py)
+                guard sigmaSrc.isFinite else { continue }
+                let penalty = lambda * abs(sigmaSrc - sigmaDstInterior)
+                    / max(sigmaDstInterior, penaltyEpsilon)
+                let medium = mediumResolution(px, py)
+                guard medium.isFinite else { continue }
+                refined.append((px, py, candidate.d, medium, sigmaSrc, penalty))
+            }
+
+            // 6. Full resolution: 8 concentric circles × 24 angles, nearest texel — the ring the
             //    kernel reads, at the resolution the answer is judged at.
             let ringCount = 8
             let angularCount = 24
@@ -815,20 +904,38 @@ extension HealSpot {
                 return (max(0, residual) / nS, sigma)
             }
 
-            var survivors: [(px: Double, py: Double, d: Double, rms: Double)] = []
-            for candidate in shortlisted {
+            // Deterministic order before taking the final few: (medium, then far first, then
+            // position). Equal medium keeps the pre-262 tie rule (the source the user would have
+            // dragged to), so the wider alignment shortlist cannot change a tie by array order.
+            refined.sort {
+                if $0.medium != $1.medium { return $0.medium < $1.medium }
+                if $0.d != $1.d { return $0.d > $1.d }
+                if $0.px != $1.px { return $0.px < $1.px }
+                return $0.py < $1.py
+            }
+            let finalTake = min(max(shortlist, 1), 12)
+            let finalists = Array(refined.prefix(finalTake))
+
+            var survivors: [(px: Double, py: Double, d: Double, rms: Double,
+                             total: Double, rim: Double)] = []
+            survivors.reserveCapacity(finalists.count)
+            for candidate in finalists {
                 let result = fullResolution(candidate.px, candidate.py)
                 guard result.score.isFinite,
                       result.sigma >= HealSpot.contrastFloor,
                       result.sigma >= 0.4 * sigmaD else { continue }
-                let rms = result.score.squareRoot()
-                survivors.append((candidate.px, candidate.py, candidate.d, rms))
+                let total = result.score + candidate.penalty
+                survivors.append((candidate.px, candidate.py, candidate.d,
+                                  total.squareRoot(), total, result.score))
             }
             let accepted = survivors.count
             // Best first, then the farthest of the sources that are within a tenth of the local
             // contrast of it — the same tie rule the shortlist uses, applied at full resolution.
-            let winner: (px: Double, py: Double, d: Double, rms: Double)? = {
-                guard let best = survivors.min(by: { $0.rms < $1.rms }) else { return nil }
+            // The comparison is on `score + penalty` (C4's final score); the reported `score` stays
+            // the rim SSD, which is what the panel has always shown.
+            let winner: (px: Double, py: Double, d: Double, rms: Double,
+                         total: Double, rim: Double)? = {
+                guard let best = survivors.min(by: { $0.total < $1.total }) else { return nil }
                 let band = best.rms + 0.1 * sigmaD
                 return survivors.filter { $0.rms <= band }.max(by: { $0.d < $1.d })
             }()
@@ -846,7 +953,7 @@ extension HealSpot {
                                     status: .found,
                                     examined: examined,
                                     accepted: accepted,
-                                    score: winner.rms * winner.rms,
+                                    score: winner.rim,
                                     distanceInRadii: (dx * dx + dy * dy).squareRoot() / r)
         }
     }
