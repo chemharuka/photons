@@ -1196,6 +1196,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 283 — the thumbnail's own pixel size, kept so a canvas resize can re-derive the same fallback
     /// rectangle when the projection is still unavailable (`framing() == nil`).
     private var firstFramePlaceholderPixelSize: ImageSize?
+    /// 290 — the EXIF orientation read once per stand-in (`nil` = the row has no metadata), so a
+    /// live resize of the canvas does not query the catalog for the same photo again.
+    private var firstFramePlaceholderOrientation: (assetID: String, value: ImageOrientation?)?
     /// Set on a photo change; cleared by the first successful `present` for that photo, which is the
     /// only moment `firstFrameContent` is meaningful.
     private var awaitingFirstFrameContent = false
@@ -5387,6 +5390,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         firstFramePlaceholderToken = nil
         firstFramePlaceholderPhoto = identity
         firstFramePlaceholderPixelSize = nil
+        firstFramePlaceholderOrientation = nil
         canvasView.hideFirstFramePlaceholder()
         let started = CACurrentMediaTime()
         guard let cache = session.thumbnailCache else { return }
@@ -5440,6 +5444,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 258's 适应 case is the same line: at `fit` the crop's rect *is* the 0.90 content rect, so
     /// existing acceptance keeps its number.
     ///
+    /// 290 — before the first ingest the catalog's `width/height` are the **stored** (sensor)
+    /// dimensions, which are transposed for EXIF 5…8 while the thumbnail is already upright. The
+    /// fallback therefore builds its projection from `placeholderSourceSize(thumbnail:)` (the stored
+    /// dimensions after the EXIF swap, or the thumbnail's own aspect when the row has no
+    /// orientation). Once `publishIngestedSource` lands, `framing()` is the authority again.
+    ///
     /// `imageSize` is only the fallback when the projection is not available yet (no asset
     /// dimensions, no decode): the thumbnail is then treated as the photo's own S1 size, which keeps
     /// its aspect and the current camera instead of collapsing to the canvas' shape.
@@ -5451,19 +5461,65 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let viewport = ImageSize(width: max(1, Int((canvas.width * scale).rounded())),
                                  height: max(1, Int((canvas.height * scale).rounded())))
         let layout: LoupeFraming
-        if let current = framing(viewport: viewport) {
+        if hasIngestedPlaceholderSource, let current = framing(viewport: viewport) {
             layout = current
-        } else if let imageSize {
+        } else if let source = placeholderSourceSize(thumbnail: imageSize) {
             layout = LoupeFraming(viewport: viewport,
-                                  decoded: imageSize,
+                                  decoded: source,
                                   decodeScale: 1,
-                                  edit: .neutral)
+                                  edit: cropTool.canvasEdit(from: session?.edit ?? .neutral),
+                                  fitScale: currentCropWorkspaceFitScale,
+                                  fitMargin: fitMarginOverride)
+        } else if let current = framing(viewport: viewport) {
+            layout = current
         } else {
             return canvasView.bounds
         }
         let pixels = layout.contentRectInS5(of: state ?? viewState)
         return CGRect(x: pixels.minX / scale, y: pixels.minY / scale,
                       width: pixels.width / scale, height: pixels.height / scale)
+    }
+
+    /// 290 — whether the photo's **upright** source is already known from a decode or the ingest
+    /// publication. Only then may the stand-in defer to `framing()`; before that its stored
+    /// dimensions are not the frame the user sees.
+    private var hasIngestedPlaceholderSource: Bool {
+        guard let asset = session?.anchorAsset else { return false }
+        if decoded != nil, decodedIdentity == backdropPhotoKey { return true }
+        return session?.ingestedSourceFrame?.assetID == asset.id
+    }
+
+    /// 290 — the upright source size for the fallback projection.
+    ///
+    /// The catalog row's dimensions are the stored ones; an EXIF orientation of 5…8 swaps them. When
+    /// the import did not record an orientation, the thumbnail's own aspect (already upright) is the
+    /// authority for **which way up** the picture is, while the stored magnitude is kept so 100 %
+    /// and 400 % still use the file's pixel scale rather than the preview's.
+    private func placeholderSourceSize(thumbnail: ImageSize?) -> ImageSize? {
+        guard let asset = session?.anchorAsset else { return thumbnail }
+        guard let storedWidth = asset.width, let storedHeight = asset.height,
+              storedWidth > 0, storedHeight > 0 else { return thumbnail }
+        if let orientation = placeholderOrientation(for: asset) {
+            let upright = orientation.uprightSize(width: storedWidth, height: storedHeight)
+            return ImageSize(width: upright.width, height: upright.height)
+        }
+        guard let thumbnail else {
+            return ImageSize(width: storedWidth, height: storedHeight)
+        }
+        let storedIsPortrait = storedHeight > storedWidth
+        let thumbnailIsPortrait = thumbnail.height > thumbnail.width
+        return storedIsPortrait == thumbnailIsPortrait
+            ? ImageSize(width: storedWidth, height: storedHeight)
+            : ImageSize(width: storedHeight, height: storedWidth)
+    }
+
+    private func placeholderOrientation(for asset: Asset) -> ImageOrientation? {
+        if let cached = firstFramePlaceholderOrientation, cached.assetID == asset.id {
+            return cached.value
+        }
+        let value = session?.sourceOrientation(of: asset.id)
+        firstFramePlaceholderOrientation = (asset.id, value)
+        return value
     }
 
     /// 283 — the acceptance's seam: the same rectangle the install path uses, for an explicit camera
@@ -7065,6 +7121,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             firstFramePlaceholderToken = nil
             firstFramePlaceholderPhoto = nil
             firstFramePlaceholderPixelSize = nil
+            firstFramePlaceholderOrientation = nil
         }
         // 258 — the new photo's pixels are on the layer now; the matte cover is no longer hiding
         // anything (and leaving it up would hide the picture itself).
@@ -7133,6 +7190,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard let rung, let assetID = session?.anchorAsset?.id else { return }
         let size = Self.fullSourceSize(rung: rung, decodeScale: decodeScale)
         session?.ingestedSourceFrame = (assetID, size)
+        // 290 — a stand-in that is still up was placed from the fallback (stored dimensions after the
+        // EXIF swap). Now the real upright frame is known; re-place it through the same resize path so
+        // a decode's one-pixel difference cannot leave it a hair off the frame that follows.
+        refreshFirstFramePlaceholderGeometry()
         // 249 — canvasV1 heal spots are converted once the **exact** S1 frame is known. Doing it here
         // (instead of inside `EditModel.init(from:)`) is what lets radius/offset scale by the real
         // frame short edge; the renderer also converts on the fly for documents that never enter the

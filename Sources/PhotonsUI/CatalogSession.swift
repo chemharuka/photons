@@ -262,6 +262,16 @@ public final class CatalogSession {
     /// switch cannot inherit the previous picture's frame before its own decode lands.
     public internal(set) var ingestedSourceFrame: (assetID: String, size: ImageSize)?
 
+    /// 290 — the EXIF orientation the import recorded for `assetID`, or `nil` when the row has no
+    /// metadata (or no orientation). The first-frame stand-in runs **before** the first ingest
+    /// publishes `ingestedSourceFrame`, so this is the one fact that turns the catalog row's stored
+    /// dimensions into the upright aspect the thumbnail already shows.
+    public func sourceOrientation(of assetID: String) -> ImageOrientation? {
+        guard let catalog,
+              let value = (try? catalog.metadata(assetId: assetID))?.orientation else { return nil }
+        return ImageOrientation(exifOrDefault: value)
+    }
+
     /// The crop tool's **live** draft geometry while the tool is open (派单 049).
     ///
     /// The draft is view state that lives in `CropToolController` and reaches the document only at
