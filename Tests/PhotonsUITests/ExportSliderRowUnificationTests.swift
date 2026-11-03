@@ -189,17 +189,20 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         XCTAssertEqual(percentRect.minX, qualityRect.minX, accuracy: 0.5)
     }
 
-    /// The unit column sits at the same x on every row that has one; 质量 reserves it but draws
-    /// nothing, so 217's "质量无单位探针" assertion still holds.
+    /// The unit column sits at the same x on every row that has one. 288 made 质量 a `%` row too, so
+    /// it now reports a unit probe at the same x as PPI / 不透明度 / 长边百分比.
     func testUnitColumnIsTheSameOnEveryRowWithAUnit() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
 
         let ppiUnit = try probe(.unit, "export.ppi", in: hosted.host)
         let opacityUnit = try probe(.unit, "export.watermark.opacity", in: hosted.host)
+        let qualityUnit = try probe(.unit, "export.quality", in: hosted.host)
         let ppiUnitX = rect(of: ppiUnit, in: hosted.host).minX
         let opacityUnitX = rect(of: opacityUnit, in: hosted.host).minX
         XCTAssertEqual(opacityUnitX, ppiUnitX, accuracy: 0.5)
+        XCTAssertEqual(rect(of: qualityUnit, in: hosted.host).minX, ppiUnitX, accuracy: 0.5,
+                       "288：质量现在也带 %，单位列必须同一条线")
 
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
@@ -208,8 +211,6 @@ final class ExportSliderRowUnificationTests: XCTestCase {
                        ppiUnitX, accuracy: 0.5)
         XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).minX,
                        opacityUnitX, accuracy: 0.5)
-
-        XCTAssertFalse(hasProbe(.unit, "export.quality", in: hosted.host), "质量没有单位")
     }
 
     /// The audit table's source: every numeric row's number / slider / unit rect.

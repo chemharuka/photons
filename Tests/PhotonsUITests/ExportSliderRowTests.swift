@@ -117,15 +117,16 @@ final class ExportSliderRowTests: XCTestCase {
                        "两行数值框同宽")
     }
 
-    /// §3 acceptance 3 + the unit: both numbers are the app-wide `SliderNumberField`, and the
-    /// opacity row is still `%` while quality has no unit.
+    /// §3 acceptance 3 + the unit: both numbers are the app-wide `SliderNumberField`. 288 changed
+    /// 质量's **readout** to percent (10…100, `%`), while the stored value is still 0.1…1.0, so the
+    /// typed values here are percent (75 → 0.75) rather than the old 0…1 decimal text.
     func testQualityAndOpacityWriteThroughTheSharedNumberField() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
         XCTAssertTrue(hasProbe(.unit, "export.watermark.opacity", in: hosted.host),
                       "不透明度必须仍带 % 单位")
-        XCTAssertFalse(hasProbe(.unit, "export.quality", in: hosted.host),
-                       "质量没有单位")
+        XCTAssertTrue(hasProbe(.unit, "export.quality", in: hosted.host),
+                      "288：质量也带 % 单位，读数区间统一 10…100")
 
         let fields = descendants(of: hosted.host).compactMap { $0 as? NumberTextField }
         let quality = try XCTUnwrap(fields.first { $0.accessibilityIdentifier() == "export.quality" })
@@ -133,11 +134,11 @@ final class ExportSliderRowTests: XCTestCase {
             $0.accessibilityIdentifier() == "export.watermark.opacity"
         })
 
-        try type("0.5", into: quality, in: hosted)
+        try type("50", into: quality, in: hosted)
         XCTAssertEqual(sheet.preset.quality, 0.5, accuracy: 1e-12)
 
-        try type("2.0", into: quality, in: hosted)
-        XCTAssertEqual(sheet.preset.quality, 1.0, accuracy: 1e-12, "2.0 钳到 1.0")
+        try type("200", into: quality, in: hosted)
+        XCTAssertEqual(sheet.preset.quality, 1.0, accuracy: 1e-12, "200% 钳到 100%")
 
         try type("abc", into: quality, in: hosted)
         XCTAssertEqual(sheet.preset.quality, 1.0, accuracy: 1e-12, "abc 保持上一个合法值")
