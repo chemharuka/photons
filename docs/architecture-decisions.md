@@ -640,5 +640,39 @@ Metal 源码形状的断言。
 
 **记录一种候选形态（未定案）**：`Orientation` 8 值枚举 + `GeometryFrame.composed(outputSize)` 作为唯一组装点（`canvasInsetOrigin` / `rotatedExtent` 退化为它的派生量），透视保持独立单应并与之共用一次采样；配套纪律采 ansel 的「shadow 双跑 + 单一构造函数 + 精度按全路径」。
 
+### 调研结论 · 透视/引线矫正（`local/research/293-perspective-correction.md`，2026-11-04 只读）
+
+名词先分清：用户说的「水平/垂直/引导式畸变矫正」= **梯形矫正（keystone）**；镜头桶形/枕形是另一回事，
+所有实现都与梯形矫正**分开**（我们已有 097 的 DNG `WarpRectilinear` 通路）。
+
+| 实现 | 许可 | 存什么 | 引线式 | 求解 |
+|---|---|---|---|---|
+| darktable `ashift` | GPLv3 | 4 个拟合量（rotation、lensshift v/h、shear）+ 镜头项 + `cl/cr/ct/cb`；**另存最多 50 条画过的线**作再编辑凭据 | 有（画线，`\|dx\|>\|dy\|` 自动判竖/横） | Nelder–Mead 最小化「线与轴夹角的 sin²」+ RANSAC 剔外点 |
+| RawTherapee | GPLv3 | 两滑杆 + camera-based pitch/roll/yaw + `control_line_values` | 有（每向 ≥2 条） | **直接内嵌 darktable 的 ashift**（`#include "ashift_dt.c"`） |
+| ART | GPLv3+ | 同 RT **+ 独立 `shear` 滑杆** | 有 | 同 RT |
+| LightCraft | MIT | `Upright` 6 值 + `guides` ≤4（镜头后/透视前的归一化坐标） | 有 | `K·R·K⁻¹`；消失点 = 加权最小二乘的 **3×3 Jacobi 特征向量** |
+| RapidRAW | AGPLv3 | `guidedPerspective{lines ≤4, autoCrop}` | 有 | **分情形闭式解**（2V / 2V1H / 2V2H / 1V1H / 2H），叉积 + 主旋转 + 次向 shear，无迭代无 SVD |
+| Lightroom/ACR | 闭源 | `crs:Perspective*` + `PerspectiveUpright`(Guided) | 有（2–4 条） | 未公开；**先套镜头配置**、**默认重置裁切** |
+| Capture One | 闭源 | Vertical/Horizontal/Amount/Aspect/**Skew** | 有（一对线） | 未公开；**引线只往滑杆写值** |
+| DxO ViewPoint | 闭源 | 未公开 | 有（2 竖/2 横/矩形/8 点/Horizon） | 未公开 |
+
+三条对本项目有用的结论：
+
+1. **「线是输入、滑杆是权威」是行业通行做法**（Capture One 明说引线只往滑杆写值）。对我们的好处是：
+   `vertical/horizontal` 仍是渲染唯一来源 ⇒ 老文档逐位不变、246 一行不改、快路径不动。引线只需作为
+   **可选输入**存进 schema（`perspective.guides[≤4]`，0…1、定向帧、**镜头校正后、透视前**）。
+2. **求解不需要 SVD**：3 个未知数（roll、v、h）的 Gauss–Newton，残差 = 引线经 `R(roll)·P(v,h)` 后与目标轴的夹角，
+   正规方程 3×3（20 行高斯消元）。实测同族真值可精确复原（0.000 px、90.0000°）。
+3. **3 个自由度不够**：真值带 3% shear 时只能到 **89.59° / 30.8 px**。ART 和 Capture One 都各自独立地加了
+   `shear`/`Skew` 滑杆 —— 若首版只做 3 DOF，验收口径只能写「每向 ≤0.2°」，或者 v2 加第 4 个自由度。
+
+**验收口径（首版）**：2 条竖引线 ⇒ `|Δv| ≤ 0.01`、`|Δroll| ≤ 0.005°`、残差 ≤0.3 px；±2 px 手抖 200 次
+`|Δroll|` p95 ≤0.06°；解不出时**精确回 identity、画布逐位不变**。注意：恰定解法的拟合残差恒为 0（噪声全进参数），
+验收必须**比参数**，只看残差会假绿。
+
+**三个接口风险（动手前必须读）**：① 引线画在「已透视已旋转」的画布上，落笔必须过 `FrameTransform.viewPointToSource`
+（已含 `P⁻¹`），否则症状是「点一次好一点、再点一次更糟」；② 097 的 `WarpRectilinear` 有效画幅与归一化分母是否一致（未核实）；
+③ 求解器必须调 `PerspectiveMap.forward` 与 `CropGeometry.RotationMatrix`，不许自写矩阵，否则 246 改归一化它不跟。
+
 **一条校核**：调研报告提出「`crs:Crop*` 需要反向旋转 + orientation 的逆，这一步今天不存在」——**实际上已经存在**：`EditModel.sourceCrop`（`:1260`）= `CropMath.sourceRect(cropRect, quarterTurns:)`，`XMP.swift:365-379` 就写在这个「文件自己的帧」里，`crs:CropAngle` 取负。所以导出侧不是缺口，别按缺口重做。
 
