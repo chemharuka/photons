@@ -247,12 +247,15 @@ public enum StageAlgorithmVersion {
     /// measured `A` — renders different pixels for the same stored number; `dehaze == 0` is
     /// bit-identical to 8.
     public static let dehaze = 9
+    /// **2** — 249: 修复搬到 S1 源像素（透视/旋转/裁切之前），spot 坐标从帧空间改为源空间。
+    /// 同样的 spot 数字覆盖不同的像素（旋转/裁切不再带动它），旧文档按 `canvasV1` 迁移，所以这一代
+    /// 的像素与 1 不同。
     /// **1** — S1.9's first arithmetic (2026-10-28, 078 P0-1): clone = the source disk, heal = the
     /// source disk + the boundary plane (mean and first harmonic, the Poisson integral truncated at
     /// n = 1). Starts at 1; a different boundary model — a real solve, a harmonic basis, a
     /// content-aware source search — is what bumps this, because it changes the pixels of the same
     /// document without changing a stored number.
-    public static let heal = 1
+    public static let heal = 2
     /// **2** — 191: the radius, the mask knee and the block window are **image** pixels converted to
     /// the render's canvas (`σ_canvas = radius·S`, knee `0.01/S…0.04/S`, block `round(4·S)`) instead of
     /// being read as canvas pixels. Same stored numbers, different pixels on every render whose scale

@@ -33,17 +33,16 @@ extension CatalogSession {
     /// and the live projection; a headless caller may pass it directly (omitted = 3 % of the short
     /// edge, a sensible click-sized fallback).
     ///
-    /// Known limitation, inherited from 184: `healFrameProvider` hands over the **uncropped** upright
-    /// decode while `framePoint` is normalised to the crop. With a non-full crop the seed window is
-    /// measured against the pre-crop picture; the landed spot is still a legal frame-space spot.
+    /// 249 — `sourcePoint` is **S1 source-normalised** (the raw upright decode, the same frame
+    /// `healFrameProvider` hands over), so the seed window no longer needs a crop conversion.
     @discardableResult
-    public func addRedEyeSpot(at framePoint: NormalizedPoint,
+    public func addRedEyeSpot(at sourcePoint: NormalizedPoint,
                               searchRadius: Double? = nil,
                               threshold: Double = RedEye.defaultThreshold,
                               softness: Double = RedEye.defaultSoftness,
                               requireDetection: Bool = false) -> HealSpot? {
-        guard framePoint.x >= 0, framePoint.x <= 1,
-              framePoint.y >= 0, framePoint.y <= 1 else { return nil }
+        guard sourcePoint.x >= 0, sourcePoint.x <= 1,
+              sourcePoint.y >= 0, sourcePoint.y <= 1 else { return nil }
         let fallback = max(0.0015, min(searchRadius ?? redEyeRadiusPoints / 100, 0.5))
         let image = healFrameProvider?()
         var detection: RedEye.Detection?
@@ -51,8 +50,8 @@ extension CatalogSession {
 
         if let image {
             let hints = redEyeFaceHintProvider?(image) ?? []
-            seed = redEyeSeedRadius(hints: hints, click: framePoint, image: image, fallback: fallback)
-            detection = RedEye.detect(in: image, near: framePoint,
+            seed = redEyeSeedRadius(hints: hints, click: sourcePoint, image: image, fallback: fallback)
+            detection = RedEye.detect(in: image, near: sourcePoint,
                                       searchRadius: seed, threshold: threshold)
         }
         if requireDetection, detection == nil {
@@ -60,7 +59,7 @@ extension CatalogSession {
             return nil
         }
 
-        let center = detection?.center ?? framePoint
+        let center = detection?.center ?? sourcePoint
         let radius = detection?.radius ?? fallback
         let source = redEyeSource(in: image, center: center, radius: radius, threshold: threshold)
         let gate = detection == nil ? RedEye.noopThreshold : threshold

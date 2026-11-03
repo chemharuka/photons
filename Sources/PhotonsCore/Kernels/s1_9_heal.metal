@@ -6,27 +6,31 @@ using namespace metal;
 //
 // ## Where it runs, and why
 //
-// S1.9 sits **after S1.6 (masks) and before S1.7 (the curve)** — see `RenderStage.order`. Three
-// reasons, and each one would be enough:
+// **249 — S1.9 runs first, on S1 source pixels, before S0 (geometry).** The pass repairs the decoded
+// photograph, and S0 then applies perspective → rotation → crop to the repaired pixels. The name is
+// historical (it names the pass, not its position); `RenderStage.order` is the authority.
 //
-//   1. **It has to see the pixels that are there.** S0 has already cropped, turned and straightened,
-//      so the canvas grid *is* the picture the user is pointing at: a disk on this grid is a disk on
-//      the photograph, at every scale, in every window. Running before S0 would put the spot in
-//      source space and every sample would need S0's transform (and its inverse) — two spellings of
-//      one geometry, which is the class of defect 080 spent a task removing from the mask atlas.
-//   2. **It is a repair, not a look.** A blemish is in the picture; the curve, the tone map, the
-//      colour stage and the effects are a look applied *to* the picture. Putting the repair after
-//      the tone map would mean the source texture had already been through a spatially-varying
-//      grade (a vignette darkens the corners), so copying it elsewhere would carry the wrong
-//      light — and the boundary correction would be fitting a difference that is partly the tone
-//      map's, not the picture's. Before S1.7 the data is scene-linear and *unbounded*, which is also
-//      the domain where "add a plane" is physically what a light difference is.
-//   3. **After S1.6, not before it.** S1.6 writes the mask adjustments into the frame. A spot that
-//      sampled *under* a mask is a spot that samples a texture the user never saw; sampling what
-//      S1.6 produced is the only choice that makes 「源点」 mean the visible pixels. (The reverse
-//      argument — masks should apply to the healed picture — is true too, and it is *also*
-//      satisfied: S1.6 runs first, so its adjustments are inside both the destination and the
-//      source, and a mask that darkens this corner does not create a seam at a spot's rim.)
+// 1. **The user's rule is the reason.** 「修复统一应用在原图像上，然后再应用变换卡片的操作」. A spot
+//    is anchored to the photograph: rotating, cropping or keystoning a document must not move the
+//    repair. The pre-249 design ran here, after S0, and a straighten therefore slid every spot off
+//    its feature — 249 reverses that argument.
+// 2. **A keystone is a strong warp.** Repairing *before* it means a perspective edit only deforms the
+//    patch; repairing after it would recompute a different patch on every keystone move (visible
+//    flicker). Today's repair is a disk + a rim plane and does not understand structure, so sampling
+//    on the corrected picture buys no quality yet.
+// 3. **It is still a repair, not a look.** The pass stays before the curve/tone map/colour/effects,
+//    in scene-linear light, so the plane it fits is a statement about the picture.
+//
+// Consequences, stated rather than hidden:
+//
+//   · **Masks (S1.6) run after this pass**, so they act on the already-repaired picture. That is the
+//     requested order; no compensation layer is added.
+//   · The kernel's buffer is the **decoded source grid**, not the canvas. `HealSpotU` is in source
+//     pixels; `HealParamsU.a` is the source rectangle (there is no letterbox to guard).
+//   · **When to revisit:** only if structural repair (252's C4/C5) lands, move the pass to “after
+//     perspective+rotation, before crop” (darktable's position). 246 already split geometry into
+//     three terms, so that is a move, not a rewrite. Until then this stays before S0, and
+//     `HealSpot`'s header carries the same decision.
 //
 // ## The two modes
 //
@@ -117,26 +121,26 @@ using namespace metal;
 //
 // ## Geometry
 //
-// Everything arrives in **canvas pixels** (`HealSpotU`, computed once on the CPU by
-// `RenderGraph.healSpotU`: `center = origin − frameOrigin + c·frameSize`, `radius = r·min(frameSize)`,
-// `offset = o·min(frameSize)`), so a window render and a whole-frame render put the disk in the same
-// physical place. The letterbox outside the content rect is never touched: those pixels are copied.
+// Everything arrives in **S1 source pixels** (`HealSpotU`, computed once on the CPU by
+// `RenderGraph.healSpotU`): `center = c·sourceSize`, `radius = r·min(sourceSize)`,
+// `offset = o·min(sourceSize)`. The pass runs before S0, so every render — fit, loupe window,
+// export — repairs the same decoded pixels; a window or a zoom cannot clip or move the disk.
 
 struct HealSpotU {
-    float4 a;   // centerCanvas.xy, radiusPx, feather (0…1 of the radius)
-    float4 b;   // offsetCanvas.xy, opacity, mode (0 = heal, 1 = clone, 2 = redeye)
+    float4 a;   // centerSource.xy, radiusPx, feather (0…1 of the radius)
+    float4 b;   // offsetSource.xy, opacity, mode (0 = heal, 1 = clone, 2 = redeye)
     // 229 — the red gate. `x` threshold, `y` softness, both in display-encoded redness. A heal /
     // clone spot leaves them zero; a no-detection redeye spot carries a threshold no pixel can pass.
     float4 c;
 };
 
 struct HealParamsU {
-    float4 a;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    float4 a;   // sourceOrigin.xy, sourceSize.xy — the whole decoded photograph (0, 0, W, H)
     // spotCount, boundaryMatch (1 = fit the plane), dispatchOrigin.xy. 257 C2: the apply pass is
     // dispatched once per spot over its bbox, and the kernel starts from `thread_position_in_grid +
-    // dispatchOrigin`; the pre-257 whole-canvas dispatch passes (0, 0), so its math is untouched.
+    // dispatchOrigin`; the pre-257 whole-source dispatch passes (0, 0), so its math is untouched.
     float4 b;
-    // 257 C0: frequencySeparation (1/0), gaussian sigma (canvas px), lowpassOrigin.xy. Zero in the
+    // 257 C0: frequencySeparation (1/0), gaussian sigma (source px), lowpassOrigin.xy. Zero in the
     // pre-257 path, which is that path's uniform byte for byte.
     float4 c;
 };
@@ -257,7 +261,7 @@ kernel void s1_9_heal_lowpass(texture2d<float, access::read> src [[texture(0)]],
     hbuf.write(float4(dsum, msum), gid0);
 }
 
-// MARK: - pass 2: every canvas pixel, every spot in order
+// MARK: - pass 2: every source pixel, every spot in order
 
 kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
@@ -268,7 +272,7 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
                             constant HealStatU *stats [[buffer(2)]],
                             uint2 gid0 [[thread_position_in_grid]]) {
     // 257 C2 — the only change to this kernel's coordinates: a per-spot dispatch starts at the
-    // spot's bbox corner. The whole-canvas dispatch passes (0, 0), so every line below is the
+    // spot's bbox corner. The whole-source dispatch passes (0, 0), so every line below is the
     // pre-257 line with the same `gid`.
     uint2 gid = gid0 + uint2(uint(round(p.b.z)), uint(round(p.b.w)));
     float4 v = src.read(gid);
@@ -304,7 +308,7 @@ kernel void s1_9_heal_apply(texture2d<float, access::read> src [[texture(0)]],
             if (w <= 0.0) { continue; }
         }
 
-        // The source texel, bilinearly sampled at `p + offset` (clamped at the frame's edge, which is
+        // The source texel, bilinearly sampled at `p + offset` (clamped at the photograph's edge, which is
         // what a spot whose source runs off the picture means).
         // `q` is already a pixel centre (`gid + 0.5` plus the offset), so the normalized coordinate
         // is `q / size`; an integer offset lands exactly on a texel centre, which is what makes the

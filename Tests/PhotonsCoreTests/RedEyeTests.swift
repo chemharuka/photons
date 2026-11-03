@@ -231,6 +231,7 @@ final class RedEyeTests: XCTestCase {
         XCTAssertFalse(healJSON.contains("kind"), "旧 spot 不写 kind，逐字节兼容")
         XCTAssertFalse(healJSON.contains("redThreshold"))
         XCTAssertFalse(healJSON.contains("redSoftness"))
+        XCTAssertTrue(healJSON.contains("healSpace"), "249: 新 spot 标记 sourceV2")
 
         let old = """
         {"center":[0.4,0.6],"feather":0.2,"id":"h-old","mode":"clone","opacity":1,
@@ -238,8 +239,13 @@ final class RedEyeTests: XCTestCase {
         """
         let decoded = try JSONDecoder().decode(HealSpot.self, from: Data(old.utf8))
         XCTAssertEqual(decoded.kind, .heal, "缺省 kind = .heal")
-        XCTAssertEqual(String(decoding: try encoder.encode(decoded), as: UTF8.self), healJSON)
-        XCTAssertEqual(decoded.keyString, heal.keyString, "旧 spot 的渲染 key 不变")
+        XCTAssertEqual(decoded.healSpace, .canvasV1, "没有标记就是 canvasV1，不许猜")
+        // An untouched pre-249 spot re-encodes **without** a marker, byte for byte.
+        let legacyJSON = String(decoding: try encoder.encode(decoded), as: UTF8.self)
+        XCTAssertEqual(legacyJSON,
+                       "{\"center\":[0.4,0.6],\"feather\":0.2,\"id\":\"h-old\",\"mode\":\"clone\","
+                       + "\"opacity\":1,\"radius\":0.05,\"sourceOffset\":[0.1,0]}")
+        XCTAssertFalse(legacyJSON.contains("healSpace"), "旧 spot 原样写回，不加新键")
 
         let red = HealSpot(id: "h-red", center: NormalizedPoint(0.5, 0.5), radius: 0.03,
                            sourceOffset: NormalizedPoint(0.06, 0), mode: .heal,

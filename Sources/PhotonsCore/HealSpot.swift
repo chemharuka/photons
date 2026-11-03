@@ -21,36 +21,45 @@ import Foundation
 //
 // ## What the search reads
 //
-// `searchSource` reads an **already decoded `LinearImage`**. Its geometry is in the same unit as a
-// `HealSpot` — the short edge of the frame — so the centre and radius it is handed mean what they
-// mean to the renderer. The UI hands it the **uncropped, upright** decode (`decoded?.oriented()`),
-// which has one known limitation: when a crop is in effect the ring is measured against the
-// pre-crop picture. The source it finds is still a legal, boundary-consistent source; it is just
-// not always the best one the cropped frame could offer. That is stated here rather than hidden.
+// `searchSource` reads an **already decoded `LinearImage`** in **S1 source pixels** — since 249 the
+// same space a `HealSpot` is stored in — so the centre and radius it is handed mean exactly what they
+// mean to the renderer. The UI hands it the raw upright decode (`decoded?.oriented()`); a crop,
+// straighten or keystone is *after* this pass and therefore cannot make the ring measure a different
+// picture.
 //
-// ## Coordinates — and this is the one place heal differs from a mask
+// ## Coordinates — S1 source pixels (249)
 //
-// A mask is stored in **uncropped source** space (see `s1_5_mask_atlas.metal`): its predicate is
-// evaluated while walking S0's mapping backwards, so a crop does not move a mask.
+// A heal spot is stored in **S1 source pixels** (`docs/coordinate-spaces.md`): `center ∈ [0,1]²`
+// relative to the **whole upright photograph** (the decoded grid, before perspective / straighten /
+// crop / the 90° turn), and `radius` / `sourceOffset` in **short-edge units of S1**. The repair pass
+// therefore runs *before* S0 (`RenderGraph` visits `.heal` first); S0 then turns/crops/keystones the
+// already-repaired pixels. That is the user's rule: 「修复统一应用在原图像上，然后再应用变换卡片的操作」.
 //
-// A heal spot is stored in **frame** space — normalised to the cropped picture the user is looking
-// at, `center ∈ [0,1]²`, `radius` and `sourceOffset` in **short-edge units** of that frame. Two
-// reasons, both structural:
+// **2026-11-02 decision (do not move without re-reading 252).** darktable, RawTherapee, ART and
+// RapidRAW all store spot coordinates in image space. We choose S1 — before perspective, rotation
+// and crop — because:
 //
-//   1. S1.9 runs **after S0**, on the canvas pixel grid (post crop, post turn, post straighten). The
-//      spot therefore has to be an object of *that* grid: mapping a source-space centre forward
-//      would need S0's whole transform again per pixel, and mapping each of the disk's samples
-//      *back* would need its inverse — two transforms that can disagree, on the one stage whose
-//      entire job is "the pixels under this disk".
-//   2. The heal correction is a statement about the **picture as composed**: `sourceOffset` is a
-//      pixel offset in the buffer the stage reads, and the ring it measures is a circle on the same
-//      grid. In source space, the offset would be a *different* vector after a straighten, and the
-//      disk would not be a disk.
+//   1. A keystone is a strong warp. Healing before it means a perspective edit only deforms the
+//      patch; healing after it would recompute a different patch on every keystone move (visible
+//      flicker).
+//   2. Today's repair is "sample a disk + fit a plane on its rim" and does not understand structure,
+//      so sampling on the corrected canvas buys no quality yet.
 //
-// The cost is stated rather than hidden: a spot is anchored to the **frame**, so cropping reframes
-// the spots (they keep their fractional position in the picture, like a vignette's centre) and a 90°
-// turn carries them with the frame. Lightroom anchors spots to the image; anchoring to the frame is
-// this version's choice, and `HealTests` pins what it does.
+// **When to revisit:** only if structural repair (252's candidate C4/C5) lands. Then the pass may
+// move to "after perspective+rotation, before crop" (darktable's position) — a move, not a rewrite,
+// because 246 split geometry into three terms. Until then this stays S1, and the same note lives in
+// `Kernels/s1_9_heal.metal` and `RenderStage.heal`.
+//
+// Consequences, stated rather than hidden:
+//
+//   · A click is mapped back through the **one** geometry inverse (`FrameTransform.viewPointToSource`
+//     → the raw-source quarter-turn rename) so a straightened/keystoned document writes the source
+//     pixel under the cursor, not a canvas pixel.
+//   · Masks (S1.6) now act on the **already-repaired** picture. That is the requested order; no
+//     compensation layer is added.
+//   · Documents written before 249 stored canvas-v1 coordinates. `healSpace` marks the space and
+//     `migrateHealSpots(sourceSize:)` converts on load (or, if the frame is not known yet, the
+//     renderer converts at draw time through the same function).
 
 /// 229 — what a spot is *for*. A red-eye spot is a **heal preset**: the same disk, the same source
 /// search, the same S1.9 blend, with a red gate in front of the blend and a per-spot threshold.
@@ -140,7 +149,18 @@ public struct HealSourceResult: Sendable, Equatable {
     }
 }
 
-/// One spot: a disk on the frame, a source offset, and how to blend.
+/// 249 — which coordinate space a stored spot is written in.
+///
+/// `.canvasV1` is the pre-249 layout: `center` was normalised to the cropped frame (S2), radius and
+/// offset in that frame's short-edge units. **No marker means `.canvasV1`** — a document that never
+/// carried the key must be converted, never guessed to be new. `.sourceV2` is S1 source pixels and is
+/// what every new spot writes.
+public enum HealSpotSpace: String, Sendable, Codable, Equatable, CaseIterable {
+    case canvasV1
+    case sourceV2
+}
+
+/// One spot: a disk in S1 source pixels, a source offset, and how to blend.
 public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     /// Lightroom's own ceiling is 20-ish; the ceiling here is about cost, and 32 is what the apply
     /// pass's loop is sized for. Enforced by `EditModel.addHealSpot` (a document that carries more is
@@ -150,15 +170,19 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
 
     /// `"h-<uuid>"`. Stable, and the only part of the identity that reaches a cache key.
     public var id: String
-    /// Centre, normalised to the **cropped frame** (`0…1` of width, height).
+    /// Centre, normalised to the **whole upright S1 photograph** (`0…1` of width, height). A quarter
+    /// turn does not move it: the spot is anchored to the pixels, not to the frame.
     public var center: NormalizedPoint
-    /// Radius, in **short-edge units** of the frame (`HealSpot.radiusRange`). `0.02` is 2 % of the short edge —
+    /// Radius, in **S1 short-edge units** (`HealSpot.radiusRange`). `0.02` is 2 % of the short edge —
     /// about 32 px on a 4.1 Mpx frame, which is a blemish and not a subject.
     public var radius: Double
-    /// Where the texture comes from, as a **pixel offset in short-edge units** (the same unit as
-    /// `radius`, so 「偏移一个半径」 is `(radius, 0)`). Signed, and may leave the frame — the sampler
-    /// clamps to the edge, which is what Lightroom does too.
+    /// Where the texture comes from, as an S1 **pixel offset in short-edge units** (the same unit as
+    /// `radius`, so 「偏移一个半径」 is `(radius, 0)`). Signed, and may leave the photograph — the
+    /// sampler clamps to the edge, which is what Lightroom does too.
     public var sourceOffset: NormalizedPoint
+    /// 249 — the space `center` / `radius` / `sourceOffset` are written in. Absent on disk means
+    /// `.canvasV1` (see `HealSpotSpace`).
+    public var healSpace: HealSpotSpace
     public var mode: HealMode
     /// Blend ramp, as a fraction of the radius: `1` at `t ≤ 1 − feather`, `0` at `t = 1`.
     /// **0 means a hard edge** — every pixel with `t < 1` gets the source at full strength, which is
@@ -192,7 +216,7 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         guard lhs.id == rhs.id, lhs.center == rhs.center, lhs.radius == rhs.radius,
               lhs.sourceOffset == rhs.sourceOffset, lhs.mode == rhs.mode,
               lhs.feather == rhs.feather, lhs.opacity == rhs.opacity,
-              lhs.kind == rhs.kind else { return false }
+              lhs.kind == rhs.kind, lhs.healSpace == rhs.healSpace else { return false }
         guard lhs.kind == .redeye else { return true }
         return lhs.redThreshold == rhs.redThreshold && lhs.redSoftness == rhs.redSoftness
     }
@@ -206,6 +230,7 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         hasher.combine(feather)
         hasher.combine(opacity)
         hasher.combine(kind)
+        hasher.combine(healSpace)
         if kind == .redeye {
             hasher.combine(redThreshold)
             hasher.combine(redSoftness)
@@ -230,7 +255,8 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
                 opacity: Double = HealSpot.defaultOpacity,
                 kind: HealSpotKind = .heal,
                 redThreshold: Double = RedEye.defaultThreshold,
-                redSoftness: Double = RedEye.defaultSoftness) {
+                redSoftness: Double = RedEye.defaultSoftness,
+                healSpace: HealSpotSpace = .sourceV2) {
         self.id = id
         self.center = center
         self.radius = radius
@@ -241,6 +267,7 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         self.kind = kind
         self.redThreshold = redThreshold
         self.redSoftness = redSoftness
+        self.healSpace = healSpace
     }
 
     // MARK: - the additive-decoding rule
@@ -259,7 +286,9 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
                   opacity: c.val("opacity", HealSpot.defaultOpacity),
                   kind: c.val("kind", HealSpotKind.heal),
                   redThreshold: c.val("redThreshold", RedEye.defaultThreshold),
-                  redSoftness: c.val("redSoftness", RedEye.defaultSoftness))
+                  redSoftness: c.val("redSoftness", RedEye.defaultSoftness),
+                  // 249 — **absent means canvasV1**, never a guess (spec §5.3).
+                  healSpace: c.val("healSpace", HealSpotSpace.canvasV1))
         self.radius = clampedRadius
         self.feather = min(max(feather, 0), 0.999)
         self.opacity = min(max(opacity, 0), 1)
@@ -278,6 +307,11 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
         try c.encode(mode, forKey: AnyCodingKey("mode"))
         try c.encode(feather, forKey: AnyCodingKey("feather"))
         try c.encode(opacity, forKey: AnyCodingKey("opacity"))
+        // 249 — a pre-249 blob carried no marker; keep it that way until the spot is migrated, so an
+        // untouched old document still re-encodes byte for byte. New spots write the marker.
+        if healSpace == .sourceV2 {
+            try c.encode(healSpace, forKey: AnyCodingKey("healSpace"))
+        }
         guard kind != .heal else { return }
         try c.encode(kind, forKey: AnyCodingKey("kind"))
         try c.encode(redThreshold, forKey: AnyCodingKey("redThreshold"))
@@ -315,10 +349,14 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     public var keyString: String {
         let base = "c=\(center.keyString);r=\(k(clampedRadius));so=\(sourceOffset.keyString)"
             + ";mode=\(mode.rawValue);f=\(k(feather));op=\(k(opacity))"
+        // 249 — the space is arithmetic: the same numbers in canvasV1 and sourceV2 are different
+        // pixels. Only the legacy spelling carries a token, so new spots keep the pre-249 key text
+        // plus the new `;alg` (the source point itself is already in the numbers).
+        let space = healSpace == .canvasV1 ? ";space=canvasV1" : ""
         // A heal spot's key is untouched (pre-229 documents and caches keep their answer). Only the
         // red gate changes pixels, so only a red-eye spot's key carries it.
-        guard kind != .heal else { return base }
-        return base + ";kind=redeye;rt=\(k(redThreshold));rs=\(k(redSoftness))"
+        guard kind != .heal else { return base + space }
+        return base + space + ";kind=redeye;rt=\(k(redThreshold));rs=\(k(redSoftness))"
     }
 
     // MARK: - the default source
@@ -328,6 +366,86 @@ public struct HealSpot: Sendable, Equatable, Codable, Hashable, Identifiable {
     /// than overlapping it, so a `heal` spot never samples the blemish it is asked to remove.
     public static func defaultSourceOffset(radius: Double) -> NormalizedPoint {
         NormalizedPoint(radius * 2, 0)
+    }
+
+    // MARK: - 249 · S1 source ⇄ turned source
+    //
+    // The geometry helpers speak the **turned** S1 frame (`CropGeometry.source`: the quarter turn is
+    // already applied), while a spot is stored in the **raw** S1 frame (the decoded buffer, before the
+    // 90° turn) so pressing 旋转 does not move it. These two names are the only conversion between
+    // the two; they are axis renames, not geometry, and the view↔source inverse stays in
+    // `FrameTransform`.
+
+    /// A normalized point in the turned source frame → the raw (decoded) source frame.
+    public static func sourcePoint(fromTurned point: NormalizedPoint,
+                                   quarterTurns: Int) -> NormalizedPoint {
+        CropMath.turned(point, quarterTurns: (4 - normalizedTurns(quarterTurns)) % 4)
+    }
+
+    /// A normalized point in the raw source frame → the turned source frame.
+    public static func turnedPoint(fromSource point: NormalizedPoint,
+                                   quarterTurns: Int) -> NormalizedPoint {
+        CropMath.turned(point, quarterTurns: normalizedTurns(quarterTurns))
+    }
+
+    private static func normalizedTurns(_ turns: Int) -> Int {
+        ((turns % 4) + 4) % 4
+    }
+
+    /// 249 — a pre-249 (canvasV1) spot in S1 source coordinates.
+    ///
+    /// `canvasV1` stored `center` normalised to the **cropped frame** (S2) and placed it on the
+    /// S1.9 canvas as `inset + center·frameSize` (the old `RenderGraph.healSpotU`). To keep the same
+    /// picture feature covered, this reconstructs that canvas point, walks it back through the
+    /// document's geometry (`FrameTransform.s3ToS1`, the one inverse — perspective included), then
+    /// renames the turned source frame to raw source. Radius scales from the frame's short edge to
+    /// S1's (the same edge only for a full crop), and the offset is the **difference of the two
+    /// mapped endpoints**, so straighten/perspective are part of the vector too.
+    public func migratedToSourceV2(sourceSize: ImageSize, geometry: GeometryGroup) -> HealSpot {
+        guard healSpace == .canvasV1 else { return self }
+        let cg = CropGeometry(geometry: geometry, source: sourceSize)
+        let frame = cg.frameSize
+        let canvas = cg.canvas
+        let inset = cg.canvasInsetPixels
+        let frameShort = Double(min(frame.width, frame.height))
+        let sourceShort = Double(min(max(cg.source.width, 1), max(cg.source.height, 1)))
+        let transform = FrameTransform(
+            source: cg.source, crop: cg.crop,
+            straightenDegrees: cg.rotationDegrees, quarterTurns: 0,
+            flipHorizontal: cg.flipHorizontal, flipVertical: cg.flipVertical,
+            perspective: cg.perspective,
+            contentScale: 1, viewport: nil, zoom: 1, cameraOffset: .zero,
+            cameraWindowSize: SIMD2(Double(canvas.width), Double(canvas.height)),
+            allowsUpscale: true)
+        // The old kernel placed `center` at `inset + center·frameSize` and the source disk at that
+        // point **plus** `sourceOffset·min(frameSize)` in canvas axes. Map both endpoints back
+        // through the same inverse (perspective and straighten included) and take the difference:
+        // a vector is not a point, so it must not skip the local Jacobian of the warp.
+        let oldCenter = SIMD2<Double>(Double(inset.x) + center.x * Double(frame.width),
+                                      Double(inset.y) + center.y * Double(frame.height))
+        let oldSource = oldCenter + SIMD2<Double>(sourceOffset.x * frameShort,
+                                                  sourceOffset.y * frameShort)
+        func sourcePixels(_ p: SIMD2<Double>) -> SIMD2<Double> {
+            let v = transform.s3ToS1.applying(to: SIMD3(p.x, p.y, 1))
+            let w = v.z == 0 ? 1 : v.z
+            let turned = NormalizedPoint(v.x / w / Double(max(cg.source.width, 1)),
+                                         v.y / w / Double(max(cg.source.height, 1)))
+            let raw = HealSpot.sourcePoint(fromTurned: turned, quarterTurns: cg.quarterTurns)
+            return SIMD2(raw.x * Double(sourceSize.width), raw.y * Double(sourceSize.height))
+        }
+        let centerPx = sourcePixels(oldCenter)
+        let sourcePx = sourcePixels(oldSource)
+        let factor = sourceShort > 0 && frameShort > 0 ? frameShort / sourceShort : 1
+        var out = self
+        out.center = NormalizedPoint(
+            min(max(centerPx.x / Double(max(sourceSize.width, 1)), 0), 1),
+            min(max(centerPx.y / Double(max(sourceSize.height, 1)), 0), 1))
+        out.radius = radius * factor
+        out.sourceOffset = NormalizedPoint(
+            (sourcePx.x - centerPx.x) / sourceShort,
+            (sourcePx.y - centerPx.y) / sourceShort)
+        out.healSpace = .sourceV2
+        return out.clamped
     }
 }
 
@@ -343,6 +461,26 @@ extension EditModel {
     /// The spots S1.9 renders, in document order (composition order — a later spot may overwrite an
     /// earlier one, exactly like a stack of layers).
     public var activeHealSpots: [HealSpot] { healSpots }
+
+    /// 249 — the spots as S1 source coordinates. Already-migrated documents are returned unchanged
+    /// (no copy of the geometry path); a legacy document is converted with its own geometry and the
+    /// **exact** source frame. The renderer uses this so a canvasV1 document that was never loaded
+    /// through a session (a thumbnail, an export, `photonsctl`) still lands on the same pixels.
+    public func migratedHealSpots(sourceSize: ImageSize) -> [HealSpot] {
+        guard healSpots.contains(where: { $0.healSpace == .canvasV1 }) else { return healSpots }
+        return healSpots.map { $0.migratedToSourceV2(sourceSize: sourceSize, geometry: geometry) }
+    }
+
+    /// 249 — convert every canvasV1 spot in place. Returns `true` when something moved, so a caller
+    /// can persist the new marker without minting a history row.
+    @discardableResult
+    public mutating func migrateHealSpots(sourceSize: ImageSize) -> Bool {
+        guard healSpots.contains(where: { $0.healSpace == .canvasV1 }) else { return false }
+        healSpots = healSpots.map {
+            $0.migratedToSourceV2(sourceSize: sourceSize, geometry: geometry)
+        }
+        return true
+    }
 
     /// Append a spot. Returns `nil` when the document is full (`HealSpot.maxCount`) or the spot
     /// would render nothing (`opacity == 0`), so a UI click can never mint an undo step for a spot

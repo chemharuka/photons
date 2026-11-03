@@ -1213,6 +1213,24 @@ public final class CatalogSession {
         recordHistogram(nil)
     }
 
+    /// 249 — convert a legacy (`canvasV1`) heal document to S1 source coordinates once the **exact**
+    /// decoded frame is known. This is a schema migration, not an edit: it mints no history row, and
+    /// it rewrites the stored document (the marker is the point of the version bump). The whole
+    /// history is migrated with the live document so ⌘Z cannot bring a canvasV1 spot back.
+    ///
+    /// Returns `true` when anything moved.
+    @discardableResult
+    public func migrateHealSpots(sourceSize: ImageSize) -> Bool {
+        var next = edit
+        guard next.migrateHealSpots(sourceSize: sourceSize) else { return false }
+        edit = next
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        history.migrateHealSpots(sourceSize: sourceSize)
+        persist()
+        return true
+    }
+
     public func recordCapabilities(_ c: DecoderCapabilities) {
         // Equality-guarded: every presented frame reports the same facts, and an unconditional write
         // would re-render the SwiftUI inspector once per slider frame for no information.

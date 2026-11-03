@@ -382,6 +382,17 @@ public struct EditHistory: Sendable, Equatable, Codable {
         return classes.count == 1 ? classes.first : nil
     }
 
+    /// 249 — migrate every snapshot's heal spots from canvasV1 to S1 source coordinates.
+    ///
+    /// A document migration, not an undoable edit: labels, seqs and the cursor stay put, and the
+    /// change is recorded in no row. Without this an undo to a pre-249 snapshot would put the spot
+    /// back in the frame space the rest of the document no longer uses.
+    public mutating func migrateHealSpots(sourceSize: ImageSize) {
+        for i in snapshots.indices {
+            snapshots[i].edit.migrateHealSpots(sourceSize: sourceSize)
+        }
+    }
+
     // MARK: tool sessions (077)
 
     /// Open a tool session: from here until `endSession` / `cancelSession`, `commit` records nothing.

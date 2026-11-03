@@ -31,28 +31,32 @@ extension CatalogSession {
     /// already exists (and never grows the undo stack).
     public static let defaultHealRadius: Double = HealSpot.defaultRadius
 
-    /// Append a spot at a **frame-normalised** point (0…1 of the cropped picture).
+    /// Append a spot at an **S1 source-normalised** point (0…1 of the raw upright photograph, before
+    /// the 90° turn). 249 moved this from frame-normalised coordinates; the caller
+    /// (`LoupeController.addHealSpot`) performs the view → S1 inverse.
     ///
     /// One snapshot per spot: the click is one action, so ⌘Z takes the whole thing back in one press.
-    /// Returns `nil` when the document is full or the point is outside the frame, so a stray click on
-    /// the letterbox does not mint a history row.
+    /// Returns `nil` when the document is full or the point is outside S1, so a stray click on the
+    /// letterbox does not mint a history row.
     @discardableResult
-    public func addHealSpot(at framePoint: NormalizedPoint, radius: Double? = nil) -> HealSpot? {
+    public func addHealSpot(at sourcePoint: NormalizedPoint, radius: Double? = nil) -> HealSpot? {
         // 229 — the preset is part of the tool, so the document door agrees with the canvas door.
         // Default `.heal` keeps every pre-229 caller byte for byte.
         if healToolMode == .redeye {
-            return addRedEyeSpot(at: framePoint, searchRadius: radius)
+            return addRedEyeSpot(at: sourcePoint, searchRadius: radius)
         }
-        guard framePoint.x >= 0, framePoint.x <= 1,
-              framePoint.y >= 0, framePoint.y <= 1 else { return nil }
+        guard sourcePoint.x >= 0, sourcePoint.x <= 1,
+              sourcePoint.y >= 0, sourcePoint.y <= 1 else { return nil }
         let r = radius ?? healRadius
         let source: HealSourceResult
         if autoHealSource, let image = healFrameProvider?() {
-            source = HealSpot.searchSource(in: image, center: framePoint, radius: r)
+            // `healFrameProvider` is the raw decoded buffer (`decoded?.oriented()`), i.e. the same S1
+            // frame `sourcePoint` is in — no crop or quarter-turn conversion belongs here.
+            source = HealSpot.searchSource(in: image, center: sourcePoint, radius: r)
         } else {
             source = .skipped(radius: r)
         }
-        let spot = HealSpot(center: framePoint, radius: r,
+        let spot = HealSpot(center: sourcePoint, radius: r,
                             sourceOffset: source.offset, mode: healMode)
         var landed: HealSpot?
         applyEdit { landed = $0.addHealSpot(spot) }

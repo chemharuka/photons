@@ -1126,21 +1126,21 @@ private struct DisplayParams {
 
 // MARK: - heal uniforms (mirror of s1_9_heal.metal, byte for byte)
 
-/// One spot, in **canvas pixels**: `center = origin − frameOrigin + c·frameSize`, `radius` and the
-/// offset scaled by the frame's short edge (`HealSpotU` in the kernel's own words).
+/// One spot, in **S1 source pixels** (249): `center = c·sourceSize`, `radius` and the offset scaled
+/// by the source short edge (`HealSpotU` in the kernel's own words).
 private struct HealSpotU {
-    var a: SIMD4<Float>   // centerCanvas.xy, radiusPx, feather
-    var b: SIMD4<Float>   // offsetCanvas.xy, opacity, mode (0 heal, 1 clone, 2 redeye)
+    var a: SIMD4<Float>   // centerSource.xy, radiusPx, feather
+    var b: SIMD4<Float>   // offsetSource.xy, opacity, mode (0 heal, 1 clone, 2 redeye)
     var c: SIMD4<Float>   // 229 red gate: threshold, softness, 0, 0 (display-encoded redness)
 }
 
 private struct HealParamsU {
-    var a: SIMD4<Float>   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
+    var a: SIMD4<Float>   // sourceOrigin.xy, sourceSize.xy — the decoded photograph, no letterbox
     // spotCount, boundaryMatch, dispatchOrigin.xy. The origin is (0, 0) on the pre-257 whole-canvas
     // dispatch and the spot's bbox corner on the 257 per-spot one: the kernel adds it to
     // `thread_position_in_grid`, so the pixel math below is untouched.
     var b: SIMD4<Float>
-    // 257 frequency separation: on (1/0), gaussian sigma (canvas px), lowpass origin.xy. All zero
+    // 257 frequency separation: on (1/0), gaussian sigma (source px), lowpass origin.xy. All zero
     // when the switch is off, which is the pre-257 uniform byte for byte.
     var c: SIMD4<Float>
 }
@@ -2371,6 +2371,37 @@ public final class RenderGraph {
                 + (stage.isMaskStage ? tilingSuffix : "")
                 + (stage.index >= RenderStage.maskAtlas.index ? semanticSuffix : "")
 
+            // 249 — 修复 runs **first**, on the decoded source grid, and S0 below consumes its
+            // output. The stage's texture is `sourceSize`, not `plan.canvas`; the generic stage cache
+            // can hold it (its budget uses the texture's own dimensions), but the hit must check the
+            // size because every other stage in that dictionary is canvas-sized.
+            if stage == .heal {
+                if usesStageCache, let hit = cache[.heal], hit.key == key,
+                   hit.texture.width == sourceSize.width,
+                   hit.texture.height == sourceSize.height {
+                    trace.record(stage, executed: false)
+                    touchCache(.heal)
+                    current = hit.texture
+                    currentIsTransient = false
+                    continue
+                }
+                let out = try pool.obtain(sourceSize)
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
+                try encodeHeal(cb: cb, into: out, from: current, edit: edit, options: options)
+                trace.record(stage, executed: true)
+                if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                if usesStageCache {
+                    insertCache(.heal, key: key, texture: out)
+                    currentIsTransient = false
+                } else {
+                    if !recyclesEachStage { transient.append(out) }
+                    currentIsTransient = true
+                }
+                current = out
+                continue
+            }
+
             // 073 — S1 has a slot of its own (see `S1Entry`), so the linear pass is decided here
             // rather than by the generic stage cache below. The key is `s1Key`, i.e. decode identity ×
             // geometry × **everything S1 reads** — a blue slider moves nothing in it, so those frames
@@ -3394,7 +3425,7 @@ public final class RenderGraph {
         return LinearSample(width: w, height: h, rgba: rgba)
     }
 
-    // MARK: - S1.9 — 修复 / 克隆 (078 P0-1)
+    // MARK: - S1.9 — 修复 / 克隆 (078 P0-1, 249 source space)
 
     /// 257 — the compile-time heal algorithm. `false` keeps S1.9's pre-257 **plane** correction
     /// (mean + first harmonic on the rim); `true` runs the LightCraft-style **frequency separation**
@@ -3405,30 +3436,28 @@ public final class RenderGraph {
     /// pixels, so it is not in any cache key (a cached frame is only ever reused for the same graph).
     public static let healFrequencySeparation = false
 
-    /// The spot list as the kernel reads it: **canvas pixels**, derived from the frame the plan
-    /// resolved. One conversion, here, so the pass and any measurement of it cannot disagree about
-    /// where a disk is.
+    /// The spot list as the kernel reads it, in **S1 source pixels** (249).
     ///
-    /// `center_canvas = origin − frameOrigin + c·frameSize`, `radius = r·min(frameSize)`,
-    /// `offset = o·min(frameSize)`. That is exactly the mapping S0 uses to place the picture in the
-    /// canvas (`s0_geometry.metal`: content pixel `gid` ← frame pixel `gid + 0.5 − origin +
-    /// frameOrigin`), so a spot defined at 0.5, 0.5 covers the frame's centre at every scale and in
-    /// a 1:1 loupe window too — a window render puts the same disk on the same photograph, which is
-    /// the property `HealTests.testAWindowPutsTheSpotOnTheSameTexels` measures.
-    private func healSpotU(_ edit: EditModel, plan: Plan) -> [HealSpotU] {
-        let shortEdge = max(min(plan.frameSize.x, plan.frameSize.y), 1)
-        let base = SIMD2<Float>(plan.origin.x - plan.frameOrigin.x,
-                                plan.origin.y - plan.frameOrigin.y)
-        return edit.activeHealSpots.map { spot in
-            let c = base + SIMD2<Float>(Float(spot.center.x) * plan.frameSize.x,
-                                        Float(spot.center.y) * plan.frameSize.y)
-            let r = Float(spot.clampedRadius) * shortEdge
+    /// `center` is relative to the raw decoded frame (the quarter turn is *not* in it — a spot is
+    /// anchored to the photograph, not to the frame the user happens to be looking at), `radius` and
+    /// `sourceOffset` are short-edge units of that same frame. There is no canvas origin / frame
+    /// origin term any more: the pass runs before S0, on the full decoded buffer, so a window or a
+    /// zoom cannot move the disk.
+    ///
+    /// A canvasV1 document that has not been migrated by a session is converted here with the exact
+    /// `sourceSize`; the renderer is the last place that must not guess.
+    private func healSpotU(_ edit: EditModel) -> [HealSpotU] {
+        let sourceShort = Double(min(max(sourceSize.width, 1), max(sourceSize.height, 1)))
+        return edit.migratedHealSpots(sourceSize: sourceSize).map { spot in
+            let c = SIMD2<Float>(Float(spot.center.x * Double(sourceSize.width)),
+                                 Float(spot.center.y * Double(sourceSize.height)))
+            let r = Float(spot.clampedRadius) * Float(sourceShort)
             // 229: red-eye is a third mode, not a second code path — it is `heal` plus the red gate
             // in `s1_9_heal_apply`. `.heal`/`.clone` keep their pre-229 mode numbers byte for byte.
             let mode: Float = spot.kind == .redeye ? 2 : (spot.mode == .clone ? 1 : 0)
             return HealSpotU(a: SIMD4(c.x, c.y, max(r, 0.5), Float(spot.feather)),
-                             b: SIMD4(Float(spot.sourceOffset.x) * shortEdge,
-                                      Float(spot.sourceOffset.y) * shortEdge,
+                             b: SIMD4(Float(spot.sourceOffset.x) * Float(sourceShort),
+                                      Float(spot.sourceOffset.y) * Float(sourceShort),
                                       Float(spot.opacity),
                                       mode),
                              c: SIMD4(Float(spot.redThreshold), Float(spot.redSoftness), 0, 0))
@@ -3486,35 +3515,20 @@ public final class RenderGraph {
                             threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
     }
 
-    /// S1.9 — the boundary ring, then the pixels.
+    /// S1.9 — the boundary ring, then the pixels, **on S1 source pixels** (249).
     ///
-    /// **257 C2.** The apply pass is dispatched **once per spot, over that spot's bbox only**, after
-    /// one blit of the input into the output. The spots are still processed in document order and
-    /// still do not share a bbox (a later spot may overwrite an earlier one where they overlap); the
-    /// pixel formula is the pre-257 one, because a spot's source is always the **input** texture, so
-    /// a pixel inside spot *i* is fully determined by the spots `0…i` that reach it. Spot *i*'s
-    /// dispatch therefore runs the same loop over `0…i` (the prefix) and writes the accumulated
-    /// result; the last dispatch that reaches a pixel writes the whole answer. That is why the
-    /// output is byte-identical with the old whole-canvas pass, and why the cost is the sum of the
-    /// bboxes rather than the canvas. `RenderOptions.healFullCanvasDispatch` keeps the old dispatch
-    /// as a first-class A/B hook for `HealDispatchTests`.
-    ///
-    /// **257 C0.** When `healFrequencySeparation` is on (compile-time default, overridable for
-    /// tests), a `heal` spot takes the LightCraft path instead: `s1_9_heal_lowpass` writes the
-    /// horizontal pass of `gaussian((target − source)·outside)` and of `gaussian(outside)` into a
-    /// scratch texture, and the apply pass finishes the vertical Gaussian and divides (normalized
-    /// convolution). The spots are then applied sequentially to the output (a scratch bbox folded
-    /// back after each), which is exactly the LightCraft `apply` order and makes the membrane see
-    /// the picture as it stands. Clone and red-eye keep the pre-257 math: clone is a verbatim copy
-    /// and red-eye is a gated heal.
+    /// The pass runs before S0: `canvas` here is the decoded buffer (`sourceSize`), not the frame
+    /// canvas. Everything else (bbox dispatch, per-spot prefix, frequency separation) is the pre-249
+    /// arithmetic with the canvas replaced by the source grid — a straighten or crop cannot clip the
+    /// source disk any more because neither has happened yet.
     private func encodeHeal(cb: MTLCommandBuffer, into out: MTLTexture,
-                            from src: MTLTexture, edit: EditModel, plan: Plan,
+                            from src: MTLTexture, edit: EditModel,
                             options: RenderOptions) throws {
-        let spots = healSpotU(edit, plan: plan)
+        let canvas = sourceSize
+        let spots = healSpotU(edit)
         let boundary: Float = options.healWithoutBoundaryMatch ? 0 : 1
         let frequency = options.healFrequencySeparation ?? RenderGraph.healFrequencySeparation
-        var params = HealParamsU(a: SIMD4(plan.origin.x, plan.origin.y,
-                                         Float(plan.content.width), Float(plan.content.height)),
+        var params = HealParamsU(a: SIMD4(0, 0, Float(canvas.width), Float(canvas.height)),
                                  b: SIMD4(Float(spots.count), boundary, 0, 0),
                                  c: SIMD4(0, 0, 0, 0))
         let apply = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_apply")
@@ -3525,7 +3539,7 @@ public final class RenderGraph {
             enc.setTexture(src, index: 2)
             enc.setTexture(src, index: 3)   // the lowpass slot is unread without frequency separation
             enc.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
-            dispatch(enc, apply, plan.canvas)
+            dispatch(enc, apply, canvas)
             enc.endEncoding()
             return
         }
@@ -3553,8 +3567,8 @@ public final class RenderGraph {
         // 2 — the pixels.
 
         // The pre-257 dispatch, kept as the A/B reference. It is the *same* kernel and the same
-        // uniform; only the origin is (0, 0) and the grid is the whole canvas, so the kernel's own
-        // copy loop still fills the letterbox and every pixel no spot reaches.
+        // uniform; only the origin is (0, 0) and the grid is the whole source, so the kernel's own
+        // copy loop still copies every pixel no spot reaches.
         if options.healFullCanvasDispatch && !frequency {
             guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
             e1.setComputePipelineState(apply)
@@ -3565,14 +3579,14 @@ public final class RenderGraph {
             e1.setBytes(&spotArray, length: MemoryLayout<HealSpotU>.stride * spots.count, index: 0)
             e1.setBytes(&params, length: MemoryLayout<HealParamsU>.stride, index: 1)
             e1.setBuffer(statBuffer, offset: 0, index: 2)
-            dispatch(e1, apply, plan.canvas)
+            dispatch(e1, apply, canvas)
             e1.endEncoding()
             return
         }
 
         // Everything outside the spots is the input verbatim.
         try blit(cb, from: src, to: out, x: 0, y: 0,
-                 width: plan.canvas.width, height: plan.canvas.height)
+                 width: canvas.width, height: canvas.height)
 
         if !frequency {
             // C2 — the same prefix of spots over each bbox; `out` is the destination, `src` both the
@@ -3580,7 +3594,7 @@ public final class RenderGraph {
             // dispatches overwrite each other's bboxes where spots overlap, and separate encoders
             // make Metal order them (a later spot must see the earlier one's pixels).
             for (i, spot) in spots.enumerated() {
-                guard let box = healBBox(spot, canvas: plan.canvas) else { continue }
+                guard let box = healBBox(spot, canvas: canvas) else { continue }
                 var p = params
                 p.b = SIMD4(Float(i + 1), boundary, Float(box.x), Float(box.y))
                 guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
@@ -3599,15 +3613,15 @@ public final class RenderGraph {
         }
 
         // C0 — frequency separation, spots applied in document order to the output. The scratch
-        // holds the whole canvas so the apply pass can write the same canvas coordinates it reads;
+        // holds the whole source so the apply pass can write the same source coordinates it reads;
         // only the bbox is folded back after each spot.
         //
         // Ported from LightCraft (MIT) — crates/pipeline/src/spots.rs, heal branch. σ = max(r·0.6, 1)
         // is the one Swift constant; the two Gaussians and the division live in `s1_9_heal.metal`.
-        let scratchTexture = try pool.obtain(plan.canvas)
+        let scratchTexture = try pool.obtain(canvas)
         let lowpass = try kernels.pipeline(file: "s1_9_heal", function: "s1_9_heal_lowpass")
         for (i, spot) in spots.enumerated() {
-            guard let box = healBBox(spot, canvas: plan.canvas) else { continue }
+            guard let box = healBBox(spot, canvas: canvas) else { continue }
             let isHeal = spot.b.w < 0.5
             var p = params
             p.b = SIMD4(1, boundary, Float(box.x), Float(box.y))
@@ -3618,7 +3632,7 @@ public final class RenderGraph {
                 let radius = Int((3 * sigma).rounded(.up))
                 // The horizontal pass needs a row above and below the bbox for the vertical one.
                 let hy0 = max(0, box.y - radius)
-                let hy1 = min(plan.canvas.height, box.y + box.height + radius)
+                let hy1 = min(canvas.height, box.y + box.height + radius)
                 let hSize = ImageSize(width: box.width, height: max(1, hy1 - hy0))
                 let h = try scratch("heal-lowpass", width: hSize.width, height: hSize.height,
                                     format: .rgba16Float)
@@ -3954,10 +3968,10 @@ public final class RenderGraph {
             throw RenderError.executeFailed("mask atlas must be encoded by encodeAtlas")
 
         case .heal:
-            // S1.9 — 修复 / 克隆 (2026-10-28, 078 P0-1). Encoded **only** for documents that carry a
-            // spot (`RenderStage.pipeline(hasHeal:)`), so a document that never used the 修复画笔
-            // renders the pre-S1.9 frame by construction: there is no pass to be neutral in.
-            try encodeHeal(cb: cb, into: out, from: src, edit: edit, plan: plan, options: options)
+            // 249 — the repair is source-sized, so it cannot go through the generic canvas-sized
+            // stage allocation. The render loop encodes it before S0 (`encodeHeal`); reaching this
+            // switch means a caller asked the generic path for a stage that does not belong to it.
+            throw RenderError.executeFailed("heal must be encoded by encodeHeal (S1 source grid)")
 
         case .toneMap:
             // 098: contrast moved to S1.8, so this stage is one entry point again: the three region

@@ -368,27 +368,29 @@ final class SharpenScaleTests: XCTestCase {
         XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=3"))
         XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=2"))
 
-        // The list that must NOT have moved, in `RenderStage.order`. `dehaze` is **not** in it:
-        // 160 later moved it 8 → 9 (the whole-picture statistics proxy), and this test's own claim
-        // stays "191/192 moved only sharpen" by naming the two movers explicitly.
+        // The generations that this bump must not move, in `RenderStage.order`. `dehaze` (160),
+        // `geometry` (246), `maskAtlas` (215) and `contrast` (159/246) moved in other tasks and are
+        // pinned at their current numbers here; `heal` is **not** in the list either — 249 moved the
+        // repair to S1 source pixels and bumped it 1 → 2. The claim is "249 touched heal only".
         let unchanged: [(RenderStage, Int)] = [
-            (.geometry, 2), (.sceneLinear, 8), (.maskAtlas, 5), (.localApply, 4), (.heal, 1),
-            (.curve, 2), (.contrast, 2), (.toneMap, 5), (.color, 1), (.bw, 1), (.localColor, 1),
+            (.geometry, 3), (.sceneLinear, 8), (.maskAtlas, 6), (.localApply, 4),
+            (.curve, 2), (.contrast, 3), (.toneMap, 5), (.color, 1), (.bw, 1), (.localColor, 1),
             (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4),
             (.vignette, 3), (.grain, 1), (.display, 1),
         ]
         for (stage, version) in unchanged {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), version,
-                           "191/192 只动了锐化，\(stage.rawValue) 不该变（名单登记的是 \(version)）")
+                           "249 only moved heal；\(stage.rawValue) 不该变（名单登记的是 \(version)）")
         }
         XCTAssertEqual(StageAlgorithmVersion.dehaze, 9, "160：去雾统计量搬到固定 512 代理")
-        XCTAssertEqual(unchanged.count + 2, RenderStage.order.count,
+        XCTAssertEqual(StageAlgorithmVersion.heal, 2, "249：修复搬到 S1 源像素")
+        XCTAssertEqual(unchanged.count + 3, RenderStage.order.count,
                        "名单漏了一个阶段，等于没盯住它")
         // The count alone cannot tell "one stage missing" from "one stage twice": spell the set out.
-        // The list must be `RenderStage.order` minus the two stages that moved.
+        // The list must be `RenderStage.order` minus the three stages that moved.
         XCTAssertEqual(Set(unchanged.map(\.0)),
-                       Set(RenderStage.order).subtracting([.sharpen, .dehaze]),
-                       "「没变」名单必须正好是 order 去掉 sharpen/dehaze —— 不多一条，不少一条")
+                       Set(RenderStage.order).subtracting([.sharpen, .dehaze, .heal]),
+                       "「没变」名单必须正好是 order 去掉 sharpen/dehaze/heal —— 不多一条，不少一条")
         XCTAssertEqual(Set(unchanged.map(\.0)).count, unchanged.count,
                        "「没变」名单里有阶段写了两次")
     }

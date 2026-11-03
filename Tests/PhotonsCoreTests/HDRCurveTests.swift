@@ -1133,17 +1133,18 @@ final class HDRCurveTests: XCTestCase {
 
     // MARK: - ⑫ the mount point
 
-    /// `.curve` sits between S1.6 (or S1.9, when the document carries a heal spot) and S2, its own key
-    /// material moves when the curve does, and nothing above it does — that is the whole reason it is a
-    /// stage and not a second dispatch in S1.
+    /// `.curve` sits after S0/S1 (and after S1.6 when masks exist) and before S2, its own key material
+    /// moves when the curve does, and nothing above it does — that is the whole reason it is a stage
+    /// and not a second dispatch in S1.
     func testMountPointAndKeyChain() throws {
         let order = RenderStage.order
         let curveIndex = try XCTUnwrap(order.firstIndex(of: .curve))
-        // 2026-10-28 (078 P0-1): S1.9 is the stage *above* the curve when it exists — it is a repair of
-        // the picture and the curve is the look applied to it. With no spot the link does not exist and
-        // the curve is seeded by S1.6 (checked below through the chain, not the enum order).
-        XCTAssertEqual(order[curveIndex - 1], .heal, "the curve must read S1.9's output when a spot exists")
-        XCTAssertEqual(order[curveIndex - 2], .localApply, "…and S1.9 reads S1.6's")
+        // 249 — 修复 moved to the very front (before S0); it no longer sits directly above the curve.
+        XCTAssertEqual(order.first, .heal, "249: 修复跑在 S0 之前的 S1 源像素上")
+        XCTAssertLessThan(try XCTUnwrap(order.firstIndex(of: .heal)),
+                          try XCTUnwrap(order.firstIndex(of: .geometry)))
+        XCTAssertEqual(order[curveIndex - 1], .localApply,
+                       "with no heal stage the curve still reads S1.6 when masks exist")
         // 159: contrast left the linear chain for S2.5, so after the curve come dehaze → vignette →
         // tone map; S3 colour reads the contrast stage, not S2.
         XCTAssertEqual(order[curveIndex + 1], .dehaze, "117: S1.9 sits at the end of the linear tail")

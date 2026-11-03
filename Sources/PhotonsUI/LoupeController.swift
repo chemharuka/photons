@@ -3035,13 +3035,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return NormalizedPoint(p.x / max(framing.sourceWidth, 1), p.y / max(framing.sourceHeight, 1))
     }
 
-    /// 2026-10-28 (078 P0-1) — one click, one spot.
+    /// 2026-10-28 (078 P0-1) — one click, one spot. **249:** the click is mapped to **S1 source
+    /// pixels**, not to the cropped frame.
     ///
-    /// The click arrives in **source** space (`normalizedSourcePoint`, the same projection the brush
-    /// uses) and the spot lives in **frame** space (the cropped picture — `HealSpot`'s header says
-    /// why), so the document's own crop rect is what converts one into the other. A click that lands
-    /// outside the crop (on the empty canvas around a cropped picture, or before a decode has
-    /// arrived) places nothing: S1.9 has no pixels there.
+    /// `normalizedSourcePoint` already undoes crop/straighten/perspective through the one
+    /// `FrameTransform` inverse, and returns the **turned** source frame (`CropGeometry.source`).
+    /// The stored spot lives in the raw decoded frame — before the 90° turn — so pressing 旋转 cannot
+    /// move it; `HealSpot.sourcePoint(fromTurned:quarterTurns:)` is the axis rename, not a second
+    /// geometry inverse. A click outside the photograph places nothing: S1 has no pixels there.
     ///
     /// The mode and radius come from the panel's view state, and the source is the default one — one
     /// radius to the right, which is Lightroom's own first guess.
@@ -3057,10 +3058,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return landed
         }
         guard let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
-        let crop = session.edit.geometry.crop
-        let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
-        let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
-        let landed = session.addHealSpot(at: frame)
+        let source = HealSpot.sourcePoint(fromTurned: p,
+                                          quarterTurns: session.edit.geometry.quarterTurns)
+        let landed = session.addHealSpot(at: source)
         refreshHealRing()
         return landed
     }
@@ -3171,7 +3171,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                                                  y: point.y)) else {
             return points / 100
         }
-        let source = session.maskSourceSize
+        // `normalizedSourcePoint` returns the **turned** S1 frame, so its dimensions are the
+        // oriented source's (a quarter turn swaps them).
+        let source = session.edit.geometry.orientedSource(session.maskSourceSize)
         let shortEdge = Double(max(min(source.width, source.height), 1))
         let dx = (b.x - a.x) * Double(source.width) / shortEdge
         let dy = (b.y - a.y) * Double(source.height) / shortEdge
@@ -3179,17 +3181,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return distance > 1e-6 ? distance : points / 100
     }
 
-    /// One 红眼 click. Same frame conversion as `addHealSpot`; the search radius is the card's
-    /// slider, and the session's detector decides whether a pupil is there.
+    /// One 红眼 click. **249:** the click is mapped to S1 source pixels (raw decoded frame, before the
+    /// 90° turn) with the same `FrameTransform` inverse as a heal click; the search radius is the
+    /// card's slider, and the session's detector decides whether a pupil is there.
     @discardableResult
     public func addRedEyeSpot(atViewPoint point: CGPoint,
                               requireDetection: Bool = false) -> HealSpot? {
         guard let session, let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
-        let crop = session.edit.geometry.crop
-        let width = max(crop.width, 1e-6), height = max(crop.height, 1e-6)
-        let frame = NormalizedPoint((p.x - crop.x) / width, (p.y - crop.y) / height)
+        let source = HealSpot.sourcePoint(fromTurned: p,
+                                          quarterTurns: session.edit.geometry.quarterTurns)
         let radius = redEyeSearchRadius(atViewPoint: point, session: session)
-        return session.addRedEyeSpot(at: frame, searchRadius: radius,
+        return session.addRedEyeSpot(at: source, searchRadius: radius,
                                      requireDetection: requireDetection)
     }
 
@@ -3202,7 +3204,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
               let p = normalizedSourcePoint(forViewPoint: point) else { return nil }
         let spacing = max(0.003, 2 * redEyeSearchRadius(atViewPoint: point, session: session))
         if let last = redEyeDragLast {
-            let source = session.maskSourceSize
+            let source = session.edit.geometry.orientedSource(session.maskSourceSize)
             let shortEdge = Double(max(min(source.width, source.height), 1))
             let dx = (p.x - last.x) * Double(source.width) / shortEdge
             let dy = (p.y - last.y) * Double(source.height) / shortEdge
@@ -7101,8 +7103,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// forgotten on one path and remembered on another.
     private func publishIngestedSource(_ rung: ImageSize?, decodeScale: Double) {
         guard let rung, let assetID = session?.anchorAsset?.id else { return }
-        session?.ingestedSourceFrame = (assetID, Self.fullSourceSize(rung: rung,
-                                                                    decodeScale: decodeScale))
+        let size = Self.fullSourceSize(rung: rung, decodeScale: decodeScale)
+        session?.ingestedSourceFrame = (assetID, size)
+        // 249 — canvasV1 heal spots are converted once the **exact** S1 frame is known. Doing it here
+        // (instead of inside `EditModel.init(from:)`) is what lets radius/offset scale by the real
+        // frame short edge; the renderer also converts on the fly for documents that never enter the
+        // loupe (thumbnails, export, `photonsctl`).
+        session?.migrateHealSpots(sourceSize: size)
     }
 
     /// 231 test seam — drive the **shipped** publication without a Metal present (the harness has no
