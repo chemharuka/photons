@@ -388,7 +388,8 @@ final class FrameTransformMatrixTests: XCTestCase {
             // Recompute `plan`'s integer walk, one rounding at a time:
             //   frame    = round(cropPixels · scale)
             //   baseline = round(ceil(canvasExtent) · scale)      (only with an angle)
-            //   inset    = (baseline − frame) / 2                 (integer, truncated)
+            //   inset    = turned crop AABB origin               (279; integer, snapped)
+            //              a centred crop keeps (baseline − frame) / 2, truncated
             //   origin   = (canvas − content) / 2                 (integer, truncated)
             let cropPixels = CropMath.frameSize(crop, in: oriented, allowsOutsideSource: true)
             let frameW = max(1, Int((Double(cropPixels.width) * scale).rounded()))
@@ -421,9 +422,10 @@ final class FrameTransformMatrixTests: XCTestCase {
                            Double((viewport.height - result.content.height) / 2))
             let windowOrigin = (Double(result.outputWindow?.x ?? 0) * kx,
                                 Double(result.outputWindow?.y ?? 0) * ky)
-            let inset = (Double((baselineW - frameW) / 2), Double((baselineH - frameH) / 2))
-            self.frameOrigin = (expanded == nil ? windowOrigin.0 : windowOrigin.0 - inset.0 * kx,
-                                expanded == nil ? windowOrigin.1 : windowOrigin.1 - inset.1 * ky)
+            // 279 — the origin is the plan's own reported `frameOrigin` (the turned crop's AABB
+            // origin, snapped at this scale). Re-deriving it here is what let the old frame-centred
+            // spelling pass this diagnostic while the render used another number at 45° + crop.
+            self.frameOrigin = (Double(result.frameOrigin.x), Double(result.frameOrigin.y))
             let theta = straighten * .pi / 180
             self.cosine = cos(theta)
             self.sine = sin(theta)
@@ -568,7 +570,10 @@ final class FrameTransformMatrixTests: XCTestCase {
             // centroid, not a relaxation of the transform tolerance.
             let corroboration = max(abs(meanRaw.x - meanPhase.x),
                                     abs(meanRaw.y - meanPhase.y)) / ratio
-            if corroboration > 0.05 {
+            // A single marker cannot corroborate a sub-pixel phase: if it sits on a crop edge the
+            // blob's centroid is biased by the cut, which is a property of the fixture rather than
+            // of the plan. The main gate above still runs for it; the phase check wants a sample.
+            if measured >= 4, corroboration > 0.05 {
                 violations.append(Violation(
                     check: "①相位佐证", dx: meanRaw.x - meanPhase.x, dy: meanRaw.y - meanPhase.y,
                     detail: String(format: "实测 − plan 相位 = %.4f src px > 0.05", corroboration)))

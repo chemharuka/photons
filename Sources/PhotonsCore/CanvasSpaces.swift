@@ -100,27 +100,71 @@ public extension CropGeometry {
     /// The canvas in continuous pixels — `ceil` of this is `canvas`.
     var canvasExtent: DSize { frameExtent }
 
-    /// `(canvas − frame) / 2` in canvas pixels, **continuous**. Reference value: the renderer and the
-    /// loupe both snap it (see `canvasInsetPixels`) because a window and the whole frame can only be
-    /// byte-identical when the picture sits at an integer offset inside the canvas.
+    /// Where the picture's own frame starts inside the **turned canvas**, in canvas pixels,
+    /// **continuous**.
+    ///
+    /// 279 — the picture turns about the **photograph's** centre (248 / 273), so the canvas is not
+    /// the frame centred in an AABB: the AABB is the turned crop's, and its origin is
+    /// `(I − R)·(cropCentre − photoCentre)` away from the frame-centred spelling. That offset is
+    /// what this property returns on top of the AABB's half margin. At θ = 0 (and every right angle)
+    /// the offset is exactly zero, so every un-straightened number is unchanged.
+    ///
+    /// `(canvas − frame) / 2` is the frame-centred value that used to be here; it is only correct
+    /// when the crop's centre is the photograph's (a full crop), which is why 45° + an off-centre
+    /// crop used to put the kept picture somewhere else in the canvas entirely.
     var canvasInset: (x: Double, y: Double) {
-        ((Double(canvas.width) - Double(frameSize.width)) / 2,
-         (Double(canvas.height) - Double(frameSize.height)) / 2)
+        guard perspective?.hasWarp != true else { return (0, 0) }
+        return Self.canvasInsetOrigin(crop: crop, in: source, degrees: rotationDegrees,
+                                      flipH: flipHorizontal, flipV: flipVertical)
     }
 
-    /// `(canvas − frame) / 2` **rounded the way the renderer rounds it**: integer division, i.e.
-    /// truncation of the odd half-pixel.
+    /// The one continuous origin of S3 for a crop turned about the photograph's centre.
+    ///
+    /// `frame = frameSize`, `extent = rotatedExtent(frame)`:
+    ///
+    ///     origin = (I − R)·F(cropCentre − photoCentre) + (extent − frame) / 2
+    ///
+    /// The second term is the frame-centred half margin; the first is the 279 correction that ties
+    /// the AABB's origin to the pivot the kernel actually uses. A right angle returns `(0, 0)`:
+    /// `canvas == frame` there, and the kernel's turn is an axis rename (162).
+    static func canvasInsetOrigin(crop: CropRect, in source: ImageSize, degrees: Double,
+                                  flipH: Bool = false, flipV: Bool = false) -> (x: Double, y: Double) {
+        guard degrees.isFinite else { return (0, 0) }
+        let quarter = degrees / 90
+        if abs(quarter - quarter.rounded()) < 1e-9 { return (0, 0) }
+        let frame = CropMath.frameSize(crop, in: source, allowsOutsideSource: true)
+        let extent = rotatedExtent(of: frame, degrees: degrees)
+        // The pivot is the photograph's centre; a flip mirrors the crop offset about it first
+        // (273's order: flip, then turn).
+        var dx = crop.centerX * Double(source.width) - Double(source.width) / 2
+        var dy = crop.centerY * Double(source.height) - Double(source.height) / 2
+        if flipH { dx = -dx }
+        if flipV { dy = -dy }
+        // A **centred** crop (a full crop is the important one) has nothing to correct: keep the
+        // historical integer AABB margin bit for bit, so its pixels and goldens do not move. The
+        // pivot term is only needed when the crop's centre is not the photograph's.
+        if dx == 0 && dy == 0 {
+            // Continuous, exactly the pre-279 value: `plan` keeps its integer spelling for this
+            // case separately, and `FrameTransform` has always used the continuous half margin.
+            return ((Double(canvasPixels(extent.width)) - Double(frame.width)) / 2,
+                    (Double(canvasPixels(extent.height)) - Double(frame.height)) / 2)
+        }
+        let turned = RotationMatrix(degrees: degrees).apply(x: dx, y: dy)
+        return (dx - turned.x + (extent.width - Double(frame.width)) / 2,
+                dy - turned.y + (extent.height - Double(frame.height)) / 2)
+    }
+
+    /// `canvasInset` **rounded the way the renderer rounds it**.
     ///
     /// 2026-11-01 (D1) — this is the one phase. `s0_geometry` places the picture at
     /// `frameOrigin = … − inset`, and a window's pixel 0 therefore samples frame pixel
-    /// `windowX − inset`; only an integer inset makes that an integer *frame* pixel, which is what
-    /// lets a windowed 1:1 plate equal the whole-frame render byte for byte. `RenderGraph.plan`
-    /// computes the same quantity from the **scaled** sizes (`baseline = round(canvas·s)`,
-    /// `frame = round(frameSize·s)`), and `LoupeFraming.canvasOrigin` reproduces it in decoded
-    /// pixels; the two cannot disagree because both truncate the same difference.
+    /// `windowX − inset`; the renderer's grid is integral, so this snaps once. `RenderGraph.plan`
+    /// computes the same quantity from the **scaled** sizes, and `LoupeFraming` reproduces the same
+    /// integer. 279 keeps the snap but moves the origin to the turned crop's AABB
+    /// (`canvasInsetOrigin`), so the phase and the pivot are one number.
     var canvasInsetPixels: (x: Int, y: Int) {
-        ((canvas.width - frameSize.width) / 2,
-         (canvas.height - frameSize.height) / 2)
+        let inset = canvasInset
+        return (Int(inset.x.rounded()), Int(inset.y.rounded()))
     }
 
     // MARK: the document canvas (space 4)

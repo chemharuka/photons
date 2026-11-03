@@ -792,17 +792,18 @@ public enum CropMath {
                          height: CropGeometry.canvasPixels(extent.height))
     }
 
-    /// Where the crop's own frame starts inside the **expanded canvas**, in canvas pixels:
-    /// `((canvas − frame) / 2)`, the margin a rotated crop is centred in (176).
+    /// Where the crop's own frame starts inside the **expanded canvas**, in canvas pixels.
     ///
-    /// This is the number a `RenderOptions.outputWindow` has to carry on top of the picture's own
-    /// pixels: the canvas is bigger than the picture at every non-right angle, so a window naming
-    /// picture pixels would cut the frame at the picture's pivot rather than the canvas' — the very
-    /// mismatch between the loupe's full-size frame and the real render that 176 fixes.
+    /// 279 — this is **not** `(canvas − frame) / 2` once the picture turns about the photograph's
+    /// centre: the AABB's origin is
+    /// `(I − R)·(cropCentre − photoCentre) + (extent − frame) / 2`
+    /// (`CropGeometry.canvasInsetOrigin`, the one owner). The frame-centred half margin is only
+    /// correct for a full crop, where the two centres coincide — the reason 45° + an off-centre
+    /// crop used to sample a completely different part of the photograph.
     ///
-    /// Integer division, because a window is an integer rect on that canvas: the continuous
-    /// half-pixel (`(canvas − frame)` odd) stays in the render, where the projection lives. `(0, 0)`
-    /// at every right angle, because `canvasSize` returns `outputSize` itself there.
+    /// Rounded, because a window is an integer rect on that canvas; the sub-pixel remainder stays in
+    /// the render, where the projection lives. `(0, 0)` at every right angle, because `canvasSize`
+    /// returns `outputSize` itself there.
     public static func canvasOrigin(crop: CropRect, in source: ImageSize,
                                     straightenDegrees: Double, quarterTurns: Int,
                                     allowsOutsideSource: Bool = false,
@@ -810,17 +811,24 @@ public enum CropMath {
         // 246: the canvas *is* the picture's bounding box (perspective + rotation already folded),
         // so the picture starts at its origin — there is no letterbox to centre it in.
         if let perspective, perspective.hasWarp { return (0, 0) }
-        let canvas = canvasSize(crop: crop, in: source,
-                                straightenDegrees: straightenDegrees,
-                                quarterTurns: quarterTurns,
-                                allowsOutsideSource: allowsOutsideSource,
-                                perspective: perspective)
         let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
             ? ImageSize(width: source.height, height: source.width)
             : source
-        let frame = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
-                              perspective: perspective)
-        return ((canvas.width - frame.width) / 2, (canvas.height - frame.height) / 2)
+        // A centred crop keeps the historical integer division — the same number `plan` takes
+        // (`(baseline − frame)/2`), so the full-crop plate is bit-identical.
+        if abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12 {
+            let canvas = canvasSize(crop: crop, in: source,
+                                    straightenDegrees: straightenDegrees,
+                                    quarterTurns: quarterTurns,
+                                    allowsOutsideSource: allowsOutsideSource,
+                                    perspective: perspective)
+            let frame = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
+                                  perspective: perspective)
+            return ((canvas.width - frame.width) / 2, (canvas.height - frame.height) / 2)
+        }
+        let inset = CropGeometry.canvasInsetOrigin(crop: crop, in: turned,
+                                                   degrees: straightenDegrees)
+        return (Int(inset.x.rounded()), Int(inset.y.rounded()))
     }
 
     /// The picture's own pixel grid at 1:1 — the crop's pixel rect **after the keystone** (183).

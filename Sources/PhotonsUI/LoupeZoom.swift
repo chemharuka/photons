@@ -951,20 +951,25 @@ public struct LoupeFraming: Equatable, Sendable {
                                 height: max(1, Int((sourceHeight * ds).rounded())))
         // `sourceWidth`/`crop` are already the turned frame, so no quarter turn enters here.
         //
-        // 2026-11-01 (D1) — **the renderer's own arithmetic, at the render's own scale.** `plan`
-        // rounds the canvas and the frame to the render grid and then truncates `(baseline − frame)/2`
-        // to an integer; the window it hands over is indexed by that same integer inset. Computing it
-        // any other way here (a continuous margin, or an integer one at 1:1 and then scaled) puts the
-        // 1:1 plate half a pixel off the very render it is a cut of. So: same two roundings, same
-        // truncation, same answer.
-        let canvas = CropMath.canvasSize(crop: crop, in: decoded,
-                                         straightenDegrees: straightenDegrees,
-                                         quarterTurns: 0)
-        let frame = CropMath.frameSize(crop, in: decoded, allowsOutsideSource: true)
+        // 279 — the origin is the turned crop's AABB, not the frame-centred half margin: the same
+        // `CropGeometry.canvasInsetOrigin` number `RenderGraph.plan` hands S0, snapped at this render
+        // scale. At θ = 0 it is exactly zero, so fit/1:1 whitespace is unchanged.
         let scale = zoom / ds
-        func scaled(_ value: Int) -> Int { max(1, Int((Double(value) * scale).rounded())) }
-        return ((scaled(canvas.width) - scaled(frame.width)) / 2,
-                (scaled(canvas.height) - scaled(frame.height)) / 2)
+        // A centred crop keeps the historical integer margin (`plan` does the same), so the
+        // full-crop / fit plate is bit-identical; an off-centre crop uses the 279 AABB origin.
+        if abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12 {
+            let canvas = CropMath.canvasSize(crop: crop, in: decoded,
+                                             straightenDegrees: straightenDegrees,
+                                             quarterTurns: 0)
+            let frame = CropMath.frameSize(crop, in: decoded, allowsOutsideSource: true)
+            func scaled(_ value: Int) -> Int { max(1, Int((Double(value) * scale).rounded())) }
+            return ((scaled(canvas.width) - scaled(frame.width)) / 2,
+                    (scaled(canvas.height) - scaled(frame.height)) / 2)
+        }
+        let origin = CropGeometry.canvasInsetOrigin(crop: crop, in: decoded,
+                                                    degrees: straightenDegrees,
+                                                    flipH: flipH, flipV: flipV)
+        return (Int((origin.x * scale).rounded()), Int((origin.y * scale).rounded()))
     }
 
     /// The document the renderer should be given for this state, **as an output window** routed
