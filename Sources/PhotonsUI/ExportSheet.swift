@@ -1098,13 +1098,18 @@ public struct ExportSheetView: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             Form {
-                locationSection
-                namingSection
-                fileSection
-                sizeSection
-                metadataSection
-                watermarkSection
-                exportSection
+                Section {
+                    VStack(alignment: .leading, spacing: 0) {
+                        locationSection
+                        namingSection
+                        fileSection
+                        sizeSection
+                        metadataSection
+                        watermarkSection
+                        exportSection
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .formStyle(.grouped)
             .disabled(model.phase == .running)
@@ -1131,6 +1136,7 @@ public struct ExportSheetView: View {
         .background(.regularMaterial)
         .alert("存储预设", isPresented: $showingSavePreset) {
             TextField("预设名称", text: $newPresetName)
+                .font(.system(size: ExportRowGrid.Font.control))
             Button("存储") {
                 if model.savePreset(named: newPresetName) {
                     selectedPreset = newPresetName
@@ -1147,20 +1153,20 @@ public struct ExportSheetView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("导出")
-                .font(.system(size: 14, weight: .bold))
+                .font(.system(size: ExportRowGrid.Font.title, weight: .semibold))
             Text(model.errorText ?? model.summaryLine)
-                .font(.system(size: 11))
+                .font(.system(size: ExportRowGrid.Font.sectionHeader))
                 .foregroundStyle(model.errorText == nil ? AnyShapeStyle(.secondary)
                                                         : AnyShapeStyle(Color.red))
                 .fixedSize(horizontal: false, vertical: true)
             if let presetError = model.presetError {
                 Text(presetError)
-                    .font(.system(size: 10))
+                    .font(.system(size: ExportRowGrid.Font.hint))
                     .foregroundStyle(Color.red)
             }
             if let draftNotice = model.draftNotice {
                 Text(draftNotice)
-                    .font(.system(size: 10))
+                    .font(.system(size: ExportRowGrid.Font.hint))
                     .foregroundStyle(.orange)
             }
         }
@@ -1169,247 +1175,305 @@ public struct ExportSheetView: View {
     // MARK: 位置
 
     private var locationSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Text("目标目录").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Text(model.outputDirectory.path)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 300, alignment: .trailing)
-                Button("选择…") { model.onChooseDirectory?() }
-                    .controlSize(.mini)
-            }
-            HStack(spacing: 8) {
-                Text("子文件夹").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                TextField("{date}/{camera}", text: $model.preset.subfolder)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .font(.system(size: 10, design: .monospaced))
-                    .frame(width: 220)
-                    .disabled(model.phase == .running)
-            }
-            HStack(spacing: 8) {
-                Text("重名文件").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: $model.preset.conflict) {
-                    ForEach(ExportConflict.allCases, id: \.self) { policy in
-                        Text(policy.displayName).tag(policy)
+        ExportSectionGrid("位置") {
+            ExportRowGridRow(
+                rowID: "export.location.directory",
+                label: { rowLabel("目标目录") },
+                control: {
+                    HStack(spacing: 6) {
+                        Text(model.outputDirectory.path)
+                            .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        Button("选择…") { model.onChooseDirectory?() }
+                            .controlSize(.mini)
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 110)
-                .disabled(model.phase == .running)
-            }
-        } header: {
-            sectionHeader("位置")
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.location.subfolder",
+                label: { rowLabel("子文件夹") },
+                control: {
+                    TextField("{date}/{camera}", text: $model.preset.subfolder)
+                        .textFieldStyle(.roundedBorder)
+                        .exportControlFont("export.location.subfolder", kind: .textField,
+                                           design: .monospaced)
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.location.conflict",
+                label: { rowLabel("重名文件") },
+                control: {
+                    Picker("", selection: $model.preset.conflict) {
+                        ForEach(ExportConflict.allCases, id: \.self) { policy in
+                            Text(policy.displayName).tag(policy)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .exportControlFont("export.location.conflict", kind: .picker)
+                    .frame(width: ExportRowGrid.controlWidth, alignment: .trailing)
+                    .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
         }
     }
 
     // MARK: 文件命名
 
     private var namingSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Text("命名模板").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                TextField("{name} / {date} / {seq} / {rating}",
-                          text: $model.preset.nameTemplate)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .font(.system(size: 10, design: .monospaced))
-                    .frame(width: 260)
-                    .disabled(model.phase == .running)
-            }
-            HStack(spacing: 8) {
-                Text("预设").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: presetSelection) {
-                    Text("—").tag("")
-                    // Built-ins (网络 2048) plus the user's saved files. Selecting one copies it into
-                    // the draft; editing afterwards changes only the draft, never the preset file.
-                    ForEach(model.presetPickerNames, id: \.self) { name in
-                        Text(name).tag(name)
+        ExportSectionGrid("文件命名") {
+            ExportRowGridRow(
+                rowID: "export.naming.template",
+                label: { rowLabel("命名模板") },
+                control: {
+                    TextField("{name} / {date} / {seq} / {rating}",
+                              text: $model.preset.nameTemplate)
+                        .textFieldStyle(.roundedBorder)
+                        .exportControlFont("export.naming.template", kind: .textField,
+                                           design: .monospaced)
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.preset",
+                label: { rowLabel("预设") },
+                control: {
+                    HStack(spacing: 6) {
+                        Picker("", selection: presetSelection) {
+                            Text("—").tag("")
+                            // Built-ins (网络 2048) plus the user's saved files. Selecting one copies
+                            // it into the draft; editing afterwards changes only the draft, never the
+                            // preset file.
+                            ForEach(model.presetPickerNames, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .exportControlFont("export.preset", kind: .picker)
+                        .frame(width: 130, alignment: .trailing)
+                        .disabled(model.phase == .running)
+                        Button("存储…") {
+                            newPresetName = model.preset.name ?? ""
+                            showingSavePreset = true
+                        }
+                        .controlSize(.mini)
+                        .disabled(model.phase == .running)
+                        Button("删除") {
+                            model.deletePreset(named: selectedPreset)
+                            selectedPreset = ""
+                        }
+                        .controlSize(.mini)
+                        .disabled(model.phase == .running || selectedPreset.isEmpty
+                                  || model.isBuiltInPreset(selectedPreset))
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 160)
-                .disabled(model.phase == .running)
-                Button("存储…") {
-                    newPresetName = model.preset.name ?? ""
-                    showingSavePreset = true
-                }
-                .controlSize(.mini)
-                .disabled(model.phase == .running)
-                Button("删除") {
-                    model.deletePreset(named: selectedPreset)
-                    selectedPreset = ""
-                }
-                .controlSize(.mini)
-                .disabled(model.phase == .running || selectedPreset.isEmpty
-                          || model.isBuiltInPreset(selectedPreset))
-            }
-        } header: {
-            sectionHeader("文件命名")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
         }
     }
 
     // MARK: 文件设置
 
     private var fileSection: some View {
-        Section {
+        ExportSectionGrid("文件设置") {
             // 109 §2 — one button per *writable* format. A missing encoder means a missing button,
             // not a greyed one (AVIF on an old system).
-            HStack(spacing: 8) {
-                Text("格式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: formatBinding) {
-                    ForEach(model.availableFormats, id: \.self) { format in
-                        Text(format.rawValue.uppercased()).tag(format)
+            ExportRowGridRow(
+                rowID: "export.format",
+                label: { rowLabel("格式") },
+                control: {
+                    Picker("", selection: formatBinding) {
+                        ForEach(model.availableFormats, id: \.self) { format in
+                            Text(format.rawValue.uppercased()).tag(format)
+                        }
                     }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 300)
-                .disabled(model.phase == .running || model.availableFormats.isEmpty)
-            }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .exportControlFont("export.format", kind: .picker)
+                    .frame(maxWidth: .infinity)
+                    .disabled(model.phase == .running || model.availableFormats.isEmpty)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
             // 109 §1 — 文件设置 follows the user's list: format, HDR switch, the HDR or SDR row,
             // quality, colour, depth.
-            HStack(spacing: 8) {
-                Toggle(isOn: hdrEnabledBinding) {
-                    Text("HDR 输出").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(model.availableHDRKinds.isEmpty
-                                         ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
-                Spacer(minLength: 8)
-                if model.availableHDRKinds.isEmpty {
-                    Text("此格式不支持 HDR")
-                        .font(.system(size: 9)).foregroundStyle(.tertiary)
-                } else if model.hdrEnabled {
-                    Picker("", selection: hdrKindBinding) {
-                        ForEach(model.availableHDRKinds, id: \.self) { kind in
-                            Text(kind.displayName).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 190)
-                    .disabled(model.phase == .running)
-                }
-            }
-            .frame(height: 20)
-            .background(ExportLayoutProbeHost(kind: .hdrRow))
-
-            if model.showsGainMapRows {
-                HStack(spacing: 6) {
-                    Text("增益图").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Picker("", selection: gainMapColorBinding) {
-                        ForEach(GainMapColorModel.allCases, id: \.self) { colorModel in
-                            Text(colorModel.displayName).tag(colorModel)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 96)
-                    .disabled(model.phase == .running)
-                    Picker("", selection: gainMapVersionBinding) {
-                        ForEach(GainMapVersion.allCases, id: \.self) { version in
-                            Text(version.displayName).tag(version)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 104)
-                    .disabled(model.phase == .running)
-                    Toggle(isOn: hdrHalfSizeBinding) {
-                        Text("半尺寸").font(.system(size: 10))
+            ExportRowGridRow(
+                rowID: "export.hdr",
+                label: {
+                    Toggle(isOn: hdrEnabledBinding) {
+                        Text("HDR 输出")
+                            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
+                            .foregroundStyle(model.availableHDRKinds.isEmpty
+                                             ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
                     }
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                    .disabled(model.phase == .running)
-                    .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
-                }
+                    .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
+                },
+                control: {
+                    if model.availableHDRKinds.isEmpty {
+                        Text("此格式不支持 HDR")
+                            .font(.system(size: ExportRowGrid.Font.hint))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if model.hdrEnabled {
+                        Picker("", selection: hdrKindBinding) {
+                            ForEach(model.availableHDRKinds, id: \.self) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .exportControlFont("export.hdr", kind: .picker)
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.phase == .running)
+                    } else {
+                        Color.clear
+                    }
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+                .background(ExportLayoutProbeHost(kind: .hdrRow))
+
+            if model.showsGainMapRows {
+                ExportRowGridRow(
+                    rowID: "export.hdr.gainMap",
+                    label: { rowLabel("增益图") },
+                    control: {
+                        HStack(spacing: 6) {
+                            Picker("", selection: gainMapColorBinding) {
+                                ForEach(GainMapColorModel.allCases, id: \.self) { colorModel in
+                                    Text(colorModel.displayName).tag(colorModel)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .exportControlFont("export.hdr.gainMap", kind: .picker)
+                            .frame(width: 110)
+                            .disabled(model.phase == .running)
+                            Picker("", selection: gainMapVersionBinding) {
+                                ForEach(GainMapVersion.allCases, id: \.self) { version in
+                                    Text(version.displayName).tag(version)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .exportControlFont("export.hdr.gainMap.version", kind: .picker)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.phase == .running)
+                        }
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: {
+                        Toggle(isOn: hdrHalfSizeBinding) {
+                            Text("半尺寸").font(.system(size: ExportRowGrid.Font.label))
+                        }
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .disabled(model.phase == .running)
+                        .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
+                    })
                 // 163 §1.6 — only when half-size is on and an output edge is odd. `nil` builds no
                 // view at all, so an even picture does not leave an empty line behind.
                 if let hint = model.halfSizeCropHint {
                     Text(hint)
-                        .font(.system(size: 9))
+                        .font(.system(size: ExportRowGrid.Font.hint))
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, ExportRowGrid.labelWidth + ExportRowGrid.gap)
                 }
             } else if model.showsToneMappingRow {
                 // 168 §1 — HDR on with PQ/HLG is neither a gain-map row nor an SDR tone-map row;
                 // `showsGainMapRows` alone would let this `else` paint 色调映射 under HDR.
-                HStack(spacing: 8) {
-                    Text("色调映射").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Picker("", selection: sdrToneMappingBinding) {
-                        ForEach(SDRToneMapping.allCases, id: \.self) { mapping in
-                            Text(mapping.displayName).tag(mapping)
+                ExportRowGridRow(
+                    rowID: "export.hdr.toneMapping",
+                    label: { rowLabel("色调映射") },
+                    control: {
+                        Picker("", selection: sdrToneMappingBinding) {
+                            ForEach(SDRToneMapping.allCases, id: \.self) { mapping in
+                                Text(mapping.displayName).tag(mapping)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .exportControlFont("export.hdr.toneMapping", kind: .picker)
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.phase == .running)
+                        .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
+                    .background(ExportToneMappingRowProbeHost())
+            }
+
+            // 288 — 质量 is shown as 10…100 %; the stored value is still 0.1…1.0.
+            exportSliderRow(label: "质量", value: model.preset.quality * 100,
+                            range: 10 ... 100, format: "%.0f", decimals: 0,
+                            unit: "%", enabled: model.phase != .running
+                                && model.preset.format.supportsQuality,
+                            axID: "export.quality") { typed in
+                model.setQuality(typed / 100)
+            }
+            // 109 §2b — three direct buttons; P3 is the default (user's 2026-10-29 口径).
+            ExportRowGridRow(
+                rowID: "export.colorSpace",
+                label: { rowLabel("色彩") },
+                control: {
+                    Picker("", selection: $model.preset.colorSpace) {
+                        Text("sRGB").tag(OutputPrimaries.sRGB)
+                        Text("P3").tag(OutputPrimaries.displayP3)
+                        Text("Rec2020").tag(OutputPrimaries.rec2020)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .exportControlFont("export.colorSpace", kind: .picker)
+                    .frame(maxWidth: .infinity)
+                    .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            // 109 §1 / 108 — only the depths this container really stores (HEIC 8/10, JPEG 8,
+            // PNG/TIFF 8/16, AVIF 8).
+            ExportRowGridRow(
+                rowID: "export.bitDepth",
+                label: { rowLabel("位深") },
+                control: {
+                    Picker("", selection: bitDepthBinding) {
+                        ForEach(model.bitDepths, id: \.self) { depth in
+                            Text("\(depth) 位").tag(depth)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 200)
+                    .exportControlFont("export.bitDepth", kind: .picker)
+                    .frame(maxWidth: .infinity)
                     .disabled(model.phase == .running)
-                    .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
-                }
-                .background(ExportToneMappingRowProbeHost())
-            }
-
-            exportSliderRow(label: "质量", value: model.preset.quality, range: 0.1 ... 1.0,
-                            format: "%.2f", decimals: 2, unit: nil, step: nil,
-                            enabled: model.phase != .running
-                                && model.preset.format.supportsQuality,
-                            axID: "export.quality") { model.setQuality($0) }
-            // 109 §2b — three direct buttons; P3 is the default (user's 2026-10-29 口径).
-            HStack(spacing: 8) {
-                Text("色彩").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: $model.preset.colorSpace) {
-                    Text("sRGB").tag(OutputPrimaries.sRGB)
-                    Text("P3").tag(OutputPrimaries.displayP3)
-                    Text("Rec2020").tag(OutputPrimaries.rec2020)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 200)
-                .disabled(model.phase == .running)
-            }
-            // 109 §1 / 108 — only the depths this container really stores (HEIC 8/10, JPEG 8,
-            // PNG/TIFF 8/16, AVIF 8).
-            HStack(spacing: 8) {
-                Text("位深").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: bitDepthBinding) {
-                    ForEach(model.bitDepths, id: \.self) { depth in
-                        Text("\(depth) 位").tag(depth)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: model.bitDepths.count > 2 ? 200 : 130)
-                .disabled(model.phase == .running)
-            }
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
             // 206 — resolution is a pixel fact, so it has its own row and can be turned off. The
             // factory preset starts at 240 (Lightroom's default); an old preset keeps `nil` (no tag).
             // 243 — PPI has no slider; it is the same constructor as 质量 / 不透明度 now.
@@ -1422,37 +1486,39 @@ public struct ExportSheetView: View {
                             placeholder: model.preset.ppi == nil ? "不写入" : nil) { typed in
                 model.setPPI(Int(typed.rounded()))
             }
-        } header: {
-            sectionHeader("文件设置")
         }
     }
 
     // MARK: 图像尺寸
 
     private var sizeSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Text("尺寸模式").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: sizingModeBinding) {
-                    // 161 §2 — UI order is 原尺寸 / 长边 / 比例. `allCases` is the stored order and
-                    // must not be reordered; `displayOrder` is the one the popup reads.
-                    ForEach(ExportSizingMode.displayOrder, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
+        ExportSectionGrid("图像尺寸") {
+            ExportRowGridRow(
+                rowID: "export.size.mode",
+                label: { rowLabel("尺寸模式") },
+                control: {
+                    Picker("", selection: sizingModeBinding) {
+                        // 161 §2 — UI order is 原尺寸 / 长边 / 比例. `allCases` is the stored order and
+                        // must not be reordered; `displayOrder` is the one the popup reads.
+                        ForEach(ExportSizingMode.displayOrder, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
                     }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 220)
-                .disabled(model.phase == .running)
-            }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .exportControlFont("export.size.mode", kind: .picker)
+                    .frame(maxWidth: .infinity)
+                    .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
             switch model.preset.sizingMode {
             case .longEdge:
                 // 243 — no slider; the 不扩大 checkbox is the row's accessory column.
                 exportSliderRow(label: "长边", value: Double(model.preset.longEdge ?? 2400),
                                 range: 1 ... 20_000, format: "%.0f", decimals: 0,
-                                unit: "px", enabled: model.phase != .running,
+                                unit: "像素", enabled: model.phase != .running,
                                 axID: "export.size.longEdge", showsSlider: false,
                                 trailingToggle: ExportRowToggle(
                                     title: "不扩大", isOn: $model.preset.noUpscale,
@@ -1468,145 +1534,211 @@ public struct ExportSheetView: View {
                     model.preset.percent = min(100, max(10, Int(typed.rounded())))
                 }
             case .none:
-                HStack {
-                    Text("按裁切后的原始像素导出")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                }
+                ExportRowGridRow(
+                    rowID: "export.size.original",
+                    label: { EmptyView() },
+                    control: {
+                        Text("按裁切后的原始像素导出")
+                            .font(.system(size: ExportRowGrid.Font.label))
+                            .foregroundStyle(.secondary)
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
             }
             // 206 — the MP reading follows `predictedOutputSize` (scale + half-size gain-map trim).
             // Absent while the selection has no measured pixels, instead of showing a made-up size.
             if let megapixels = model.predictedMegapixelText {
-                HStack(spacing: 8) {
-                    Text("像素量").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Text(megapixels)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("export.size.megapixels")
-                }
+                ExportRowGridRow(
+                    rowID: "export.size.megapixels",
+                    label: { rowLabel("像素量") },
+                    control: {
+                        Text(megapixels)
+                            .font(.system(size: ExportRowGrid.Font.value, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("export.size.megapixels")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
             }
-        } header: {
-            sectionHeader("图像尺寸")
         }
     }
 
     // MARK: 元数据
 
     private var metadataSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Text("元数据").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: metadataLevelBinding) {
-                    ForEach(ExportMetadataLevel.allCases, id: \.self) { level in
-                        Text(level.displayName).tag(level)
+        ExportSectionGrid("元数据") {
+            ExportRowGridRow(
+                rowID: "export.metadata.level",
+                label: { rowLabel("元数据") },
+                control: {
+                    Picker("", selection: metadataLevelBinding) {
+                        ForEach(ExportMetadataLevel.allCases, id: \.self) { level in
+                            Text(level.displayName).tag(level)
+                        }
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 110)
-                .disabled(model.phase == .running)
-            }
-            HStack(spacing: 8) {
-                Toggle(isOn: writeXMPBinding) {
-                    Text("写入 XMP").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running || model.preset.metadataLevel != .all)
-                Spacer(minLength: 8)
-                Text(model.preset.metadataLevel == .all
-                     ? "完整 develop 设置"
-                     : "由上面的档位决定，不能再单独开关")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            HStack(spacing: 8) {
-                Toggle(isOn: $model.preset.removeLocation) {
-                    Text("移除位置信息").font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(model.phase == .running || model.preset.metadataPolicy == .none)
-                Spacer(minLength: 8)
-                Text("GPS 不写入导出（EXIF 与 XMP 两处）")
-                    .font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-        } header: {
-            sectionHeader("元数据")
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .exportControlFont("export.metadata.level", kind: .picker)
+                    .frame(width: ExportRowGrid.controlWidth, alignment: .trailing)
+                    .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.metadata.xmp",
+                label: {
+                    Toggle(isOn: writeXMPBinding) {
+                        Text("写入 XMP")
+                            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .disabled(model.phase == .running || model.preset.metadataLevel != .all)
+                },
+                control: {
+                    Text(model.preset.metadataLevel == .all
+                         ? "完整 develop 设置"
+                         : "由上面的档位决定，不能再单独开关")
+                        .font(.system(size: ExportRowGrid.Font.hint))
+                        .foregroundStyle(.tertiary)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.metadata.location",
+                label: {
+                    Toggle(isOn: $model.preset.removeLocation) {
+                        Text("移除位置信息")
+                            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .disabled(model.phase == .running || model.preset.metadataPolicy == .none)
+                },
+                control: {
+                    Text("GPS 不写入导出（EXIF 与 XMP 两处）")
+                        .font(.system(size: ExportRowGrid.Font.hint))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
         }
     }
 
     // MARK: 水印
 
     private var watermarkSection: some View {
-        Section {
-            HStack(spacing: 8) {
-                Text("文字").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                TextField("水印文字", text: $model.preset.watermarkText)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .frame(width: 220)
-                    .accessibilityIdentifier("export.watermark.text")
-                    .disabled(model.phase == .running)
-            }
-            HStack(spacing: 8) {
-                Text("位置").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Picker("", selection: $model.preset.watermarkPosition) {
-                    ForEach(WatermarkPosition.allCases, id: \.self) { position in
-                        Text(position.displayName).tag(position)
+        ExportSectionGrid("水印") {
+            ExportRowGridRow(
+                rowID: "export.watermark.text",
+                label: { rowLabel("文字") },
+                control: {
+                    TextField("水印文字", text: $model.preset.watermarkText)
+                        .textFieldStyle(.roundedBorder)
+                        .exportControlFont("export.watermark.text", kind: .textField)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("export.watermark.text")
+                        .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
+            ExportRowGridRow(
+                rowID: "export.watermark.position",
+                label: { rowLabel("位置") },
+                control: {
+                    Picker("", selection: $model.preset.watermarkPosition) {
+                        ForEach(WatermarkPosition.allCases, id: \.self) { position in
+                            Text(position.displayName).tag(position)
+                        }
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 110)
-                .accessibilityIdentifier("export.watermark.position")
-                .disabled(model.phase == .running)
-            }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .exportControlFont("export.watermark.position", kind: .picker)
+                    .frame(width: ExportRowGrid.controlWidth, alignment: .trailing)
+                    .accessibilityIdentifier("export.watermark.position")
+                    .disabled(model.phase == .running)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
             exportSliderRow(label: "不透明度", value: model.preset.watermarkOpacity,
                             range: 0 ... 100, format: "%.0f", decimals: 0,
-                            unit: "%", step: 5, enabled: model.phase != .running,
+                            unit: "%", enabled: model.phase != .running,
                             axID: "export.watermark.opacity") { typed in
-                model.preset.watermarkOpacity = min(100, max(0, typed))
+                // 288 — the slider is continuous; the 5 % quantization lives on the write path.
+                let quantized = (typed / 5).rounded() * 5
+                model.preset.watermarkOpacity = min(100, max(0, quantized))
             }
             if !model.preset.isWatermarkActive {
-                Text("不画水印")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                ExportRowGridRow(
+                    rowID: "export.watermark.inactive",
+                    label: { EmptyView() },
+                    control: {
+                        Text("不画水印")
+                            .font(.system(size: ExportRowGrid.Font.hint))
+                            .foregroundStyle(.tertiary)
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
             }
-        } header: {
-            sectionHeader("水印")
         }
     }
 
     // MARK: 导出
 
     private var exportSection: some View {
-        Section {
-            Text(model.summaryLine)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        ExportSectionGrid("导出") {
+            ExportRowGridRow(
+                rowID: "export.summary",
+                label: { EmptyView() },
+                control: {
+                    Text(model.summaryLine)
+                        .font(.system(size: ExportRowGrid.Font.value, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                },
+                value: { EmptyView() },
+                unit: { EmptyView() },
+                accessory: { EmptyView() })
             if model.phase == .running {
-                ProgressView(value: model.progress)
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity)
+                ExportRowGridRow(
+                    rowID: "export.progress",
+                    label: { EmptyView() },
+                    control: {
+                        ProgressView(value: model.progress)
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
             }
             if let error = model.errorText {
-                Text(error)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                ExportRowGridRow(
+                    rowID: "export.error",
+                    label: { EmptyView() },
+                    control: {
+                        Text(error)
+                            .font(.system(size: ExportRowGrid.Font.hint))
+                            .foregroundStyle(Color.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    },
+                    value: { EmptyView() },
+                    unit: { EmptyView() },
+                    accessory: { EmptyView() })
             }
-        } header: {
-            sectionHeader("导出")
         }
     }
 
@@ -1704,10 +1836,24 @@ public struct ExportSheetView: View {
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold))
+    private func rowLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
             .foregroundStyle(.secondary)
+    }
+
+    private func rowToggle(_ toggle: ExportRowToggle, enabled: Bool) -> some View {
+        Toggle(isOn: toggle.isOn) {
+            Text(toggle.title)
+                .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .toggleStyle(.checkbox)
+        .controlSize(.small)
+        .disabled(!enabled)
+        .accessibilityIdentifier(toggle.axID)
+        .background(ExportSliderRowProbeHost(kind: .toggle, rowID: toggle.axID))
+        .help(toggle.help ?? toggle.title)
     }
 
     private func color(for state: ExportRow.State) -> Color {
@@ -1719,7 +1865,7 @@ public struct ExportSheetView: View {
         }
     }
 
-    // MARK: slider rows
+    // MARK: numeric rows
 
     /// 243 — a checkbox that belongs to a numeric row: `label` form carries the row label (PPI),
     /// `trailing` form is the row's accessory (不扩大).
@@ -1730,101 +1876,71 @@ public struct ExportSheetView: View {
         var help: String? = nil
     }
 
-    /// 217 — one set of measurements for every export numeric row, so the rows cannot drift apart
-    /// again.
-    ///
-    /// 243 — the number field's x is only equal on every row if the columns to its **right** are the
-    /// same width everywhere. 质量 has no unit, 长边 has an extra 不扩大 checkbox, so both the unit
-    /// column and the accessory column are reserved on every row (empty when that row does not use
-    /// them). That is why `unitWidth` / `accessoryWidth` exist: they are placeholders, not decoration.
-    private enum ExportSliderRowMetrics {
-        static let sliderWidth: CGFloat = 140
-        static let numberWidth: CGFloat = 46
-        static let fontSize: CGFloat = 10
-        static let spacing: CGFloat = 8
-        /// 243 — fixed unit column ("像素/英寸" measures 45.43 pt at 10 pt).
-        static let unitWidth: CGFloat = 52
-        /// 243 — fixed row-end accessory column (the 不扩大 checkbox).
-        static let accessoryWidth: CGFloat = 64
-    }
-
-    /// 217/243 — the export sheet's ONE numeric row. 质量 / 不透明度 / PPI / 长边 / 长边百分比 all render
-    /// through here; `SliderNumberField` appears exactly once in this file, inside it.
+    /// 288 — every numeric row goes through the sheet's one grid. `SliderNumberField` appears exactly
+    /// once in this file, inside it. The slider is continuous (no `step:` — SwiftUI would draw tick
+    /// marks); 质量 / 不透明度 / 长边百分比 quantize on their write path instead.
     private func exportSliderRow(
         label: String, value: Double, range: ClosedRange<Double>,
         format: String, decimals: Int, unit: String? = nil,
-        step: Double? = nil, enabled: Bool, axID: String,
+        enabled: Bool, axID: String,
         showsSlider: Bool = true,
         labelToggle: ExportRowToggle? = nil,
         trailingToggle: ExportRowToggle? = nil,
         placeholder: String? = nil,
         write: @escaping (Double) -> Void
     ) -> some View {
-        HStack(spacing: ExportSliderRowMetrics.spacing) {
-            if let labelToggle {
-                Toggle(isOn: labelToggle.isOn) {
-                    Text(label).font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
+        ExportRowGridRow(
+            rowID: axID,
+            label: {
+                if let labelToggle {
+                    rowToggle(labelToggle, enabled: enabled)
+                } else {
+                    rowLabel(label)
+                }
+            },
+            control: {
+                if showsSlider {
+                    Slider(value: Binding(get: { value }, set: write), in: range)
+                        .controlSize(.small)
+                        .frame(width: ExportRowGrid.sliderWidth)
+                        .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
+                        .disabled(!enabled)
+                } else {
+                    Color.clear
+                }
+            },
+            value: {
+                if let placeholder {
+                    Text(placeholder)
+                        .font(.system(size: ExportRowGrid.Font.hint))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    SliderNumberField(value: value, range: range, format: format,
+                                      decimals: decimals,
+                                      fontSize: ExportRowGrid.Font.value,
+                                      width: ExportRowGrid.valueWidth,
+                                      accessibilityID: axID, onCommit: write)
+                        .disabled(!enabled)
+                        .background(ExportSliderRowProbeHost(kind: .number, rowID: axID))
+                }
+            },
+            unit: {
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: ExportRowGrid.Font.unit))
                         .foregroundStyle(.secondary)
+                        .background(ExportSliderRowProbeHost(kind: .unit, rowID: axID))
+                } else {
+                    Color.clear
                 }
-                .toggleStyle(.checkbox).controlSize(.small)
-                .disabled(!enabled)
-                .accessibilityIdentifier(labelToggle.axID)
-                .background(ExportSliderRowProbeHost(kind: .toggle, rowID: labelToggle.axID))
-            } else {
-                Text(label).font(.system(size: ExportSliderRowMetrics.fontSize, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            if showsSlider {
-                Group {
-                    if let step {
-                        Slider(value: Binding(get: { value }, set: write), in: range, step: step)
-                    } else {
-                        Slider(value: Binding(get: { value }, set: write), in: range)
-                    }
+            },
+            accessory: {
+                if let trailingToggle {
+                    rowToggle(trailingToggle, enabled: enabled)
+                } else {
+                    Color.clear
                 }
-                .controlSize(.small)
-                .frame(width: ExportSliderRowMetrics.sliderWidth)
-                .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
-                .disabled(!enabled)
-            }
-            if let placeholder {
-                Text(placeholder).font(.system(size: 9)).foregroundStyle(.tertiary)
-                    .frame(width: ExportSliderRowMetrics.numberWidth, alignment: .trailing)
-            } else {
-                SliderNumberField(value: value, range: range, format: format,
-                                  decimals: decimals,
-                                  fontSize: ExportSliderRowMetrics.fontSize,
-                                  width: ExportSliderRowMetrics.numberWidth,
-                                  accessibilityID: axID, onCommit: write)
-                    .disabled(!enabled)
-                    .background(ExportSliderRowProbeHost(kind: .number, rowID: axID))
-            }
-            // 243 — the unit column is reserved on every row (质量 has no unit), so the
-            // number field's x is identical everywhere. A row without a unit draws nothing there and
-            // therefore reports **no** unit probe (217's assertion stays true).
-            if let unit {
-                Text(unit).font(.system(size: ExportSliderRowMetrics.fontSize))
-                    .foregroundStyle(.secondary)
-                    .frame(width: ExportSliderRowMetrics.unitWidth, alignment: .leading)
-                    .background(ExportSliderRowProbeHost(kind: .unit, rowID: axID))
-            } else {
-                Color.clear.frame(width: ExportSliderRowMetrics.unitWidth)
-            }
-            if let trailingToggle {
-                Toggle(isOn: trailingToggle.isOn) {
-                    Text(trailingToggle.title).font(.system(size: ExportSliderRowMetrics.fontSize))
-                }
-                .toggleStyle(.checkbox).controlSize(.small)
-                .disabled(!enabled)
-                .accessibilityIdentifier(trailingToggle.axID)
-                .background(ExportSliderRowProbeHost(kind: .toggle, rowID: trailingToggle.axID))
-                .help(trailingToggle.help ?? "")
-                .frame(width: ExportSliderRowMetrics.accessoryWidth, alignment: .leading)
-            } else {
-                Color.clear.frame(width: ExportSliderRowMetrics.accessoryWidth)
-            }
-        }
+            })
     }
 
     // MARK: bindings
