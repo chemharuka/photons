@@ -406,16 +406,16 @@ final class DehazeScaleTests: XCTestCase {
     // MARK: - S6 · the cache key is the upstream stage key
 
     func testTheStatisticsKeyIsTheUpstreamChain() throws {
-        XCTAssertEqual(StageAlgorithmVersion.dehaze, 9, "160：统计量搬到固定 512 代理，版本 8 → 9")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .dehaze), 9)
-        XCTAssertTrue(StageAlgorithmVersion.material.contains("dehaze=9"))
-        XCTAssertFalse(StageAlgorithmVersion.material.contains("dehaze=8"))
+        XCTAssertEqual(StageAlgorithmVersion.dehaze, 10, "280：高光参与度收窄到估计噪声尺度，版本 9 → 10")
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .dehaze), 10)
+        XCTAssertTrue(StageAlgorithmVersion.material.contains("dehaze=10"))
+        XCTAssertFalse(StageAlgorithmVersion.material.contains("dehaze=9"))
 
         let graph = try makeGraph(foggyLandscape(), identity: "dehaze-scale-key")
         var edit = EditModel.neutral
         edit.effects.dehaze = 60
-        XCTAssertTrue(edit.keyMaterial(.dehaze).hasSuffix(";alg=9"),
-                      "去雾的键材质必须以 ;alg=9 收尾，实际 \(edit.keyMaterial(.dehaze))")
+        XCTAssertTrue(edit.keyMaterial(.dehaze).hasSuffix(";alg=10"),
+                      "去雾的键材质必须以 ;alg=10 收尾，实际 \(edit.keyMaterial(.dehaze))")
         let display = DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: 1)
         _ = try render(graph, edit, scale: 1.0, probe: true, display: display, useCache: true)
         let A0 = try XCTUnwrap(graph.lastDehazeAirlight)
