@@ -53,6 +53,10 @@ final class RotCropFrameTests: XCTestCase {
 
     private func document(crop: CropRect, degrees: Double, quarterTurns: Int = 0) -> EditModel {
         var edit = EditModel.neutral
+        // 314 — `EditModel.neutral` now carries the shipped default sharpen (50 / 2.0). These cases
+        // assert that the four right angles are **byte-identical**, which sharpening cannot preserve
+        // (it is not invariant under resampling); the geometry claim is measured with it off.
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
         edit.geometry.crop = crop.normalizedRect
         edit.geometry.rotationDegrees = degrees
         edit.geometry.quarterTurns = quarterTurns

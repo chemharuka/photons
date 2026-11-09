@@ -131,14 +131,16 @@ final class CanvasRoleGeometryTests: XCTestCase {
             let display = try XCTUnwrap(result.display)
             let hash = display.sha256()
             print("307 · export pin \(degrees)° · \(display.width)×\(display.height) · \(hash.prefix(16))…")
-            // Pinned on this tree, on a synthetic ramp (no RAW needed). The claim that `.export` did
-            // not move under 307 is carried by the two recorded goldens instead
+            // Pinned on this tree, on a synthetic ramp (no RAW needed). Re-pinned for 314: the shipped
+            // default sharpen (50 / 2.0) is part of the exported look now, so the numbers moved by
+            // design; the claim this pin still carries is "`.export` is one path, not the `.document`
+            // one". The two recorded goldens were re-recorded for the same reason.
             // (`render-edit-crop-rot-s0.25` = `ed99453e…`, `render-edit-push-s0.25` = `ee726906…`,
             // both re-measured after the change and equal to the pre-change values); this pin is what
             // catches a leak from the `.document` branch into the default one, at unit-test speed.
             let pinned = degrees == 0
-                ? "50108481b67dde9c588cd03b5a42fc2629767d7a51c8acd0ba589cb22695d9c4"
-                : "c68fcf9fc14dffa803872ef9a478453c30cf9aec5c0644dedb68e878a89efd5b"
+                ? "0d8c84d768302ab9547ea400f889c3679f16b4b134dc121f1c2c15ba72f97ef1"
+                : "ef985bad61f35807b7dcda4c4be39e03f62c07c4ec54f9d1347c96523f9e6715"
             XCTAssertEqual(hash, pinned, "\(degrees)°: the export moved — `.export` must stay 301")
         }
     }
