@@ -656,7 +656,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let display = displayPixels
         cell.cardView.thumbnailDisplayPixels = display
         let document = document(for: asset)
-        let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        let key = ThumbnailProvider.hdKey(for: asset, document: document)
         // `serveFromMemory` (not `memoryImage`) so a warm cell is counted as a hit rather than
         // disappearing from the statistics.
         if let cached = provider.serveFromMemory(for: key, display: display) {
@@ -740,7 +740,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard let provider = provider(), thumbRequests[index] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
         let token = provider.request(index: index, asset: asset, fileURL: url,
-                                     document: document(for: asset), tier: tier, spec: .hdJPEG,
+                                     document: document(for: asset), tier: tier, spec: .hd,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
@@ -831,7 +831,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         for index in wanted {
             guard index < session.assets.count else { continue }
             let asset = session.assets[index]
-            if provider.memoryImage(for: ThumbnailProvider.hdJPEGKey(for: asset,
+            if provider.memoryImage(for: ThumbnailProvider.hdKey(for: asset,
                                                                  document: document(for: asset)),
                                      display: display) != nil { continue }
             if thumbRequests[index] != nil { continue }

@@ -196,11 +196,7 @@ public final class ThumbnailService: @unchecked Sendable {
         /// for slow machines.
         public var producerDeadline: TimeInterval
 
-        /// 308 — the *service* default follows the machine too, so a caller that builds a service
-        /// without a config cannot silently reinstate the old 3. The app always goes through
-        /// `ThumbnailProvider.defaultConcurrency`; this is the floor under it.
-        public init(maxConcurrency: Int = max(2, ProcessInfo.processInfo.activeProcessorCount - 1),
-                    queueDepthLimit: Int = 0,
+        public init(maxConcurrency: Int = 3, queueDepthLimit: Int = 0,
                     producerDeadline: TimeInterval = 30) {
             self.maxConcurrency = max(1, maxConcurrency)
             self.queueDepthLimit = max(0, queueDepthLimit)

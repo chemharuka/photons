@@ -196,8 +196,8 @@ final class ThumbnailOrientationTests: XCTestCase {
     /// of them is unreachable (the LRU reclaims it) instead of being served under a new build.
     func testCacheKeyVersionInvalidatesPreFixHDFiles() {
         let key = ThumbKey.hd(contentHash: "abc", document: .neutral)
-        XCTAssertEqual(ThumbSpec.hd.schemaVersion, 3)
-        XCTAssertTrue(key.keyString.contains("sv3"))
+        XCTAssertEqual(ThumbSpec.hd.schemaVersion, 2)
+        XCTAssertTrue(key.keyString.contains("sv2"))
         XCTAssertFalse(key.keyString.contains("sv1"))
     }
 }

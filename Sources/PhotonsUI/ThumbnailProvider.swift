@@ -132,11 +132,6 @@ public final class ThumbnailProvider: @unchecked Sendable {
         public var imageIOThumbnailDecodes = 0
         /// 223 — decodes that went through Core Image → `MTLTexture` (the HD HEIC path).
         public var gpuDecodes = 0
-        /// 308 — decodes of the 1920 PQ JPEG, via ImageIO's thumbnail door with
-        /// `kCGImageSourceThumbnailMaxPixelSize` = the cell's pixels. Counted apart from
-        /// `imageIOThumbnailDecodes` (which is producer-side preview work) so "the grid decoded the
-        /// JPEG at cell size" is a number, not a claim.
-        public var hdJPEGDecodes = 0
         /// 284 — first-frame stand-in decodes, split by the bitmap they produced. The EDR counter is
         /// the shipped path; the SDR counter is the no-Metal fallback. `placeholderSRGBDecodes` is
         /// deliberately never incremented: the stand-in is a P3 picture, and a non-zero value would
@@ -172,19 +167,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// Both limits are enforced: `NSCache` evicts on whichever limit trips first.
     public static let memoryCountLimit = 512
     public static let memoryByteLimit = 256 * 1024 * 1024
-    /// 006 §4 said 3. 308 measured what threads actually buy on this machine (24 distinct files,
-    /// warm disk, decode downsampled to a 512 cell):
-    ///
-    ///   · **1920 PQ JPEG** — 331.8 ms wall at k=1 / 180.3 at 2 / 92.8 at 4 / 60.1 at 8 / 51.3 at
-    ///     10: 5.52× at 8 threads, 6.47× at 10, close to linear. JPEG is software-decoded, so
-    ///     threads convert directly into throughput;
-    ///   · **1920 PQ HEIC** — 10.0 img/s at k=1 and 10.0 at k=4 (8.4 at k=12): HEVC's frame cost
-    ///     serialises inside the process. Extra workers only make each image wait longer. That
-    ///     measurement is why the old constant was 3, and it is no longer the file the grid reads.
-    ///
-    /// So the ceiling follows the machine and leaves one core for the main thread / compositing.
-    /// A fixed 3/4/8 was right for one lane's sample size and wrong for every other machine.
-    public static let defaultConcurrency = max(2, ProcessInfo.processInfo.activeProcessorCount - 1)
+    /// 006 §4 "并发上限 3" — handed to the service, which is the only thing that schedules.
+    public static let defaultConcurrency = 3
 
     public let cache: ThumbnailCache
     /// The one scheduler. Public so a probe can read `stats()`/`pendingCount`; no view should
@@ -347,7 +331,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         lock.lock()
         rememberDisplaySize(display, for: key.digest)
         lock.unlock()
-        if key.spec.isHDFamily {
+        if key.spec == .hd {
             recent.setObject(ImageBox(image),
                              forKey: ThumbnailProvider.recentKey(key.contentHash, display: display),
                              cost: cost)
@@ -387,12 +371,6 @@ public final class ThumbnailProvider: @unchecked Sendable {
             document: document ?? ThumbnailProvider.document(from: asset))
     }
 
-    /// 308 — the key the three browsers share. Same document rules as `hdKey`; a different family.
-    public static func hdJPEGKey(for asset: Asset, document: EditModel? = nil) -> ThumbKey {
-        .hdJPEG(contentHash: asset.contentHash,
-                document: document ?? ThumbnailProvider.document(from: asset))
-    }
-
     /// 223 — the pixel rectangle a cell actually shows, from its layout size in points and the
     /// window's backing scale. One helper: the grid, the filmstrip and the list must not each round
     /// differently, or the memory key would never be hit twice.
@@ -430,10 +408,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
                         completion: @escaping @MainActor (Int, ThumbKey, CGImage?) -> Void) -> ThumbnailRequest {
         let pixels = display ?? ImageSize(width: 512, height: 512)
         let key: ThumbKey
-        if spec.isHDFamily {
+        if spec == .hd {
             let doc = document ?? ThumbnailProvider.document(from: asset)
-            key = spec == .hd ? ThumbKey.hd(contentHash: asset.contentHash, document: doc)
-                              : ThumbKey.hdJPEG(contentHash: asset.contentHash, document: doc)
+            key = ThumbKey.hd(contentHash: asset.contentHash, document: doc)
             rememberDocument(doc, for: key.digest)
         } else {
             let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
@@ -445,7 +422,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
         // 1. memory. Synchronous, so a cell that scrolls back into view draws in the same frame.
         // 223 — the key includes the display pixels: a grid bitmap is never handed to the list.
-        if let hit = memoryImage(for: key, display: spec.isHDFamily ? pixels : nil) {
+        if let hit = memoryImage(for: key, display: spec == .hd ? pixels : nil) {
             note { $0.requests += 1; $0.memoryHits += 1; $0.applied += 1 }
             let token = ThumbnailRequest(index: index, key: key, ticket: nil, provider: self)
             token.state.markFinished()
@@ -559,15 +536,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
         // 223 — the two decode doors are counted separately, so "the HEIC path used ImageIO" is a
         // number a test can refute rather than a claim in a comment.
-        // 308 — three now: HEIC (Core Image → texture), 1920 PQ JPEG (ImageIO downsample), and the
-        // legacy ladder (ImageIO whole image).
         let image: CGImage?
         if result.key.spec == .hd {
             image = ThumbnailProvider.decodeHD(data, display: display)
             if image != nil { note { $0.gpuDecodes += 1 } }
-        } else if result.key.spec == .hdJPEG {
-            image = ThumbnailProvider.decodeJPEG(data, display: display)
-            if image != nil { note { $0.hdJPEGDecodes += 1 } }
         } else {
             image = ThumbnailCache.decode(data)
             if image != nil { note { $0.imageIOWholeDecodes += 1 } }
@@ -586,7 +558,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
     /// The `ThumbnailProducer` the service calls. Several workers may call this at once.
     public func produce(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
-        if key.spec.isHDFamily {
+        if key.spec == .hd {
             return try produceHD(key, source: source)
         }
         let ext = source.pathExtension
@@ -687,70 +659,17 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// extended-range picture, so the linear exit (`s4_display_linear` in P3) is the only frame
     /// needed. Reusing this door is what keeps "grid thumbnail == export preview" a fact instead of
     /// a claim — and it is why 223 does not add a second encoder.
-    ///
-    /// 308 — the same render now serves **two** files: the 1920 HEIC (the loupe's first-frame
-    /// stand-in, `cachedCanvasPlaceholder`) and the 512 PQ JPEG the grid/list/filmstrip read. A
-    /// `.hdJPEG` request therefore writes the HEIC as a by-product when it is missing, instead of
-    /// rendering the photo a second time at 1920 for the loupe.
     private func produceHD(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
-        let document: EditModel
-        lock.lock(); document = documentsByKey[key.digest] ?? .neutral; lock.unlock()
-        let rendered = try renderHD(key: key, source: source, document: document)
-
-        let data: Data
-        let provenance: String
-        switch key.spec {
-        case .hdJPEG:
-            // The loupe's 1920 stand-in. Written straight through the cache (not the service), so
-            // this is one producer call and one single-flight job, not a nested request. Failure to
-            // write it must not fail the JPEG: the cells asked for the JPEG.
-            let hdKey = ThumbKey.hd(contentHash: key.contentHash, document: document)
-            if !cache.exists(hdKey) {
-                if let heic = try? Self.encodeHEIC(rendered.image) {
-                    try? cache.store(heic, for: hdKey)
-                }
-            }
-            guard let jpeg = ThumbnailPQJPEG.encode(linear: rendered.linear,
-                                                    longEdge: ThumbSpec.hdJPEG.longEdge,
-                                                    quality: ThumbSpec.hdJPEG.quality) else {
-                throw ThumbProviderError.encodeFailed(source)
-            }
-            data = jpeg
-            provenance = "graph-pq-jpeg"
-        default:
-            data = try Self.encodeHEIC(rendered.image)
-            provenance = "graph-pq"
-        }
-
-        lock.lock()
-        runsPerKey[key.digest, default: 0] += 1
-        runsPerContent[key.contentHash, default: 0] += 1
-        lock.unlock()
-        return ThumbPayload(data: data, source: provenance,
-                            sourceLongEdge: rendered.longEdge)
-    }
-
-    /// The render half of `produceHD`: decode once, one graph frame at 1920, and hand back both the
-    /// `DisplayImage` (what `HDREncoding` consumes) and its linear companion (what the 512 JPEG is
-    /// downscaled from). Split out so the two encoders share exactly one render.
-    struct HDRender {
-        let image: DisplayImage
-        let linear: LinearPixels
-        let longEdge: Int
-    }
-
-    /// Internal, not private: the 308 acceptance harness compares the JPEG against the **exact**
-    /// buffer it was encoded from (same render, same document), rather than re-rendering and hoping
-    /// the two agree.
-    func renderHD(key: ThumbKey, source: URL, document: EditModel) throws -> HDRender {
         guard FileManager.default.fileExists(atPath: source.path) else {
             throw ThumbProviderError.unreadable(source)
         }
         guard let decoder = rawDecoder() else { throw ThumbProviderError.noRAWDecoder }
+        let document: EditModel
+        lock.lock(); document = documentsByKey[key.digest] ?? .neutral; lock.unlock()
 
         let longEdge = ThumbSpec.hd.longEdge
         // Decode no larger than needed for 1920 (a 60 MP RAW at 0.25 already covers it), and never
-        // so small that the thumbnail has to upscale. The 512 JPEG is a downscale of this frame.
+        // so small that the thumbnail has to upscale.
         let sourceEdge = ThumbnailProvider.sourceLongEdge(url: source) ?? longEdge
         let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, sourceEdge))))
         // The HD thumbnail is our own graph, so it must ask for the document's whole development:
@@ -781,14 +700,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
         guard let linear = try? graph.render(document, options: linearOptions).display else {
             throw ThumbProviderError.encodeFailed(source)
         }
-        return HDRender(image: linear.withLinear(LinearPixels(linear)),
-                        linear: LinearPixels(linear),
-                        longEdge: max(linear.width, linear.height))
-    }
+        let image = linear.withLinear(LinearPixels(linear))
 
-    /// The 1920 PQ HEIC bytes. One `CGImageDestinationFinalize`, into a temp file because
-    /// `HDREncoding.write` takes a URL.
-    private static func encodeHEIC(_ image: DisplayImage) throws -> Data {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
             "photons-hd-thumb-\(UUID().uuidString).heic")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -797,7 +710,14 @@ public final class ThumbnailProvider: @unchecked Sendable {
                                     bitDepth: ThumbSpec.hd.bitDepth,
                                     hdr: HDRExport(enabled: true, kind: .pq))
         try HDREncoding.write(image, to: tmp, options: options)
-        return try Data(contentsOf: tmp)
+        let data = try Data(contentsOf: tmp)
+
+        lock.lock()
+        runsPerKey[key.digest, default: 0] += 1
+        runsPerContent[key.contentHash, default: 0] += 1
+        lock.unlock()
+        return ThumbPayload(data: data, source: "graph-pq",
+                            sourceLongEdge: max(linear.width, linear.height))
     }
 
     /// Pixel size of the file's primary image without decoding it (ImageIO metadata only).
@@ -820,56 +740,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// SDR white instead of lifting reference white to the panel's maximum. The legacy JPEG ladder
     /// keeps ImageIO (it is the fast path there).
     static func decode(_ data: Data, for key: ThumbKey, display: ImageSize) -> CGImage? {
-        switch key.spec {
-        case .hd: return decodeHD(data, display: display)
-        case .hdJPEG: return decodeJPEG(data, display: display)
-        case .legacy: return ThumbnailCache.decode(data)
-        }
-    }
-
-    /// 308 — the 1920 PQ JPEG, decoded **by ImageIO straight to the cell's pixel size**.
-    ///
-    /// This is the whole reason the file stays at 1920: `kCGImageSourceThumbnailMaxPixelSize` makes
-    /// the JPEG decoder do the downsample (DCT-domain where it can), averaging PQ codes before they
-    /// reach the screen. Measured 14.7 ms to 512 against 183 ms for the 1920 HEIC, and a *lower*
-    /// banding residual on screen (0.032 EV) than a file stored natively at 512 (0.047 EV) — the
-    /// averaging is the point, not a shortcut. Decoding at full size and scaling by hand costs 2×
-    /// the time and leaves the 0.0847 EV full-resolution residual (the reverse gate in the tests).
-    ///
-    /// The returned image is 8-bit and tagged `displayP3_PQ`; the cell's `ThumbnailMetalSurface`
-    /// converts it to the extended-linear-P3 float texture it always draws (its 16-bit fast path is
-    /// skipped, which is the migration `CIImage(cgImage:)` handles in one pass).
-    static func decodeJPEG(_ data: Data, display: ImageSize) -> CGImage? {
-        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let edge = max(1, max(display.width, display.height))
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: edge,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
-        else { return nil }
-        return Self.taggedPQ(image)
-    }
-
-    /// 226's lesson, applied to a JPEG: a `CGImage` whose profile ImageIO dropped has **no transfer
-    /// function**, and Core Image would copy the PQ signal into its linear working space (5.9× too
-    /// bright). The file's ICC normally survives the JPEG decode; when it does not, re-tag the same
-    /// bytes as `displayP3_PQ` rather than trusting an untagged image.
-    static func taggedPQ(_ image: CGImage) -> CGImage? {
-        if let space = image.colorSpace,
-           (space.name as String?) == (CGColorSpace.displayP3_PQ as String) {
-            return image
-        }
-        guard let pq = CGColorSpace(name: CGColorSpace.displayP3_PQ),
-              let provider = image.dataProvider else { return image }
-        return CGImage(width: image.width, height: image.height,
-                       bitsPerComponent: image.bitsPerComponent,
-                       bitsPerPixel: image.bitsPerPixel,
-                       bytesPerRow: image.bytesPerRow, space: pq,
-                       bitmapInfo: image.bitmapInfo, provider: provider, decode: nil,
-                       shouldInterpolate: false, intent: .defaultIntent)
+        guard key.spec == .hd else { return ThumbnailCache.decode(data) }
+        return decodeHD(data, display: display)
     }
 
     /// 223 — the HD decode is the shared `ThumbnailHDRDecoder`: `CIImage` (display P3 PQ) → one

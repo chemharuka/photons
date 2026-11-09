@@ -349,8 +349,8 @@ final class ThumbnailCacheTests: XCTestCase {
         XCTAssertNotEqual(neutral.digest, changed.digest, "the stage keys must move the cache key")
         XCTAssertEqual(neutral.relativePath(in: root).pathExtension, "heic")
         XCTAssertTrue(neutral.keyString.contains("hd1920q75p3pq10"))
-        XCTAssertTrue(neutral.keyString.contains("sv3"))
-        XCTAssertEqual(ThumbSpec.hd.schemaVersion, 3)
+        XCTAssertTrue(neutral.keyString.contains("sv2"))
+        XCTAssertEqual(ThumbSpec.hd.schemaVersion, 2)
         // The 8-bit legacy family never changed row order, so its key keeps v1 and stays reachable.
         XCTAssertEqual(ThumbSpec.legacy.schemaVersion, 1)
     }
