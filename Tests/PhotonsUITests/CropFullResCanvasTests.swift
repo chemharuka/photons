@@ -130,7 +130,7 @@ final class CropFullResCanvasTests: XCTestCase {
         let graph = try RenderGraph(input: RenderInput(image: developed.image, identity: "real",
                                                        sourceURL: url,
                                                        lensProfile: developed.lensProfile))
-        var edit = EditModel.neutral
+        var edit = CropUITestSupport.geometryOnly
         edit.geometry.rotationDegrees = 45
 
         let real = try realRender(edit, graph: graph)
@@ -187,7 +187,7 @@ final class CropFullResCanvasTests: XCTestCase {
         loupe.collectsHistogram = false
 
         for turns in [0, 1, 2, 3] {
-            var edit = EditModel.neutral
+            var edit = CropUITestSupport.geometryOnly
             edit.geometry.quarterTurns = turns
             let real = try realRender(edit, graph: graph)
             let frame = try fullSizeFrame(edit, loupe: loupe, decoded: decoded)
@@ -219,8 +219,8 @@ final class CropFullResCanvasTests: XCTestCase {
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
 
-        let real = try realRender(EditModel.neutral, graph: graph)
-        let frame = try fullSizeFrame(EditModel.neutral, loupe: loupe, decoded: decoded)
+        let real = try realRender(CropUITestSupport.geometryOnly, graph: graph)
+        let frame = try fullSizeFrame(CropUITestSupport.geometryOnly, loupe: loupe, decoded: decoded)
         var state = LoupeViewState.fit
         state.mode = .actual
         state.zoom = Double(decodeScale)
@@ -246,7 +246,7 @@ final class CropFullResCanvasTests: XCTestCase {
         let graph = try RenderGraph(input: RenderInput(image: developed.image, identity: "real",
                                                        sourceURL: url,
                                                        lensProfile: developed.lensProfile))
-        var edit = EditModel.neutral
+        var edit = CropUITestSupport.geometryOnly
         edit.geometry.rotationDegrees = 9
 
         let real = try realRender(edit, graph: graph)

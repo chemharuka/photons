@@ -76,7 +76,7 @@ final class RotateCropFortyFiveTests: XCTestCase {
                                      rotationDegrees: angle.straighten,
                                      quarterTurns: angle.quarterTurns)
         geometry.aspectLock = .original
-        var e = EditModel.neutral
+        var e = CropUITestSupport.geometryOnly
         e.geometry = geometry
         return e
     }

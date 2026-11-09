@@ -19,6 +19,17 @@ struct CropTestLibrary {
 /// upright frame the renderer ingested, the inspector gate is on the real hosting view). No Metal, no
 /// decode, no 66 MP file: the geometry below is all `CropMath` / `LoupeFraming` arithmetic.
 enum CropUITestSupport {
+    /// 314 — `EditModel.neutral` now carries the **shipped default sharpen (50 / 2.0)**, so a neutral
+    /// document is no longer translation-invariant at a canvas edge (sharpening sees a different
+    /// neighbourhood when the crop window moves). Tests that describe **geometry** — "the same crop
+    /// region at every angle", "the full-size frame is the real render" — take this document instead:
+    /// the same neutral pipeline with sharpening switched off.
+    static var geometryOnly: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
 
     /// `9520×6336` — the Leica SL3 file the user pinned in 049/072 (`60.3 Mpx`, 3:2 upright).
     static let stored = ImageSize(width: 9520, height: 6336)
