@@ -334,6 +334,9 @@ public final class WorkspaceRootView: NSView {
     public let gridController: AssetGridController
     public let loupeController: LoupeController
     public let filmstripController: FilmstripController
+    /// 303 — the one coalescer behind all three browsers' HD thumbnail refresh: an edit calls
+    /// `noteEdit`, and 0.25 s after the last tick the edited photo's visible cells re-request.
+    public let editThumbnailRefresher: EditThumbnailRefresher
     public let inspectorHost: InspectorHostingView
     /// **Which inspector workspace is showing** (派单 073), owned by the window's root rather than by
     /// the SwiftUI panel, so anything outside that panel — `--ui-smoke`, a future menu command, a
@@ -377,11 +380,21 @@ public final class WorkspaceRootView: NSView {
     private let defaults = UserDefaults.standard
 
     public init(session: CatalogSession) {
+        let browserPane = BrowserPaneController(session: session)
+        let gridController = AssetGridController(session: session)
+        let filmstripController = FilmstripController(session: session)
         self.session = session
-        self.browserPane = BrowserPaneController(session: session)
-        self.gridController = AssetGridController(session: session)
+        self.browserPane = browserPane
+        self.gridController = gridController
         self.loupeController = LoupeController(session: session)
-        self.filmstripController = FilmstripController(session: session)
+        self.filmstripController = filmstripController
+        // 303: every document edit feeds one window, and one callback refreshes the edited photo in
+        // whichever of the three browsers has it on screen.
+        self.editThumbnailRefresher = EditThumbnailRefresher { assetID in
+            browserPane.refreshThumbnail(forAssetID: assetID)
+            gridController.refreshThumbnail(forAssetID: assetID)
+            filmstripController.refreshThumbnail(forAssetID: assetID)
+        }
         // The panel gets **this** object, not a fresh one: the root is the handle the smoke runner
         // (and the unit test behind it) switches workspaces through.
         let workspaces = InspectorWorkspaceState()
@@ -503,6 +516,11 @@ public final class WorkspaceRootView: NSView {
         updateForwardCompatNotice()
         applyBrowserMode()
         observeModel()
+
+        // 303 — weak on both sides: the session does not keep the workspace (or its refresher) alive.
+        session.addEditObserver { [weak refresher = editThumbnailRefresher] assetID in
+            refresher?.noteEdit(assetID: assetID)
+        }
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }

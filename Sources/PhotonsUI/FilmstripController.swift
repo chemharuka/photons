@@ -551,6 +551,22 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    /// 303 — after an edit, re-ask for the one photo that moved. Only a cell that is on screen is
+    /// refreshed; an off-screen cell computes the new key when it is configured again.
+    public func refreshThumbnail(forAssetID id: String) {
+        guard isViewLoaded, let session,
+              let index = session.assets.firstIndex(where: { $0.id == id }) else { return }
+        let path = IndexPath(item: index, section: 0)
+        guard collectionView.indexPathsForVisibleItems().contains(path),
+              let cell = collectionView.item(at: path) as? FilmstripCell,
+              let asset = cell.cardView.asset, asset.id == id else { return }
+        // The in-flight request still carries the pre-edit key; cancel it so it cannot repaint the
+        // old frame after the new one arrives.
+        thumbRequests[index]?.cancel()
+        thumbRequests.removeValue(forKey: index)
+        applyThumbnail(to: cell, index: index, asset: asset)
+    }
+
     private func reconcileThumbnails(force: Bool) {
         guard isViewLoaded, let session, !session.assets.isEmpty, let provider = provider() else { return }
 
