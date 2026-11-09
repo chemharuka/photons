@@ -1,15 +1,15 @@
 {
-  "createdAt" : "2026-11-09T19:41:15Z",
+  "createdAt" : "2026-11-09T22:29:45Z",
   "decoderVersion" : "8",
   "edit" : "edit-neutral",
-  "fileSHA256" : "c902c148656418274a1885f811ea254bfb335d02bfee34eace5932169d84cfd3",
+  "fileSHA256" : "8eb2d822eeabb039fe6c9bed483c60d5e59243d484d66835707a554b918cfce1",
   "height" : 1584,
   "note" : "Recorded by photonsctl render. Apple's decoder output can change across OS releases; re-record on major OS bumps and keep the old file as history.",
   "osVersion" : "Version 27.3 (Build 26C5035r)",
-  "pixelSHA256" : "1e191e024b6b05650366ecdceb7ab32b3cb8517e521e43b19e124d60797c1da6",
+  "pixelSHA256" : "e713e5fd20dcf5febbac29068ca8b3c32a17640dc0b363912352423e148d2edc",
   "raw" : "L1030433.dng",
   "rawSHA256" : "3c33888215a1969a3d9fb82fddf6c9bcfd389dc5b647737dd0d78826a832ebd1",
   "scale" : 0.25,
-  "stageKeys" : "s0=28c06d41 s1=66f1ad44 s1.7=21bcf709 s2=8518044e s3-color=8c095781 s3-vignette=89f8a203 s4=af50a8b4",
+  "stageKeys" : "s0=8a266e83 s1=61b3363d s1.7=742059b5 s3-vignette=7be7e39d s2=afdd968a s3-color=5035737c s3.10=8480e2c3 s4=59ed8a84",
   "width" : 2380
 }
