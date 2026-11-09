@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import CoreGraphics
 import ImageIO
+import Darwin
 import PhotonsCore
 
 // MARK: - tiers
@@ -83,7 +84,13 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     /// bottom-row-first). Files written before this build by the **same** spec spelling can be
     /// upside down (238 removed the encoder flip that used to cancel it), so the version moves to
     /// make every one of them unreachable; the LRU reclaims them.
-    public var schemaVersion: Int { self == .hd ? 2 : 1 }
+    ///
+    /// 308 — v3: the on-disk **layout** of the `hd` family changed from a digest-sharded tree to a
+    /// content-hash-sharded one (`thumbs/hd/<ch[0..2]>/<ch[2..4]>/<digest>.heic`). The path is not
+    /// part of `keyString`, but the version is bumped anyway because the meaning of "the file this
+    /// key names" moved: a v2 file cannot be found by a v3 key, and the migration deletes the old
+    /// tree wholesale instead of leaving it to the LRU (`ThumbnailCache.migrateHDLayoutIfNeeded`).
+    public var schemaVersion: Int { self == .hd ? 3 : 1 }
 }
 
 /// The constants that decide pixels, plus the digest that enters the cache key.
@@ -201,6 +208,10 @@ public enum ThumbNamespace {
     /// 218 → 223 — the HD/HDR family. Its key already carries the edit fingerprint, so a superseded
     /// edit is an unreachable key (reclaimed by the LRU, and by undo's old key becoming live again)
     /// rather than a directory generation.
+    ///
+    /// 308 — the *layout inside* this namespace is now content-hash-sharded (§2), and the directory
+    /// carries a `.layout-v3` stamp so a tree written by the previous layout can be recognised and
+    /// deleted in one `removeItem` at startup instead of surviving as a 353 MB pile of edits.
     public static let hd = "hd"
     /// The namespaces a file written by *this* build may live in. Everything else under the cache root
     /// is a superseded generation (including the pre-P1f layout, whose shard directories sat directly
@@ -284,11 +295,26 @@ public struct ThumbKey: Hashable, Sendable {
         return String(s[start..<end])
     }
 
+    /// 308 — the shard of the **content**, not of the key. `digest` is the sha256 of the whole key
+    /// string, so every edit of one photo lands in an unrelated directory and nothing on disk can
+    /// answer "which files belong to this photo?". Sharding on `contentHash` makes the tree group an
+    /// asset's edits (and a duplicate copy) together, which is what the retention rule in
+    /// `ThumbnailCache.store` prunes. Short hashes (tests, probes) yield short shards rather than a
+    /// crash: the layout is a directory name, not a checksum.
+    public var contentShard0: String { String(contentHash.prefix(2)) }
+    public var contentShard1: String { String(contentHash.dropFirst(2).prefix(2)) }
+
     /// Path inside a cache root: `thumbs/<namespace>/xx/yy/<digest>.<ext>` (§3; the namespace is P1f).
+    ///
+    /// 308 — the `hd` family shards on **contentHash** (`<ch[0..2]>/<ch[2..4]>`) so prior edits of one
+    /// photo sit in one place; `preview`/`graph` keep the digest shard, where grouping by edit is
+    /// meaningless (their keys already carry the recipe, and the tier ladder is what they shard by).
     public func relativePath(in root: URL) -> URL {
-        root.appendingPathComponent(namespace, isDirectory: true)
-            .appendingPathComponent(shard0, isDirectory: true)
-            .appendingPathComponent(shard1, isDirectory: true)
+        let s0 = spec == .hd ? contentShard0 : shard0
+        let s1 = spec == .hd ? contentShard1 : shard1
+        return root.appendingPathComponent(namespace, isDirectory: true)
+            .appendingPathComponent(s0, isDirectory: true)
+            .appendingPathComponent(s1, isDirectory: true)
             .appendingPathComponent("\(digest).\(spec.fileExtension)", isDirectory: false)
     }
 }
@@ -401,6 +427,120 @@ public final class ThumbnailCache {
         self.versionSweep = VersionSweep(previous: nil, current: StageAlgorithmVersion.fingerprint,
                                          isUpgrade: false)
         self.versionSweep = sweepSupersededNamespaces()
+        // 308: the `hd` family's own layout migration. Runs after the namespace sweep so it sees the
+        // tree this build will actually read, and before any lookup for the same reason.
+        self.hdLayoutSweep = migrateHDLayoutIfNeeded()
+    }
+
+    // MARK: - 308 · the `hd` layout stamp
+
+    /// What the `hd` tree looked like when this cache opened it.
+    ///
+    /// `removedFiles` is the number of `.heic` files the migration deleted: the **whole** previous
+    /// `hd` tree (digest-sharded) and, when the kernel generation moved, the current one too. HD is
+    /// derived data — deleting it costs one re-render and reclaims the 353 MB a long edit session
+    /// leaves behind — so this is a reclaim, not a data loss.
+    public struct HDLayoutSweep: Sendable, Equatable {
+        public var removedFiles = 0
+        public var didReset = false
+        public var summary: String {
+            didReset ? "hd layout → v3: removed \(removedFiles) file(s), tree rebuilt"
+                     : "hd layout v3: up to date"
+        }
+    }
+
+    public private(set) var hdLayoutSweep = HDLayoutSweep()
+
+    /// The stamp file *inside* the `hd` directory (`thumbs/hd/.layout-v3`). It names both the layout
+    /// and the arithmetic generation: an unreadable/missing stamp is the pre-308 digest-sharded tree,
+    /// a different fingerprint is a tree whose pixels this build would not produce.
+    public var hdLayoutMarkerURL: URL {
+        root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+            .appendingPathComponent(Self.hdLayoutMarkerName)
+    }
+    private static let hdLayoutMarkerName = ".layout-v3"
+    private var hdLayoutStamp: String { "hd3|\(StageAlgorithmVersion.fingerprint)" }
+
+    /// Delete the `hd` tree unless it is stamped as this build's layout **and** arithmetic.
+    ///
+    /// Why wholesale rather than per-file: the old tree is keyed by `sha256(keyString)`, so nothing in
+    /// it is reachable from a v3 key and nothing in it says which photo (or which edit) it belongs to.
+    /// Enumerating it per asset would be a full walk of 982 files to delete data that is regenerable
+    /// by definition (§3: losing the directory costs one regeneration).
+    @discardableResult
+    public func migrateHDLayoutIfNeeded() -> HDLayoutSweep {
+        var sweep = HDLayoutSweep()
+        let expected = hdLayoutStamp
+        let found = (try? String(contentsOf: hdLayoutMarkerURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if found == expected { return sweep }
+
+        let hdRoot = root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: hdRoot.path, isDirectory: &isDir), isDir.boolValue {
+            sweep.removedFiles = Self.tally(in: hdRoot).files
+            try? fm.removeItem(at: hdRoot)
+        }
+        try? fm.createDirectory(at: hdRoot, withIntermediateDirectories: true)
+        try? Data(expected.utf8).write(to: hdLayoutMarkerURL, options: .atomic)
+        sweep.didReset = true
+        return sweep
+    }
+
+    // MARK: - 308 · one file per content hash
+
+    /// 308 — the ownership tag every `hd` file carries.
+    ///
+    /// The file name is the digest of the key, so "does this file belong to this photo?" is not
+    /// answerable from the path: the shard is only `contentHash[0..4]` wide (65 536 buckets, i.e.
+    /// guaranteed collisions in a 10 000-photo library), and `store` must never delete another
+    /// photo's thumbnail when it prunes a superseded edit. The extended attribute answers it exactly.
+    /// A file whose tag cannot be read is left alone — garbage, reclaimed by `trim()` as §2.3 says.
+    static let hdOwnerAttribute = "com.photons.contentHash"
+
+    static func hdOwner(ofFileAt path: String) -> String? {
+        let name = hdOwnerAttribute
+        let size = getxattr(path, name, nil, 0, 0, 0)
+        guard size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size + 1)
+        let read = getxattr(path, name, &buffer, size, 0, 0)
+        guard read > 0 else { return nil }
+        return String(decoding: buffer.prefix(read).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private func tagOwner(_ path: String, contentHash: String) {
+        let value = Array(contentHash.utf8)
+        value.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            _ = setxattr(path, Self.hdOwnerAttribute, base, value.count, 0, 0)
+        }
+    }
+
+    /// 308 §2.3 — after a new HD file lands, the same content hash may keep exactly one: the newest.
+    ///
+    /// Runs synchronously after the `rename` that published the file, inside the same `store` call, so
+    /// the steady state is "one 368 KB file per photo" instead of "one per edit until the 2 GB LRU
+    /// happens to need the space". Two different edits of one photo can be in flight at once (the grid
+    /// still shows the old document while the new commit rebuilds): the loser of that race may delete
+    /// the winner's file, and the next lookup simply regenerates it — the cache has no correctness
+    /// role, and being conservative here would mean keeping files forever.
+    private func retainNewestHDOnly(for key: ThumbKey) {
+        guard key.spec == .hd else { return }
+        let dir = url(for: key).deletingLastPathComponent()
+        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        var owners: [(path: String, modified: Date)] = []
+        for name in names where name.hasSuffix(".heic") && !name.hasPrefix(".") {
+            let path = dir.appendingPathComponent(name).path
+            guard Self.hdOwner(ofFileAt: path) == key.contentHash else { continue }
+            let modified = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+                ?? .distantPast
+            owners.append((path, modified))
+        }
+        guard owners.count > 1 else { return }
+        guard let newest = owners.max(by: { $0.modified < $1.modified }) else { return }
+        for item in owners where item.path != newest.path {
+            try? fm.removeItem(atPath: item.path)
+        }
     }
 
     // MARK: - algorithm version (P1f)
@@ -604,6 +744,13 @@ public final class ThumbnailCache {
         if key.pipeline == .graph && key.spec == .legacy {
             pruneShadowedPreview(for: key)
         }
+        // 308: an HD file is one per *photo*, not one per edit. Tag it with its owner and keep the
+        // newest file in the content-hash shard (see `retainNewestHDOnly`). The tag comes first: the
+        // prune only ever deletes files it can attribute.
+        if key.spec == .hd {
+            tagOwner(dest.path, contentHash: key.contentHash)
+            retainNewestHDOnly(for: key)
+        }
     }
 
     public func store(image: CGImage, for key: ThumbKey, quality: Double = ThumbnailJPEG.quality) throws {
@@ -660,6 +807,17 @@ public final class ThumbnailCache {
             let path = url(for: key)
             guard fm.fileExists(atPath: path.path) else { continue }
             if (try? fm.removeItem(at: path)) != nil { removed += 1 }
+        }
+        // 308 — and every *other* HD file this photo owns: one content-hash shard is one directory, so
+        // "deleted the library entry, its pixels are gone" is now a scan of one directory instead of a
+        // guess at the documents an undo stack may have left behind.
+        let hdShard = ThumbKey.hd(contentHash: contentHash, document: .neutral).relativePath(in: root)
+            .deletingLastPathComponent()
+        for name in (try? fm.contentsOfDirectory(atPath: hdShard.path)) ?? []
+        where name.hasSuffix(".heic") {
+            let path = hdShard.appendingPathComponent(name).path
+            guard Self.hdOwner(ofFileAt: path) == contentHash else { continue }
+            if (try? fm.removeItem(atPath: path)) != nil { removed += 1 }
         }
         lock.lock()
         touched = touched.filter { !$0.contains(contentHash) }
