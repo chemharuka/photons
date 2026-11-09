@@ -205,23 +205,27 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
     // MARK: - 2. file parameters
 
+    /// 311 — the HD file is one **1920 8-bit Display P3 PQ JPEG**, and the loupe's stand-in reads
+    /// that same file. The HEIC family it used to be (10-bit, plus a second encode per render) is
+    /// retired: the assertions that mattered are kept — PQ transfer, P3 primaries, no gain map, and
+    /// real light above SDR white — and only the container/depth changed.
     @available(macOS 15.0, *)
-    func testGeneratedFileIsTenBitDisplayP3PQWithNoGainMap() throws {
+    func testGeneratedFileIsEightBitDisplayP3PQJPEGWithNoGainMap() throws {
         let generated = try generateHD()
         let data = generated.data
         let path = generated.provider.cache.url(for: generated.key)
 
-        XCTAssertTrue(ThumbnailCache.looksLikeHEIC(data), "container must be HEIF/HEIC")
+        XCTAssertEqual(generated.key.spec, .hdJPEG, "311: the HD family is the JPEG")
+        XCTAssertTrue(path.path.hasSuffix(".jpg"))
+        XCTAssertTrue(ThumbnailJPEG.looksComplete(data), "container must be a JPEG")
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(path as CFURL, nil))
-        XCTAssertEqual(CGImageSourceGetCount(source), 1, "one primary item, no second image")
+        XCTAssertEqual(CGImageSourceGetCount(source), 1, "one primary image, no second one")
         let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
-        XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 10, "10-bit HEIC")
+        XCTAssertEqual((props[kCGImagePropertyDepth] as? NSNumber)?.intValue, 8, "8-bit JPEG")
 
         let primary = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertLessThanOrEqual(max(primary.width, primary.height), 1920, "long edge ≤ 1920")
-        // HEIF has no 16-bit mode: asking for 16 reads back 10. Accept either spelling of "PQ".
-        XCTAssertTrue(primary.bitsPerComponent == 10 || primary.bitsPerComponent == 16,
-                      "bitsPerComponent \(primary.bitsPerComponent)")
+        XCTAssertEqual(primary.bitsPerComponent, 8, "bitsPerComponent \(primary.bitsPerComponent)")
 
         // The colour space is the file's, read through the same Core Image door the cells use.
         let ci = try XCTUnwrap(CIImage(contentsOf: path))
@@ -236,15 +240,17 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertNil(CGImageSourceCopyAuxiliaryDataInfoAtIndex(
             source, 0, kCGImageAuxiliaryDataTypeHDRGainMap), "no Apple gain map")
 
-        // And the file really carries extended-range light: our decoder's float peak ≥ 1.05.
-        let decoded = try XCTUnwrap(ThumbnailProvider.decodeHD(data,
-                                                              display: ImageSize(width: 326, height: 242)))
-        let filePeak = try peak(of: decoded)
-        XCTAssertGreaterThanOrEqual(filePeak, 1.05,
-                                    "the PQ file must carry light above SDR white")
+        // And the 8-bit PQ codes really carry extended-range light: the stand-in's float peak ≥ 1.8
+        // for a source with > 2.0 stops of headroom (311's acceptance number; it was 1.05 when the
+        // file was 10-bit, which is why the check got stricter rather than weaker).
+        let standIn = try XCTUnwrap(ThumbnailProvider.decodeHDForPlaceholder(data))
+        XCTAssertEqual(standIn.bitsPerComponent, 16, "the stand-in decodes to the EDR exit")
+        let filePeak = try peak(of: standIn)
+        XCTAssertGreaterThanOrEqual(filePeak, 1.8,
+                                    "the PQ file must carry light above SDR white (peak \(filePeak))")
 
-        print("223 file: \(primary.width)×\(primary.height) depth \(primary.bitsPerComponent) "
-              + "HEIC \(data.count) bytes · peak \(filePeak)")
+        print("311 file: \(primary.width)×\(primary.height) depth \(primary.bitsPerComponent)"
+              + " JPEG \(data.count) bytes · stand-in peak \(filePeak)")
     }
 
     /// A P3 primary is **outside** sRGB: converting a pure P3 red to linear sRGB gives R > 1 and a
@@ -296,10 +302,13 @@ final class ThumbnailHDRCacheTests: XCTestCase {
 
     // MARK: - 3. display-sized decode + counters
 
-    func testDecodeAtEachCellSizeMatchesDisplayPixelsAndNeverUsesImageIO() throws {
+    /// 311 — the cells decode the **JPEG**, by ImageIO's thumbnail door at the cell's own pixels
+    /// (308's measurement: 14.7 ms to 512 vs the HEIC's 183 ms). What this pins is unchanged in
+    /// spirit: the bitmap is exactly the cell's pixels, in float extended linear P3, and it is
+    /// **one** decode per disk hit — never a whole-image decode plus a resize.
+    func testDecodeAtEachCellSizeMatchesDisplayPixels() throws {
         let generated = try generateHD()
         let data = generated.data
-        let extP3 = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3))
 
         let sizes = [ImageSize(width: 68, height: 68),          // browser list, 34 pt @2×
                      ImageSize(width: Int((WorkspaceLayout.filmstripCell.width * 2).rounded()),
@@ -307,36 +316,49 @@ final class ThumbnailHDRCacheTests: XCTestCase {
                                              - WorkspaceLayout.filmstripCaptionHeight) * 2).rounded())),
                                                             // filmstrip, 90×60 pt @2×
                      ImageSize(width: 326, height: 242)]        // grid, common 163×121 pt @2×
+        // The picture's own aspect, straight from the file.
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let fileW = try XCTUnwrap((props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue)
+        let fileH = try XCTUnwrap((props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue)
+        let pictureAspect = Double(fileW) / Double(fileH)
         for size in sizes {
-            let image = try XCTUnwrap(ThumbnailProvider.decodeHD(data, display: size))
-            XCTAssertEqual(image.width, size.width, "bitmap width = display pixels")
-            XCTAssertEqual(image.height, size.height, "bitmap height = display pixels")
-            XCTAssertEqual(image.colorSpace?.name, extP3.name, "float extended linear P3")
-            XCTAssertEqual(image.bitsPerComponent, 16)
-            print("223 decode \(size.width)×\(size.height)")
+            let image = try XCTUnwrap(ThumbnailProvider.decodeJPEG(data, display: size))
+            // ImageIO's thumbnail door honours `kCGImageSourceThumbnailMaxPixelSize`: the bitmap's
+            // **long** edge is the display's, and the picture's own aspect is kept (the cell's
+            // surface does the aspect-fill, as it always did). It returns the file's own form:
+            // 8-bit PQ, tagged with the file's PQ profile.
+            XCTAssertEqual(max(image.width, image.height), max(size.width, size.height),
+                           "long edge = display's long edge")
+            let imageAspect = Double(image.width) / Double(image.height)
+            XCTAssertEqual(imageAspect, pictureAspect, accuracy: pictureAspect * 0.05,
+                           "aspect follows the picture, not the slot")
+            XCTAssertEqual(image.colorSpace?.name, CGColorSpace.displayP3_PQ,
+                           "the JPEG's own PQ tag survives the decode")
+            XCTAssertEqual(image.bitsPerComponent, 8)
+            print("311 decode \(image.width)×\(image.height) for \(size.width)×\(size.height)")
         }
 
         // A second provider on the same cache has no memory layer, so this request must go
-        // disk → decode. The counters are the evidence that the HEIC never touched ImageIO.
+        // disk → decode. The counter is the evidence of which door served it.
         let provider = ThumbnailProvider(cache: try cache())
         provider.resetStats()
         let done = expectation(description: "second decode")
         let display = ImageSize(width: 326, height: 242)
         provider.request(index: 0, asset: asset(), fileURL: try rawURL(),
                          document: equalEdit(exposure: 1), tier: .t256, spec: .hd,
-                         display: display) { _, _, image in
+                         display: display) { _, key, image in
+            XCTAssertEqual(key.spec, .hdJPEG, "311: a `.hd` ask lands on the JPEG family")
             XCTAssertEqual(image?.width, display.width)
             done.fulfill()
         }
         wait(for: [done], timeout: 60)
         let stats = provider.stats
         XCTAssertEqual(stats.imageIOWholeDecodes, 0,
-                       "CGImageSourceCreateImageAtIndex must not run for a HEIC cell")
-        XCTAssertEqual(stats.imageIOThumbnailDecodes, 0,
-                       "CGImageSourceCreateThumbnailAtIndex must not run for a HEIC cell")
-        XCTAssertEqual(stats.gpuDecodes, 1, "one disk hit ⇒ one Core Image → Metal decode")
-        print("223 counters: imageIO whole \(stats.imageIOWholeDecodes) · "
-              + "thumbnail \(stats.imageIOThumbnailDecodes) · gpu \(stats.gpuDecodes)")
+                       "the whole JPEG must not be decoded and resized by hand")
+        XCTAssertEqual(stats.gpuDecodes, 0, "311: no HEIC → no Core Image → Metal cell decode")
+        XCTAssertEqual(stats.hdJPEGDecodes, 1, "one disk hit ⇒ one ImageIO thumbnail decode")
+        print("311 counters: imageIO whole \(stats.imageIOWholeDecodes) · jpeg \(stats.hdJPEGDecodes)")
     }
 
     // MARK: - 4. HDR is really on screen
@@ -534,7 +556,8 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let display = ImageSize(width: 326, height: 242)
         provider.resetStats()
 
-        let key = ThumbnailProvider.hdKey(for: a, document: equalEdit(exposure: 1))
+        // 311 — the key the producer filled is the JPEG family's.
+        let key = ThumbnailProvider.hdJPEGKey(for: a, document: equalEdit(exposure: 1))
         for _ in 0..<200 {
             XCTAssertNotNil(provider.serveFromMemory(for: key, display: display))
         }

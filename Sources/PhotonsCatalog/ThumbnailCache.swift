@@ -460,6 +460,9 @@ public final class ThumbnailCache {
         // 308: the `hd` family's own layout migration. Runs after the namespace sweep so it sees the
         // tree this build will actually read, and before any lookup for the same reason.
         self.hdLayoutSweep = migrateHDLayoutIfNeeded()
+        // 311: the HEIC half of that family is retired — the loupe reads the JPEG now. One sweep
+        // deletes what an older build left behind; the JPEGs beside them are kept.
+        self.retiredFamilySweep = retireHEICFamilyIfNeeded()
     }
 
     // MARK: - 308 · the `hd` layout stamp
@@ -515,6 +518,72 @@ public final class ThumbnailCache {
         try? Data(expected.utf8).write(to: hdLayoutMarkerURL, options: .atomic)
         sweep.didReset = true
         return sweep
+    }
+
+    // MARK: - 311 · the retired HEIC family
+
+    /// What the one-shot `.heic` sweep found when this cache opened.
+    ///
+    /// 311 — the loupe's stand-in reads the 1920 PQ **JPEG** now, and the producer writes no HEIC at
+    /// all: one render, one encode, one file per photo. Files left by an earlier build are dead
+    /// weight (a photo's old HEIC is never read again), so they are deleted once per directory,
+    /// stamped by a marker of their own. The JPEGs next to them stay: they are still the file every
+    /// surface reads.
+    public struct RetiredFamilySweep: Sendable, Equatable {
+        public var removedHEICFiles = 0
+        public var didSweep = false
+        public var summary: String {
+            didSweep ? "hd heic retired: removed \(removedHEICFiles) file(s)"
+                     : "hd heic retired: already swept"
+        }
+    }
+
+    public private(set) var retiredFamilySweep = RetiredFamilySweep()
+
+    /// `thumbs/hd/.heic-retired-v1`
+    public var heicRetiredMarkerURL: URL {
+        root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+            .appendingPathComponent(Self.heicRetiredMarkerName)
+    }
+    private static let heicRetiredMarkerName = ".heic-retired-v1"
+
+    /// Delete every `.heic` under `hd/` once. Idempotent by marker; cheap (`contentsOfDirectory` per
+    /// shard) and runs before a single lookup, like the layout migration above it.
+    @discardableResult
+    public func retireHEICFamilyIfNeeded() -> RetiredFamilySweep {
+        var sweep = RetiredFamilySweep()
+        if fm.fileExists(atPath: heicRetiredMarkerURL.path) { return sweep }
+        let hdRoot = root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: hdRoot.path, isDirectory: &isDir), isDir.boolValue {
+            sweep.removedHEICFiles = Self.removeFiles(under: hdRoot) { $0.hasSuffix(".heic") }
+        }
+        try? fm.createDirectory(at: hdRoot, withIntermediateDirectories: true)
+        try? Data("heic-retired-v1".utf8).write(to: heicRetiredMarkerURL, options: .atomic)
+        sweep.didSweep = true
+        return sweep
+    }
+
+    /// Delete the files under `dir` whose name satisfies `match`; returns how many went. Two levels
+    /// deep is the whole `hd` layout (`hd/<a>/<b>/<digest>.ext`), so a bounded walk is enough.
+    private static func removeFiles(under dir: URL, match: (String) -> Bool) -> Int {
+        let fm = FileManager.default
+        var removed = 0
+        func walk(_ url: URL, depth: Int) {
+            guard let names = try? fm.contentsOfDirectory(atPath: url.path) else { return }
+            for name in names where !name.hasPrefix(".") {
+                let child = url.appendingPathComponent(name)
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: child.path, isDirectory: &isDir) else { continue }
+                if isDir.boolValue {
+                    if depth < 2 { walk(child, depth: depth + 1) }
+                } else if match(name) {
+                    if (try? fm.removeItem(atPath: child.path)) != nil { removed += 1 }
+                }
+            }
+        }
+        walk(dir, depth: 0)
+        return removed
     }
 
     // MARK: - 308 · one file per content hash

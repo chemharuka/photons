@@ -465,12 +465,12 @@ final class ThumbnailPQJPEGTests: XCTestCase {
         }
     }
 
-    // MARK: - the two files of one render
+    // MARK: - one file per render (311: the HEIC half is retired)
 
-    /// A `.hdJPEG` request must leave **both** files: the 512-shaped JPEG the cells read and the 1920
-    /// HEIC the loupe draws before its frame exists. One render, two uses — and the second request
-    /// must not re-encode the HEIC.
-    func testProducingAJPEGAlsoLeavesTheLoupeHEIC() throws {
+    /// A `.hdJPEG` request must leave **one** file — the 1920 PQ JPEG the cells read *and* the
+    /// loupe's stand-in reads (311). The 1920 HEIC that 308 wrote as a by-product is no longer
+    /// produced: encoding it was the slow half of a warm and no surface needs two files per photo.
+    func testProducingAJPEGLeavesNoHEICAndIsNotReEncoded() throws {
         guard ProcessInfo.processInfo.environment["PHOTONS_PQ_BENCH"] != nil else {
             throw XCTSkip("set PHOTONS_PQ_BENCH=1 (needs a RAW)")
         }
@@ -482,13 +482,19 @@ final class ThumbnailPQJPEGTests: XCTestCase {
         let hash = sha256(url.path)
         let jpegKey = ThumbKey.hdJPEG(contentHash: hash, document: .neutral)
         let heicKey = ThumbKey.hd(contentHash: hash, document: .neutral)
+        let jpegURL = cache.url(for: jpegKey)
 
         let payload = try provider.produce(jpegKey, source: url)
         XCTAssertTrue(ThumbnailJPEG.looksComplete(payload.data))
         XCTAssertEqual(payload.source, "graph-pq-jpeg")
         try cache.store(payload.data, for: jpegKey)
-        XCTAssertTrue(cache.exists(jpegKey), "the JPEG the cells asked for")
-        XCTAssertTrue(cache.exists(heicKey), "the HEIC the loupe's first frame reads")
+        XCTAssertTrue(cache.exists(jpegKey), "the JPEG every surface reads")
+        XCTAssertFalse(cache.exists(heicKey), "311: the HEIC family is retired, not written")
+
+        // The directory holds exactly one file for this photo — the JPEG.
+        let names = (try? fm.contentsOfDirectory(atPath: jpegURL.deletingLastPathComponent().path)) ?? []
+        XCTAssertEqual(names.filter { $0.hasSuffix(".heic") }.count, 0)
+        XCTAssertEqual(names.filter { !$0.hasPrefix(".") }.count, 1, "\(names)")
 
         let source = try XCTUnwrap(CGImageSourceCreateWithData(payload.data as CFData, nil))
         let props = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
@@ -497,10 +503,11 @@ final class ThumbnailPQJPEGTests: XCTestCase {
         XCTAssertLessThanOrEqual(edge, 1920)
         XCTAssertGreaterThan(edge, 1000, "the file keeps the render's 1920, the decode shrinks it")
 
-        let heicBefore = try Data(contentsOf: cache.url(for: heicKey)).count
+        // A second request for the same key must not re-encode: the service answers `hit`.
+        let before = try Data(contentsOf: jpegURL)
         _ = try provider.produce(jpegKey, source: url)
-        let heicAfter = try Data(contentsOf: cache.url(for: heicKey)).count
-        XCTAssertEqual(heicBefore, heicAfter, "the HEIC must not be re-encoded on a second JPEG request")
+        let after = try Data(contentsOf: jpegURL)
+        XCTAssertEqual(before, after, "the JPEG must not be rewritten on a second request")
     }
 
     // MARK: - the +52 % "peak" on three files

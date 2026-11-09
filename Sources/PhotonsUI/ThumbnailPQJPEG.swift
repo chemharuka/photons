@@ -41,6 +41,17 @@ enum ThumbnailPQJPEG {
     static var pqSpace: CGColorSpace? { CGColorSpace(name: CGColorSpace.displayP3_PQ) }
     static var linearSpace: CGColorSpace? { CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) }
 
+    /// One context for every encode in the process (311): a `CIContext` owns a Metal device and a
+    /// shader cache, and building one per thumbnail was pure overhead on the warm path. The colour
+    /// configuration is fixed by the encoder, so sharing it cannot change a pixel.
+    private static let encodeContext = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+            ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.displayP3_PQ)
+            ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+        .cacheIntermediates: false,
+    ])
+
     /// Encode `linear` (display P3, extended-range half floats) as a PQ JPEG whose long edge is at
     /// most `longEdge`. Returns `nil` only when Core Graphics refuses a bitmap — never a silently
     /// tone-mapped file.
@@ -79,8 +90,10 @@ enum ThumbnailPQJPEG {
 
         // Both working and output space pinned: an unpinned working space would route a P3 picture
         // through linear sRGB before the PQ encode, which is the same class of bug as the tone map.
-        let context = CIContext(options: [.workingColorSpace: lin, .outputColorSpace: pq,
-                                          .cacheIntermediates: false])
+        // 311 — one shared context: building a `CIContext` per encode was ~40 ms of the warm's
+        // budget for nothing (a context owns a Metal device and a shader cache; `CIContext` is
+        // thread-safe and this one never changes its colour configuration).
+        let context = Self.encodeContext
         var codes = [UInt16](repeating: 0, count: tw * th * 4)
         codes.withUnsafeMutableBytes { raw in
             guard let base = raw.baseAddress else { return }
