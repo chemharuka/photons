@@ -41,7 +41,12 @@ public struct FrameTransform: Sendable, Equatable {
     /// The decoded S1 frame.
     public let decodedSource: ImageSize
 
-    /// S3 — the frame canvas, in S1 pixels (full resolution).
+    /// 307 — **which** canvas S3 is (`CanvasRole`). `.export` is 301's crop frame; `.document` is the
+    /// turned whole photograph's AABB with the frame centred in it. Defaulted everywhere, so every
+    /// pre-307 caller keeps the export canvas bit for bit.
+    public let canvasRole: CanvasRole
+    /// S3 — the canvas, in S1 pixels (full resolution): the crop frame (`.export`) or the photograph's
+    /// AABB (`.document`).
     public let canvasS3: ImageSize
     /// S2 — the crop frame's bounding box in S3. At a right angle its origin is the frame's own
     /// top-left; at an angle the frame is a quad (`frameQuadInS3`) and this is its AABB.
@@ -124,7 +129,8 @@ public struct FrameTransform: Sendable, Equatable {
                 cameraWindowSize: SIMD2<Double>? = nil,
                 cameraWindow: CGRect? = nil,
                 cameraWindowInS5: ImageRect? = nil,
-                allowsUpscale: Bool = false) {
+                allowsUpscale: Bool = false,
+                canvasRole: CanvasRole = .export) {
         let ds = Self.validScale(decodeScale)
         let z = Self.validScale(zoom)
         let crop = crop.clamped(allowsOutsideSource: true)
@@ -136,6 +142,7 @@ public struct FrameTransform: Sendable, Equatable {
         self.flipHorizontal = flipHorizontal
         self.flipVertical = flipVertical
         self.decodeScale = ds
+        self.canvasRole = canvasRole
         let decoded = ImageSize(
             width: max(1, Int((Double(source.width) * ds).rounded())),
             height: max(1, Int((Double(source.height) * ds).rounded())))
@@ -159,7 +166,7 @@ public struct FrameTransform: Sendable, Equatable {
         // canvas' `ceil` and its inset drift by up to half a decoded pixel (× the zoom).
         let cg = CropGeometry(geometry: group, source: source)
         self.geometry = cg
-        self.canvasS3 = cg.canvas
+        self.canvasS3 = cg.canvas(canvasRole)
         let frame = cg.frameSize
         self.cropOrigin = Point(crop.left * Double(source.width),
                                 crop.top * Double(source.height))
@@ -177,8 +184,8 @@ public struct FrameTransform: Sendable, Equatable {
             let fromPhoto = Matrix3(rows: [[1 / Double(max(decoded.width, 1)), 0, 0],
                                            [0, 1 / Double(max(decoded.height, 1)), 0],
                                            [0, 0, 1]])
-            let toCanvas = Matrix3(rows: [[Double(cg.canvas.width), 0, 0],
-                                          [0, Double(cg.canvas.height), 0],
+            let toCanvas = Matrix3(rows: [[Double(cg.canvas(canvasRole).width), 0, 0],
+                                          [0, Double(cg.canvas(canvasRole).height), 0],
                                           [0, 0, 1]])
             let flip = Self.cropFlipMatrix(crop: crop, decoded: decoded,
                                            flipH: flipHorizontal, flipV: flipVertical)
@@ -208,7 +215,7 @@ public struct FrameTransform: Sendable, Equatable {
             // canvas-normalised space, and 274 records that difference (36.97 px at 45° / off-centre
             // / flip H) for the "kernel 透视路径统一到 S1/S3" task.
             let centre = Point(Double(source.width) / 2, Double(source.height) / 2)
-            let inset = Point(Double(cg.canvasInset.x), Double(cg.canvasInset.y))
+            let inset = Point(cg.canvasInset(canvasRole).x, cg.canvasInset(canvasRole).y)
             let toFrame = Matrix3(rows: [[1, 0, inset.x - cropOrigin.x],
                                          [0, 1, inset.y - cropOrigin.y],
                                          [0, 0, 1]])
@@ -221,14 +228,30 @@ public struct FrameTransform: Sendable, Equatable {
         self.s3ToS1 = Self.inverse(photoToCanvas)
         // The crop frame's four corners in S3, through the same exit the pixels use.
         //
-        // 301b — S3 **is** the crop frame (the canvas), so the frame's quad in S3 is the canvas
-        // rectangle: `(0, 0) … (W, H)`. Pre-301 the canvas was the turned crop's AABB and this walk
-        // placed a turned frame inside it; applying `photoToCanvas` to the crop corners again now
-        // would rotate the frame out of its own canvas (a 45° quad of 282.8 px inside a 240 px
+        // 301b — for `.export` S3 **is** the crop frame (the canvas), so the frame's quad in S3 is
+        // the canvas rectangle: `(0, 0) … (W, H)`. Pre-301 the canvas was the turned crop's AABB and
+        // this walk placed a turned frame inside it; applying `photoToCanvas` to the crop corners
+        // again would rotate the frame out of its own canvas (a 45° quad of 282.8 px inside a 240 px
         // canvas, which is what `RotateCropFortyFiveTests` measured).
-        let corners = [(0.0, 0.0), (Double(cg.canvas.width), 0.0),
+        //
+        // 307 — for `.document` the canvas is the photograph's AABB and the frame *is* a turned quad
+        // inside it (a full crop's quad touches the AABB at four points, an inset crop's sits inside
+        // with black around it). So the document role takes the pre-301b walk, unchanged: the four
+        // crop corners through `photoToCanvas`, which already carries the `(canvas − frame)/2` inset
+        // of this role.
+        let corners: [Point]
+        switch canvasRole {
+        case .export:
+            corners = [(0.0, 0.0), (Double(cg.canvas.width), 0.0),
                        (Double(cg.canvas.width), Double(cg.canvas.height)),
                        (0.0, Double(cg.canvas.height))].map { Point($0.0, $0.1) }
+        case .document:
+            corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner -> Point in
+                Self.apply(photoToCanvas,
+                           Point((crop.left + corner.0 * crop.width) * Double(source.width),
+                                 (crop.top + corner.1 * crop.height) * Double(source.height)))
+            }
+        }
         self.frameQuadInS3 = corners
         let minX = corners.map(\.x).min() ?? 0
         let minY = corners.map(\.y).min() ?? 0
@@ -249,14 +272,14 @@ public struct FrameTransform: Sendable, Equatable {
             // by the canvas' own inset — zero since 301b, when the canvas became the frame itself.
             // It is **not** rotated: the window is a window onto the canvas, exactly what
             // `RenderOptions.outputWindow` indexes.
-            let inset = cg.canvasInset
+            let inset = cg.canvasInset(canvasRole)
             windowS3 = (Point((window.minX - cropOrigin.x) + inset.x,
                               (window.minY - cropOrigin.y) + inset.y),
                         SIMD2(Double(window.width), Double(window.height)))
         } else {
             windowS3 = (cameraOffset,
-                        cameraWindowSize ?? SIMD2(Double(cg.canvas.width),
-                                                  Double(cg.canvas.height)))
+                        cameraWindowSize ?? SIMD2(Double(cg.canvas(canvasRole).width),
+                                                  Double(cg.canvas(canvasRole).height)))
         }
         let safeWindow = SIMD2(max(windowS3.size.x, 1e-9), max(windowS3.size.y, 1e-9))
         let requested = ImageSize(
@@ -295,8 +318,8 @@ public struct FrameTransform: Sendable, Equatable {
                                        [0, 0, 1]])
         self.s3ToS5 = translate
         self.s5ToS3 = Self.inverse(translate)
-        self.renderBaseline = ImageSize(width: max(1, Int((Double(cg.canvas.width) * z).rounded())),
-                                        height: max(1, Int((Double(cg.canvas.height) * z).rounded())))
+        self.renderBaseline = ImageSize(width: max(1, Int((Double(cg.canvas(canvasRole).width) * z).rounded())),
+                                        height: max(1, Int((Double(cg.canvas(canvasRole).height) * z).rounded())))
         let kx = contentWidth / Double(max(requested.width, 1))
         let ky = contentHeight / Double(max(requested.height, 1))
         self.contentPerRequested = kx
@@ -324,13 +347,15 @@ public struct FrameTransform: Sendable, Equatable {
                 viewport: ImageSize?,
                 cameraOffset: Point,
                 cameraWindowSize: SIMD2<Double>?,
-                allowsUpscale: Bool) {
+                allowsUpscale: Bool,
+                canvasRole: CanvasRole = .export) {
         self.init(source: source, crop: crop, straightenDegrees: straightenDegrees,
                   quarterTurns: quarterTurns, flipHorizontal: flipHorizontal,
                   flipVertical: flipVertical, perspective: perspective,
                   decodeScale: 1, contentScale: contentScale, viewport: viewport,
                   zoom: contentScale, cameraOffset: cameraOffset,
-                  cameraWindowSize: cameraWindowSize, allowsUpscale: allowsUpscale)
+                  cameraWindowSize: cameraWindowSize, allowsUpscale: allowsUpscale,
+                  canvasRole: canvasRole)
     }
 
     // MARK: - convenience
@@ -359,7 +384,7 @@ public struct FrameTransform: Sendable, Equatable {
     /// that has to land on a rendered pixel.
     public func viewPointToUnrotatedSource(_ point: Point) -> Point {
         let s3 = Self.apply(s5ToS3, point)
-        let frame = geometry.framePoint(canvasX: s3.x, canvasY: s3.y)
+        let frame = geometry.framePoint(canvasX: s3.x, canvasY: s3.y, role: canvasRole)
         // 298 — S3 is the **full-resolution** source grid (261); the decoded rung is only the
         // renderer's allocation. No rung factor belongs in this walk (the inverse below has none
         // either), or the frame measures `decoded / source` of itself on every non-1.0 rung.
@@ -372,7 +397,7 @@ public struct FrameTransform: Sendable, Equatable {
         // must not be scaled by `decodedSource / source`. That residual factor made the 0.5 preview
         // rung's stand-in exactly half-size (the reported top-left-quarter `切图` placeholder).
         let frame = Point(point.x - cropOrigin.x, point.y - cropOrigin.y)
-        let p = geometry.canvasPoint(frameX: frame.x, frameY: frame.y)
+        let p = geometry.canvasPoint(frameX: frame.x, frameY: frame.y, role: canvasRole)
         return Self.apply(s3ToS5, Point(p.x, p.y))
     }
 

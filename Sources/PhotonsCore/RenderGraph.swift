@@ -81,6 +81,16 @@ public struct RenderOptions: Sendable {
     /// Output canvas. `nil` = the content size (export). A viewport passes its own size and the
     /// photograph is letterboxed inside it, which is what the screen actually shows.
     public var canvas: ImageSize?
+    /// 307 — **which** canvas `canvas`/`outputWindow` name. `.export` (the default) is 301's crop
+    /// frame: the output picture, no baseline, no inset. `.document` is the interaction canvas — the
+    /// turned whole photograph's AABB (`CropGeometry.canvas(.document)`), with the crop frame centred
+    /// inside it at `(canvas − frame)/2`, the photograph turned about that centre and the corners it
+    /// does not cover written `000000`. The `0F0F0F` matte is then only what lies **outside** the
+    /// box, which is the user's 2026-11-09 report: 0F 遮罩没有按旋转后的源画布大小.
+    ///
+    /// It is one value, not two booleans, and `plan` branches on it in exactly one place, because a
+    /// pair of flags is how 301 and 301b came to disagree about which rectangle "the canvas" was.
+    public var canvasRole: CanvasRole
     /// Output pixels relative to crop pixels. 1 = 1:1, 0.25 = quarter-size preview.
     public var scale: Double
     /// Render only this part of the canvas, in **content pixels** — the whole output's own pixel grid
@@ -291,6 +301,7 @@ public struct RenderOptions: Sendable {
     public var stopBefore: RenderStage?
 
     public init(canvas: ImageSize? = nil,
+                canvasRole: CanvasRole = .export,
                 scale: Double = 1,
                 outputWindow: ImageRect? = nil,
                 display: DisplayOptions = DisplayOptions(),
@@ -315,6 +326,7 @@ public struct RenderOptions: Sendable {
                 legacyDehazeUnboundedRecovery: Bool = false,
                 stopBefore: RenderStage? = nil) {
         self.canvas = canvas
+        self.canvasRole = canvasRole
         self.scale = scale
         self.outputWindow = outputWindow
         self.display = display
@@ -1901,20 +1913,48 @@ public final class RenderGraph {
         // the canvas' whole domain. The old AABB branch is what put a tilted black ring around the
         // photograph; the inset quantities below therefore all reduce to zero without a second
         // rule (they still exist for the kind check and the downstream arithmetic).
-        let expandedCanvas: ImageSize? = nil
+        //
+        // 307 — **except when the caller asked for the document canvas.** The interaction canvas is
+        // the turned *whole photograph*'s AABB, so an expanded baseline comes back for that role and
+        // only for it: `baseline = photoExtent × scale`, `inset = (baseline − frame)/2`, and S0's
+        // existing "sampled past the photograph is background" branch paints the corners `000000`
+        // while the `0F0F0F` matte is left to the present pass outside this box. The export role is
+        // byte-for-byte the 301 line above; the value is a `CanvasRole`, not a flag pair, so a future
+        // caller cannot switch half of it.
+        let expandedCanvas: ImageSize?
+        switch options.canvasRole {
+        case .export:
+            expandedCanvas = nil
+        case .document:
+            let documentExtent = CropGeometry.rotatedExtent(of: orientedSource,
+                                                             degrees: edit.geometry.straightenDegrees)
+            // `cropPixels` is the frame at 1:1; the box can never be smaller than the frame it holds.
+            expandedCanvas = ImageSize(width: max(CropGeometry.canvasPixels(documentExtent.width),
+                                                  cropPixels.width),
+                                       height: max(CropGeometry.canvasPixels(documentExtent.height),
+                                                   cropPixels.height))
+        }
         // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
-        let baseline = expandedCanvas.map {
+        let scaledBaseline = expandedCanvas.map {
             ImageSize(width: max(1, Int((Double($0.width) * scale).rounded())),
                       height: max(1, Int((Double($0.height) * scale).rounded())))
         } ?? frame
+        // 307: a keystoned frame can exceed the plain `rotatedExtent` box; the box always holds it.
+        let baseline = ImageSize(width: max(scaledBaseline.width, frame.width),
+                                 height: max(scaledBaseline.height, frame.height))
         // Where the picture's own frame starts inside the baseline, in baseline pixels.
         //
-        // 301b — there is nothing to compute: the canvas **is** the frame (`CropMath.canvasSize`),
-        // the baseline *is* the frame at every angle, and `s0_geometry` samples `p.c` from canvas
-        // pixel 0. 279's AABB origin (and 162's frame-centred half margin before it) described a
-        // picture placed inside a larger box; there is no larger box. `CropGeometry.canvasInset`
-        // answers the same `(0, 0)` by name, so the overlay and the renderer cannot disagree.
-        let inset = SIMD2<Float>(0, 0)
+        // 301b — for `.export` there is nothing to compute: the canvas **is** the frame
+        // (`CropMath.canvasSize`), the baseline *is* the frame at every angle, and `s0_geometry`
+        // samples `p.c` from canvas pixel 0. `CropGeometry.canvasInset` answers the same `(0, 0)` by
+        // name, so the overlay and the renderer cannot disagree.
+        // 307 — for `.document` the frame sits centred in the AABB: `(baseline − frame)/2`, integral,
+        // the same one snap the pre-301 `centred` branch took. At θ = 0 the AABB *is* the frame, so
+        // the value is 0 there and an upright document's bytes cannot move.
+        let inset: SIMD2<Float> = expandedCanvas == nil
+            ? SIMD2<Float>(0, 0)
+            : SIMD2<Float>(Float((baseline.width - frame.width) / 2),
+                           Float((baseline.height - frame.height) / 2))
         let baselineRect = ImageRect(x: 0, y: 0, width: baseline.width, height: baseline.height)
 
         // A window covering the baseline *is* no window: normalizing here means "1:1 on a picture
@@ -1954,7 +1994,9 @@ public final class RenderGraph {
             cameraWindowSize: nil,
             cameraWindow: nil,
             cameraWindowInS5: window,
-            allowsUpscale: expandedCanvas == nil && !options.neverUpscalesContent)
+            allowsUpscale: expandedCanvas == nil && !options.neverUpscalesContent,
+            // 307 — the plan's own assembly is of the same canvas it is allocating.
+            canvasRole: options.canvasRole)
         let requested = transform.requestedInS5
         let canvas = transform.viewport
         // The renderer's own grid is integer: `FrameTransform` reports the letterbox continuously

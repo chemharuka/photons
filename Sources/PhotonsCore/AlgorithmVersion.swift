@@ -40,6 +40,12 @@ public enum StageAlgorithmVersion {
 
     // One number per stage, in `RenderStage.order`. 2 = "the maths changed after graph-v1 was set".
 
+    /// **5** — 307：画布分成两个类型（`CanvasRole.document/.export`）。`.export` 仍是 301 的
+    /// 「画布 = 旋转后的裁切框」，所以 `--golden` 的像素逐字节不变（`ed99453e…` / `ee726906…`，
+    /// 改前改后同值）；但同一个 crop/angle 现在能渲染出**第二张**画布（整张照片的 AABB，四角
+    /// `000000`），而且 S0 的 `frameOrigin/inset` 在 `.document` 下不再是 0 —— 缓存键必须分开，
+    /// 否则交互画布会命中导出画布的 S0 纹理。这就是 bump 的理由（同一参数、不同像素）。
+    ///
     /// **4** — 301：输出画布 = 旋转后的裁切框本身（方案 A），并删掉 S0 里「采样坐标 vs `p.c`」的
     /// 空间错配钳制。同样的 crop/angle 现在渲染的像素不同：内缩 + 非直角不再被误涂黑（9° 实测
     /// 7.385 % → 0），满幅的 AABB 黑边也随画布一起消失。直角（`straighten == 0`）逐字节不变。
@@ -54,7 +60,7 @@ public enum StageAlgorithmVersion {
     /// **2** — 183: the keystone (`geometry.perspectiveVertical/Horizontal`) joined S0's sample
     /// coordinate, with the canvas as the inscribed rectangle of the warped quad.
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic, before the keystone).
-    public static let geometry = 4
+    public static let geometry = 5
     /// **8** — 179: 原色校准 joined S1 (`CalibrationGroup`). The stage's exit now multiplies by a
     /// 3×3 primaries matrix and applies the shadows' green↔magenta tint, so a document whose seven
     /// calibration numbers are **not** all 0 renders pixels it could not render before. A document

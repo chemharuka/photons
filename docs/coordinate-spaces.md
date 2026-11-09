@@ -71,8 +71,10 @@
 | `CropGeometry.source` | 摆正后的照片尺寸 | S1 |
 | `CropGeometry.frameSize` | 保留画面的 1:1 像素尺寸 | S2 |
 | `CropGeometry.frameExtent` | S2 旋转后的连续包围盒（301 起只是合法区读数，不是 S3） | S2 的 AABB，旧口径 |
-| `CropGeometry.canvas` / `plan.canvas` | 渲染输出尺寸（= `frameSize`） | S3 = S2 |
+| `CropGeometry.canvas` / `plan.canvas` | 渲染输出尺寸（= `frameSize`，`.export`） | S3 = S2 |
+| `CropGeometry.canvas(.document)` | 整幅照片旋转后的 AABB（裁切界面的渲染面） | S3 = S4 |
 | `CropGeometry.photoCanvas` | 整幅照片旋转后的包围盒 | S4 |
+| `CropGeometry.canvasInset(.document)` | 裁切框在文档画布里的 `(canvas−frame)/2` | S3 |
 | `LoupeFraming.mapping` | S3 → S5 的映射（origin/content 都是 S5 里的位置） | S3→S5 |
 | `session.ingestedSourceFrame` | 解码期发布的整份文件尺寸（已除 `decodeScale`） | S1 |
 
@@ -90,4 +92,4 @@
 
 ## 7. 一句话记住
 
-> 修复/蒙版在 **S1 源像素**；裁切框是 **S2 帧**；编辑界面画的是 **S3 帧画布**；裁切界面画的是 **S4 源画布**；两个都装进 **S5 视口**。
+> 修复/蒙版在 **S1 源像素**；裁切框是 **S2 帧**；导出/成品界面画的是 **S3 帧画布**（`.export`）；裁切界面画的是 **S4 源画布**（`.document`）；两个都装进 **S5 视口** —— 307 把这两个画布变成了类型 `CanvasRole`，不再靠约定。

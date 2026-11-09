@@ -188,31 +188,31 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(implicit.display, explicit.display)
 
         let expected: [(String, String, String)] = [
-            ("geometry", "d4fa7fb30cd112629c1206cea1f8bc0adb08840854b46fd706f3faa7b90ba370",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=4"),
-            ("sceneLinear", "16a31c311a637d4cb5444b50d86fa1826e64864bcf86073a5de46a84a8c83eab",
-             "d4fa7fb30cd112629c1206cea1f8bc0adb08840854b46fd706f3faa7b90ba370|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
-            ("curve", "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff",
-             "16a31c311a637d4cb5444b50d86fa1826e64864bcf86073a5de46a84a8c83eab|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
+            ("geometry", "852f5668846d56f8bdb097213c2f25560fced26ae7ae1d263688276ceaf4a6f8",
+             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=5"),
+            ("sceneLinear", "ce2f19ae8903be3ecaa68f4a530b48d62f189dc211dc2871a67ad7d5af2af16b",
+             "852f5668846d56f8bdb097213c2f25560fced26ae7ae1d263688276ceaf4a6f8|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
+            ("curve", "ccbbedd7754d98b40dd0aa2274f77c1381de98f1724baf6050b5669fcfdd378c",
+             "ce2f19ae8903be3ecaa68f4a530b48d62f189dc211dc2871a67ad7d5af2af16b|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
             // 159: the contrast link is seeded by the tone map and feeds colour; alg=3.
             // 228 换算子后重钉（alg=2→3）
-            ("toneMap", "a89f38baaf38871928dad58f11268d922e773d07d15abc63fd57d3b32d2f0d36",
-             "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff|hi=-30.00000;sh=15.00000;alg=7"),
+            ("toneMap", "adfd15ead7a524d68bdf87f4a9d792ff04b9272246974eb9b16b3f707077d10d",
+             "ccbbedd7754d98b40dd0aa2274f77c1381de98f1724baf6050b5669fcfdd378c|hi=-30.00000;sh=15.00000;alg=7"),
             // 228 换算子后重钉（alg=2→3）
-            ("contrast", "02e27a184fc01e3bad8e580cce222fea5c8f2771b854bf20752a077a7be0b315",
-             "a89f38baaf38871928dad58f11268d922e773d07d15abc63fd57d3b32d2f0d36|contrast|con=20.00000;alg=3"),
+            ("contrast", "bab6c75ad3d3bf76667ae15943eca98b5bc3494342cced7b2ae749bfb1fe76e3",
+             "adfd15ead7a524d68bdf87f4a9d792ff04b9272246974eb9b16b3f707077d10d|contrast|con=20.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("color", "662fbec3ee6ea1e2b1b9ffc9da10c7dbac97c292f3365a69119d4c897f6a6438",
-             "02e27a184fc01e3bad8e580cce222fea5c8f2771b854bf20752a077a7be0b315|vib=15.00000;sat=-10.00000;alg=1"),
+            ("color", "9767d47c95c407aa69373a6685959f8e6701d9745ad914ef9c7b6b84e0e4f035",
+             "bab6c75ad3d3bf76667ae15943eca98b5bc3494342cced7b2ae749bfb1fe76e3|vib=15.00000;sat=-10.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("hsl", "f95e2bbd6346f92461eb0b5ff303ad23768709a8950e85f62f217115c16d6851",
-             "662fbec3ee6ea1e2b1b9ffc9da10c7dbac97c292f3365a69119d4c897f6a6438|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "f861eccbc32a780d5f913b7ed148cc8e0afad4181b74c0508b916a752f4d6ffe",
+             "9767d47c95c407aa69373a6685959f8e6701d9745ad914ef9c7b6b84e0e4f035|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("vignette", "5d1edd0a09a6a514ae50b25db99b7da171fbcbc69f618186a5eb4ec087a464cd",
-             "f95e2bbd6346f92461eb0b5ff303ad23768709a8950e85f62f217115c16d6851|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("vignette", "9f97af1fe8f9bacf4e58b07e2097ccc58b42d02923d8418018f5501770e4bf85",
+             "f861eccbc32a780d5f913b7ed148cc8e0afad4181b74c0508b916a752f4d6ffe|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("display", "c47b2d78518e7199f22a1016936b587668dc6d7dfae9494fb2113bf169ccd647",
-             "5d1edd0a09a6a514ae50b25db99b7da171fbcbc69f618186a5eb4ec087a464cd|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("display", "2359192db907ba5ace6b5cd5fe9d2e49f6ff7542eb5c233a7f00d0212da176fc",
+             "9f97af1fe8f9bacf4e58b07e2097ccc58b42d02923d8418018f5501770e4bf85|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [

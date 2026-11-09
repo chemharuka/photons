@@ -102,13 +102,15 @@ final class CropWorkspaceFitTests: XCTestCase {
                           Double(framing.viewport.height) / aabb.height)
         XCTAssertEqual(refit, min(1, aabbFit * LoupeFraming.fitMargin), accuracy: 1e-6,
                        "45° must fit the rotated canvas at the one 90 % margin")
-        // 301b — the canvas is the crop **frame** at every angle, so 45° re-fits to the same zoom
-        // it had at 0°: the turned AABB that used to force a second, smaller fit (`< cropFit·0.95`)
-        // is exactly what 301 removed.
-        XCTAssertEqual(refit, cropFit, accuracy: 1e-6,
-                       "45° must not shrink the canvas — it is the crop frame, not its AABB")
-        XCTAssertGreaterThan(refit, ordinaryFit * 0.7,
-                             "a 3:2 frame at 45° is ~0.85 of the ordinary fit, not 0.707")
+        // 307 — 301b's reading ("the canvas is the crop frame, so 45° must not shrink") was the
+        // 0F-mask report: the crop workspace's canvas is the turned **whole photograph's AABB**, so
+        // 45° *must* shrink the view — otherwise the AABB's picture overflows the viewport by the
+        // 78.9 / 173.8 px `CanvasRole307Tests` measures going to 0. The fit still has the one 90 %
+        // margin, and it is strictly smaller than the 0° (crop-frame) fit.
+        XCTAssertLessThan(refit, cropFit - 1e-6,
+                          "45° must shrink the view — the canvas is the photograph's AABB")
+        XCTAssertEqual(refit, min(1, aabbFit * LoupeFraming.fitMargin), accuracy: 1e-6,
+                       "45° must still be one 90 % fit, of the document canvas")
         print(String(format: "132 §10 · 45° · ordinary %.6f · crop@0 %.6f · refit %.6f (%.4f/fit)",
                      ordinaryFit, cropFit, refit, refit / ordinaryFit))
 

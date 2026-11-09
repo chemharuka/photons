@@ -133,6 +133,59 @@ public extension CropGeometry {
         return (Int(inset.x.rounded()), Int(inset.y.rounded()))
     }
 
+    // MARK: 307 — the two canvases, by name
+
+    /// The canvas a *render* is of — see `CanvasRole`.
+    ///
+    /// `.export` is 301's crop frame (`canvas` / `canvasExtent`, bit for bit). `.document` is the
+    /// turned whole photograph's AABB — `max(photoExtent, frameExtent)` so a crop frame that reaches
+    /// outside the photograph is still *inside* its canvas, which is the point of the box.
+    public func canvasExtent(_ role: CanvasRole) -> DSize {
+        switch role {
+        case .export:
+            return canvasExtent
+        case .document:
+            let e = photoExtent, f = frameExtentPixels
+            return DSize(width: max(e.width, f.width), height: max(e.height, f.height))
+        }
+    }
+
+    /// `canvasExtent(role)` in whole pixels: `canvas` for `.export`, `photoCanvas` for `.document`.
+    public func canvas(_ role: CanvasRole) -> ImageSize {
+        switch role {
+        case .export:
+            return canvas
+        case .document:
+            let e = canvasExtent(role)
+            return ImageSize(width: Self.canvasPixels(e.width), height: Self.canvasPixels(e.height))
+        }
+    }
+
+    /// Where the crop frame starts inside the canvas, in canvas pixels, **continuous**.
+    ///
+    /// `.export` is `(0, 0)` (the canvas *is* the frame). `.document` centres the frame in the box:
+    /// `(canvas − frame)/2`, the one margin the pre-301 code called the AABB inset. The photograph is
+    /// turned **about the canvas' centre** — the same pivot S0 uses — so a centred frame (a full crop,
+    /// which is what the crop tool always hands the canvas: `CropToolController.canvasEdit`) lands
+    /// exactly on the photograph's own centre. An off-centre frame is not meaningful in this role and
+    /// no interaction path asks for one: the role describes the *document* box, and the crop is drawn
+    /// on top of it as an overlay.
+    public func canvasInset(_ role: CanvasRole) -> (x: Double, y: Double) {
+        switch role {
+        case .export:
+            return canvasInset
+        case .document:
+            let c = canvasExtent(role), f = frameExtentPixels
+            return ((c.width - f.width) / 2, (c.height - f.height) / 2)
+        }
+    }
+
+    /// `canvasInset(role)` rounded once, the way `RenderGraph.plan` rounds it.
+    public func canvasInsetPixels(_ role: CanvasRole) -> (x: Int, y: Int) {
+        let inset = canvasInset(role)
+        return (Int(inset.x.rounded()), Int(inset.y.rounded()))
+    }
+
     // MARK: the document canvas (space 4)
 
     /// The turned **whole photograph**'s continuous bounding box, in photo pixels.
@@ -204,14 +257,18 @@ public extension CropGeometry {
     /// canvas was the turned frame's AABB; that box no longer exists, and rotating here would
     /// un-place the crop quad inside its own canvas (done twice, once by this walk and once by
     /// `s0_geometry`, the overlay's corners came out 79–116 px off the picture at 9°/15°).
-    func canvasPoint(frameX: Double, frameY: Double) -> (x: Double, y: Double) {
-        (frameX, frameY)
+    func canvasPoint(frameX: Double, frameY: Double,
+                     role: CanvasRole = .export) -> (x: Double, y: Double) {
+        let inset = canvasInset(role)
+        return (frameX + inset.x, frameY + inset.y)
     }
 
     /// The inverse of `canvasPoint` — the walk a click on the canvas does to reach the frame.
-    /// The identity, for the same reason (`canvas == frame` since 301b).
-    func framePoint(canvasX: Double, canvasY: Double) -> (x: Double, y: Double) {
-        (canvasX, canvasY)
+    /// The identity for `.export`; `.document` subtracts the `(canvas − frame)/2` margin.
+    func framePoint(canvasX: Double, canvasY: Double,
+                    role: CanvasRole = .export) -> (x: Double, y: Double) {
+        let inset = canvasInset(role)
+        return (canvasX - inset.x, canvasY - inset.y)
     }
 
     // MARK: photo pixels ⇄ frame ⇄ canvas

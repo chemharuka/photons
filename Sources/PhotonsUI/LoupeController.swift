@@ -2619,6 +2619,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the camera has to describe the same picture the frame job renders (`canvasEdit`), or the
         // overlay would be projected through a crop the pixels no longer have.
         let edit = cropTool.canvasEdit(from: session?.edit ?? .neutral)
+        // 307 — the projection's canvas follows the tool: 裁切 shows the **document** canvas (the turned
+        // whole photograph's AABB), everything else the export canvas (the crop frame, 301).
+        let role = cropTool.canvasRole
         // 202 ④ — only a buffer of **this** photo may describe this photo's projection.
         if let image = decoded, decodedIdentity == backdropPhotoKey {
             return LoupeFraming(viewport: size,
@@ -2626,7 +2629,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decodeScale: decodedScale,
                                 edit: edit,
                                 fitScale: currentCropWorkspaceFitScale,
-                                fitMargin: fitMarginOverride)
+                                fitMargin: fitMarginOverride,
+                                canvasRole: role)
         }
         if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
             // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
@@ -2640,7 +2644,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 decodeScale: 1,
                                 edit: edit,
                                 fitScale: currentCropWorkspaceFitScale,
-                                fitMargin: fitMarginOverride)
+                                fitMargin: fitMarginOverride,
+                                canvasRole: role)
         }
         return nil
     }
@@ -6273,7 +6278,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                          decodeScale: ds,
                                          edit: cameraEdit,
                                          fitScale: fitScale,
-                                         fitMargin: fitMarginOverride)
+                                         fitMargin: fitMarginOverride,
+                                         // 307 — the same canvas the overlay is projected through.
+                                         canvasRole: cropTool.canvasRole)
             // 176: the window indexes the **expanded canvas** (the rotated crop's bounding box), so it
             // carries the canvas origin `(canvas − frame)/2` — measured on this rung's grid, which is
             // why the decode scale goes with it.
@@ -6326,7 +6333,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 canvas: viewport,
                 scale: s.scale,
                 display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
-                neverUpscalesContent: neverUpscales)
+                neverUpscalesContent: neverUpscales,
+                // 307 — one value for the pixels, the projection and the overlay.
+                canvasRole: cropTool.canvasRole)
             var options = request.renderOptions()
             options.useCache = useCache
             options.collectHistogram = measure

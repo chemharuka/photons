@@ -56,6 +56,12 @@ final class CropFitNinetyTests: XCTestCase {
 
     // MARK: - acceptance 2: entry is the same projection
 
+    /// 307 — "the ordinary fit itself" is still the rule, but the *ordinary fit of the canvas the crop
+    /// workspace draws*. Since 307 that canvas is the turned whole photograph's AABB
+    /// (`CanvasRole.document`), so an angled document's entry is the `AABB` fit — the same one 90 %,
+    /// a smaller rectangle. At θ = 0 the two coincide (`0.2`); at 5°/7°/45° the AABB is 1.006/1.011/1.179×
+    /// the photograph and the entry is that much smaller. The 301b reading (`entry == crop-frame fit`)
+    /// is what the 78.9/173.8 px overflow came from, and `CanvasRole307Tests` measures it going to 0.
     func testCropWorkspaceEntryIsTheOrdinaryFitItself() {
         for degrees in [0.0, 5, 7, 45] {
             let layout = CropWorkspaceLayout(
@@ -64,14 +70,17 @@ final class CropFitNinetyTests: XCTestCase {
                                width: Double(Self.viewport.width),
                                height: Double(Self.viewport.height)))
             let entry = layout.entry(crop: .full)
-            let framing = LoupeFraming(viewport: Self.viewport,
-                                       sourceWidth: Double(Self.source.width),
-                                       sourceHeight: Double(Self.source.height),
-                                       crop: .full, straightenDegrees: degrees)
-            print(String(format: "213 · %.0f° · entry %.9f · fitZoom %.9f",
-                         degrees, entry.entryZoom, framing.fitZoom))
-            XCTAssertEqual(entry.entryZoom, framing.fitZoom, accuracy: 1e-12,
-                           "\(degrees)°: 裁切入口 must be the ordinary fit itself, not another 0.9")
+            var group = GeometryGroup.identity
+            group.rotationDegrees = degrees
+            let box = CropGeometry(geometry: group, source: Self.source).canvasExtent(.document)
+            let documentFit = LoupeFraming.fitZoom(viewportWidth: Double(Self.viewport.width),
+                                                   viewportHeight: Double(Self.viewport.height),
+                                                   extent: (box.width, box.height),
+                                                   isWholeFrame: true)
+            print(String(format: "213 · %.0f° · entry %.9f · document-canvas fit %.9f (AABB %.3f×%.3f)",
+                         degrees, entry.entryZoom, documentFit, box.width, box.height))
+            XCTAssertEqual(entry.entryZoom, documentFit, accuracy: 1e-12,
+                           "\(degrees)°: 裁切入口 must be the document canvas' fit itself, not another 0.9")
         }
     }
 
