@@ -1,58 +1,109 @@
 import AppKit
 import SwiftUI
 
-/// 288 — the export sheet's one row grid.
+/// 302 — 导出面板改版 A 的**一列**栅格。
 ///
-/// Every row in the sheet (slider rows, picker rows, text rows, button rows) is built by
-/// `ExportRowGridRow`, so the five columns cannot drift apart the way 217/243's slider-only grid did:
+/// 288 的五列（96 / 8 / 240 / 46 / 52 / 64）是列表的度量：46 / 52 / 64 三列在商业产品里没有对应物，
+/// 行高 20 + 行距 6 也装不下 macOS 标准控件，那是「重心不稳」的直接来源。302 把它收回表单：
 ///
-///     [label 96 trailing] [gap 8] [control 240 leading] [value 46 trailing]
-///                         [gap 8] [unit 52 leading]      [gap 8] [accessory 64 leading]
+///     [padding 20] [label 110 trailing] [gap 8] [control 250 leading] …… [readout 102 trailing] [padding 20]
 ///
-/// The columns to the right of the control are always there, even when a row leaves one empty, because
-/// that is what makes the *next* row's number field start at the same x.
+/// 读数（值 + 单位）是一个**右对齐到面板右 padding** 的块：块内 46 / 4 / 52 只是为了让数值框和
+/// 单位在每一行都换到同一个 x（288 的列对齐思想），块本身是一条右沿，不再有第三条列。
+///
+/// 行高 24 / 行距 8 → **pitch 32，只有这一种**；节与节之间额外 16，节标题 24，标题到首行 8。
 enum ExportRowGrid {
-    static let labelWidth: CGFloat = 96
-    static let gap: CGFloat = 8
-    static let controlWidth: CGFloat = 240
-    static let valueWidth: CGFloat = 46
-    static let unitWidth: CGFloat = 52
-    static let accessoryWidth: CGFloat = 64
-    static let rowHeight: CGFloat = 20
-    static let rowSpacing: CGFloat = 6
-    static let sectionHeaderTopSpacing: CGFloat = 12
-    static let sliderWidth: CGFloat = 140
 
-    /// 288 §2.2 — no slider in the sheet asks SwiftUI for a step, so it draws no tick marks. The
-    /// value is a construction constant, not an AppKit readback: SwiftUI's `Slider` has no AppKit
-    /// leaf under `swift test` (217 measured that). The source guard in `ExportRowGrid288Tests`
-    /// keeps the `step:` argument out of `ExportSheet.swift`.
+    // MARK: 面板
+
+    /// 560 —— sheet 固定宽，不再随窗口。左右 padding 相等，这是重心。
+    static let panelWidth: CGFloat = 560
+    static let horizontalPadding: CGFloat = 20
+    /// 内容自适应上限。
+    static let contentMaxHeight: CGFloat = 640
+
+    // MARK: 三列
+
+    /// 标签列，右对齐。
+    static let labelWidth: CGFloat = 110
+    /// 标签右沿到控件左沿。
+    static let gap: CGFloat = 8
+    /// 控件列，左对齐，统一高度 24。
+    static let controlWidth: CGFloat = 250
+    /// 读数块里的数值框（288 的 46 宽度，保持不变，免得同类型控件换位）。
+    static let valueWidth: CGFloat = 46
+    /// 读数块里的单位。
+    static let unitWidth: CGFloat = 52
+    static let readoutGap: CGFloat = 4
+
+    // MARK: 纵向节奏
+
+    static let rowHeight: CGFloat = 24
+    static let rowSpacing: CGFloat = 8
+    /// 节标题相对上一节末行的间距（pitch 32 之外**唯一**的另一种间距）。
+    static let sectionSpacing: CGFloat = 16
+    static let headerHeight: CGFloat = 24
+    static let headerToRows: CGFloat = 8
+    static let footerHeight: CGFloat = 22
+    static let buttonHeight: CGFloat = 28
+    static let disclosureSize: CGFloat = 12
+    /// 下拉菜单（预设 / 元数据 / 重名 / 水印位置）的宽度。
+    static let presetWidth: CGFloat = 150
+    static let menuWidth: CGFloat = 160
+
+    // MARK: 控件
+
+    /// 288 §2.2 —— 滑杆仍是 140 宽、不传 `step:`，所以没有刻度。
+    static let sliderWidth: CGFloat = 140
     static let sliderTickMarks = 0
 
-    /// 288 §2.4 — the whole sheet's type scale. Only `title` is allowed above 10 pt.
+    // MARK: 推导出的锚点（测试读的就是这些）
+
+    static var contentWidth: CGFloat { panelWidth - horizontalPadding * 2 }
+    /// 标签右沿：20 + 110 = 118。
+    static var labelRight: CGFloat { horizontalPadding + labelWidth }
+    /// 控件左沿：118 + 8 = 138。
+    static var controlLeft: CGFloat { labelRight + gap }
+    /// 控件右沿：138 + 250 = 388。
+    static var controlRight: CGFloat { controlLeft + controlWidth }
+    /// 读数块宽：46 + 4 + 52 = 102。
+    static var readoutWidth: CGFloat { valueWidth + readoutGap + unitWidth }
+    /// 读数右沿 = 面板右 padding：560 − 20 = 540。
+    static var readoutRight: CGFloat { panelWidth - horizontalPadding }
+    static var readoutLeft: CGFloat { readoutRight - readoutWidth }
+    /// 行 pitch：24 + 8 = 32。
+    static var rowPitch: CGFloat { rowHeight + rowSpacing }
+
+    /// 288 §2.4 / 302 §2A —— 字号表。标题 13 只留给面板标题。
     enum Font {
         static let title: CGFloat = 13
-        static let sectionHeader: CGFloat = 10
-        static let label: CGFloat = 10
-        static let control: CGFloat = 10
-        static let value: CGFloat = 10
-        static let unit: CGFloat = 10
-        static let hint: CGFloat = 9
+        static let sectionHeader: CGFloat = 12
+        static let label: CGFloat = 12
+        static let control: CGFloat = 12
+        static let value: CGFloat = 12
+        static let unit: CGFloat = 12
+        static let hint: CGFloat = 11
+        static let disclosure: CGFloat = 12
+        static let footer: CGFloat = 12
     }
 }
 
-/// 288 — the column anchors. The hosted `swift test` tree has no AppKit leaf for SwiftUI `Text` or
-/// `Picker`, so these transparent backgrounds are the honest readback of the frames the layout gave
-/// each column (the same trick `ExportSliderRowProbe` / `ExportLayoutProbe` use).
+/// 288 —— 列的锚点。hosted `swift test` 里 SwiftUI 的 `Text` / `Picker` 没有 AppKit 叶子，
+/// 这些透明背景是布局真正给出去的那几个 frame 的诚实读数（217/243 用的同一招）。
 final class ExportRowGridProbe: NSView {
     enum Kind: String {
         case row
         case label
         case control
+        /// 302：读数整块（值 + 单位），右沿 = 面板右 padding。
+        case readout
         case value
         case unit
         case accessory
         case header
+        /// 302：页脚摘要行与按钮带。
+        case summary
+        case buttons
     }
 
     private(set) var kind: Kind = .row
@@ -91,9 +142,7 @@ struct ExportRowGridProbeHost: NSViewRepresentable {
     }
 }
 
-/// 288 §2.4 — the font every TextField / Picker in the sheet carries. The probe records the point
-/// size that was actually applied to that control, so the test can print a control → size list even
-/// though SwiftUI draws its own text and exposes no `NSTextField`/`NSFont` leaf under `swift test`.
+/// 288 §2.4 —— 每个 TextField / Picker 的字体。探针记录真正打到控件上的字号。
 enum ExportControlKind: String {
     case textField
     case picker
@@ -154,16 +203,17 @@ private struct ExportControlFontModifier: ViewModifier {
 }
 
 extension View {
-    /// The one font/control-size rule for every TextField and Picker in the export sheet.
+    /// 导出面板里每个 TextField / Picker 唯一的字号/控件尺寸规则。
     func exportControlFont(_ rowID: String, kind: ExportControlKind,
                            design: Font.Design? = nil) -> some View {
         modifier(ExportControlFontModifier(rowID: rowID, kind: kind, design: design))
     }
 }
 
-/// 288 — the sheet's one row. Every column is fixed-width and every row reserves all five, so the
-/// label right edge, the control left edge, the value leading edge (right-aligned column), the unit
-/// column and the accessory column land on the same x on every row.
+/// 302 —— 面板的一行：三列，宽度固定，空列也占位。
+///
+/// 标签右沿 118、控件左沿 138、读数右沿 540 三根线，每一行都一样 —— 这是「同类型控件位置一致」
+/// 的可判定形式。控件块（250）内部再分：控件内容左对齐、行修饰勾选框贴右沿。
 struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Accessory: View>: View {
     let rowID: String
     let label: Label
@@ -187,22 +237,38 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
     }
 
     var body: some View {
-        HStack(spacing: ExportRowGrid.gap) {
+        HStack(spacing: 0) {
             column(label, width: ExportRowGrid.labelWidth, alignment: .trailing, kind: .label)
-            column(control, width: ExportRowGrid.controlWidth, alignment: .leading, kind: .control)
-            column(value, width: ExportRowGrid.valueWidth, alignment: .trailing, kind: .value)
-            column(unit, width: ExportRowGrid.unitWidth, alignment: .leading, kind: .unit)
-            column(accessory, width: ExportRowGrid.accessoryWidth,
-                   alignment: .leading, kind: .accessory)
+            Color.clear.frame(width: ExportRowGrid.gap)
+            controlBlock
+            Spacer(minLength: 0)
+            readout
         }
         .frame(height: ExportRowGrid.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(ExportRowGridProbeHost(kind: .row, rowID: rowID))
     }
 
-    /// A fixed column that keeps its width even when the row leaves it empty. `EmptyView` plus a
-    /// `.frame` is discarded by SwiftUI (the columns collapsed to 0 in the hosted readback), so the
-    /// width lives on a clear rectangle and the content rides as an overlay.
+    private var controlBlock: some View {
+        control
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .trailing) { accessory }
+            .frame(width: ExportRowGrid.controlWidth, alignment: .leading)
+            .background(ExportRowGridProbeHost(kind: .control, rowID: rowID))
+    }
+
+    /// 读数是一个块：值 46（右对齐）+ 4 + 单位 52（左对齐），整块右对齐到面板右 padding。
+    private var readout: some View {
+        HStack(spacing: ExportRowGrid.readoutGap) {
+            column(value, width: ExportRowGrid.valueWidth, alignment: .trailing, kind: .value)
+            column(unit, width: ExportRowGrid.unitWidth, alignment: .leading, kind: .unit)
+        }
+        .frame(width: ExportRowGrid.readoutWidth, alignment: .trailing)
+        .background(ExportRowGridProbeHost(kind: .readout, rowID: rowID))
+    }
+
+    /// 固定列：`EmptyView` + `.frame` 会被 SwiftUI 丢掉（288 的 hosted 读数里那些列塌成 0），
+    /// 所以宽度长在一块透明矩形上，内容作为 overlay 挂上去。
     private func column<Content: View>(_ content: Content, width: CGFloat,
                                        alignment: Alignment,
                                        kind: ExportRowGridProbe.Kind) -> some View {
@@ -213,30 +279,128 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
     }
 }
 
-/// 288 — a section: header then a 6 pt-spaced run of rows, all inside the sheet's single `Form`
-/// section. The header's 12 pt top padding is the gap from the previous section's last row.
-struct ExportSectionGrid<Rows: View>: View {
+/// 302 —— 一个折叠段：标题行 24（三角 12×12 + 标题 + 收起时的摘要），展开后是 8 pt 间距的行。
+///
+/// 收起的段**不建**子行（`if isExpanded`），所以首屏只有标题 —— 这是「一屏 7 行 + 3 折叠段」
+/// 能被量出来的原因。
+struct ExportCollapsibleSection<Rows: View>: View {
     let title: String
+    let summary: String
+    let isExpanded: Bool
+    let toggle: () -> Void
     let rows: Rows
 
-    init(_ title: String, @ViewBuilder rows: () -> Rows) {
+    init(_ title: String, summary: String, isExpanded: Bool,
+         toggle: @escaping () -> Void, @ViewBuilder rows: () -> Rows) {
         self.title = title
+        self.summary = summary
+        self.isExpanded = isExpanded
+        self.toggle = toggle
         self.rows = rows()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: ExportRowGrid.Font.sectionHeader, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .background(ExportRowGridProbeHost(kind: .header, rowID: title))
-                .padding(.top, ExportRowGrid.sectionHeaderTopSpacing)
-                .padding(.bottom, ExportRowGrid.rowSpacing)
-            VStack(alignment: .leading, spacing: ExportRowGrid.rowSpacing) {
-                rows
+            Button(action: toggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                        .frame(width: ExportRowGrid.disclosureSize,
+                               height: ExportRowGrid.disclosureSize)
+                    Text(title)
+                        .font(.system(size: ExportRowGrid.Font.sectionHeader, weight: .semibold))
+                        .kerning(0.5)
+                        .textCase(.uppercase)
+                        .foregroundStyle(.secondary)
+                    if !isExpanded {
+                        Text(summary)
+                            .font(.system(size: ExportRowGrid.Font.hint))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(height: ExportRowGrid.headerHeight)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.plain)
+            .background(ExportRowGridProbeHost(kind: .header, rowID: title))
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: ExportRowGrid.rowSpacing) {
+                    rows
+                }
+                .padding(.top, ExportRowGrid.headerToRows)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
+        .padding(.top, ExportRowGrid.sectionSpacing)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - 数值行 / 色调映射行的探针（288 / 217 / 243 的读数手段，302 继续用）
+
+/// 168 §1 —— 色调映射行自己的定位锚。`ExportLayoutProbe.Kind` 在 `ExportHDRControls.swift`
+/// 里（本任务的改动范围之外），所以这一行带一个自己的小标记。
+final class ExportToneMappingRowProbe: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+}
+
+struct ExportToneMappingRowProbeHost: NSViewRepresentable {
+    func makeNSView(context: Context) -> ExportToneMappingRowProbe {
+        ExportToneMappingRowProbe()
+    }
+
+    func updateNSView(_ probe: ExportToneMappingRowProbe, context: Context) {}
+}
+
+/// 217 —— 数值行的布局锚。SwiftUI 的 `Slider` 在 hosted `swift test` 里既没有 AppKit 叶子也
+/// 没有 accessibility 节点，透明背景探针是唯一诚实的读数方式。
+final class ExportSliderRowProbe: NSView {
+    enum Kind: String {
+        case slider
+        case number
+        case unit
+        /// 250 —— 勾选框自己的 frame（定位用，不是控件）：窗口测试把真实鼠标事件打在这个矩形里。
+        case toggle
+    }
+
+    private(set) var kind: Kind = .slider
+    private(set) var rowID = ""
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = false
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("ExportSliderRowProbe is created in code")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var isOpaque: Bool { false }
+
+    func update(kind: Kind, rowID: String) {
+        self.kind = kind
+        self.rowID = rowID
+    }
+}
+
+struct ExportSliderRowProbeHost: NSViewRepresentable {
+    var kind: ExportSliderRowProbe.Kind
+    var rowID: String
+
+    func makeNSView(context: Context) -> ExportSliderRowProbe {
+        let probe = ExportSliderRowProbe()
+        probe.update(kind: kind, rowID: rowID)
+        return probe
+    }
+
+    func updateNSView(_ probe: ExportSliderRowProbe, context: Context) {
+        probe.update(kind: kind, rowID: rowID)
     }
 }
