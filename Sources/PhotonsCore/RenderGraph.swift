@@ -954,7 +954,8 @@ private struct CalParamsU {
 }
 
 private struct S2Params {
-    // 085 — dShadow, dMid, dHighlight (all EV, already gated by `S2Regions.travelEV`), identity.
+    // 085/299 — dShadow, dMid (EV, already gated by `S2Regions.travelEV`), the 高光 slope `k`
+    // (1 = identity), identity.
     var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
     // it the region lifts treat the matte's 0 as a picture pixel and the viewport's background bars
@@ -3997,12 +3998,15 @@ public final class RenderGraph {
             let identity = edit.light.highlights == 0
                 && edit.light.midtones == 0 && edit.light.shadows == 0
             // 085: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
-            // kernel only weights and exponentiates.
+            // kernel only weights and exponentiates. 299: 高光 is a slope above white, so `.z` is
+            // `k` rather than the gated `d.high` (which the mask path still reads).
             let d = S2Regions.travelEV(shadows: edit.light.shadows,
                                        midtones: edit.light.midtones,
                                        highlights: edit.light.highlights)
             var params = S2Params(
-                b: SIMD4(Float(d.shadow), Float(d.mid), Float(d.high), identity ? 1 : 0),
+                b: SIMD4(Float(d.shadow), Float(d.mid),
+                         Float(S2Regions.highSlope(highlights: edit.light.highlights)),
+                         identity ? 1 : 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
                 // encoder, and the guard is what makes "shadows" leave the letterbox alone.

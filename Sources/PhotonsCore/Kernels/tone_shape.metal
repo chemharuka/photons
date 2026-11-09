@@ -87,6 +87,8 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
 // the very top instead of eating the HDR range.
 //
 // The CPU owns the travel and its monotonicity gate (`S2Regions`); these functions take **EV**.
+// **299**: this applies to the shadow/mid components and to the mask path only. S2's global 高光 is
+// `high_shoulder_ev` (below), whose parameter `k` is a slope, and its 0.25 EV knee lives above white.
 constant float REGION3_SHADOW_LO_EV = -5.4;
 constant float REGION3_SHADOW_HI_EV = -3.9;
 constant float REGION3_MID_LO_EV = -2.4;
@@ -95,6 +97,11 @@ constant float REGION3_HIGH_LO_EV = 4.0;
 constant float REGION3_HIGH_HI_EV = 6.0;
 
 /// `(shadow, mid, high)` for one pixel, each 0…1.
+///
+/// **299**: S2's global gain no longer multiplies the third component by an EV displacement — the
+/// 高光 slider is the `high_shoulder_ev` slope below. The component stays here because `s1_6_local`
+/// (074's mask path) still reads `region_gain3(region_weights3(v), …)` with the EV travel, and its
+/// two-window family is intentionally unchanged. In S2 only `.xy` are used.
 static inline float3 region_weights3(float3 v) {
     float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
     float L = log2(lum);
@@ -105,8 +112,30 @@ static inline float3 region_weights3(float3 v) {
 }
 
 /// The one gain of the three lifts: `exp2(shadow·Δs + mid·Δm + high·Δh)`, `dEV` already in EV.
+///
+/// Still used **verbatim** by `s1_6_local` (the mask path). S2 uses only `.xy` of the weights and
+/// adds `high_shoulder_ev` instead; see the 299 note on `region_weights3`.
 static inline float region_gain3(float3 w, float3 dEV) {
     return exp2(dot(w, dEV));
+}
+
+// ── 299 — 高光: a C¹ log shoulder above display white ────────────────────────────────────────────
+//
+// The slider is a **slope**, not an EV displacement. `k` is `S2Regions.highSlope` (1 + 0.8h), and
+// the log2-domain output above white is
+//
+//     y = L + Δ(L),   Δ(L) = 0                                  L ≤ 0
+//                     Δ(L) = (k−1)(L − w(1 − e^{−L/w}))         L > 0,  w = 0.25 EV
+//
+// so the slope starts at 1 at the white point (no corner) and asymptotes to `k`; at k = 0.20 a +4 EV
+// sample lands at +1.00 EV. `L ≤ 0` and k = 1 are exact identities. `y ≥ kL ≥ 0`, so a value at or
+// above white stays at or above white and the SDR (headroom 1) render is unchanged: this is an HDR
+// tail compressor, not an SDR highlight control (that is 138's `whites`).
+constant float HIGH_KNEE_W_EV = 0.25;
+
+static inline float high_shoulder_ev(float L, float k) {
+    if (L <= 0.0) { return 0.0; }
+    return (k - 1.0) * (L - HIGH_KNEE_W_EV * (1.0 - exp(-L / HIGH_KNEE_W_EV)));
 }
 
 // ── 073B / 073C — the end points: blacks and whites ──────────────────────────────────────────────

@@ -28,8 +28,16 @@ import Foundation
 /// headroom (and 114's possible 4 EV), so `w_high = 1` from −0.9 EV through the whole HDR range. The
 /// 阴影 / 中间调 windows are unchanged: the 0.400 slope budget is measured on their seams too.
 ///
-/// Each slider is a displacement in EV (`+` brightens that zone, 派单 008 A), with full travel
-/// 0.90 / 0.70 / 0.60 EV. Three independent travels can fold the map when they have opposite signs
+/// **299 (2026-11-09): 高光 is a slope shoulder above white, not a displacement.** The user asked
+/// 「+4 EV 拉回到 +1 左右」, which needs 3 EV of travel through `L > 0` — five times the old 0.60 EV
+/// and impossible for a fixed displacement without a fold. So only the **global** 高光 changes: its
+/// slider sets `k(h) = 1 + 0.8h`, and the kernel applies the C¹ log shoulder
+/// `Δ(L) = (k−1)(L − 0.25(1 − e^{−L/0.25}))` above 0 EV. `L ≤ 0` and `h = 0` are bit-exact
+/// identities, and the SDR (headroom 1) image is unchanged because `y ≥ 0`. The shadow/mid travels
+/// and the gate below are untouched; the mask's `LocalAdjustU.b.y` still reads `travelEV().high`.
+///
+/// Each shadow/mid slider is a displacement in EV (`+` brightens that zone, 派单 008 A), with full
+/// travel 0.90 / 0.70 EV. Three independent travels can fold the map when they have opposite signs
 /// (e.g. shadows +100 and midtones −100), so `travelEV` compresses all three by one common factor when
 /// the worst derivative budget exceeds `1 − minSlope`. The scale is positive and symmetric about zero,
 /// so the identity and the direction of every slider are untouched; only extreme opposite-sign
@@ -39,7 +47,42 @@ public enum S2Regions {
     /// Full travel at |slider| = 100, in EV.
     public static let shadowTravel: Double = 0.90
     public static let midTravel: Double = 0.70
+    /// 299 — the **mask** path still reads this displacement (`localApply`); the global 高光 slider
+    /// no longer does. See `highSlope` / `highShoulderEV` below.
     public static let highTravel: Double = 0.60
+
+    /// 299 — the global 高光 slider is a slope above display white, not an EV displacement.
+    ///
+    /// A +4 EV sample must come down to +1 EV at `highlights = −100`: 3 EV of travel, five times the
+    /// old 0.60 EV. A fixed displacement cannot do that without folding the map, so the slider moves
+    /// the **asymptotic slope** instead:
+    ///
+    ///     h = clamp(highlights, −100, 100) / 100
+    ///     k(h) = 1 + 0.8·h          k(−100) = 0.20, k(0) = 1 (exact identity), k(+100) = 1.80
+    ///
+    /// `Δ(L) = (k−1)·(L − w·(1 − e^{−L/w}))` for `L > 0`, `Δ(L) = 0` otherwise, with the C¹ knee
+    /// width `w = 0.25 EV`. At `L = +4`, `Δ = −0.8·(4 − 0.25·(1 − e^{−16})) = −3.0`, so `y = +1.0`.
+    public static let highSlopeFull: Double = 0.20
+    public static let highKneeWidthEV: Double = 0.25
+
+    /// The asymptotic log2 slope above display white for one 高光 slider position.
+    public static func highSlope(highlights: Double) -> Double {
+        let h = min(max(highlights, -100), 100) / 100
+        return 1 + (1 - highSlopeFull) * h
+    }
+
+    /// The log2-domain shoulder displacement, in EV, for a sample at `L` EV.
+    ///
+    /// `L ≤ 0` is the identity (the display-white knee is exactly at 0), and `L > 0` starts with
+    /// slope 1 (C¹ at the knee) and asymptotes to `k`. Because `0 ≤ w(1 − e^{−L/w}) < L`, the output
+    /// `y = L + Δ(L)` stays in `[kL, L]`: never negative, so an SDR value still clips to white and
+    /// the headroom-1 render is unchanged.
+    public static func highShoulderEV(L: Double, highlights: Double) -> Double {
+        guard L > 0 else { return 0 }
+        let k = highSlope(highlights: highlights)
+        let w = highKneeWidthEV
+        return (k - 1) * (L - w * (1 - exp(-L / w)))
+    }
 
     /// The steepest slope `d(log2 v′)/dL` the gate is allowed to produce. It stays 085's shipped
     /// 0.500 so the shadow/mid travel (and their measured code shifts) does not move: a single

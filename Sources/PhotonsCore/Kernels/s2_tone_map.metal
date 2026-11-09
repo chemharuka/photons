@@ -17,16 +17,17 @@ using namespace metal;
 //     high    b(1 − c), c = smoothstep(+4.0, +6.0, L)  (high → white, closing above the HDR range)
 //
 // Because `a` reaches 1 before `b` starts, the three weights sum to 1 over the whole shadow→high run:
-// every luminance has a full-weight owner and there is no gap. **124** moved `c` off display white:
-// it used to close at 0 EV, which is why the 高光 slider did nothing to a value above 1.0. Now
-// `c = 0` through the whole HDR range (default 2.3 EV headroom; 114 may go to 4 EV) and only closes
-// at +4…+6 EV, so 高光 owns the entire range above −0.9 EV. S2 still has no upper clamp, so a pixel
-// above white simply passes through with the gain the window gives it.
+// every luminance has a full-weight owner and there is no gap. **299 replaces the 124 closure for
+// the global 高光 slider**: the slider no longer multiplies the high weight by an EV displacement.
+// It sets a slope `k` and the kernel applies `high_shoulder_ev` above display white (see
+// `tone_shape.metal`). That is what makes 「+4 EV → +1 EV」 possible: a displacement would need 3 EV
+// through the HDR tail, while a shoulder changes the asymptote without folding the map. `a` and `b`
+// (阴影 / 中间调), their travels and the monotonicity gate are unchanged; the high weight in
+// `region_weights3` is still used by the mask path (`s1_6_local`).
 //
 // Travel and its monotonicity gate are **CPU-side** (`S2Regions.travelEV`): 0.90 / 0.70 / 0.60 EV at
 // full slider, compressed by one common factor when opposite-sign combinations would push the
-// derivative below 0.400. The kernel receives EV directly (`S2Params.b.xyz`) and only weights and
-// exponentiates.
+// derivative below 0.400. S2 receives `b.xy` as EV and `b.z` as the 高光 **slope** `k`.
 //
 // Direction (派单 008 A): Lightroom's, i.e. **all three region sliders brighten towards +**.
 //
@@ -40,9 +41,9 @@ using namespace metal;
 // the same distinction.
 
 struct S2Params {
-    // 085 — EV displacements, not slider positions: dShadow, dMid, dHighlight, identity.
-    // `S2Regions.travelEV` has already multiplied by the travel and applied the monotonicity gate;
-    // the kernel only weights and takes one `exp2`.
+    // 085/299 — dShadow (EV), dMid (EV), 高光 slope `k` (1 = identity), identity.
+    // `S2Regions.travelEV` has already multiplied the first two by the travel and applied the
+    // monotonicity gate; `k` comes from `S2Regions.highSlope`. Layout is unchanged (32-byte stride).
     float4 b;
     // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
     float4 c;
@@ -82,14 +83,17 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // stage must still not clamp it away before its own maths.)
     float3 v = c.rgb;
 
-    // 085/124: three complementary windows (`tone_shape.metal#region_weights3`), all on
-    // `L = log2(luma)` — EV relative to display white, the histogram's own HDR axis — so a window's
-    // width is exposure-invariant. Every luminance has a full-weight owner, and 124 moved the white
-    // closure above +4 EV, so the high window reaches through the whole HDR range instead of
-    // stopping at white. `p.b.xyz` is the gated EV travel from `S2Regions`.
+    // 085: the shadow/mid windows (`tone_shape.metal#region_weights3`), on `L = log2(luma)` — EV
+    // relative to display white, the histogram's own HDR axis — so a window's width is
+    // exposure-invariant. `p.b.xy` is the gated EV travel from `S2Regions`.
     float3 w = region_weights3(v);
+    float luma = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
+    float L = log2(luma);
+    // 299: 高光 is the C¹ slope shoulder above white, not the third weight times a displacement.
+    // `p.b.z` is `k = S2Regions.highSlope(...)`; `L ≤ 0` makes the shoulder exactly 0, so the SDR
+    // image is untouched.
+    v *= exp2(dot(w.xy, p.b.xy) + high_shoulder_ev(L, p.b.z));
     // LR convention (派单 008 A): `+` brightens the named zone, `−` pulls it down.
-    v *= region_gain3(w, p.b.xyz);
 
     // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
     // value that a lift has pulled above zero is real picture by now and must survive; whatever is
