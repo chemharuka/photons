@@ -87,30 +87,28 @@ final class InspectorCropInfoTests: XCTestCase {
                                                   geometry: flips),
                        plain, "\(flips) does not change the grid")
 
-        // **188 — a straighten does, and this is the one row that moved.** The expectation this test
-        // used to carry here (`9520×6336 / isCroppedCanvas: false` for `rotationDegrees: 12`) came from
-        // 176's 「S0 不改输出网格」: `EditModel.outputPixels` then answered `CropMath.frameSize`, the
-        // crop's own rect, and the angle only decided how that rect was *drawn*. 188 made the same
-        // property answer `CropMath.canvasSize` — **the grid the renderer allocates** — because at
-        // θ ≠ 0 the render does not allocate the crop, it allocates the turned crop's bounding box
-        // (162), and the backdrop's own scale and the exported file are that box. So the old
-        // expectation is void: the row now prints the canvas the document will really produce,
-        // `10630×8177` = ⌈9520·cos12° + 6336·sin12°⌉ × ⌈9520·sin12° + 6336·cos12°⌉.
-        //
-        // θ = 0 is untouched by 188 (`canvasSize` returns `outputSize` at every right angle), which is
-        // why the three values asserted above — `60 MP`, `9520×6336`, `isCroppedCanvas == false` — are
-        // still the pre-049 ones to the last digit, and why a *whole-frame* crop must keep equalling
-        // the no-crop row.
+        // **301 reversed 188's answer, and this is the row that moved back.** 188 made the property
+        // answer `CropMath.canvasSize` = the turned crop's AABB, so 12° printed `10630×8177 / 87 MP`.
+        // 301 (方案 A) made `canvasSize` the crop **frame** — the rect S0 samples — and a full crop's
+        // frame is the picture's own pixels at every angle, so the turned row is the asset's own row
+        // again: `9520×6336 / 60 MP / isCroppedCanvas == false`, equal to the θ = 0 row field for
+        // field. ⌈9520·cos12° + 6336·sin12°⌉ is exactly the box 301 removed.
         let turned = GeometryGroup(crop: .full, rotationDegrees: 12)
         let turnedRow = InspectorPhotoInfo.metrics(storedWidth: storedWidth, storedHeight: storedHeight,
                                                    geometry: turned)
-        XCTAssertEqual(turnedRow.pixelDimensions, "10630×8177")
-        XCTAssertEqual(turnedRow.pixelCount, "87 MP")
+        XCTAssertEqual(turnedRow.pixelDimensions, "9520×6336")
+        XCTAssertEqual(turnedRow.pixelCount, "60 MP")
         // …and the number is the document's own, not this test's arithmetic.
         XCTAssertEqual(turnedRow.canvas, turned.outputPixels(in: stored))
-        XCTAssertTrue(turnedRow.isCroppedCanvas,
-                      "a turned full-canvas crop is a canvas of its own, not the asset's own row")
-        XCTAssertNotEqual(turnedRow, plain, "12° grows the canvas; the row has to say so")
+        XCTAssertEqual(turnedRow.canvas,
+                       CropMath.frameSize(turned.renderCrop(source: stored),
+                                          in: turned.orientedSource(stored),
+                                          allowsOutsideSource: true),
+                       "a full crop's canvas is the crop frame")
+        XCTAssertFalse(turnedRow.isCroppedCanvas,
+                       "a turned full crop is still the picture's own row — no AABB to report")
+        XCTAssertEqual(turnedRow, plain,
+                       "12° no longer grows the canvas; the row must not say it does")
 
         print("049 full-canvas == no-crop: \(plain.pixelCount) / \(plain.pixelDimensions) "
               + "(rect \(wholeRect.canvas!), full \(plain.canvas!), "

@@ -105,9 +105,11 @@ public struct CropWorkspaceLayout: Equatable, Sendable {
 
         let rotatedSource = LoupeFraming.rotatedExtent(width: ow, height: oh, degrees: straighten)
         let rect = crop.clamped(allowsOutsideSource: true)
-        let rotatedCrop = LoupeFraming.rotatedExtent(width: rect.width * ow,
-                                                     height: rect.height * oh,
-                                                     degrees: straighten)
+        // 301b — the carve-out's canvas is the crop **frame**, not the turned crop's AABB: turning
+        // a rectangle does not change its extent, and the renderer's `p.c` is this very rect. The
+        // old `rotatedExtent(crop)` made the entry zoom disagree with `LoupeFraming.fitZoom` (which
+        // now frames the frame) by the AABB/frame ratio on every angled document.
+        let rotatedCrop = (width: rect.width * ow, height: rect.height * oh)
         // The one fit function the live projection uses (259): crop AABB, one 90 % margin, the
         // full-frame 1:1 rule for a never-cropped document, and the 4× magnification ceiling.
         var zoom = cw.isFinite && ch.isFinite && cw > 0 && ch > 0

@@ -368,12 +368,15 @@ final class SharpenScaleTests: XCTestCase {
         XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=3"))
         XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=2"))
 
+        // 301 bumped `geometry` 3 → 4 (canvas = crop frame, θ ≠ 0 pixels moved); it is pinned at 4
+        // here so this sharpen test still proves **only** sharpen moved in 192.
+        //
         // The generations that this bump must not move, in `RenderStage.order`. `dehaze` (160),
         // `geometry` (246), `maskAtlas` (215) and `contrast` (159/246) moved in other tasks and are
         // pinned at their current numbers here; `heal` is **not** in the list either — 249 moved the
         // repair to S1 source pixels and bumped it 1 → 2. The claim is "249 touched heal only".
         let unchanged: [(RenderStage, Int)] = [
-            (.geometry, 3), (.sceneLinear, 8), (.maskAtlas, 6), (.localApply, 4),
+            (.geometry, 4), (.sceneLinear, 8), (.maskAtlas, 6), (.localApply, 4),
             (.curve, 2), (.contrast, 3), (.toneMap, 6), (.color, 1), (.bw, 1), (.localColor, 1),
             (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4),
             (.vignette, 3), (.grain, 1), (.display, 1),

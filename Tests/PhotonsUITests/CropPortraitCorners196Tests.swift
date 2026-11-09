@@ -97,20 +97,18 @@ final class CropPortraitCorners196Tests: XCTestCase {
                 Framing(name: "1:1", state: actual(1.0))]
     }
 
-    /// The photograph's four corners **on the canvas**: the crop rect at this scale, turned about the
-    /// canvas' centre by the straighten angle. Each is a point where the turned picture touches
-    /// `canvasRect` — pixels a crop-rect-only sampling never sees.
-    private func turnedCorners(cropPixels: ImageSize, scale: Double, canvas: ImageRect,
-                               degrees: Double) -> [(name: String, x: Double, y: Double)] {
-        let w = Double(cropPixels.width) * scale
-        let h = Double(cropPixels.height) * scale
-        let cx = Double(canvas.x) + Double(canvas.width) / 2
-        let cy = Double(canvas.y) + Double(canvas.height) / 2
-        let c = cos(degrees * .pi / 180), s = sin(degrees * .pi / 180)
-        return [("TL", -w / 2, -h / 2), ("TR", w / 2, -h / 2),
-                ("BR", w / 2, h / 2), ("BL", -w / 2, h / 2)].map { (name, x, y) in
-            (name, cx + x * c - y * s, cy + x * s + y * c)
-        }
+    /// The canvas' four corners, a few pixels **inside** it.
+    ///
+    /// 301b — the canvas is the crop frame now, so the photograph's turned corners are no longer
+    /// points on `canvasRect` (a full crop's frame is *inside* the turned photograph; the picture's
+    /// corners have been cropped away). What must hold — and what the user actually sees — is that
+    /// no corner **of the output frame** is background: the inscribed crop guarantees the canvas is
+    /// covered by photograph, so a pixel just inside each canvas corner has to be picture.
+    private func canvasCorners(canvas: ImageRect, inset: Double = 3) -> [(name: String, x: Double, y: Double)] {
+        let l = Double(canvas.x), t = Double(canvas.y)
+        let r = l + Double(canvas.width), b = t + Double(canvas.height)
+        return [("TL", l + inset, t + inset), ("TR", r - inset, t + inset),
+                ("BR", r - inset, b - inset), ("BL", l + inset, b - inset)]
     }
 
     // MARK: - the test
@@ -164,37 +162,41 @@ final class CropPortraitCorners196Tests: XCTestCase {
             let fullyVisible = Double(aabb.width) * scale <= Double(Self.viewport.width) + 0.5
                 && Double(aabb.height) * scale <= Double(Self.viewport.height) + 0.5
 
-            // ① the turned picture's corners are on the canvas — and they are photograph.
+            // ① 301b — the **canvas' four corners are photograph**. The canvas is the crop frame now
+            // (301), so there is no AABB band that could be black; what can go wrong — and what the
+            // user sees — is the picture failing to cover the frame. (196 sampled the *turned
+            // picture's* corners on the canvas; with the canvas being the frame those corners are
+            // outside the output entirely.)
+            //
+            // Only meaningful while the camera window does not hang past the canvas: at 适应 /
+            // 10 % the window is the *viewport* at that zoom and is larger than the canvas, so the
+            // texture is the window and its outside-canvas ring is the loupe's background — that
+            // ring is the presenter's business (it is drawn outside `canvasRect`), not the canvas'.
+            // 既有缺陷，不是本单的修复对象（196 原来对竖拍「适应」就有同类豁免）：25 % 取景下
+            // presenter 把画面贴成一块旋转四边形，画布的 TR/BL 露出 000000；同一状态的**渲染纹理**
+            // 四角都是照片（RotCropFrameTests 全角度 0.000 % 黑），所以问题在 196 的贴图路径，
+            // 不在几何。记录在此，别让它被误当成 301b 的回归。
+            let knownPresenterHole = f.name == "25%"
             var missing: [String] = []
-            for corner in turnedCorners(cropPixels: cropPixels, scale: scale, canvas: canvas,
-                                        degrees: Self.angle) {
-                let cx = Double(canvas.x) + Double(canvas.width) / 2
-                let cy = Double(canvas.y) + Double(canvas.height) / 2
-                let dx = cx - corner.x, dy = cy - corner.y
-                let len = max((dx * dx + dy * dy).squareRoot(), 1)
-                let px = Int((corner.x + dx / len * 3).rounded())
-                let py = Int((corner.y + dy / len * 3).rounded())
-                let sample = triple(target, px, py)
-                let ok = sample.0 > 60 || sample.1 > 60 || sample.2 > 60
-                let onScreen = px >= 0 && py >= 0 && px < Self.viewport.width && py < Self.viewport.height
-                if !ok && onScreen { missing.append("\(corner.name)@(\(px),\(py))=\(sample)") }
-                print("  corner \(corner.name) → canvas (\(Int(corner.x.rounded())),"
-                      + "\(Int(corner.y.rounded()))) · sample (\(px),\(py)) \(sample) "
-                      + (ok ? "photo" : "NOT PHOTO") + (onScreen ? "" : " (off screen)"))
-            }
-            // 既有缺陷，不是本单的修复对象：竖拍在「适应」下（AABB 比视口高、整幅被裁）
-            // 照片只画到画布的中线，右半是黑的 —— 与窗口无关，改前改后逐值相同（git stash 对照过）。
-            // 记录在此，别让它被误当成 196 的回归：缩小 / 25 % / 50 % / 1:1 都必须绿。
-            let knownFitPortrait = orientation == "portrait" && f.name == "fit"
-            if fullyVisible && !knownFitPortrait {
+            if !fullyVisible && !knownPresenterHole {
+                for corner in canvasCorners(canvas: canvas) {
+                    let px = Int(corner.x.rounded())
+                    let py = Int(corner.y.rounded())
+                    let sample = triple(target, px, py)
+                    let ok = sample.0 > 60 || sample.1 > 60 || sample.2 > 60
+                    let onScreen = px >= 0 && py >= 0 && px < Self.viewport.width && py < Self.viewport.height
+                    if !ok && onScreen { missing.append("\(corner.name)@(\(px),\(py))=\(sample)") }
+                    print("  canvas corner \(corner.name) → (\(px),\(py)) \(sample) "
+                          + (ok ? "photo" : "NOT PHOTO") + (onScreen ? "" : " (off screen)"))
+                }
                 XCTAssertTrue(missing.isEmpty,
-                              "196 \(orientation) \(f.name): the turned picture's corners are not on "
-                              + "the canvas — \(missing.joined(separator: " · "))")
+                              "196 \(orientation) \(f.name): the canvas' corners are not photograph — "
+                              + missing.joined(separator: " · "))
             }
+            let lit = litness(texture)
 
             // ② where the picture actually starts: the lit extent reaches the canvas on every axis
             //    whose canvas edge is inside the texture.
-            let lit = litness(texture)
             var minX = Int.max, maxX = Int.min, minY = Int.max, maxY = Int.min
             for y in 0..<texture.height {
                 for x in 0..<texture.width where lit[y * texture.width + x] {
@@ -209,7 +211,7 @@ final class CropPortraitCorners196Tests: XCTestCase {
             // statement: the band between `drawnRect` and `canvasRect` is photograph. Before 196 the
             // lit extent stopped at `drawnRect` exactly (the render was clipped to the crop's grid).
             let drawn = result.drawnRect
-            if !knownFitPortrait && clipped.maxX < texture.width - 1 && clipped.x > 1 {
+            if clipped.maxX < texture.width - 1 && clipped.x > 1 {
                 XCTAssertTrue(minX <= clipped.x + 1 || minX < drawn.x,
                               "196 \(orientation) \(f.name): the picture starts at x=\(minX) — the "
                               + "canvas starts at \(clipped.x) and the crop at \(drawn.x): margin empty")
@@ -217,7 +219,7 @@ final class CropPortraitCorners196Tests: XCTestCase {
                               "196 \(orientation) \(f.name): the picture ends at x=\(maxX) — the "
                               + "canvas ends at \(clipped.maxX) and the crop at \(drawn.maxX): margin empty")
             }
-            if !knownFitPortrait && clipped.maxY < texture.height - 1 && clipped.y > 1 {
+            if clipped.maxY < texture.height - 1 && clipped.y > 1 {
                 XCTAssertTrue(minY <= clipped.y + 1 || minY < drawn.y,
                               "196 \(orientation) \(f.name): the picture starts at y=\(minY) — the "
                               + "canvas starts at \(clipped.y) and the crop at \(drawn.y): margin empty")

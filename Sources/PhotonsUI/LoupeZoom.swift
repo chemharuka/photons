@@ -720,8 +720,15 @@ public struct LoupeFraming: Equatable, Sendable {
                                   degrees: straightenDegrees)
     }
 
-    /// The crop turned by the document's angle — the canvas 132 renders, and therefore the window
-    /// 适应 shows (the empty corners are part of the output, black).
+    /// The crop **in canvas pixels** — the extent the output has, and therefore the window 适应
+    /// shows.
+    ///
+    /// 301b — the canvas **is** the crop frame, so this is the crop's own pixel rectangle at every
+    /// angle: turning a rectangle does not change its extent, and `p.c` is the crop rect itself.
+    /// 132 spelled it as `rotatedExtent(crop)` because the canvas was then the turned crop's AABB;
+    /// keeping that spelling here made 适应 frame a box the renderer no longer produces (and made
+    /// `framePlacement` divide by `AABB / frame`, #11/#17). The name is 132's; the value is the
+    /// frame.
     ///
     /// 246: with a keystone the canvas is the AABB of the warped-and-turned crop, not the turned
     /// rectangle; that is what entering 裁切 must frame.
@@ -732,8 +739,7 @@ public struct LoupeFraming: Equatable, Sendable {
                                                 perspective: perspective)
             return (pc.extent.width, pc.extent.height)
         }
-        return Self.rotatedExtent(width: cropWidthPixels, height: cropHeightPixels,
-                                  degrees: straightenDegrees)
+        return (cropWidthPixels, cropHeightPixels)
     }
 
     /// 259 — the fit ceiling. A small crop's quadrilateral can be far smaller than the viewport, so
@@ -961,33 +967,12 @@ public struct LoupeFraming: Equatable, Sendable {
     /// quantity `RenderGraph.plan` subtracts from the window (`inset`), so the loupe never grows a
     /// second copy of the canvas arithmetic.
     private func canvasOrigin(decodeScale: Double, zoom: Double) -> (x: Int, y: Int) {
-        // 246: the canvas *is* the picture's AABB (perspective + rotation already folded), so the
-        // picture starts at the canvas' origin — no inset, exactly like `CropMath.canvasOrigin`.
-        guard perspective == nil, straightenDegrees != 0 else { return (0, 0) }
-        let ds = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
-        let decoded = ImageSize(width: max(1, Int((sourceWidth * ds).rounded())),
-                                height: max(1, Int((sourceHeight * ds).rounded())))
-        // `sourceWidth`/`crop` are already the turned frame, so no quarter turn enters here.
-        //
-        // 279 — the origin is the turned crop's AABB, not the frame-centred half margin: the same
-        // `CropGeometry.canvasInsetOrigin` number `RenderGraph.plan` hands S0, snapped at this render
-        // scale. At θ = 0 it is exactly zero, so fit/1:1 whitespace is unchanged.
-        let scale = zoom / ds
-        // A centred crop keeps the historical integer margin (`plan` does the same), so the
-        // full-crop / fit plate is bit-identical; an off-centre crop uses the 279 AABB origin.
-        if abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12 {
-            let canvas = CropMath.canvasSize(crop: crop, in: decoded,
-                                             straightenDegrees: straightenDegrees,
-                                             quarterTurns: 0)
-            let frame = CropMath.frameSize(crop, in: decoded, allowsOutsideSource: true)
-            func scaled(_ value: Int) -> Int { max(1, Int((Double(value) * scale).rounded())) }
-            return ((scaled(canvas.width) - scaled(frame.width)) / 2,
-                    (scaled(canvas.height) - scaled(frame.height)) / 2)
-        }
-        let origin = CropGeometry.canvasInsetOrigin(crop: crop, in: decoded,
-                                                    degrees: straightenDegrees,
-                                                    flipH: flipH, flipV: flipV)
-        return (Int((origin.x * scale).rounded()), Int((origin.y * scale).rounded()))
+        // 301b — the canvas **is** the crop frame at every angle, so the picture starts at the
+        // canvas' own origin: there is no AABB half margin and no 279 pivot correction left to
+        // apply. `RenderGraph.plan` hands S0 `inset == 0` for the same reason. Re-deriving the
+        // pre-301 number here is what put a 1:1 window 443 px (x) / 850 px (y) away from the
+        // derived crop it is supposed to name (`LoupeZoomTests` measured exactly that).
+        (0, 0)
     }
 
     /// The document the renderer should be given for this state, **as an output window** routed

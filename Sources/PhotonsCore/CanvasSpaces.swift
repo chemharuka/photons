@@ -10,20 +10,24 @@ import Foundation
 //   1. **photo pixels** — the turned source (`CropGeometry.source`), i.e. the photograph's own grid
 //      after the quarter turn. Normalized `CropRect`s are measured in it.
 //   2. **frame** — the crop's pixel grid at 1:1, `frameSize`. The picture the document *keeps*.
-//   3. **canvas** — `canvas` / `frameExtent`: the axis-aligned box that contains every pixel of the
-//      kept picture once it is turned. At a right angle it *is* the frame (only a real angle grows
-//      it, user rule 162). The renderer's output, the export's output.
+//   3. **canvas** — `canvas` / `canvasExtent`: the crop **frame** at 1:1, i.e. the picture the
+//      document keeps, already turned. 301 (方案 A) took the AABB away: turning a rectangle does not
+//      change its extent, so the output is the frame itself at every angle. `frameExtent` still
+//      answers the turned frame's AABB, but that is now only the crop's legal region (space 4's
+//      builder), never the output. The renderer's output, the export's output.
 //   4. **document canvas** — `photoCanvas`: the box that contains every pixel of the **whole
 //      photograph** once it is turned (user 2026-11-01: 画布 = 能包住全部照片像素的最小矩形). A crop
 //      frame may leave the photograph — the black corners the turn opens up — but not this box.
 //      It is a function of (source, angle, quarter turn) only: **never** of the zoom, the window, the
 //      viewport or the crop rect, which is what makes the crop clamp screen-independent.
 //
-// The one transform between (1)+(2) and (3) is a rotation about the frame's centre plus the frame's
-// inset — the same walk `s0_geometry.metal` does backwards:
+// The canvas *is* the frame (301), so frame pixels and canvas pixels are one grid: `canvasPoint` /
+// `framePoint` are the identity, `canvasInset` is zero, and there is no pivot to correct. The walk
+// below is the pre-301 AABB placement, kept because `frameExtent` still answers the turned frame's
+// AABB (the crop's legal region):
 //
-//     canvas = C/2 + R(θ)·(frame − F/2)          C = canvas pixels, F = frame pixels
-//     frame  = F/2 + R(−θ)·(canvas − C/2)
+//     aabb   = C/2 + R(θ)·(frame − F/2)          C = aabb pixels, F = frame pixels
+//     frame  = F/2 + R(−θ)·(aabb − C/2)
 //
 // At θ = 0 this is the identity, so every un-straightened document keeps its numbers bit for bit.
 public extension CropGeometry {
@@ -49,7 +53,10 @@ public extension CropGeometry {
         DSize(width: Double(frameSize.width), height: Double(frameSize.height))
     }
 
-    /// The turned frame's continuous bounding box — the canvas **before** the one `ceil`.
+    /// The turned frame's continuous **AABB** — the crop's legal region before the one `ceil`.
+    ///
+    /// Since 301 this is **not** the canvas (the canvas is the frame itself); `frameExtent` survives
+    /// because space 4 and the overlay still need the box the turned crop occupies.
     ///
     /// At every right angle this is the frame itself: a quarter turn renames the axes, it does not
     /// rotate the rectangle (user rule 162, `CropMath.canvasSize`'s early return).
@@ -97,71 +104,30 @@ public extension CropGeometry {
 
     // MARK: the canvas (space 3)
 
-    /// The canvas in continuous pixels — `ceil` of this is `canvas`.
-    var canvasExtent: DSize { frameExtent }
+    /// The canvas in continuous pixels — `ceil` of this is `canvas`. The canvas is the frame (301).
+    var canvasExtent: DSize { frameExtentPixels }
 
     /// Where the picture's own frame starts inside the **turned canvas**, in canvas pixels,
     /// **continuous**.
     ///
-    /// 279 — the picture turns about the **photograph's** centre (248 / 273), so the canvas is not
-    /// the frame centred in an AABB: the AABB is the turned crop's, and its origin is
-    /// `(I − R)·(cropCentre − photoCentre)` away from the frame-centred spelling. That offset is
-    /// what this property returns on top of the AABB's half margin. At θ = 0 (and every right angle)
-    /// the offset is exactly zero, so every un-straightened number is unchanged.
-    ///
-    /// `(canvas − frame) / 2` is the frame-centred value that used to be here; it is only correct
-    /// when the crop's centre is the photograph's (a full crop), which is why 45° + an off-centre
-    /// crop used to put the kept picture somewhere else in the canvas entirely.
+    /// **301b — the canvas *is* the rotated crop frame**, so the frame starts at the canvas' own
+    /// origin: `(0, 0)` at every angle, keystone or not. The 279 spelling
+    /// (`(I − R)·(cropCentre − photoCentre) + (extent − frame)/2`) described where a frame-sized
+    /// picture sat inside a *larger* AABB; 301 took the AABB away (`RenderGraph.plan` hands S0
+    /// `inset == 0` and the kernel samples `p.c` over the canvas' whole domain), so that offset has
+    /// nothing left to describe. Keeping it here only made the overlay contradict the picture: at
+    /// 1200×800 / 9° a drawn corner landed 79.2 px outside the photograph because the UI added an
+    /// AABB margin the renderer no longer had.
     var canvasInset: (x: Double, y: Double) {
-        guard perspective?.hasWarp != true else { return (0, 0) }
-        return Self.canvasInsetOrigin(crop: crop, in: source, degrees: rotationDegrees,
-                                      flipH: flipHorizontal, flipV: flipVertical)
-    }
-
-    /// The one continuous origin of S3 for a crop turned about the photograph's centre.
-    ///
-    /// `frame = frameSize`, `extent = rotatedExtent(frame)`:
-    ///
-    ///     origin = (I − R)·F(cropCentre − photoCentre) + (extent − frame) / 2
-    ///
-    /// The second term is the frame-centred half margin; the first is the 279 correction that ties
-    /// the AABB's origin to the pivot the kernel actually uses. A right angle returns `(0, 0)`:
-    /// `canvas == frame` there, and the kernel's turn is an axis rename (162).
-    static func canvasInsetOrigin(crop: CropRect, in source: ImageSize, degrees: Double,
-                                  flipH: Bool = false, flipV: Bool = false) -> (x: Double, y: Double) {
-        guard degrees.isFinite else { return (0, 0) }
-        let quarter = degrees / 90
-        if abs(quarter - quarter.rounded()) < 1e-9 { return (0, 0) }
-        let frame = CropMath.frameSize(crop, in: source, allowsOutsideSource: true)
-        let extent = rotatedExtent(of: frame, degrees: degrees)
-        // The pivot is the photograph's centre; a flip mirrors the crop offset about it first
-        // (273's order: flip, then turn).
-        var dx = crop.centerX * Double(source.width) - Double(source.width) / 2
-        var dy = crop.centerY * Double(source.height) - Double(source.height) / 2
-        if flipH { dx = -dx }
-        if flipV { dy = -dy }
-        // A **centred** crop (a full crop is the important one) has nothing to correct: keep the
-        // historical integer AABB margin bit for bit, so its pixels and goldens do not move. The
-        // pivot term is only needed when the crop's centre is not the photograph's.
-        if dx == 0 && dy == 0 {
-            // Continuous, exactly the pre-279 value: `plan` keeps its integer spelling for this
-            // case separately, and `FrameTransform` has always used the continuous half margin.
-            return ((Double(canvasPixels(extent.width)) - Double(frame.width)) / 2,
-                    (Double(canvasPixels(extent.height)) - Double(frame.height)) / 2)
-        }
-        let turned = RotationMatrix(degrees: degrees).apply(x: dx, y: dy)
-        return (dx - turned.x + (extent.width - Double(frame.width)) / 2,
-                dy - turned.y + (extent.height - Double(frame.height)) / 2)
+        (0, 0)
     }
 
     /// `canvasInset` **rounded the way the renderer rounds it**.
     ///
-    /// 2026-11-01 (D1) — this is the one phase. `s0_geometry` places the picture at
-    /// `frameOrigin = … − inset`, and a window's pixel 0 therefore samples frame pixel
-    /// `windowX − inset`; the renderer's grid is integral, so this snaps once. `RenderGraph.plan`
-    /// computes the same quantity from the **scaled** sizes, and `LoupeFraming` reproduces the same
-    /// integer. 279 keeps the snap but moves the origin to the turned crop's AABB
-    /// (`canvasInsetOrigin`), so the phase and the pivot are one number.
+    /// 2026-11-01 (D1) made this the one phase — the renderer's grid is integral, so the picture's
+    /// place inside the canvas snaps once. Since 301b the canvas is the frame, so the value is
+    /// `(0, 0)` and the phase is gone; the accessor stays because `HealSpot`'s canvasV1 migration
+    /// reads it by name and a second spelling of "zero" in that file would be one place too many.
     var canvasInsetPixels: (x: Int, y: Int) {
         let inset = canvasInset
         return (Int(inset.x.rounded()), Int(inset.y.rounded()))
@@ -231,23 +197,21 @@ public extension CropGeometry {
 
     // MARK: frame ⇄ canvas
 
-    /// A frame point in canvas pixels. `θ = 0` ⇒ the same number plus the inset, and the inset is 0
-    /// at every right angle, so this is the identity there.
+    /// A frame point in canvas pixels.
+    ///
+    /// **301b — the canvas is the frame**, so this is the identity: a frame pixel *is* a canvas
+    /// pixel at every angle. 162's spelling rotated the frame about the canvas' centre because the
+    /// canvas was the turned frame's AABB; that box no longer exists, and rotating here would
+    /// un-place the crop quad inside its own canvas (done twice, once by this walk and once by
+    /// `s0_geometry`, the overlay's corners came out 79–116 px off the picture at 9°/15°).
     func canvasPoint(frameX: Double, frameY: Double) -> (x: Double, y: Double) {
-        let f = frameExtentPixels
-        // 246: frame pixels *are* canvas pixels — the perspective+rotation is already in `canvas`.
-        guard perspective?.hasWarp != true, hasAngle else { return (frameX, frameY) }
-        let p = rotation.apply(x: frameX - f.width / 2, y: frameY - f.height / 2)
-        return (Double(canvas.width) / 2 + p.x, Double(canvas.height) / 2 + p.y)
+        (frameX, frameY)
     }
 
     /// The inverse of `canvasPoint` — the walk a click on the canvas does to reach the frame.
+    /// The identity, for the same reason (`canvas == frame` since 301b).
     func framePoint(canvasX: Double, canvasY: Double) -> (x: Double, y: Double) {
-        let f = frameExtentPixels
-        guard perspective?.hasWarp != true, hasAngle else { return (canvasX, canvasY) }
-        let p = rotation.invert(x: canvasX - Double(canvas.width) / 2,
-                                y: canvasY - Double(canvas.height) / 2)
-        return (p.x + f.width / 2, p.y + f.height / 2)
+        (canvasX, canvasY)
     }
 
     // MARK: photo pixels ⇄ frame ⇄ canvas

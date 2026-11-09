@@ -187,7 +187,11 @@ public struct FrameTransform: Sendable, Equatable {
             // 281 — the kernel's own walk (`s0_geometry.metal`), in **photograph** pixels:
             //
             //     photo  = R(θ, P)·p                    // turn about the photo centre FIRST
-            //     canvas = inset + (F(photo) − cropOrigin)
+            //     canvas = inset + (F(photo) − cropOrigin)   // inset == (0,0) since 301b
+            //
+            // 301b — the canvas is the crop frame, so there is no inset and no AABB origin: a
+            // canvas point is a frame point. `cg.canvasInset` answers `(0, 0)` at every angle
+            // (keystone included) and is kept as the single named zero.
             //
             // The order is the kernel's, not a free choice: S0 samples canvas → source as
             // `R(−θ)(flip(frame))` — it mirrors the photo-normalized sample **first**, then un-turns
@@ -215,13 +219,16 @@ public struct FrameTransform: Sendable, Equatable {
         }
         self.s1ToS3 = photoToCanvas
         self.s3ToS1 = Self.inverse(photoToCanvas)
-        // The crop frame's four corners in S3, through the same exit the pixels use. At θ = 0 this
-        // is the crop's own rectangle (the canvas *is* the frame); at an angle it is the turned quad,
-        // whose AABB is `frameInS3` (and, for an off-centre crop, no longer centred on the canvas).
-        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner -> Point in
-            Self.apply(photoToCanvas, Point((crop.left + corner.0 * crop.width) * Double(source.width),
-                                            (crop.top + corner.1 * crop.height) * Double(source.height)))
-        }
+        // The crop frame's four corners in S3, through the same exit the pixels use.
+        //
+        // 301b — S3 **is** the crop frame (the canvas), so the frame's quad in S3 is the canvas
+        // rectangle: `(0, 0) … (W, H)`. Pre-301 the canvas was the turned crop's AABB and this walk
+        // placed a turned frame inside it; applying `photoToCanvas` to the crop corners again now
+        // would rotate the frame out of its own canvas (a 45° quad of 282.8 px inside a 240 px
+        // canvas, which is what `RotateCropFortyFiveTests` measured).
+        let corners = [(0.0, 0.0), (Double(cg.canvas.width), 0.0),
+                       (Double(cg.canvas.width), Double(cg.canvas.height)),
+                       (0.0, Double(cg.canvas.height))].map { Point($0.0, $0.1) }
         self.frameQuadInS3 = corners
         let minX = corners.map(\.x).min() ?? 0
         let minY = corners.map(\.y).min() ?? 0
@@ -239,8 +246,8 @@ public struct FrameTransform: Sendable, Equatable {
                         SIMD2(Double(window.width) / z, Double(window.height) / z))
         } else if let window = cameraWindow {
             // The camera names an axis-aligned rect in S1 frame pixels; S3 is that rect translated
-            // by the canvas' own inset (the picture sits centred inside the turned canvas). It is
-            // **not** rotated: the window is a window onto the canvas, exactly what
+            // by the canvas' own inset — zero since 301b, when the canvas became the frame itself.
+            // It is **not** rotated: the window is a window onto the canvas, exactly what
             // `RenderOptions.outputWindow` indexes.
             let inset = cg.canvasInset
             windowS3 = (Point((window.minX - cropOrigin.x) + inset.x,

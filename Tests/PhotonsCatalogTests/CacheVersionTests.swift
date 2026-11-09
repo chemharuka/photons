@@ -142,7 +142,8 @@ final class CacheVersionTests: XCTestCase {
         // so every stage's key moved **once**, on the day the mechanism arrived — that is the
         // documented one-time migration. What must never happen again is S0 moving because *S2* was
         // bumped, so S2's generation may not appear anywhere in S0's material or S1's:
-        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=3"), true)
+        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=4"), true,
+                       "301: canvas = crop frame, geometry 3→4")
         XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=5"), "S0 does not carry S2's generation")
         XCTAssertFalse(new.toneMap.isEmpty)
         XCTAssertNotEqual(old.geometry, new.geometry,
@@ -190,10 +191,10 @@ final class CacheVersionTests: XCTestCase {
         // value-identical, which is why the golden images do not move.
         XCTAssertEqual(StageAlgorithmVersion.sharpen, 3,
                        "192: σ 地板删除 + 基面 stride 随尺度")
-        // 246: perspective joins the canvas-size arithmetic and the kernel evaluates one composed
-        // `M = R · P`, so the same crop and keystone now draw different pixels — generation 3.
-        XCTAssertEqual(StageAlgorithmVersion.geometry, 3,
-                       "246: perspective is folded into the canvas AABB (P → R → AABB)")
+        // 301: the canvas is the rotated crop **frame** (方案 A), so a straightened, non-full crop's
+        // pixels moved — generation 4. (246 had taken it to 3 by folding the keystone into the AABB.)
+        XCTAssertEqual(StageAlgorithmVersion.geometry, 4,
+                       "301: canvas = crop frame; θ ≠ 0 pixels moved, geometry 3 → 4")
         // …and the ones that did not, so a bump stays a statement about one stage.
         for stage in [RenderStage.color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
@@ -566,6 +567,6 @@ final class CacheVersionTests: XCTestCase {
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=6"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=8"))
-        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=3"))
+        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=4"))
     }
 }

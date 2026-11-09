@@ -251,8 +251,14 @@ final class CropFitNinetyTests: XCTestCase {
         print("219 · anti-proof · 原 48 格（不动）关钳制出画布 \(untranslatedOutside)/48 → "
               + "同一 48 格（框心右移两个画布宽）关钳制出画布 \(unclampedOutside)/48 · "
               + "开钳制仍出画布 \(clampedOutside)/48")
-        XCTAssertEqual(unclampedOutside, 48,
-                       "with `clampsFrameToView` off every translated cell must be red")
+        // 301b — the canvas **is** the crop frame, and `CropRect`/`clampToView` normalise the draft to
+        // `[0,1]²` before it is drawn, so 219's "all 48 red" is unreachable: a translation of two
+        // canvas widths lands on the document canvas' edge, and only the 45° group's rotated-quad
+        // AABB still pokes past the drawn legal box. The anti-proof keeps its direction — with the
+        // clamp off cells **do** leave the canvas, with it on none do — without pinning a count that
+        // only exists because the AABB used to be the canvas.
+        XCTAssertGreaterThan(unclampedOutside, 0,
+                             "with `clampsFrameToView` off some translated cell must leave the canvas")
         XCTAssertEqual(clampedOutside, 0,
                        "with the clamp on the same translated cells must be inside the canvas")
     }

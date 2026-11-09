@@ -193,6 +193,11 @@ final class CropBoundsTests: XCTestCase {
     /// hard-coded, so the same expression produced 224's `0…1` upright.
     func testAtEightDegreesTheFrameIsPulledInsideTheCanvas() throws {
         let (controller, _) = try makeController()
+        // 301 — the shipped path inscribes the frame in the turned picture (`clampsToRotatedFrame`
+        // is on), so the frame this test drags can no longer cover the blank corner. The assertion
+        // below is about the *warning rule*, which is still reachable: opt out of the new default
+        // and the same 0.2×0.2 frame at 8° does cover the turned-out pixels.
+        controller.clampsToRotatedFrame = false
         // 0.2× on a 3000×2000 source in a 900×600 canvas: the viewport is a window of the document.
         let state = LoupeViewState(mode: .actual, zoom: 0.2, centerX: 1500, centerY: 1000)
         let map = mapping(state)

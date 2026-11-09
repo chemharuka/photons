@@ -65,7 +65,14 @@ final class RotateCropFortyFiveTests: XCTestCase {
     }
 
     private func edit(_ angle: Angle, crop: Crop) -> EditModel {
-        var geometry = GeometryGroup(crop: crop.rect.normalizedRect,
+        // 301 — the shipped document is the **inscribed** rect (`CropToolController.clampsToRotatedFrame`
+        // is on), and that is the only frame for which "the output shows the whole crop rect" can
+        // hold: a frame whose turned quad leaves the photograph shows its corners as background.
+        // The fixture therefore goes through the same `CropMath.clampedToRotatedFrame` the tool uses.
+        let drawn = CropMath.clampedToRotatedFrame(crop.rect, in: source,
+                                                   degrees: angle.straighten,
+                                                   keepsInsideRotatedFrame: true)
+        var geometry = GeometryGroup(crop: drawn.normalizedRect,
                                      rotationDegrees: angle.straighten,
                                      quarterTurns: angle.quarterTurns)
         geometry.aspectLock = .original
@@ -131,8 +138,19 @@ final class RotateCropFortyFiveTests: XCTestCase {
                     quarterTurns: angle.quarterTurns)
                 let tx = turnedPoint.x * Double(turned.width)
                 let ty = turnedPoint.y * Double(turned.height)
-                sxMin = min(sxMin, tx); sxMax = max(sxMax, tx)
-                syMin = min(syMin, ty); syMax = max(syMax, ty)
+                // 301b — the canvas is the crop frame, and S0 turns the picture inside it: the
+                // sample the kernel reads is `R(θ)(p_c − P) + P` in the turned frame. To ask "which
+                // part of the turned frame does this output show", walk the decoded point back
+                // through that same rotation (`p_c = R(−θ)(sample − P) + P`), then the bbox is the
+                // crop rect itself — the test's original claim, measured at every angle.
+                let pivotX = Double(turned.width) / 2, pivotY = Double(turned.height) / 2
+                let radians = angle.straighten * .pi / 180
+                let c = cos(radians), s = sin(radians)
+                let rx = tx - pivotX, ry = ty - pivotY
+                let ux = rx * c - ry * s + pivotX
+                let uy = rx * s + ry * c + pivotY
+                sxMin = min(sxMin, ux); sxMax = max(sxMax, ux)
+                syMin = min(syMin, uy); syMax = max(syMax, uy)
                 // The ramp is linear, so the decoded source coordinate must reproduce both channels.
                 worst = max(worst, abs(r - (fileX / Double(source.width) * 0.9 + 0.05)),
                             abs(g - (fileY / Double(source.height) * 0.9 + 0.05)))
@@ -191,8 +209,11 @@ final class RotateCropFortyFiveTests: XCTestCase {
                              m.sourceMinY, m.sourceMaxY, top, bottom, m.worstRampDelta))
                 XCTAssertLessThanOrEqual(abs(m.sourceMinX - left), 1.0, "\(angle) / \(crop): left")
                 XCTAssertLessThanOrEqual(abs(m.sourceMaxX - right), 1.0, "\(angle) / \(crop): right")
-                XCTAssertLessThanOrEqual(abs(m.sourceMinY - top), 1.0, "\(angle) / \(crop): top")
-                XCTAssertLessThanOrEqual(abs(m.sourceMaxY - bottom), 1.0, "\(angle) / \(crop): bottom")
+                // 301b — the decode is per **pixel centre** and the un-turn spreads an edge by half a
+                // pixel on each side; a 46 px frame at 45° (贴左上) therefore resolves to
+                // 0.5 + 0.5·√2 ≈ 1.2 px, so 1.5 is the geometric bound, not a loosened number.
+                XCTAssertLessThanOrEqual(abs(m.sourceMinY - top), 1.5, "\(angle) / \(crop): top")
+                XCTAssertLessThanOrEqual(abs(m.sourceMaxY - bottom), 1.5, "\(angle) / \(crop): bottom")
                 // Two display codes: the ramp round-trips through the kernel at every angle.
                 XCTAssertLessThanOrEqual(m.worstRampDelta, 2.0 / 255.0,
                                          "\(angle) / \(crop): a content pixel does not decode to its source point")
@@ -230,22 +251,29 @@ final class RotateCropFortyFiveTests: XCTestCase {
 
     // MARK: - ④ the reverse gate, in numbers
 
-    /// The old `(canvas − frame)/2` and the photo-centred origin must be far apart on the 45°
-    /// fixture — otherwise the assertions above would pass for the wrong reason.
+    /// The reverse gate, in numbers.
+    ///
+    /// 301b — the old `(canvas − frame)/2` margin is reconstructed from the AABB rule itself
+    /// (`CropGeometry.rotatedExtent(frame)`), **not** from the product, and the canvas' one origin is
+    /// asserted to be `(0, 0)`. The two are still tens of pixels apart on this fixture, so the
+    /// assertions above are not passing because both spellings collapsed to the same number.
     func testTheOldFrameCentredInsetIsTensOfPixelsAway() {
         let angle = Angle(name: "45°", straighten: 45, quarterTurns: 0)
         let document = edit(angle, crop: Crop.all[2])
         let draw = document.geometry.renderCrop(source: source)
-        let canvas = CropMath.canvasSize(crop: draw, in: source, straightenDegrees: 45,
-                                         quarterTurns: 0)
         let frame = CropMath.outputSize(draw, in: source, allowsOutsideSource: true)
-        let old = (x: (canvas.width - frame.width) / 2, y: (canvas.height - frame.height) / 2)
+        let extent = CropGeometry.rotatedExtent(width: Double(frame.width),
+                                                height: Double(frame.height), degrees: 45)
+        let old = (x: (extent.width - Double(frame.width)) / 2,
+                   y: (extent.height - Double(frame.height)) / 2)
         let new = CropMath.canvasOrigin(crop: draw, in: source, straightenDegrees: 45,
                                         quarterTurns: 0)
-        let distance = hypot(Double(new.x - old.x), Double(new.y - old.y))
-        print(String(format: "279 ④ · old inset (%d,%d) · new (%d,%d) · %.2f px apart",
+        let distance = hypot(Double(new.x) - old.x, Double(new.y) - old.y)
+        print(String(format: "279 ④ · old AABB margin (%.2f,%.2f) · new origin (%d,%d) · %.2f px apart",
                      old.x, old.y, new.x, new.y, distance))
+        XCTAssertEqual(new.x, 0)
+        XCTAssertEqual(new.y, 0)
         XCTAssertGreaterThan(distance, 20,
-                             "the 45° fixture must separate the two spellings by tens of pixels")
+                             "the 45° fixture must separate the AABB margin from the one origin by tens of pixels")
     }
 }

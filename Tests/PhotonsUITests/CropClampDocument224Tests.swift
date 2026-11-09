@@ -180,6 +180,10 @@ final class CropClampDocument224Tests: XCTestCase {
     /// same full frame.
     func testAtFortyFiveDegreesTheFullFrameIsAllowedAndWarns() throws {
         let controller = try makeController()
+        // 301 — the shipped path inscribes (`clampsToRotatedFrame` on), so a full draft is drawn as
+        // the inset rect. This test's claim is 224 §2's *rule* — the full frame is legal and red —
+        // which now needs the opt-out; the inset behaviour is pinned by CropRotatedFrameClampTests.
+        controller.clampsToRotatedFrame = false
         let map = mapping(.fit, degrees: 45)
         controller.draft = CropToolController.Draft(crop: .full, straighten: 45, lock: .original)
         let legal = legalRect(degrees: 45, source: Self.source)

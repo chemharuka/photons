@@ -285,34 +285,31 @@ final class FrameTransformMatrixTests: XCTestCase {
 
         /// The picture's place in the canvas: `inset + A + R(θ)(source − P)`, the walk S0 executes.
         ///
-        /// 286 / 294 — re-derived here from 279's geometry, not read out of the product: the
-        /// hit-test inverse must not call the same continuous origin the overlay/renderer use.
+        /// 286 / 294 — re-derived here, never read out of the product: the hit-test inverse must not
+        /// call the same continuous origin the overlay/renderer use.
+        ///
+        /// 301b — the derivation is the **half difference of two independent size functions**, the
+        /// output grid and the crop's own pixel rect:
+        ///
+        ///     inset = (canvasSize(crop) − frameSize(crop)) / 2
+        ///
+        /// Under 301 the canvas *is* the crop frame, so this is zero — but it is zero because the two
+        /// functions agree, not because a constant says so. 279's AABB spelling
+        /// (`(I − R)·(cropCentre − photoCentre) + (extent − frame)/2`) described a picture placed
+        /// inside a larger box; there is no larger box any more, and keeping it here left the ③
+        /// hit test 1.12 px out at 0.1°.
         private var independentCanvasInset: (x: Double, y: Double) {
             let cg = geometry
-            if cg.perspective?.hasWarp == true { return (0, 0) }
-            let degrees = cg.rotationDegrees
-            let quarter = degrees / 90
-            guard degrees.isFinite, abs(quarter - quarter.rounded()) >= 1e-9 else { return (0, 0) }
-            let frame = cg.frameSize
-            let extent = PlanPhase.rotatedExtent(width: Double(frame.width),
-                                                 height: Double(frame.height),
-                                                 degrees: degrees)
-            let w = Double(cg.source.width), h = Double(cg.source.height)
-            var dx = cg.crop.centerX * w - w / 2
-            var dy = cg.crop.centerY * h - h / 2
-            // 274 — the pivot is the crop offset about the photograph's centre, mirrored first
-            // (kernel order: flip, then turn).
-            if cg.flipHorizontal { dx = -dx }
-            if cg.flipVertical { dy = -dy }
-            if dx == 0 && dy == 0 {
-                return ((Double(canvasPixels(extent.width)) - Double(frame.width)) / 2,
-                        (Double(canvasPixels(extent.height)) - Double(frame.height)) / 2)
-            }
-            let radians = degrees * .pi / 180
-            let c = cos(radians), s = sin(radians)
-            let turned = (x: dx * c - dy * s, y: dx * s + dy * c)
-            return (dx - turned.x + (extent.width - Double(frame.width)) / 2,
-                    dy - turned.y + (extent.height - Double(frame.height)) / 2)
+            let canvas = CropMath.canvasSize(crop: cg.crop, in: cg.source,
+                                             straightenDegrees: cg.rotationDegrees,
+                                             quarterTurns: 0,
+                                             allowsOutsideSource: true,
+                                             perspective: cg.perspective)
+            let frame = CropMath.frameSize(cg.crop, in: cg.source,
+                                           allowsOutsideSource: true,
+                                           perspective: cg.perspective)
+            return (Double(canvas.width - frame.width) / 2,
+                    Double(canvas.height - frame.height) / 2)
         }
 
         /// The one `ceil` the canvas uses, written here rather than borrowed.
@@ -583,38 +580,22 @@ final class FrameTransformMatrixTests: XCTestCase {
             //
             // A centred crop is the historical integer half difference; a right angle is (0, 0).
             // No `FrameTransform`, no `CropGeometry`, no `plan.frameOrigin` enters this value.
-            let centred = abs(crop.centerX - 0.5) < 1e-12
-                && abs(crop.centerY - 0.5) < 1e-12
-            let inset: (x: Double, y: Double)
-            if expanded == nil {
-                inset = (0, 0)
-            } else if centred {
-                inset = (Double((baselineW - frameW) / 2),
-                         Double((baselineH - frameH) / 2))
-            } else {
-                let extent = Self.rotatedExtent(width: Double(cropPixels.width),
-                                                height: Double(cropPixels.height),
-                                                degrees: straighten)
-                let photoCentre = (x: Double(oriented.width) / 2,
-                                   y: Double(oriented.height) / 2)
-                var pivot = (x: crop.centerX * Double(oriented.width) - photoCentre.x,
-                             y: crop.centerY * Double(oriented.height) - photoCentre.y)
-                // 274 — a flip mirrors the crop offset about the photograph's centre first
-                // (kernel order: flip, then turn).
-                if flipHorizontal { pivot.x = -pivot.x }
-                if flipVertical { pivot.y = -pivot.y }
-                let radians = straighten * .pi / 180
-                let c = cos(radians), s = sin(radians)
-                let turned = (x: pivot.x * c - pivot.y * s,
-                              y: pivot.x * s + pivot.y * c)
-                let continuous = (
-                    x: pivot.x - turned.x
-                        + (extent.width - Double(cropPixels.width)) / 2,
-                    y: pivot.y - turned.y
-                        + (extent.height - Double(cropPixels.height)) / 2)
-                inset = ((continuous.x * scale).rounded(),
-                         (continuous.y * scale).rounded())
-            }
+            /// **301b — the two independent size functions.** `canvasSize` is the output grid and
+            /// `frameSize` the crop's own pixel rect; the picture's place inside the canvas is their
+            /// half difference, snapped once at this rung — never a constant, and never read from
+            /// `plan`. Under 301 the difference is zero because the canvas *is* the frame, which is
+            /// the thing being derived here rather than assumed.
+            let canvasPixels = CropMath.canvasSize(crop: crop, in: decoded,
+                                                   straightenDegrees: straighten,
+                                                   quarterTurns: edit.geometry.quarterTurns,
+                                                   allowsOutsideSource: true)
+            let framePixels = CropMath.frameSize(crop, in: oriented, allowsOutsideSource: true)
+            let canvasScaledW = max(1, Int((Double(canvasPixels.width) * scale).rounded()))
+            let canvasScaledH = max(1, Int((Double(canvasPixels.height) * scale).rounded()))
+            let frameScaledW = max(1, Int((Double(framePixels.width) * scale).rounded()))
+            let frameScaledH = max(1, Int((Double(framePixels.height) * scale).rounded()))
+            let inset = (x: Double(canvasScaledW - frameScaledW) / 2,
+                         y: Double(canvasScaledH - frameScaledH) / 2)
             self.frameOrigin = (windowOrigin.x - inset.x * kx,
                                 windowOrigin.y - inset.y * ky)
             let theta = straighten * .pi / 180
@@ -909,6 +890,30 @@ final class FrameTransformMatrixTests: XCTestCase {
         XCTAssertEqual(failing, 0,
                        "274: render (half a source pixel), overlay and hit test (0.5 S5 px) deviate in "
                        + "\(failing) places at rung \(rung), flip included; see the [260] ✗ rows above")
+    }
+
+    /// **301b — 画布 = 帧.** Two *independent* size functions must agree: the output grid
+    /// (`CropMath.canvasSize`, which owns the quarter turn and the keystone) and the crop's own
+    /// pixel rect (`CropMath.frameSize`). Under 301 the canvas is the crop frame at every angle, so a
+    /// full crop's canvas is the picture's own pixels and an inset crop's is its own rect; the half
+    /// difference the walk calls the inset is therefore zero. This guard says so without reading
+    /// `plan`, `frameOrigin` or `canvasInset` — it compares the two derivations.
+    func testTheCanvasIsTheCropFrameAtEveryAngle() {
+        let source = ImageSize(width: 3000, height: 2000)
+        let crops = [CropRect.full,
+                     CropRect(left: 0.10, top: 0.15, right: 0.70, bottom: 0.75)]
+        for degrees in [0.0, 9, 15, 45] {
+            for crop in crops {
+                let canvas = CropMath.canvasSize(crop: crop, in: source,
+                                                 straightenDegrees: degrees, quarterTurns: 0,
+                                                 allowsOutsideSource: true)
+                let frame = CropMath.frameSize(crop, in: source, allowsOutsideSource: true)
+                XCTAssertLessThanOrEqual(abs(canvas.width - frame.width), 1,
+                                         "\(degrees)° \(crop.keyString): canvas ≠ frame (width)")
+                XCTAssertLessThanOrEqual(abs(canvas.height - frame.height), 1,
+                                         "\(degrees)° \(crop.keyString): canvas ≠ frame (height)")
+            }
+        }
     }
 
     func testMatrixRungQuarter() throws { try runMatrix(Rung.all[0]) }

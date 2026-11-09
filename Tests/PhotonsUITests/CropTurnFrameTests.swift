@@ -223,8 +223,11 @@ final class CropTurnFrameTests: XCTestCase {
                                      flipV: framing.flipV)
         let committedWindow = committed.windowSize(of: .fit)
         XCTAssertEqual(committedWindow.width, committed.rotatedCropExtent.width, accuracy: 1e-9)
-        XCTAssertGreaterThan(committedWindow.width, committed.cropWidthPixels,
-                             "5°: the committed canvas must be the rotated bounding box")
+        // 301b — the committed canvas **is** the crop frame at every angle (301 方案 A), so 132's
+        // "the canvas grows to the rotated bounding box" is reversed: a full crop's 适应 window is
+        // the crop's own pixel width, not a wider AABB.
+        XCTAssertEqual(committedWindow.width, committed.cropWidthPixels, accuracy: 1e-9,
+                       "5°: the committed canvas is the crop frame, not the rotated bounding box")
     }
 
     // MARK: - 3. 松手只写一次、只渲一帧

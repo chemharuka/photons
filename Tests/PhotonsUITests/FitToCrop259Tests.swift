@@ -42,25 +42,23 @@ final class FitToCrop259Tests: XCTestCase {
         XCTAssertNotEqual(f.fitZoom, oldFit, "reverting to rotatedSourceExtent must make this red")
     }
 
-    // MARK: - 2. a full frame is the pre-259 document, bit for bit
+    // MARK: - 2. a full frame is the picture's own grid, so its 适应 never changes
 
     func testFullFrameFitIsTheOldValueExactly() {
         let viewport = ImageSize(width: 2560, height: 1600)
+        // 301b — a full crop's canvas **is** the photograph's grid at every angle, so 适应 is the
+        // θ = 0 value bit for bit. 259's expression needed the `> cropRefitDegrees` branch only to
+        // shrink for the turned AABB; with the AABB gone there is nothing to re-fit, and this test
+        // now pins that the angle enters a full frame's fit **nowhere**.
+        let expected = min(1, min(Double(viewport.width) / 6000,
+                                  Double(viewport.height) / 4000) * LoupeFraming.fitMargin)
         for degrees in [0.0, 9.0, 45.0] {
             let f = LoupeFraming(viewport: viewport, sourceWidth: 6000, sourceHeight: 4000,
                                  crop: .full, straightenDegrees: degrees)
-            // The old production expression, including its > 6° re-fit branch.
-            let base = f.rotatedSourceExtent
-            let z = min(Double(viewport.width) / max(base.width, 1e-9),
-                        Double(viewport.height) / max(base.height, 1e-9))
-            var old = min(1, z * LoupeFraming.fitMargin)
-            if abs(degrees) > LoupeFraming.cropRefitDegrees {
-                let aabb = f.rotatedCropExtent
-                let fit = min(Double(viewport.width) / max(aabb.width, 1e-9),
-                              Double(viewport.height) / max(aabb.height, 1e-9))
-                old = min(old, min(1, fit * LoupeFraming.fitMargin))
-            }
-            XCTAssertEqual(f.fitZoom, old, "\(degrees)°: a full frame is the old 适应 bit for bit")
+            XCTAssertEqual(f.fitZoom, expected,
+                           "\(degrees)°: a full crop's canvas is the source grid → the 0° fit")
+            XCTAssertEqual(f.rotatedCropExtent.width, 6000, accuracy: 1e-9,
+                           "\(degrees)°: the canvas is the crop frame, not its AABB")
         }
 
         // The M3 never-magnify rule survives for a small, never-cropped source.
