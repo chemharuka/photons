@@ -263,17 +263,29 @@ final class ThumbnailMetalSurface {
     private func makeTexture(_ image: CGImage, device: MTLDevice) -> MTLTexture? {
         let width = image.width, height = image.height
         guard width > 0, height > 0 else { return nil }
+
+        // The HD thumbnail is already half-float RGBA in extended linear P3: upload it directly.
+        let directBytes: UnsafePointer<UInt8>? = {
+            guard image.bitsPerComponent == 16, image.bitsPerPixel == 64,
+                  image.bytesPerRow >= width * 8,
+                  let data = image.dataProvider?.data else { return nil }
+            return CFDataGetBytePtr(data)
+        }()
+
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
-        descriptor.usage = .shaderRead
+        // 313 — `.shaderWrite` is **not** optional for the Core Image branch: `CIContext.render(_:to:)`
+        // runs its kernels through Metal *compute*, and a texture that only declares `.shaderRead` is
+        // silently left untouched — no error, no assert, an all-zero texture. Nothing noticed while
+        // every payload was the half-float bitmap below (a `replace` upload needs `.shaderRead`
+        // alone); 308 moved the grid to an 8-bit PQ JPEG, every cell took the Core Image branch, and
+        // the whole grid and filmstrip went black.
+        descriptor.usage = directBytes == nil ? [.shaderRead, .shaderWrite, .renderTarget]
+                                              : .shaderRead
         descriptor.storageMode = device.hasUnifiedMemory ? .shared : .managed
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
 
-        // The HD thumbnail is already half-float RGBA in extended linear P3: upload it directly.
-        if image.bitsPerComponent == 16, image.bitsPerPixel == 64,
-           image.bytesPerRow >= width * 8,
-           let data = image.dataProvider?.data,
-           let bytes = CFDataGetBytePtr(data) {
+        if let bytes = directBytes {
             texture.replace(region: MTLRegionMake2D(0, 0, width, height),
                             mipmapLevel: 0, withBytes: bytes, bytesPerRow: image.bytesPerRow)
             return texture
