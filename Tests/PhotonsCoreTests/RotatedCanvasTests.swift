@@ -2,7 +2,9 @@ import XCTest
 import Metal
 import PhotonsCore
 
-/// 132 — the canvas is the **rotated crop's bounding box**, and a crop may leave the photograph.
+/// 132 / 301 — the canvas is the **rotated crop frame itself** (301 方案 A). 132's AABB is gone from
+/// the output; the same formula remains as the crop's legal region (`CropGeometry.rotatedExtent`).
+/// A crop may still leave the photograph at 0° (the black ring then is the crop, not a margin).
 final class RotatedCanvasTests: XCTestCase {
 
     private let square = ImageSize(width: 400, height: 400)
@@ -32,24 +34,28 @@ final class RotatedCanvasTests: XCTestCase {
         XCTAssertEqual(carried.canvas, CropMath.outputSize(carried.crop, in: source))
     }
 
-    func testSquareAt45IsTheDiagonal() {
+    func testSquareAt45KeepsTheCropFrameAndTheAABBIsTheLegalRegion() {
         let canvas = CropMath.canvasSize(crop: .full, in: square, straightenDegrees: 45,
                                          quarterTurns: 0)
-        XCTAssertLessThanOrEqual(abs(canvas.width - 566), 1, "400·√2 = 565.7")
-        XCTAssertLessThanOrEqual(abs(canvas.height - 566), 1)
+        // 301 — the output is the crop frame, so a 400×400 crop stays 400×400 at 45°.
+        XCTAssertEqual(canvas, square)
+        let legal = CropGeometry.rotatedExtent(width: 400, height: 400, degrees: 45)
+        XCTAssertEqual(legal.width, 400 * 2.0.squareRoot(), accuracy: 1e-9)
+        XCTAssertEqual(legal.height, 400 * 2.0.squareRoot(), accuracy: 1e-9)
     }
 
-    func testNinePointSevenDegreesFollowsTheFormula() {
+    func testNinePointSevenDegreesKeepsTheCropFrame() {
         let source = ImageSize(width: 4000, height: 3000)
         let out = CropMath.outputSize(.full, in: source)
         let canvas = CropMath.canvasSize(crop: .full, in: source, straightenDegrees: 9.7,
                                          quarterTurns: 0)
+        XCTAssertEqual(canvas, out, "301: the canvas is the crop frame at every angle")
+        // The old AABB formula is still the legal region; it is intentionally *not* the canvas.
         let c = abs(cos(9.7 * Double.pi / 180)), s = abs(sin(9.7 * Double.pi / 180))
         let w = Double(out.width), h = Double(out.height)
-        // 162: one `ceil`, not `.rounded()` — the canvas has to *contain* the rotated corners. The
-        // old expectation (rounded) is 1 px short on a wide crop at 9.7°, the under-cover G1 fixes.
-        XCTAssertEqual(canvas.width, Int((w * c + h * s).rounded(.up)))
-        XCTAssertEqual(canvas.height, Int((w * s + h * c).rounded(.up)))
+        let legal = CropGeometry.rotatedExtent(width: w, height: h, degrees: 9.7)
+        XCTAssertEqual(legal.width, w * c + h * s, accuracy: 1e-9)
+        XCTAssertEqual(legal.height, w * s + h * c, accuracy: 1e-9)
     }
 
     func testQuarterTurnIsAppliedBeforeTheAngle() {
@@ -59,8 +65,11 @@ final class RotatedCanvasTests: XCTestCase {
         XCTAssertEqual(turned, ImageSize(width: 3000, height: 4000))
         let turned45 = CropMath.canvasSize(crop: .full, in: source, straightenDegrees: 45,
                                            quarterTurns: 1)
-        XCTAssertLessThanOrEqual(abs(turned45.width - 4950), 1)   // 3000·√2
-        XCTAssertLessThanOrEqual(abs(turned45.height - 4950), 1)
+        // The crop is measured in the turned frame (3000×4000); 301 keeps that as the canvas.
+        XCTAssertEqual(turned45, ImageSize(width: 3000, height: 4000))
+        let legal = CropGeometry.rotatedExtent(width: 3000, height: 4000, degrees: 45)
+        XCTAssertEqual(legal.width, 4950, accuracy: 1)   // (3000 + 4000)·sin 45°
+        XCTAssertEqual(legal.height, 4950, accuracy: 1)
     }
 
     // MARK: - 2. pixels: corners, black margins
@@ -84,34 +93,36 @@ final class RotatedCanvasTests: XCTestCase {
         return [Float(image.rgba[o]), Float(image.rgba[o + 1]), Float(image.rgba[o + 2])]
     }
 
-    func testFullFrameAt45KeepsThePictureCornersAndBlacksTheBoundingBoxCorners() throws {
+    func testFullFrameAt45HasNoBlackCorners() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         let image = borderImage(400, 400)
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "rotated-canvas"))
         var edit = EditModel.neutral
         edit.geometry.rotationDegrees = 45
+        // 301's contract: a full-frame request is inscribed in the turned picture before it reaches
+        // the renderer (the crop tool does this through `clampsToRotatedFrame`); model that here so
+        // the whole output is photograph and no AABB margin exists.
+        edit.geometry.crop = CropMath.clampedToRotatedFrame(.full, in: ImageSize(width: 400, height: 400),
+                                                            degrees: 45,
+                                                            keepsInsideRotatedFrame: true).normalizedRect
         let result = try graph.render(edit, options: RenderOptions(scale: 1, useCache: false,
                                                                   wantsPixels: true))
         let display = try XCTUnwrap(result.display)
-        XCTAssertLessThanOrEqual(abs(result.canvas.width - 566), 1)
+        XCTAssertEqual(result.canvas,
+                       CropMath.frameSize(edit.geometry.renderCrop(source: ImageSize(width: 400, height: 400)),
+                                          in: ImageSize(width: 400, height: 400),
+                                          allowsOutsideSource: true),
+                       "the canvas is the crop frame itself")
 
-        // The rotated square's corners land on the canvas edges' midpoints. Two pixels inside each
-        // of the four picture corners is still the photograph's own bright border…
-        let mid = result.canvas.width / 2
+        // Every corner is photograph — including the four AABB corners that used to be black.
         let maxX = result.canvas.width - 3, maxY = result.canvas.height - 3
-        for (x, y) in [(mid, 2), (maxX, mid), (mid, maxY), (2, mid)] {
+        for (x, y) in [(2, 2), (maxX, 2), (2, maxY), (maxX, maxY),
+                       (result.canvas.width / 2, 2), (maxX, result.canvas.height / 2)] {
             let p = pixels(display, x, y)
-            print(String(format: "132 §3 2 · canvas %d×%d · picture corner (%d,%d) = %.3f/%.3f/%.3f",
+            print(String(format: "301 §3 · canvas %d×%d · corner (%d,%d) = %.3f/%.3f/%.3f",
                          result.canvas.width, result.canvas.height, x, y, p[0], p[1], p[2]))
             XCTAssertTrue(p.contains { $0 > 0.3 },
-                          "the picture's corner at (\(x),\(y)) is background — the canvas is too small")
-        }
-        // …while the bounding box's four corners (outside the rotated picture) are pure black.
-        for (x, y) in [(2, 2), (result.canvas.width - 3, 2),
-                       (2, result.canvas.height - 3), (result.canvas.width - 3,
-                                                       result.canvas.height - 3)] {
-            let p = pixels(display, x, y)
-            XCTAssertEqual(p, [0, 0, 0], "AABB corner (\(x),\(y)) is not background")
+                          "the picture's corner at (\(x),\(y)) is background — the frame is not the canvas")
         }
     }
 
@@ -143,7 +154,7 @@ final class RotatedCanvasTests: XCTestCase {
 
     // MARK: - 3. the cache key follows the canvas
 
-    func testTheCanvasChangeMovesTheGeometryKeyAndThenHits() {
+    func testTheCanvasIsTheCropFrameAtEveryAngleAndTheKeyFollowsTheCrop() {
         let source = ImageSize(width: 4000, height: 3000)
         var edit = EditModel.neutral
         edit.geometry.rotationDegrees = 45
@@ -151,19 +162,23 @@ final class RotatedCanvasTests: XCTestCase {
         let flat = CropMath.outputSize(crop, in: source)
         let rotated = CropMath.canvasSize(crop: crop, in: source, straightenDegrees: 45,
                                           quarterTurns: 0)
+        // 301 — the straighten no longer grows the canvas; the crop alone decides it.
+        XCTAssertEqual(rotated, flat, "the canvas is the crop frame at 45°")
         func keys(canvas: ImageSize) -> RenderKeyChain.Links {
-            RenderKeyChain.links(identity: "132-key", sourceSize: source, canvas: canvas,
+            RenderKeyChain.links(identity: "301-key", sourceSize: source, canvas: canvas,
                                  content: canvas, edit: edit, display: DisplayOptions())
         }
-        let before = keys(canvas: flat)
-        let after = keys(canvas: rotated)
-        XCTAssertNotEqual(before.geometry, after.geometry,
-                          "the canvas is in the geometry link — a grown canvas must miss")
-        XCTAssertNotEqual(before.sceneLinear, after.sceneLinear, "…and every downstream link")
-        XCTAssertEqual(after.geometry, keys(canvas: rotated).geometry,
-                       "the same document + canvas is the same key (the rebuild is one-off)")
-        print("132 §6 · geoKey \(String(before.geometry.prefix(8)))… → "
-              + "\(String(after.geometry.prefix(8)))… for \(flat.keyString) → \(rotated.keyString)")
+        XCTAssertEqual(keys(canvas: flat).geometry, keys(canvas: rotated).geometry,
+                       "the same crop is the same canvas, so the same key")
+        // A real crop *does* change the canvas — the key still has to follow it.
+        var cropped = edit
+        cropped.geometry.crop = CropRect(left: 0.1, top: 0.1, right: 0.6, bottom: 0.7).normalizedRect
+        let smaller = CropMath.canvasSize(crop: cropped.geometry.renderCrop(source: source),
+                                          in: source, straightenDegrees: 45, quarterTurns: 0)
+        XCTAssertNotEqual(smaller, flat)
+        XCTAssertNotEqual(keys(canvas: flat).geometry, keys(canvas: smaller).geometry,
+                          "a different crop must miss the geometry key")
+        print("301 §6 · crop canvas \(flat.keyString) · smaller \(smaller.keyString)")
     }
 
     // MARK: - 4. the UI predicate

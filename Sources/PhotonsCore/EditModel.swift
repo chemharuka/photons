@@ -1215,11 +1215,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// its width is a fraction of the turned width). This is the same two calls with the turned
     /// size in the second one, kept in one place so no caller can forget the swap.
     ///
-    /// **188 — 「输出尺寸」 is the canvas the renderer allocates, so it is `CropMath.canvasSize`.**
-    /// At θ ≠ 0 the canvas is the turned crop's bounding box (162), which is what the render produces
-    /// and what the info bar has to report; keeping `frameSize` here made the readout and the
-    /// backdrop's own scale smaller than the picture on screen. At every right angle `canvasSize`
-    /// returns `outputSize` itself, so this is the pre-188 value bit for bit.
+    /// **301 — 「输出尺寸」 is the crop frame, which is the canvas the renderer allocates.** Turning a
+    /// rectangle does not change its extent, so `CropMath.canvasSize` answers the crop's own pixel
+    /// rect at every angle (188's AABB, which made the readout larger than the picture, is gone).
+    /// At every right angle this is the same number it always was, bit for bit. The keystone keeps
+    /// its own `P → R → AABB` canvas inside `canvasSize` (a warped crop is a quadrilateral).
     public func outputPixels(in source: ImageSize) -> ImageSize {
         CropMath.canvasSize(crop: renderCrop(source: source), in: orientedSource(source),
                             straightenDegrees: straightenDegrees, quarterTurns: 0,

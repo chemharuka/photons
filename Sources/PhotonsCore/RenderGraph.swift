@@ -1894,51 +1894,26 @@ public final class RenderGraph {
         // `window == nil`, so a zoomed crop workspace composed its full-size frame on the
         // photograph's own canvas — the crop's pivot instead of the AABB' — and the two pictures
         // disagreed by up to 59 code values (24.8 % of pixels by more than 2).
-        let expandedCanvas: ImageSize? = perspectiveCanvas == nil
-            && edit.geometry.straightenDegrees != 0
-            ? CropMath.canvasSize(crop: crop, in: sourceSize,
-                                  straightenDegrees: edit.geometry.straightenDegrees,
-                                  quarterTurns: edit.geometry.quarterTurns,
-                                  allowsOutsideSource: true,
-                                  perspective: nil)
-            : nil
+        // 301 (方案 A, 帧优先): there is no expanded baseline any more. The canvas **is** the rotated
+        // crop frame (`CropMath.canvasSize`), so the picture's frame and the canvas are the same
+        // rectangle at every angle. `baseline == frame`, `inset == 0`, and `S0` samples `p.c` over
+        // the canvas' whole domain. The old AABB branch is what put a tilted black ring around the
+        // photograph; the inset quantities below therefore all reduce to zero without a second
+        // rule (they still exist for the kind check and the downstream arithmetic).
+        let expandedCanvas: ImageSize? = nil
         // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
         let baseline = expandedCanvas.map {
             ImageSize(width: max(1, Int((Double($0.width) * scale).rounded())),
                       height: max(1, Int((Double($0.height) * scale).rounded())))
         } ?? frame
-        // Where the picture's own frame starts inside the baseline, in baseline pixels. Zero — and
-        // therefore free — for every un-straightened document.
+        // Where the picture's own frame starts inside the baseline, in baseline pixels.
         //
-        // 279 — the origin is the **turned crop's** AABB origin, not the frame-centred
-        // `(baseline − frame)/2`: the kernel turns about the photograph's centre (248), so an
-        // off-centre crop's AABB is `(I − R)·(cropCentre − photoCentre)` away from the centred
-        // spelling. `CropGeometry.canvasInsetOrigin` is the one owner of that number;
-        // `CanvasSpaces.canvasInset` and `CropMath.canvasOrigin` read it, so the overlay and the
-        // renderer cannot disagree. At θ = 0 it is exactly zero, hence every un-straightened key is
-        // unchanged.
-        //
-        // 2026-11-01 (D1) — **integer**, one snap. The window indexes this baseline with integer
-        // pixels, and `s0_geometry` samples `framePx = windowX + local − inset`; a fractional inset
-        // made every windowed frame sample the picture at a half-pixel phase, so a 1:1 plate could
-        // not equal the same-region cut of the whole-frame render (`CropFullResCanvas` measured 75
-        // codes of difference). Keep the snap; the pivot correction rides inside the same integer.
-        let insetContinuous = CropGeometry.canvasInsetOrigin(
-            crop: crop, in: orientedSource, degrees: edit.geometry.straightenDegrees,
-            flipH: edit.geometry.flipHorizontal, flipV: edit.geometry.flipVertical)
-        // A centred crop (full included) keeps D1's integer `(baseline − frame)/2` bit for bit;
-        // only the off-centre pivot correction is new, and it snaps at the same one place.
-        let centred = abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12
-        let inset: SIMD2<Float>
-        if expandedCanvas == nil {
-            inset = SIMD2<Float>(0, 0)
-        } else if centred {
-            inset = SIMD2<Float>(Float((baseline.width - frame.width) / 2),
-                                 Float((baseline.height - frame.height) / 2))
-        } else {
-            inset = SIMD2<Float>(Float((insetContinuous.x * scale).rounded()),
-                                 Float((insetContinuous.y * scale).rounded()))
-        }
+        // 301b — there is nothing to compute: the canvas **is** the frame (`CropMath.canvasSize`),
+        // the baseline *is* the frame at every angle, and `s0_geometry` samples `p.c` from canvas
+        // pixel 0. 279's AABB origin (and 162's frame-centred half margin before it) described a
+        // picture placed inside a larger box; there is no larger box. `CropGeometry.canvasInset`
+        // answers the same `(0, 0)` by name, so the overlay and the renderer cannot disagree.
+        let inset = SIMD2<Float>(0, 0)
         let baselineRect = ImageRect(x: 0, y: 0, width: baseline.width, height: baseline.height)
 
         // A window covering the baseline *is* no window: normalizing here means "1:1 on a picture

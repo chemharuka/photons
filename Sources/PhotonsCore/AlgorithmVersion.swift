@@ -40,6 +40,10 @@ public enum StageAlgorithmVersion {
 
     // One number per stage, in `RenderStage.order`. 2 = "the maths changed after graph-v1 was set".
 
+    /// **4** — 301：输出画布 = 旋转后的裁切框本身（方案 A），并删掉 S0 里「采样坐标 vs `p.c`」的
+    /// 空间错配钳制。同样的 crop/angle 现在渲染的像素不同：内缩 + 非直角不再被误涂黑（9° 实测
+    /// 7.385 % → 0），满幅的 AABB 黑边也随画布一起消失。直角（`straighten == 0`）逐字节不变。
+    ///
     /// **3** — 246：透视并入画布尺寸计算. The order is now the user's: 先透视 → 再旋转 → 再算画布.
     /// The canvas is the AABB of the warped **and** turned picture (the old generation took the
     /// inscribed rectangle of the warped quad and therefore cut its corners off), and the kernel
@@ -50,7 +54,7 @@ public enum StageAlgorithmVersion {
     /// **2** — 183: the keystone (`geometry.perspectiveVertical/Horizontal`) joined S0's sample
     /// coordinate, with the canvas as the inscribed rectangle of the warped quad.
     /// Unchanged since graph-v1 (crop/rotate/flip/lateral CA arithmetic, before the keystone).
-    public static let geometry = 3
+    public static let geometry = 4
     /// **8** — 179: 原色校准 joined S1 (`CalibrationGroup`). The stage's exit now multiplies by a
     /// 3×3 primaries matrix and applies the shadows' green↔magenta tint, so a document whose seven
     /// calibration numbers are **not** all 0 renders pixels it could not render before. A document

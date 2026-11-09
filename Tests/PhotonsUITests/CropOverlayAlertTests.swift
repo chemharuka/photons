@@ -35,6 +35,9 @@ final class CropOverlayAlertTests: XCTestCase {
         let session = editor.session
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
         CropUITestSupport.pump(0.05)
+        // 301 — the shipped path inscribes the frame, so a full draft can never cover the turned-out
+        // corners. The red rule is still live behind the opt-out; this test is about that rule.
+        loupe.cropTool.clampsToRotatedFrame = false
 
         let start = try XCTUnwrap(loupe.cropOverlayLayoutForTesting, "no frame at 0°")
         XCTAssertFalse(start.exceedsPicture, "0° full frame has no empty pixels → not red")
@@ -150,6 +153,9 @@ final class CropOverlayAlertTests: XCTestCase {
         // 再进裁切，缩到 25 %。
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
         CropUITestSupport.pump(0.05)
+        // 301 — the opt-out: the "frame over the letterbox ⇒ red" rule is unreachable through the
+        // shipped inset path, which is exactly what this test exists to paint.
+        loupe.cropTool.clampsToRotatedFrame = false
 
         // 用户的取景：缩到 25 %。这个窗口里 25 % 的画布（10075 px × 0.25 = 2518）比视口（2044）还
         // 宽，旋转空角根本不在屏幕上，而 ⑦ 会把框 clamp 进可见画布 —— 那一档「盖住黑角」这件事不
@@ -263,6 +269,8 @@ final class CropOverlayAlertTests: XCTestCase {
         session.applyEdit { $0.geometry.quarterTurns = 1 }
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, session))
         CropUITestSupport.pump(0.05)
+        // 301 — see the other two alerts: the red rule now lives behind `clampsToRotatedFrame`.
+        loupe.cropTool.clampsToRotatedFrame = false
         loupe.cropTool.setStraighten(5.4)
         loupe.refreshCropTool()
         CropUITestSupport.pump(0.02)

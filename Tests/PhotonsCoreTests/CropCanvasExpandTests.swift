@@ -1,15 +1,14 @@
 import XCTest
 import PhotonsCore
 
-/// 162 §2.1 / G1 — **画布只在真的旋转时扩**.
+/// 162 / 301 — **画布 = 裁切帧本身**.
 ///
-/// A quarter-turn angle (0 / 90 / 180 / 270, and the 90° multiples a quarter turn adds) leaves the
-/// canvas exactly the size of the crop's pixel rect — no padding, no rounding-up border. Only a
-/// genuinely non-right angle grows the canvas, and then to the **exact** bounding box of the rotated
-/// crop: a single `ceil` on the half-pixel boundary, never `+1`.
-///
-/// The expected values are computed here from `cos`/`sin` and the crop's pixel edges, independently
-/// of `CropMath.canvasSize`.
+/// 301 (方案 A) reversed 162's "a real angle grows the canvas" rule. The output is the rotated crop
+/// frame, so every angle (right or not) leaves the canvas exactly the crop's pixel rect — no AABB,
+/// no padding. The rotated AABB still exists as the crop's **legal region**
+/// (`CropGeometry.rotatedExtent`), with a single `ceil` on the half-pixel boundary; it is no longer
+/// the output texture. The expected values are computed from `cos`/`sin` and the crop's pixel edges,
+/// independently of `CropMath.canvasSize`.
 final class CropCanvasExpandTests: XCTestCase {
 
     private let source = ImageSize(width: 6000, height: 4000)
@@ -87,25 +86,17 @@ final class CropCanvasExpandTests: XCTestCase {
         }
     }
 
-    // MARK: - everything else: the exact bounding box
+    // MARK: - everything else: the crop frame
 
-    /// `ceil` once around the continuous extent, computed here without `CropMath`.
-    private func expectedExtent(_ crop: CropRect, in source: ImageSize,
-                                degrees: Double) -> ImageSize {
-        let w = Double(source.width) * crop.width
-        let h = Double(source.height) * crop.height
-        let radians = degrees * Double.pi / 180
-        let c = abs(cos(radians)), s = abs(sin(radians))
-        // The continuous AABB must be contained; the integer canvas is the smallest one that is.
-        // The `1e-9` is the half-pixel-boundary snap: 400.00000000000006 is 400, not 401.
-        func ceil(_ v: Double) -> Int { max(1, Int((v - 1e-9).rounded(.up))) }
-        return ImageSize(width: ceil(w * c + h * s), height: ceil(w * s + h * c))
-    }
-
-    func testNonRightAnglesUseTheExactRotatedBoundingBox() {
+    /// 301 (方案 A) — a non-right angle **does not grow the canvas any more**: the output is the
+    /// rotated crop frame itself, so the canvas stays the crop's `W × H`. The rotated AABB still
+    /// exists, but only as the frame's legal region (`CropGeometry.rotatedExtent`), not as the
+    /// output texture. The user's 162 rule is therefore now "a right angle and every other angle
+    /// both keep the crop frame"; the old AABB formula moved to the document-canvas side.
+    func testNonRightAnglesKeepTheCropFrameAndTheAABBIsOnlyTheLegalRegion() {
         for k in cases {
             for angle in [1.0, 8.0, 45.0] {
-                let expected = expectedExtent(k.crop, in: source, degrees: angle)
+                let expected = cropPixels(k.crop, in: source)
                 let canvas = CropMath.canvasSize(crop: k.crop, in: source,
                                                  straightenDegrees: angle, quarterTurns: 0)
                 let radians = angle * Double.pi / 180
@@ -113,18 +104,17 @@ final class CropCanvasExpandTests: XCTestCase {
                 let h = Double(source.height) * k.crop.height
                 let continuous = (w * abs(cos(radians)) + h * abs(sin(radians)),
                                   w * abs(sin(radians)) + h * abs(cos(radians)))
-                print(String(format: "162 G1 · %@ @ %.0f° · continuous %.3f×%.3f → canvas %@ "
-                             + "(expected %@)",
-                             k.name, angle, continuous.0, continuous.1,
-                             canvas.keyString, expected.keyString))
+                let legal = CropGeometry.rotatedExtent(width: w, height: h, degrees: angle)
+                print(String(format: "301 · %@ @ %.0f° · canvas %@ · rotated AABB %.3f×%.3f",
+                             k.name, angle, canvas.keyString, continuous.0, continuous.1))
                 XCTAssertEqual(canvas, expected,
-                               "\(k.name) @ \(angle)°: canvas is not the exact rotated bounding box")
-                // The integer canvas contains the continuous box…
-                XCTAssertGreaterThanOrEqual(Double(canvas.width), continuous.0)
-                XCTAssertGreaterThanOrEqual(Double(canvas.height), continuous.1)
-                // …and it is the *smallest* integer box that does (no stacked +1).
-                XCTAssertLessThan(Double(canvas.width), continuous.0 + 1)
-                XCTAssertLessThan(Double(canvas.height), continuous.1 + 1)
+                               "\(k.name) @ \(angle)°: canvas must be the crop frame itself")
+                // The AABB is the legal region: it contains the frame to within the one `ceil` and
+                // agrees with the formula `|w·cos| + |h·sin|` independently of the canvas rule.
+                XCTAssertEqual(legal.width, continuous.0, accuracy: 1e-9)
+                XCTAssertEqual(legal.height, continuous.1, accuracy: 1e-9)
+                XCTAssertGreaterThanOrEqual(legal.width + 1e-9, Double(canvas.width))
+                XCTAssertGreaterThanOrEqual(legal.height + 1e-9, Double(canvas.height))
             }
         }
     }

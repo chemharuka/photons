@@ -27,12 +27,13 @@ final class GeometryTests: XCTestCase {
 
         XCTAssertEqual(carried.rotationDegrees, -12.5, accuracy: 1e-12)
         XCTAssertEqual(carried.crop, geometry.renderCrop(source: source))
-        // 132: the canvas is the bounding box of the rotated crop; at 0° it is `outputSize`.
+        // 301 (方案 A): the canvas is the rotated crop frame itself, so it is `outputSize` at every
+        // angle. The rotated bounding box is only the crop's legal region now.
         XCTAssertEqual(carried.canvas,
                        CropMath.canvasSize(crop: carried.crop, in: source,
                                            straightenDegrees: -12.5, quarterTurns: 0))
-        XCTAssertNotEqual(carried.canvas, CropMath.outputSize(carried.crop, in: source),
-                          "a straightened frame's canvas is the rotated bounding box")
+        XCTAssertEqual(carried.canvas, CropMath.outputSize(carried.crop, in: source),
+                       "a straightened frame's canvas is the crop frame, not its AABB")
         XCTAssertEqual(carried.source, source)
         XCTAssertEqual(carried.cosine, cos(-12.5 * .pi / 180), accuracy: 1e-12)
         XCTAssertEqual(carried.sine, sin(-12.5 * .pi / 180), accuracy: 1e-12)

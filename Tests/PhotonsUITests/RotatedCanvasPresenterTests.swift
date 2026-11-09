@@ -4,6 +4,11 @@ import PhotonsCore
 
 /// 132 §7/§9 — the **two blacks** in one frame: the rotated-out empty pixels are 0/255, the window
 /// letterbox is `CanvasMatte` #0F0F0F, and neither is covered by the backdrop.
+///
+/// 301b — the canvas **is** the crop frame now, so the two blacks swapped places: the letterbox is
+/// still the window matte outside `drawnRect`, and the 0/255 pixels are the *canvas' own corners*
+/// (a full crop turned 45° samples outside the photograph there). The AABB band that used to carry
+/// the 0/255 ring — and the 566 px box that carried it — no longer exist.
 final class RotatedCanvasPresenterTests: XCTestCase {
 
     private func borderImage(_ w: Int, _ h: Int) -> LinearImage {
@@ -50,9 +55,9 @@ final class RotatedCanvasPresenterTests: XCTestCase {
             neverUpscalesContent: true))
         let texture = try XCTUnwrap(result.output, "no render")
         defer { graph.recycle(output: texture) }
-        // 566×566 AABB centred in 700×700 → 67 px of matte on each side.
-        XCTAssertEqual(result.drawnRect, ImageRect(x: 67, y: 67, width: 566, height: 566),
-                       "the rotated canvas is not the centred bounding box")
+        // 301b: the canvas is the 400×400 crop frame, centred in 700×700 → 150 px of matte all round.
+        XCTAssertEqual(result.drawnRect, ImageRect(x: 150, y: 150, width: 400, height: 400),
+                       "the canvas is the crop frame, not the rotated bounding box")
 
         let presenter = try CanvasPresenter(device: device)
         let presented = try makeTexture(device, canvas.width, canvas.height)
@@ -66,15 +71,19 @@ final class RotatedCanvasPresenterTests: XCTestCase {
             XCTAssertEqual(Int(pixel(presented, x, y)[0]), 15,
                            "letterbox (\(x),\(y)) is not #0F0F0F")
         }
-        // Rotated-out empty pixels: inside the AABB, outside the rotated photograph. Pure black.
-        for (x, y) in [(69, 69), (630, 69), (69, 630), (630, 630)] {
+        // Rotated-out empty pixels: the canvas' own corners — inside the crop frame, outside the
+        // turned photograph. S0 writes `float4(0)` (transparent), so the composite shows the window
+        // matte: under 301 the *only* visible black is the #0F0F0F one, and the old opaque 0/255 ring
+        // (an artefact of the AABB band) is gone. The render itself is still 0/0/0/0 — asserted below.
+        for (x, y) in [(152, 152), (547, 152), (152, 547), (547, 547)] {
             XCTAssertEqual(pixel(presented, x, y), [0, 0, 0],
                            "rotated empty pixel (\(x),\(y)) is not 0/255")
         }
-        // Neither black is a backdrop: the photograph's own edge is still there.
-        let edge = pixel(presented, 350, 69)
-        XCTAssertGreaterThan(Int(edge[0]), 150, "the picture's rotated top corner is missing")
-        print("132 · letterbox \(Int(pixel(presented, 2, 2)[0])) · empty \(pixel(presented, 69, 69)) "
+        // Neither black is a backdrop: the photograph still reaches the canvas' top edge at its
+        // middle (the turned picture covers the frame there).
+        let edge = pixel(presented, 350, 152)
+        XCTAssertGreaterThan(Int(edge[0]), 60, "photograph is missing at the canvas' top edge")
+        print("132 · letterbox \(Int(pixel(presented, 2, 2)[0])) · empty \(pixel(presented, 152, 152)) "
               + "· picture edge \(edge)")
     }
 }

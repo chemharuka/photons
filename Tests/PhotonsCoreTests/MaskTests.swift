@@ -1031,25 +1031,19 @@ final class MaskTests: XCTestCase {
         let clamped = crop.clamped()
         let frame = (width: Double(dump.width), height: Double(dump.height))
         let cs = cos(rotation * Double.pi / 180), sn = sin(rotation * Double.pi / 180)
-        // 132: at θ ≠ 0 the canvas is the rotated crop's bounding box and the frame is centred in it,
-        // so `p.f.xy` is the frame's pixel size and the canvas origin is `(frame − canvas)/2`.
-        // 188: `outputPixels` is now the **canvas** (the info-bar size), so the frame's own pixels are
-        // asked for by name — the two are the same number at every right angle and differ by the AABB
-        // margin at any other, which is exactly the difference this forward model needs.
-        let framePixels = CropMath.frameSize(edit.geometry.renderCrop(source: ImageSize(width: image.width,
-                                                                                       height: image.height)),
-                                             in: ImageSize(width: image.width, height: image.height),
-                                             allowsOutsideSource: true)
+        // 301 (方案 A) — the canvas **is** the rotated crop frame: `p.f.xy` is the frame's pixel
+        // size and the frame starts at the canvas origin, so the atlas is the frame's own grid.
+        // (Before 301 the atlas was the AABB and the frame sat at `canvasInsetOrigin` inside it.)
+        let imageSize = ImageSize(width: image.width, height: image.height)
+        let framePixels = CropMath.frameSize(edit.geometry.renderCrop(source: imageSize),
+                                             in: imageSize, allowsOutsideSource: true)
         let fx = Double(framePixels.width), fy = Double(framePixels.height)
-        // 279 — the frame sits at the **turned crop's AABB origin**, snapped to an integer exactly
-        // as `plan` does (`CropGeometry.canvasInsetOrigin`). The old frame-centred
-        // `(baseline − frame)/2` is only the θ = 0 spelling; with flips and a 7° turn this model
-        // described a picture that was `(I−R)F(cropCentre−photoCentre)` away from the atlas.
-        let origin = CropGeometry.canvasInsetOrigin(
-            crop: CropRect(clamped), in: ImageSize(width: image.width, height: image.height),
-            degrees: rotation, flipH: true, flipV: false)
-        let ox = origin.x.rounded()
-        let oy = origin.y.rounded()
+        let origin = CropMath.canvasOrigin(crop: CropRect(clamped), in: imageSize,
+                                           straightenDegrees: rotation, quarterTurns: 0)
+        let ox = Double(origin.x)
+        let oy = Double(origin.y)
+        XCTAssertEqual(ImageSize(width: dump.width, height: dump.height), framePixels,
+                       "the atlas canvas must be the crop frame")
 
         var worst = 0.0
         for y in 0..<dump.height {
@@ -1078,7 +1072,9 @@ final class MaskTests: XCTestCase {
         }
         XCTAssertLessThan(worst, 2.0 / 255.0,
                           "the atlas does not invert crop/rotation/flip (worst \(worst))")
-        XCTAssertLessThan(crop.clamped().width * Double(image.width), Double(dump.width),
+        XCTAssertEqual(Double(dump.width), crop.clamped().width * Double(image.width),
+                       accuracy: 1, "the atlas is the crop's own frame")
+        XCTAssertLessThan(Double(dump.width), Double(image.width),
                           "the atlas follows the crop, not the source")
 
         // Where S0's own map puts the probe, in canvas pixel indices (`MaskCanvasMapping` is the same

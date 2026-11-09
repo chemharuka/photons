@@ -122,57 +122,43 @@ final class CropCommitRegion248Tests: XCTestCase {
         max(1, Int((value - 1e-9).rounded(.up)))
     }
 
-    /// 279's integer origin of the crop inside its turned AABB, recomputed in the test:
+    /// The canvas' origin inside the turned frame — **`(0, 0)` since 301**.
     ///
-    ///     origin = (I − R)·(cropCentre − photoCentre) + (extent − frame)/2
-    ///
-    /// A centred crop keeps the historical integer half difference; a right angle is `(0, 0)`.
-    private func inset279(crop: CropRect, in turned: ImageSize,
-                          degrees: Double) -> (x: Int, y: Int) {
-        let quarter = degrees / 90
-        guard degrees.isFinite, abs(quarter - quarter.rounded()) >= 1e-9 else { return (0, 0) }
-        let frame = CropMath.frameSize(crop, in: turned, allowsOutsideSource: true)
-        let extent = rotatedExtent(width: Double(frame.width),
-                                   height: Double(frame.height), degrees: degrees)
-        let w = Double(turned.width), h = Double(turned.height)
-        let dx = crop.centerX * w - w / 2, dy = crop.centerY * h - h / 2
-        if dx == 0 && dy == 0 {
-            return ((canvasPixels(extent.width) - frame.width) / 2,
-                    (canvasPixels(extent.height) - frame.height) / 2)
-        }
-        let radians = degrees * .pi / 180
-        let c = cos(radians), s = sin(radians)
-        let turnedOffset = (x: dx * c - dy * s, y: dx * s + dy * c)
-        let continuous = (
-            x: dx - turnedOffset.x + (extent.width - Double(frame.width)) / 2,
-            y: dy - turnedOffset.y + (extent.height - Double(frame.height)) / 2)
-        return (Int(continuous.x.rounded()), Int(continuous.y.rounded()))
+    /// 279's derivation (`(I − R)·(cropCentre − photoCentre) + (extent − frame)/2`) placed a
+    /// frame-sized picture inside the turned crop's AABB. 301 made the canvas the crop frame itself
+    /// (方案 A), so there is no AABB and no offset: S0 samples `p.c` from canvas pixel 0 and the
+    /// overlay's forward/backward walks start there too. Kept as a named call so this file spells
+    /// the kernel's walk with **one** origin, and so a future AABB cannot creep back in silently.
+    private func canvasInset(crop: CropRect, in turned: ImageSize,
+                             degrees: Double) -> (x: Int, y: Int) {
+        _ = crop; _ = turned; _ = degrees
+        return (0, 0)
     }
 
-    /// Turned source pixel → canvas coordinate, the kernel's forward walk.
+    /// Turned source pixel → canvas coordinate.
+    ///
+    /// **301b — this is a translation, not a rotation.** S0's `p.c` is the crop rect in the turned
+    /// frame and the kernel maps a canvas pixel to `p_c + uv·crop` *linearly*: the canvas **is** the
+    /// crop's own pixel grid (301, 方案 A). The straighten lives one step further out, on the sample
+    /// coordinate (`photo = R(θ)(p_c − P) + P`), so it cancels between the committed crop and the
+    /// session canvas — both index the same turned frame at 1:1. 279's spelling rotated *here* and
+    /// put the difference back through the AABB inset; with the inset gone that walk is a 2θ error
+    /// (measured 0.008 / 0.105 / 0.256 before this correction).
     private func canvasPoint(photo: (x: Double, y: Double), crop: CropRect,
                              in turned: ImageSize, degrees: Double,
                              inset: (x: Int, y: Int)) -> (x: Double, y: Double) {
-        let cx = Double(turned.width) / 2, cy = Double(turned.height) / 2
-        let dx = photo.x - cx, dy = photo.y - cy
-        let radians = degrees * .pi / 180
-        let c = cos(radians), s = sin(radians)
-        let qx = dx * c - dy * s + cx, qy = dx * s + dy * c + cy
-        return (Double(inset.x) + qx - crop.left * Double(turned.width),
-                Double(inset.y) + qy - crop.top * Double(turned.height))
+        _ = degrees
+        return (Double(inset.x) + photo.x - crop.left * Double(turned.width),
+                Double(inset.y) + photo.y - crop.top * Double(turned.height))
     }
 
-    /// Canvas pixel → turned source pixel, the inverse of `canvasPoint`.
+    /// Canvas pixel → turned source pixel, the inverse of `canvasPoint` (also a translation).
     private func photoPoint(canvas: (x: Double, y: Double), crop: CropRect,
                             in turned: ImageSize, degrees: Double,
                             inset: (x: Int, y: Int)) -> (x: Double, y: Double) {
-        let cx = Double(turned.width) / 2, cy = Double(turned.height) / 2
-        let qx = canvas.x - Double(inset.x) + crop.left * Double(turned.width)
-        let qy = canvas.y - Double(inset.y) + crop.top * Double(turned.height)
-        let dx = qx - cx, dy = qy - cy
-        let radians = degrees * .pi / 180
-        let c = cos(radians), s = sin(radians)
-        return (dx * c + dy * s + cx, -dx * s + dy * c + cy)
+        _ = degrees
+        return (canvas.x - Double(inset.x) + crop.left * Double(turned.width),
+                canvas.y - Double(inset.y) + crop.top * Double(turned.height))
     }
 
     /// The acceptance's 4 × 4 matrix: the pixels under the box equal the committed render's pixels.
@@ -206,9 +192,9 @@ final class CropCommitRegion248Tests: XCTestCase {
                 // by the crop's own origin, then snap the AABB origin once). Neither side calls
                 // `FrameTransform.sourceToView` or reads the product's continuous inset, so a
                 // wrong origin cannot agree with itself.
-                let inset = self.inset279(crop: draw, in: turned,
+                let inset = self.canvasInset(crop: draw, in: turned,
                                           degrees: angle.straighten)
-                let sessionInset = self.inset279(crop: .full, in: turned,
+                let sessionInset = self.canvasInset(crop: .full, in: turned,
                                                  degrees: angle.straighten)
                 let frame = CropMath.outputSize(draw, in: turned, allowsOutsideSource: true)
                 let cropOrigin = (x: draw.left * Double(turned.width),

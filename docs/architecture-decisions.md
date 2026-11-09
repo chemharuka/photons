@@ -604,7 +604,7 @@ Metal 源码形状的断言。
 ### 现状（已核实）
 
 - **存 5 个数**：`crop`（归一化、相对于**转过的帧**）、`rotationDegrees`（±45 微调）、`quarterTurns`（0…3，同时是 XMP orientation 的唯一来源）、`flipHorizontal/Vertical`、`perspective`（±100）。
-- **派生量散在几处**：`CropMath.canvasSize`（AABB）、`CropGeometry.rotatedExtent`（已收成一处）、`CropGeometry.canvasInsetOrigin`（279 新收）、`FrameTransform`（S1→S3→S5）、`LoupeFraming`（S5 取景）、`s0_geometry.metal`（8 个编译期 entry：turn × rot × lens × flip，外加 identity / pureCA / pureTurn 三条快路径）。
+- **派生量散在几处**：`CropMath.canvasSize`（**301 起 = 裁切帧**；AABB 只在 `CropGeometry.rotatedExtent` / S4）、`CropGeometry.rotatedExtent`（已收成一处）、`CropGeometry.canvasInsetOrigin`（279 新收）、`FrameTransform`（S1→S3→S5）、`LoupeFraming`（S5 取景）、`s0_geometry.metal`（8 个编译期 entry：turn × rot × lens × flip，外加 identity / pureCA / pureTurn 三条快路径）。
 - **快路径是字节级兼容的代价**：`s0_geometry` 为了老金值逐位不变，保留了「不旋转就完全不含乘除」的独立 entry（`fma(o,1,0.5)` 那段），重构时必须正面处理，不能顺手抹平。
 - **守卫已经铺开**：`FrameTransformMatrixTests`（720 组 × ①渲染/②叠层/③命中）、`RotateCropFortyFiveTests`、`CropCommitRegion248Tests`、`Crop*` 系列、`LoupeZoom*`。重构的前提是这些守卫先全部真绿（含 286 恢复独立推导、281 修次序）。
 

@@ -13,7 +13,7 @@
 |---|---|---|---|---|
 | **S1** | **源像素**（source pixels） | `CropGeometry.source` | 解码得到的照片像素，已按 EXIF 摆正、**未**做透视/旋转/裁切 | 像素；`[0,1]²` 归一化时指整幅照片 |
 | **S2** | **帧**（frame） | `frameSize` / `frameExtent` | 文档**保留**的那块画面（裁切框围出的那块），1:1 像素网格 | 像素 |
-| **S3** | **帧画布**（frame canvas） | `canvas` / `frameExtent` | 把 S2 旋转后**恰好包住**它的轴对齐矩形 —— 渲染器输出、导出的图像 | 像素 |
+| **S3** | **帧画布**（frame canvas） | `canvas` | **301 起 = S2 本身**：旋转后的裁切框仍是 `W × H`，它就是渲染器输出、导出的图像 | 像素 |
 | **S4** | **源画布**（source canvas） | `photoCanvas` | 把**整幅照片**（S1）旋转后包住它的轴对齐矩形。裁切框可以出照片（黑角），但**不可出源画布** | 像素；裁切钳制基准 |
 | **S5** | **视口 / 窗口**（viewport / window） | `LoupeFraming.viewport`、窗口 rung | 屏幕上的可见区域（含 fit/zoom 缩放与相机位置） | 设备像素 |
 
@@ -22,10 +22,11 @@
 
 铁律（来自代码，别口头改）：
 
-- `S3` 与 `S4` **只在"裁切切进照片里"或"有透视"时不同**；全幅 + 无透视 + 直角时三者（S2/S3/S4）重合。
+- **301（方案 A，帧优先）**：`S3 = S2`。输出画布是旋转后的裁切框本身，不取 AABB；AABB 只留在 `S4`
+  （以及裁切框的合法区）里。
 - `S4` **只是** (S1, 角度, 四分之一转) 的函数 —— **永远不依赖** 缩放、窗口、视口、裁切框；这是"钳制与屏幕无关"的根。
-- `S2 → S3` 的唯一换算是「绕帧中心旋转 + 帧内 inset」，与 `s0_geometry.metal` 反向同构：
-  `canvas = C/2 + R(θ)·(frame − F/2)`。
+- `S2 → S3` 是**恒等**；旋转在 `S0` 内部完成（canvas → source 的 `R(−θ)`），不再把帧旋进一块更大的画布。
+  `CropGeometry.frameExtent` / `canvasInset` 仍是旧 AABB 读数的陈迹，不参与 301 的渲染路径。
 - 两个模式**不各有一套空间**，只有"当前谁被画出来"不同（见 §3）。
 
 ## 2. 用户口语 → 规范用词（对照表）
@@ -69,8 +70,8 @@
 |---|---|---|
 | `CropGeometry.source` | 摆正后的照片尺寸 | S1 |
 | `CropGeometry.frameSize` | 保留画面的 1:1 像素尺寸 | S2 |
-| `CropGeometry.frameExtent` | S2 旋转后的连续包围盒（S3 的 ceil 前） | S2→S3 |
-| `CropGeometry.canvas` / `plan.canvas` | 渲染输出尺寸 | S3 |
+| `CropGeometry.frameExtent` | S2 旋转后的连续包围盒（301 起只是合法区读数，不是 S3） | S2 的 AABB，旧口径 |
+| `CropGeometry.canvas` / `plan.canvas` | 渲染输出尺寸（= `frameSize`） | S3 = S2 |
 | `CropGeometry.photoCanvas` | 整幅照片旋转后的包围盒 | S4 |
 | `LoupeFraming.mapping` | S3 → S5 的映射（origin/content 都是 S5 里的位置） | S3→S5 |
 | `session.ingestedSourceFrame` | 解码期发布的整份文件尺寸（已除 `decodeScale`） | S1 |

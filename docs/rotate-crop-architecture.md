@@ -23,22 +23,28 @@
 | 源（文件）像素 | 解码缓冲；quarter turn 后 = `orientedSource` | `GeometryGroup.orientedSource` | 裁切矩形按**转向后**的帧归一化 |
 | 照片像素 | 转向后的整张照片 = `CropGeometry.source` | `CropGeometry` | 归一化 `CropRect` 的坐标系 |
 | 帧（裁切像素） | `CropMath.frameSize` | `CropMath.swift:655` | 132 起可越出照片 |
-| **输出画布** | 旋转后**裁切框**的 AABB | `CropMath.canvasSize:596` | 渲染/导出的输出；`ceil` 一次 |
-| **文档画布** | 旋转后**整张照片**的 AABB | 本次新增 `CropGeometry.photoCanvas` | 裁切框的合法区；与缩放/视口无关 |
+| **输出画布** | **旋转后的裁切框本身**（= 帧的 `W × H`） | `CropMath.canvasSize`（301 起 = `frameSize`） | 渲染/导出的输出；`p.c` 的定义域 |
+| **文档画布** | 旋转后**整张照片**的 AABB | `CropGeometry.photoCanvas` | 裁切框的合法区；与缩放/视口无关 |
 | 窗口 | 输出画布上的一个整数矩形 | `RenderOptions.outputWindow` | 屏幕可见区 |
 | backdrop | 整帧的低清渲染，画布坐标系 | `BackdropCache` + `framePlacement` | 归一化到输出画布 |
 
 **关键区分**（此前代码没有名字，是多数 bug 的根源）：**输出画布** ≠ **文档画布**。
-裁切 ≠ 满幅时两者不是同一个矩形：输出画布只包住「留下的照片」，文档画布包住「全部照片」。
+裁切 ≠ 满幅时两者不是同一个矩形：输出画布就是「留下的照片」这块帧，文档画布包住「全部照片」。
 渲染/导出用前者；裁切框的边界、backdrop 的理解、平移上限用后者。
+
+> **301 反转（2026-11-09，方案 A · 帧优先）**：输出画布不再是「旋转后裁切框的 AABB」。旋转是刚体
+> 变换，转完的裁切框仍是 `W × H`；取 AABB 只会把照片四周的一圈黑边带进输出（满幅 9° 实测 25.4 %）。
+> 现在 `CropMath.canvasSize == CropMath.frameSize`，`RenderGraph.plan` 不再有 expanded baseline/inset，
+> `p.c` 就是画布的整个定义域。旋转后照片的 AABB 只作为**裁切框的合法区**（S4 / `CropGeometry.rotatedExtent`）
+> 保留。描边帧在进入渲染前由 `CropToolController.clampsToRotatedFrame = true` 内切到转向后的照片。
 
 ### 1.1 同一个量曾有多份实现
 
 | 量 | 曾经的实现 | 现状态 |
 |---|---|---|
-| 旋转 AABB `\|w·cos\|+\|h·sin\|` | `CropMath.canvasSize`(ceil)、`CropMath.containingExtent`、`LoupeFraming.rotatedExtent`、`LoupeMapping.canvasRect` | ✅ 收敛到 `CropGeometry.rotatedExtent`（3 处已改为委托，1 处仅读数） |
-| `ceil` 规则 | `CropMath.canvasSize` 内联闭包 | ✅ `CropGeometry.canvasPixels` |
-| `(canvas−frame)/2` | `CropMath.canvasOrigin`(Int)、`RenderGraph.plan` inset(Float)、`LoupeFraming.canvasOriginPixels`(Double)、`LoupeFraming.canvasOrigin`(Int→scale→round) | ⚠️ 新增 `CropGeometry.canvasInset`（连续，权威），旧拼写保留（见 §3 D1） |
+| 旋转 AABB `\|w·cos\|+\|h·sin\|` | `CropMath.containingExtent`、`LoupeFraming.rotatedExtent`、`LoupeMapping.canvasRect` | ✅ 收敛到 `CropGeometry.rotatedExtent`；**301 起它只是合法区，不再是输出画布** |
+| `ceil` 规则 | `CropMath.canvasSize` 内联闭包 | ✅ `CropGeometry.canvasPixels`（AABB 侧）；输出画布已不需要 ceil |
+| `(canvas−frame)/2` | `CropMath.canvasOrigin`(Int)、`RenderGraph.plan` inset(Float)、`LoupeFraming.canvasOriginPixels`(Double)、`LoupeFraming.canvasOrigin`(Int→scale→round) | ✅ 301：`CanvasSize == frameSize`，渲染端 inset 恒为 0；`CropMath.canvasOrigin` 返回 `(0,0)`。`CropGeometry.canvasInset` 仍留作旧 AABB 读数的陈迹 |
 | 裁切合法区 | `LoupeMapping.canvasRect`(视口∪AABB)、`CropToolController.documentCanvas`(AABB)、`CropTool.clampToCanvas`([0,1]²) | ✅ 统一为 `CropGeometry.documentCanvasCropRect`，钳制改用它 |
 
 ---
@@ -67,6 +73,9 @@ static rotatedExtent(width:height:degrees:) / documentCanvasCropRect(in:degrees:
 `CropMath.containingExtent`、`CropMath.canvasSize`（ceil 部分）、`LoupeFraming.rotatedExtent` 全部改为
 委托 `CropGeometry.rotatedExtent`。右角度（0/90/180/270）**原样返回输入**（不是 `w·1+h·0`），
 所以未拉直的文档一个数都不动。
+
+> 301 后续：`CropMath.canvasSize` 已不再走这条 AABB，改为返回 `frameSize`（旋转后的裁切框本身）。
+> `rotatedExtent` 仍是 S4（整幅照片的合法区）与裁切钳制的唯一实现；见 §1 的 301 注。
 
 ### 2.3 裁切合法区：规则搬进类型（应用侧 2026-11-02 已切换，见 §6）
 

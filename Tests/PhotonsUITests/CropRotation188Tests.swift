@@ -106,13 +106,16 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertEqual(placement.region.width, 1, accuracy: 1 / 1400)
         XCTAssertEqual(placement.region.height, 1, accuracy: 1 / 1000)
 
-        // …and the quad the user sees, in points. 213: 适应 is 90 % of the viewport, so the canvas is
-        // 1141.2 × 900 with a (129.4, 50) margin; the picture's own rect inside it is the same
-        // 0.0471/0.9057 fraction at 90 % scale.
-        XCTAssertEqual(px.x, 70 + 0.9 * 0.0471 * 1400, accuracy: 1, "left margin of the quad")
-        XCTAssertEqual(px.y, 50, accuracy: 1, "the quad starts at the canvas' top edge")
-        XCTAssertEqual(px.w, 0.9 * 0.9057 * 1400, accuracy: 1, "the quad's width")
-        XCTAssertEqual(px.h, 0.9 * 1000, accuracy: 1, "and it fills the canvas' height")
+        // …and the quad the user sees, in points. 301b: the canvas is the crop **frame** at every
+        // angle, so the quad is the 4:3 frame at 90 % of the viewport — for a full crop that is the
+        // source's own rectangle (6000×4500), centred: 1200 × 900 at (100, 50). (188's number,
+        // 1141.2 × 900 at x = 129.4, was the turned AABB's letterboxed fit; the AABB is gone.)
+        let fit = min(1400.0 / 6000, 1000.0 / 4500) * LoupeFraming.fitMargin
+        let framePx = (w: 6000 * fit, h: 4500 * fit)
+        XCTAssertEqual(px.x, (1400 - framePx.w) / 2, accuracy: 1, "left margin of the quad")
+        XCTAssertEqual(px.y, (1000 - framePx.h) / 2, accuracy: 1, "the quad is centred vertically")
+        XCTAssertEqual(px.w, framePx.w, accuracy: 1, "the quad's width")
+        XCTAssertEqual(px.h, framePx.h, accuracy: 1, "and its height")
 
         // The picture quad the present pass paints the matte's edge from is the same rectangle: the
         // backdrop and the photograph agree to the pixel, so the `0F0F0F` band starts where it must.
@@ -128,17 +131,15 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertEqual(picture.x, px.x, accuracy: 1)
         XCTAssertEqual(picture.w, px.w, accuracy: 1)
 
-        // 45°: the turned canvas is square (6000 + 4500 on both axes), so the quad is the centred
-        // 1000 × 1000 square — 0.7143 wide, not 0.577 × 0.606 (Δ 394 px on the old arithmetic).
+        // 45°: the canvas is still the crop frame — a 4:3 rectangle, not a square. 301b removed the
+        // AABB that made it square (6000 + 4500), so the quad stays 1200 × 900 centred.
         let diagonal = framing(degrees: 45)
         let at45 = backdropQuad(diagonal.framePlacement(of: diagonal.mapping(of: .fit)))
         print(String(format: "188 ① · 45° · quad (%.4f, %.4f, %.4f, %.4f)", at45.u0, at45.v0, at45.du, at45.dv))
-        // 213: at 90 % the square canvas is 900 × 900 centred, i.e. u0 = 250/1400, du = 900/1400,
-        // v0 = 50/1000, dv = 900/1000.
-        XCTAssertEqual(at45.du, 900.0 / 1400, accuracy: 1 / 1400, "45°: the AABB is square")
-        XCTAssertEqual(at45.dv, 900.0 / 1000, accuracy: 1 / 1000)
-        XCTAssertEqual(at45.u0, 250.0 / 1400, accuracy: 1 / 1400, "centred in the viewport")
-        XCTAssertEqual(at45.v0, 50.0 / 1000, accuracy: 1 / 1000)
+        XCTAssertEqual(at45.du, framePx.w / 1400, accuracy: 1 / 1400, "45°: the canvas is the frame")
+        XCTAssertEqual(at45.dv, framePx.h / 1000, accuracy: 1 / 1000)
+        XCTAssertEqual(at45.u0, (1400 - framePx.w) / 2 / 1400, accuracy: 1 / 1400, "centred in the viewport")
+        XCTAssertEqual(at45.v0, (1000 - framePx.h) / 2 / 1000, accuracy: 1 / 1000)
     }
 
     // MARK: - ② the frame stays inside the canvas, and may cover its letterbox
@@ -156,16 +157,22 @@ final class CropRotation188Tests: XCTestCase {
                                                              height: Self.source.height)
         let controller = CropToolController(session: session)
         XCTAssertTrue(controller.begin())
+        // 301 — the shipped path inscribes, so a draft 100 pt outside the canvas is re-centred before
+        // it can be drawn. This test is about the *canvas* clamp (`clampToView`), so opt out of the
+        // picture clamp and keep the overhang reachable.
+        controller.clampsToRotatedFrame = false
         let angle = 5.4
         let mapping = framing(degrees: angle).mapping(of: .fit)
         let canvas = CGRect(x: 0, y: 0, width: Double(Self.viewport.width),
                             height: Double(Self.viewport.height))
-        let draft = draftFrame(mapping: mapping, angle: angle, atCanvasX: 8)
+        let draft = CropRect(left: -0.25, top: 0.40, right: -0.05, bottom: 0.60)
         controller.draft = CropToolController.Draft(crop: draft, straighten: angle, lock: .original)
 
         let before = rect(controller.layout(mapping: mapping, source: Self.source, pointScale: 1))
-        print(String(format: "188 ② · before clamp · quad %@ · canvas %@",
-                     NSStringFromRect(before), NSStringFromRect(canvas)))
+        print(String(format: "188 ② · before clamp · quad %@ · canvas %@ · draft %@ · eff %@",
+                     NSStringFromRect(before), NSStringFromRect(canvas),
+                     draft.keyString,
+                     controller.effectiveCrop(source: Self.source, degrees: angle).keyString))
         XCTAssertLessThan(before.minX, canvas.minX - 100,
                           "the fixture must start 100 pt out: \(NSStringFromRect(before))")
 
@@ -191,16 +198,18 @@ final class CropRotation188Tests: XCTestCase {
         XCTAssertEqual(drawn.height, draft.height, accuracy: 1e-9)
         XCTAssertNotEqual(drawn.left, draft.left, "the frame must actually have moved")
 
-        // ③ …and the canvas is not the photograph: the clamped frame still covers pixels that are
-        //    **not** photograph — the `000000` letterbox inside the canvas — and that is allowed.
-        //    (196: 画布是硬边界，照片只是「红框」警告。)
+        // ③ 301b — the canvas **is** the crop frame, so there is no AABB band; the frame the canvas
+        //    clamp pulled back sits on the canvas' own edge, and its turned quad still covers pixels
+        //    outside the photograph (the straighten opens them at the frame's edge). The red rule
+        //    is unchanged: legal (the canvas is the hard bound), and painted red (the picture is the
+        //    soft one).
         let overLetterbox = controller.frameExceedsPicture(source: Self.source, degrees: angle)
         let layoutAfter = controller.layout(mapping: mapping, source: Self.source, pointScale: 1)
         print("188 ② · after clamp · over the photograph \(overLetterbox)"
               + " · exceedsPicture \(layoutAfter.exceedsPicture)")
         XCTAssertTrue(overLetterbox,
-                      "a frame against the canvas' edge covers the letterbox at 5.4° — that is legal")
-        XCTAssertTrue(layoutAfter.exceedsPicture, "and the overlay must be told to paint it red")
+                      "a frame pulled to the canvas' edge covers the turned-out pixels at 5.4°")
+        XCTAssertTrue(layoutAfter.exceedsPicture, "…and the overlay must paint it red")
 
         // ③ the size rules are untouched: `minimumSpan` and the ratio lock still describe the draft.
         let span = CropTool.minimumSpan(source: Self.source)
@@ -240,8 +249,11 @@ final class CropRotation188Tests: XCTestCase {
                                         allowsOutsideSource: true)
         print("188 ③ · θ=0 \(upright) · θ=5.4 canvas \(canvas) · outputPixels \(turned)")
         XCTAssertEqual(turned, canvas, "the info bar must report the canvas, not the crop")
-        XCTAssertGreaterThan(turned.width, Self.source.width - 1)
-        XCTAssertGreaterThan(turned.height, Self.source.height)
+        // 301b — the canvas is the crop **frame**, so a full crop at 5.4° is the source's own pixel
+        // grid, not the turned AABB. (188 asserted `> source - 1` because `canvasSize` then answered
+        // the AABB, the very rule 301 reversed.)
+        XCTAssertEqual(turned, Self.source,
+                       "a full crop's canvas is the picture's own grid at every angle")
 
         // A quarter turn is not a rotation: the canvas stays the crop's own size (swapped axes).
         edit.geometry.rotationDegrees = 0

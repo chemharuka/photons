@@ -170,6 +170,10 @@ final class WindowTests: XCTestCase {
     /// instead of four (`CurvePoint.keyString`). The engine still reads `u = x/2`, i.e. the very
     /// numbers the LUT and the kernel had before, so this row is a change of unit and of spelling —
     /// never of curve. The four links below it moved only because they chain-digest the curve's text.
+    ///
+    /// 301 (geometry 3 → 4): S0's material gained `alg=4` because the canvas became the crop frame
+    /// (the θ ≠ 0 pixels moved). Per §8i the pinned rows are re-recorded from the new material, and
+    /// every digest below is `sha256` of the text above it — not a copied reading.
     func testNilWindowKeepsTheSevenM1KeysByteForByte() {
         let edit = m1Fixture()
         // Both spellings of "no window" (default argument and an explicit nil) must be the same text.
@@ -184,31 +188,31 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(implicit.display, explicit.display)
 
         let expected: [(String, String, String)] = [
-            ("geometry", "0eddd5f3e95e3f2047bf41a8c13c28b103801c0ec168b65cffae1d94eb8fbd42",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=3"),
-            ("sceneLinear", "cc86187fedbf30311bf7d1b48d1baaa0574ab159394ee7ea604e1575733b10f5",
-             "0eddd5f3e95e3f2047bf41a8c13c28b103801c0ec168b65cffae1d94eb8fbd42|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
-            ("curve", "fa4b02aadb04a0e6934916054ad8dc73f9460ba78a19a78ce01efce2c77bfa2a",
-             "cc86187fedbf30311bf7d1b48d1baaa0574ab159394ee7ea604e1575733b10f5|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
+            ("geometry", "d4fa7fb30cd112629c1206cea1f8bc0adb08840854b46fd706f3faa7b90ba370",
+             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=4"),
+            ("sceneLinear", "16a31c311a637d4cb5444b50d86fa1826e64864bcf86073a5de46a84a8c83eab",
+             "d4fa7fb30cd112629c1206cea1f8bc0adb08840854b46fd706f3faa7b90ba370|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
+            ("curve", "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff",
+             "16a31c311a637d4cb5444b50d86fa1826e64864bcf86073a5de46a84a8c83eab|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
             // 159: the contrast link is seeded by the tone map and feeds colour; alg=3.
             // 228 换算子后重钉（alg=2→3）
-            ("toneMap", "fd8a4ea60b87f45f18383311decc14c3fd5265bd33f7a9cd9a423426390d93d6",
-             "fa4b02aadb04a0e6934916054ad8dc73f9460ba78a19a78ce01efce2c77bfa2a|hi=-30.00000;sh=15.00000;alg=6"),
+            ("toneMap", "22bb19d09c0be8809bca124e7b4fcf4d170f5e1429535b160fa5c37f068b020e",
+             "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff|hi=-30.00000;sh=15.00000;alg=6"),
             // 228 换算子后重钉（alg=2→3）
-            ("contrast", "7182eb7a952332f247f93c4bf9ab91bf38a29fe97f33098fdb8d76ed09b8723f",
-             "fd8a4ea60b87f45f18383311decc14c3fd5265bd33f7a9cd9a423426390d93d6|contrast|con=20.00000;alg=3"),
+            ("contrast", "a4c9893c5648460db4fd76fd997ecd795e4af7a3bf6a824ecf05ce25244c96a3",
+             "22bb19d09c0be8809bca124e7b4fcf4d170f5e1429535b160fa5c37f068b020e|contrast|con=20.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("color", "3003e70c66bd742fe0edb582a20523fe80d8bc34eb5896e65ecbf06af7186688",
-             "7182eb7a952332f247f93c4bf9ab91bf38a29fe97f33098fdb8d76ed09b8723f|vib=15.00000;sat=-10.00000;alg=1"),
+            ("color", "be20f5b37597ca4d8ac1aaf7e76cb665eb2f1f681cf9c54f50dbc8f0413f06fd",
+             "a4c9893c5648460db4fd76fd997ecd795e4af7a3bf6a824ecf05ce25244c96a3|vib=15.00000;sat=-10.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("hsl", "b2abf73fa1a0f8d984df538efa7cc48cdc47d40c77c2e07eab45aa8ba895f082",
-             "3003e70c66bd742fe0edb582a20523fe80d8bc34eb5896e65ecbf06af7186688|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "1f43e64d2fa5015d94883b9d32f89f386b9dcf2a924711f896a2e00f0c2f16e2",
+             "be20f5b37597ca4d8ac1aaf7e76cb665eb2f1f681cf9c54f50dbc8f0413f06fd|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("vignette", "7f811dfbde003a0f007558df0be7128caebc54a7692ad70a22d3f351ab333663",
-             "b2abf73fa1a0f8d984df538efa7cc48cdc47d40c77c2e07eab45aa8ba895f082|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("vignette", "2dd482514281af6326aead61d0f2cdd6489e112fe8e4f68ba92ab318711f306e",
+             "1f43e64d2fa5015d94883b9d32f89f386b9dcf2a924711f896a2e00f0c2f16e2|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("display", "1d49f67528a84d574f910335e3a9ce6a354533999aefa8b8404d945b40ac7ee8",
-             "7f811dfbde003a0f007558df0be7128caebc54a7692ad70a22d3f351ab333663|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("display", "3232eadea8a5bf07ace83976378412cd3320a006e8c41e71217a5c2bdeeb768f",
+             "2dd482514281af6326aead61d0f2cdd6489e112fe8e4f68ba92ab318711f306e|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
@@ -265,8 +269,12 @@ final class WindowTests: XCTestCase {
         let canvas = CropMath.canvasSize(crop: .full, in: size(image),
                                          straightenDegrees: 3, quarterTurns: 0)
         let whole = ImageRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
-        XCTAssertNotEqual(ImageSize(width: whole.width, height: whole.height), size(image),
-                          "the fixture only proves anything if the canvas is bigger than the picture")
+        // 301b — the canvas **is** the crop frame, so a full crop at 3° is the picture's own grid:
+        // `whole` equals the image and a window that covers it is still normalized to "no window"
+        // (the equality below is the fixture's proof that the covering window really is the whole
+        // output, not a crop of it). 176's bigger rotated AABB no longer exists.
+        XCTAssertEqual(ImageSize(width: whole.width, height: whole.height), size(image),
+                       "301: the full crop's canvas is the picture's own pixel grid")
 
         let plain = try graph.render(edit, options: RenderOptions(scale: 1, useCache: false, wantsPixels: true))
         let windowed = try graph.render(edit, options: RenderOptions(scale: 1,

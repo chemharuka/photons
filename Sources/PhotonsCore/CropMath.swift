@@ -742,22 +742,22 @@ public enum CropMath {
         [[r.cosine, -r.sine, 0], [r.sine, r.cosine, 0], [0, 0, 1]]
     }
 
-    /// The output canvas: the crop's pixel size at a right angle, and the **exact bounding box of the
-    /// rotated crop** at every other angle (162).
+    /// The output canvas: **the rotated crop frame itself**, i.e. the crop's own pixel size.
+    ///
+    /// 301 (方案 A, 帧优先) reversed 162's AABB rule. The crop rect is a window on the turned
+    /// picture; the output is that window, so the canvas is the window's `W × H` — not the bounding
+    /// box of the window once it is turned. Rotation is a rigid transform: turning the frame does not
+    /// change its extent, and the AABB only added the black margin the user reported (a full-frame
+    /// crop at 9° was 25.4 % background). `RenderGraph.plan` hands S0 the same crop and no baseline
+    /// inset, so `p.c` is the canvas' whole domain and the picture support edge is the canvas edge.
     ///
     /// `quarterTurns` is applied to `source` first — `source` is the file's own frame, exactly like
-    /// `GeometryGroup.orientedSource` — because `crop` is measured in the turned frame.
+    /// `GeometryGroup.orientedSource` — because `crop` is measured in the turned frame. A right angle
+    /// (0 / 90 / 180 / 270) still returns the crop's own pixel size bit for bit: that is now simply
+    /// the same branch every other angle takes.
     ///
-    /// **θ is a multiple of 90° (0 / 90 / 180 / 270, and any quarter-turn document) ⇒ the canvas is
-    /// `outputSize` itself.** A right angle does not rotate the rectangle at all — it only renames its
-    /// axes — so it must not grow the canvas by a padding pixel or a rounding border. This is the
-    /// user's 162 rule: 只有真的旋转才扩画布.
-    ///
-    /// **Any other angle ⇒ `|w·cos| + |h·sin|` by `|w·sin| + |h·cos|`, rounded up exactly once.**
-    /// `ceil` is the only rounding: `.rounded()` can land *below* the continuous box (1° on a
-    /// 5400×3600 crop is 5462.006 wide, and `rounded()` gives 5462 — a canvas that misses the rotated
-    /// corner). The `1e-9` snap keeps floating-point noise at an integer boundary from adding a whole
-    /// pixel (`400.00000000000006` is 400, not 401), and there is no extra `+1`.
+    /// The keystone is the one exception: a warped crop is a quadrilateral, so its canvas stays the
+    /// `P → R → AABB` box `perspectiveCanvas` defines (the pre-301 behaviour, untouched).
     public static func canvasSize(crop: CropRect, in source: ImageSize,
                                   straightenDegrees: Double,
                                   quarterTurns: Int,
@@ -766,69 +766,31 @@ public enum CropMath {
         let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
             ? ImageSize(width: source.height, height: source.width)
             : source
-        // 246 — the order is 透视 → 旋转 → 画布 AABB. The warped *and* turned quadrilateral is the
-        // picture, and the canvas is its bounding box: the whole picture fits inside it (the old
-        // 183 path took the **inscribed** rectangle of the warped quad, which threw the corners
-        // away). `perspectiveCanvas` is the one owner of that arithmetic; at 0/0 the optional is
-        // `nil` and this is the pre-183 line byte for byte.
+        // 246 — the keystone keeps its own canvas: the warped picture is a quadrilateral, and its
+        // bounding box is still the honest output for a document that never had a rectangular crop
+        // frame. `perspectiveCanvas` is the one owner of that arithmetic; at 0/0 this branch is not
+        // taken and the crop-frame rule below applies.
         if let perspective, perspective.hasWarp {
             return perspectiveCanvas(crop: crop, in: turned,
                                      straightenDegrees: straightenDegrees,
                                      perspective: perspective).size
         }
-        let out = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
-                            perspective: perspective)
-        guard straightenDegrees.isFinite else { return out }
-        // 162 §2.1 — 0 / 90 / 180 / 270: the crop's own pixel size, bit for bit. (`/ 90` and a
-        // tolerance rather than `==`, so −0.0 and 360 count and 89.999999999 does not.)
-        let quarter = straightenDegrees / 90
-        if abs(quarter - quarter.rounded()) < 1e-9 { return out }
-        // 2026-11-01 — the AABB itself lives in `CropGeometry.rotatedExtent` (one formula for the
-        // renderer, the loupe's fit and the crop clamp); here it only gets the one `ceil`.
-        let extent = CropGeometry.rotatedExtent(width: Double(out.width),
-                                               height: Double(out.height),
-                                               degrees: straightenDegrees)
-        return ImageSize(width: CropGeometry.canvasPixels(extent.width),
-                         height: CropGeometry.canvasPixels(extent.height))
+        return frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
+                         perspective: nil)
     }
 
-    /// Where the crop's own frame starts inside the **expanded canvas**, in canvas pixels.
+    /// Where the crop's own frame starts inside the canvas, in canvas pixels.
     ///
-    /// 279 — this is **not** `(canvas − frame) / 2` once the picture turns about the photograph's
-    /// centre: the AABB's origin is
-    /// `(I − R)·(cropCentre − photoCentre) + (extent − frame) / 2`
-    /// (`CropGeometry.canvasInsetOrigin`, the one owner). The frame-centred half margin is only
-    /// correct for a full crop, where the two centres coincide — the reason 45° + an off-centre
-    /// crop used to sample a completely different part of the photograph.
-    ///
-    /// Rounded, because a window is an integer rect on that canvas; the sub-pixel remainder stays in
-    /// the render, where the projection lives. `(0, 0)` at every right angle, because `canvasSize`
-    /// returns `outputSize` itself there.
+    /// 301 — the canvas **is** the crop frame, so the answer is always `(0, 0)`. Before 301 the
+    /// canvas was the rotated crop's AABB and the frame sat at
+    /// `(I − R)·(cropCentre − photoCentre) + (extent − frame) / 2` inside it
+    /// (`CropGeometry.canvasInsetOrigin`); there is no such margin now. Kept as a named call so the
+    /// loupe and the tests have one place to ask, not a second spelling of "zero".
     public static func canvasOrigin(crop: CropRect, in source: ImageSize,
                                     straightenDegrees: Double, quarterTurns: Int,
                                     allowsOutsideSource: Bool = false,
                                     perspective: PerspectiveMap? = nil) -> (x: Int, y: Int) {
-        // 246: the canvas *is* the picture's bounding box (perspective + rotation already folded),
-        // so the picture starts at its origin — there is no letterbox to centre it in.
-        if let perspective, perspective.hasWarp { return (0, 0) }
-        let turned = GeometryGroup.normalizedQuarterTurns(quarterTurns) % 2 == 1
-            ? ImageSize(width: source.height, height: source.width)
-            : source
-        // A centred crop keeps the historical integer division — the same number `plan` takes
-        // (`(baseline − frame)/2`), so the full-crop plate is bit-identical.
-        if abs(crop.centerX - 0.5) < 1e-12 && abs(crop.centerY - 0.5) < 1e-12 {
-            let canvas = canvasSize(crop: crop, in: source,
-                                    straightenDegrees: straightenDegrees,
-                                    quarterTurns: quarterTurns,
-                                    allowsOutsideSource: allowsOutsideSource,
-                                    perspective: perspective)
-            let frame = frameSize(crop, in: turned, allowsOutsideSource: allowsOutsideSource,
-                                  perspective: perspective)
-            return ((canvas.width - frame.width) / 2, (canvas.height - frame.height) / 2)
-        }
-        let inset = CropGeometry.canvasInsetOrigin(crop: crop, in: turned,
-                                                   degrees: straightenDegrees)
-        return (Int(inset.x.rounded()), Int(inset.y.rounded()))
+        (0, 0)
     }
 
     /// The picture's own pixel grid at 1:1 — the crop's pixel rect **after the keystone** (183).

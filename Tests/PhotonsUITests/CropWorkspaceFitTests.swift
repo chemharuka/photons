@@ -102,8 +102,11 @@ final class CropWorkspaceFitTests: XCTestCase {
                           Double(framing.viewport.height) / aabb.height)
         XCTAssertEqual(refit, min(1, aabbFit * LoupeFraming.fitMargin), accuracy: 1e-6,
                        "45° must fit the rotated canvas at the one 90 % margin")
-        XCTAssertLessThan(refit, cropFit * 0.95,
-                          "45° must re-fit the whole canvas once (the AABB no longer fits at 90 %)")
+        // 301b — the canvas is the crop **frame** at every angle, so 45° re-fits to the same zoom
+        // it had at 0°: the turned AABB that used to force a second, smaller fit (`< cropFit·0.95`)
+        // is exactly what 301 removed.
+        XCTAssertEqual(refit, cropFit, accuracy: 1e-6,
+                       "45° must not shrink the canvas — it is the crop frame, not its AABB")
         XCTAssertGreaterThan(refit, ordinaryFit * 0.7,
                              "a 3:2 frame at 45° is ~0.85 of the ordinary fit, not 0.707")
         print(String(format: "132 §10 · 45° · ordinary %.6f · crop@0 %.6f · refit %.6f (%.4f/fit)",
