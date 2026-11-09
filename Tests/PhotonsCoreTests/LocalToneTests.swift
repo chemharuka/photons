@@ -334,8 +334,11 @@ final class LocalToneTests: XCTestCase {
 
     /// Every tone slider at ±100, masked over everything, against the same slider global: **the same
     /// pixels**. That is what "reuse the global mapping" has to mean — not "similar after the tone
-    /// curve", since S1.6 is upstream of S2 and both paths run the same four functions
+    /// curve", since S1.6 is upstream of S2 and both paths run the same functions
     /// (`tone_shape.metal`) in the same order.
+    ///
+    /// **299** pins shadows and the end points only: the global 高光 became a shoulder above white,
+    /// while the mask keeps 074's EV displacement on purpose (a later task unifies them).
     func testMaskedToneIsTheGlobalTone() throws {
         let image = try frame(Self.frames[0])
         let graph = try makeGraph(image, identity: "local-tone-same")
@@ -371,10 +374,9 @@ final class LocalToneTests: XCTestCase {
                  masked: { _ in doc { $0.shadows = 100 } }, global: { _ in globalDoc { $0.shadows = 100 } }),
             Case(name: "shadows−100", unit: -100,
                  masked: { _ in doc { $0.shadows = -100 } }, global: { _ in globalDoc { $0.shadows = -100 } }),
-            Case(name: "highlights+100", unit: 100,
-                 masked: { _ in doc { $0.highlights = 100 } }, global: { _ in globalDoc { $0.highlights = 100 } }),
-            Case(name: "highlights−100", unit: -100,
-                 masked: { _ in doc { $0.highlights = -100 } }, global: { _ in globalDoc { $0.highlights = -100 } }),
+            // 299: 高光 is deliberately **not** in this list. The global slider is a C¹ slope shoulder
+            // above display white; the mask still runs 074's EV displacement (`LocalAdjustU.b.y`).
+            // The two bodies are unified by a later task, not here.
         ]
 
         for c in cases {

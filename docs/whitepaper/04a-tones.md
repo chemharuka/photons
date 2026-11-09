@@ -127,25 +127,53 @@ $$
 w_s=1-a,\qquad w_m=a(1-b),\qquad w_h=b(1-c)
 $$
 
-$a$ 在 $b$ 起步之前就已到 1，所以 $L<+4$ 时 $w_s+w_m+w_h=1$：没有哪个亮度是没人管的（`Sources/PhotonsCore/Kernels/tone_shape.metal:98`、`Sources/PhotonsCore/Kernels/tone_shape.metal:104`）。增益只有一个 `exp2`：
+$a$ 在 $b$ 起步之前就已到 1，所以 $L<+4$ 时 $w_s+w_m+w_h=1$：没有哪个亮度是没人管的（`Sources/PhotonsCore/Kernels/tone_shape.metal`）。**299 起，全局高光不再用 $w_h$ 乘位移**，而是用一条白点以上的斜率肩；$w_h$ 仍由蒙版路径（`s1_6_local`）读取，见「取舍」。全局增益因此是
 
 $$
-v \leftarrow v\cdot 2^{\,w_s d_s+w_m d_m+w_h d_h}
+v \leftarrow v\cdot 2^{\,w_s d_s+w_m d_m+\Delta(L)}
 $$
 
-$d_i$ 是**已经过门**的 EV 位移，在 CPU 上算：
+$d_s,d_m$ 是**已经过门**的 EV 位移：
 
 $$
-d_i=\frac{s_i}{100}\Delta_i,\qquad \Delta_s=0.90,\ \Delta_m=0.70,\ \Delta_h=0.60
+d_i=\frac{s_i}{100}\Delta_i,\qquad \Delta_s=0.90,\ \Delta_m=0.70
 $$
 
-（`Sources/PhotonsCore/S2Regions.swift:40`。）三个行程反号时会把局部斜率压穿，所以有一道公共压缩：
+（`Sources/PhotonsCore/S2Regions.swift`。）两个行程反号时会把局部斜率压穿，所以有一道公共压缩：
 
 $$
 \text{deficit}=\max\left\{|d_m-d_s|,\ |d_h-d_m|,\ \tfrac{1.5}{2.0}|d_h|\right\},\qquad \text{deficit}>1-\sigma\ \Rightarrow\ d\leftarrow d\cdot\frac{\sigma}{\text{deficit}}
 $$
 
-$\sigma=0.500$（`Sources/PhotonsCore/S2Regions.swift:52`、`Sources/PhotonsCore/S2Regions.swift:82`）。方向照 Lightroom：`+` 提亮该区，`−` 压暗（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:31`）。
+$\sigma=0.500$；门本身和第三个（蒙版仍用的）EV 行程 `d_h` 都保持 085/124 的数值（`Sources/PhotonsCore/S2Regions.swift`）。方向照 Lightroom：`+` 提亮该区，`−` 压暗（`Sources/PhotonsCore/Kernels/s2_tone_map.metal`）。
+
+**高光 = 白点以上的 C¹ 斜率肩（299）。** 记 $h=\mathrm{clamp}(\text{highlights},-100,100)/100$，滑杆设定的是渐近斜率而不是 EV 位移：
+
+$$
+k(h)=1+0.8h,\qquad k(-100)=0.20,\ k(0)=1,\ k(+100)=1.80
+$$
+
+$$
+\Delta(L)=
+\begin{cases}
+0, & L\le 0\\
+(k-1)\left(L-w\left(1-e^{-L/w}\right)\right), & L>0
+\end{cases}
+\qquad w=0.25\ \text{EV}
+$$
+
+`k = 1` 时 $\Delta\equiv 0$（浮点精确），$L\le 0$ 对任意 $k$ 都逐位恒等。斜率从白点的 1 连续过渡到 $k$，所以白点上没有折角；$L=+4$、$h=-100$ 时 $\Delta=-0.8\cdot3.75=-3.0$，输出 $y=+1.00$ EV。实测的 $y$（EV）：
+
+| L (EV) | h=−100 | h=−50 | h=0 | h=+50 | h=+100 |
+|---|---|---|---|---|---|
+| 0.5 | 0.273 | 0.386 | 0.500 | 0.614 | 0.727 |
+| 1 | 0.396 | 0.698 | 1.000 | 1.302 | 1.604 |
+| 2 | 0.600 | 1.300 | 2.000 | 2.700 | 3.400 |
+| 2.3 | 0.660 | 1.480 | 2.300 | 3.120 | 3.940 |
+| 4 | 1.000 | 2.500 | 4.000 | 5.500 | 7.000 |
+| 8 | 1.800 | 4.900 | 8.000 | 11.100 | 14.200 |
+
+$dy/dL=1+(k-1)(1-e^{-L/w})\ge k$，最小局部斜率就是 $k$（−100 时 0.20，+100 时 1.80）；$0<k$，所以肩永不打折。又因为 $w(1-e^{-L/w})<L$，有 $y\ge kL\ge0$：白点以上的像素仍留在白点以上，SDR（headroom 1）渲染逐位不变——**高光在 SDR 上没有可见作用，它是 HDR 尾部的压缩器**；白点附近仍由 `whites`（138）负责。
 
 **参数与范围**
 
@@ -154,13 +182,15 @@ $\sigma=0.500$（`Sources/PhotonsCore/S2Regions.swift:52`、`Sources/PhotonsCore
 | `shadows` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1252`） |
 | `midtones` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1251`） |
 | `highlights` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1247`） |
-| 满行程 | 0.90 / 0.70 / 0.60 | — | EV（`Sources/PhotonsCore/S2Regions.swift:40`） |
-| 最小斜率 $\sigma$ | 0.500 | 0.500 | — （`Sources/PhotonsCore/S2Regions.swift:52`） |
-| 窗口边界 | −5.4/−3.9，−2.4/−0.9，+4.0/+6.0 | — | EV（`Sources/PhotonsCore/Kernels/tone_shape.metal:90`、`Sources/PhotonsCore/Kernels/tone_shape.metal:95`） |
+| 阴影/中间调满行程 | 0.90 / 0.70 | — | EV（`Sources/PhotonsCore/S2Regions.swift`） |
+| 高光斜率 $k$ | 0.20…1.80 | 1（恒等） | — （`Sources/PhotonsCore/S2Regions.swift`） |
+| 高光膝宽 $w$ | 0.25 | 0.25 | EV（`Sources/PhotonsCore/S2Regions.swift`） |
+| 最小斜率 $\sigma$ | 0.500 | 0.500 | — （`Sources/PhotonsCore/S2Regions.swift`） |
+| 窗口边界 | −5.4/−3.9，−2.4/−0.9，+4.0/+6.0 | — | EV（`Sources/PhotonsCore/Kernels/tone_shape.metal`） |
 
 **实现**
 
-分工很清楚：kernel 只做权重与一次 `exp2`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:90`、`Sources/PhotonsCore/Kernels/s2_tone_map.metal:92`），行程和单调性门都在 CPU 的 `S2Regions.travelEV`（`Sources/PhotonsCore/S2Regions.swift:73`）——kernel 收到的是 EV，不是滑杆位置（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:26`）。“图不会折”因此是一个可计算的属性，而不是窗口宽度选得巧。
+分工很清楚：kernel 只做阴影/中间调的权重、`high_shoulder_ev` 肩和一次 `exp2`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal`），行程、斜率与单调性门都在 CPU（`S2Regions.travelEV` / `highSlope` / `highShoulderEV`）——kernel 收到的是 EV 与 $k$，不是滑杆位置。“图不会折”因此是一个可计算的属性，而不是窗口宽度选得巧。
 
 S2 在入口**不夹取**：`v = c.rgb` 直接进权重（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:83`），只在本阶段末尾取 `max(v, 0)`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:97`）。原因是解码器会给零以下的样本，抬升已把它们拉过零的像素是真画面（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:78`）。alpha 0 与内容矩形两道守卫在像素运算之前（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:66`、`Sources/PhotonsCore/Kernels/s2_tone_map.metal:73`），否则抬暗部会把黑边一起点亮。
 
@@ -171,7 +201,8 @@ S2 在入口**不夹取**：`v = c.rgb` 直接进权重（`Sources/PhotonsCore/K
 
 **取舍**
 
-- 单个 `shadows +100` 拿不到 0.90 EV：门会把它压到 0.50（`Sources/PhotonsCore/S2Regions.swift:44`）。三个滑杆的满行程是标称值，不是保证值。
+- 单个 `shadows +100` 拿不到 0.90 EV：门会把它压到 0.50（`Sources/PhotonsCore/S2Regions.swift`）。阴影/中间调的满行程是标称值，不是保证值。
+- 高光只压缩白点以上的 HDR 尾部；SDR 里白点以上的像素本来就是白的，所以拖高光滑杆在 headroom 1 下看不到变化。这是 299 的有意行为，白点附近的观感由 `whites` 负责。
 - 两条接缝都是钉死的 1.5 EV（`Sources/PhotonsCore/S2Regions.swift:83`），不随画幅、不随内容自适应；动态范围很窄的图可能整幅落在某条接缝上，三个滑杆于是都动它。
 - 蒙版内的阴影/高光仍用 074 的两窗口 `region_weights`（`Sources/PhotonsCore/Kernels/tone_shape.metal:53`），与全局的三段**故意**不同步（`Sources/PhotonsCore/Kernels/tone_shape.metal:30`）。同一次拖动，全局与蒙版的响应因此不完全同形。
 
