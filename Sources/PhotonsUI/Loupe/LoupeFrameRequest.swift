@@ -24,12 +24,17 @@ public struct LoupeFrameRequest: Equatable, Sendable {
     public var scale: Double
     public var display: DisplayOptions
     public var neverUpscalesContent: Bool
+    /// 307 — which canvas `contentRect` indexes (`CanvasRole`). `.export` for every frame of a settled
+    /// document; `.document` while 裁切 is on, which is what makes the interaction canvas the turned
+    /// whole photograph's AABB instead of the crop frame.
+    public var canvasRole: CanvasRole
 
     public init(identity: String, documentHash: String, revision: Int,
                 source: Source = .edited, rungScale: Float,
                 contentRect: ImageRect? = nil, canvas: ImageSize, scale: Double,
                 display: DisplayOptions = DisplayOptions(),
-                neverUpscalesContent: Bool = false) {
+                neverUpscalesContent: Bool = false,
+                canvasRole: CanvasRole = .export) {
         self.identity = identity
         self.documentHash = documentHash
         self.revision = revision
@@ -40,6 +45,7 @@ public struct LoupeFrameRequest: Equatable, Sendable {
         self.scale = scale
         self.display = display
         self.neverUpscalesContent = neverUpscalesContent
+        self.canvasRole = canvasRole
     }
 
     /// 映射到 `RenderOptions`（`photonsCore` 的那个），字段一一对应：
@@ -49,6 +55,7 @@ public struct LoupeFrameRequest: Equatable, Sendable {
     public func renderOptions() -> RenderOptions {
         let renderSource: RenderSource = source == .decoded ? .decoded : .edited
         return RenderOptions(canvas: canvas,
+                             canvasRole: canvasRole,
                              scale: scale,
                              outputWindow: contentRect,
                              display: display,

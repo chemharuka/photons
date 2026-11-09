@@ -601,6 +601,13 @@ public struct LoupeFraming: Equatable, Sendable {
     /// turn. Both are inputs of `FrameTransform`; neither multiplies anything else here.
     public var decodeScale: Double
     public var quarterTurns: Int
+    /// 307 — **which canvas this projection is of** (`CanvasRole`). `.export` (the default) frames the
+    /// crop frame, which is what the loupe shows of a finished document and what every pre-307 caller
+    /// gets bit for bit. `.document` frames the turned **whole photograph's AABB** — the crop
+    /// workspace's canvas, where the 0F matte only starts outside the photograph's own box. The role
+    /// changes three numbers and nothing else: the fit extent, the canvas origin the window carries,
+    /// and the `FrameTransform` the overlay is projected through.
+    public var canvasRole: CanvasRole
     /// 213 (D13, user 2026-11-01) — **the one fit margin.** Ordinary 适应 is this fraction of the
     /// viewport fit, and the crop workspace uses the same number (it no longer multiplies by a second
     /// 0.90 on entry, which produced 0.81). One constant, read by `fitZoom` and by
@@ -624,7 +631,7 @@ public struct LoupeFraming: Equatable, Sendable {
                 flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1,
                 perspective: PerspectiveMap? = nil,
                 decodeScale: Double = 1, quarterTurns: Int = 0,
-                fitMargin: Double? = nil) {
+                fitMargin: Double? = nil, canvasRole: CanvasRole = .export) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
@@ -638,6 +645,7 @@ public struct LoupeFraming: Equatable, Sendable {
         self.perspective = perspective.flatMap { $0.hasWarp ? $0 : nil }
         self.decodeScale = decodeScale.isFinite && decodeScale > 0 ? decodeScale : 1
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
+        self.canvasRole = canvasRole
     }
 
     /// The constructor the loupe uses: the same `lockedCrop` call — in the same *decoded* pixel
@@ -648,7 +656,8 @@ public struct LoupeFraming: Equatable, Sendable {
     /// therefore a pixel of the *turned* frame — the same photograph, rotated — which is what every
     /// consumer of this projection (window, fit zoom, crop overlay) is asking about.
     public init(viewport: ImageSize, decoded: ImageSize, decodeScale: Double, edit: EditModel,
-                fitScale: Double = 1, fitMargin: Double? = nil) {
+                fitScale: Double = 1, fitMargin: Double? = nil,
+                canvasRole: CanvasRole = .export) {
         let ds = decodeScale > 0 && decodeScale.isFinite ? decodeScale : 1
         let turned = edit.geometry.orientedSource(decoded)
         let crop = CropMath.lockedCrop(edit.geometry.aspectLock,
@@ -665,7 +674,8 @@ public struct LoupeFraming: Equatable, Sendable {
                   perspective: edit.geometry.perspective,
                   decodeScale: ds,
                   quarterTurns: edit.geometry.quarterTurns,
-                  fitMargin: fitMargin)
+                  fitMargin: fitMargin,
+                  canvasRole: canvasRole)
     }
 
     // MARK: crop metrics
@@ -733,6 +743,11 @@ public struct LoupeFraming: Equatable, Sendable {
     /// 246: with a keystone the canvas is the AABB of the warped-and-turned crop, not the turned
     /// rectangle; that is what entering 裁切 must frame.
     public var rotatedCropExtent: (width: Double, height: Double) {
+        // 307 — the **canvas** extent of this projection, by role. `.export` is the crop frame (301b);
+        // `.document` is the turned whole photograph's AABB, which is the box the crop workspace draws
+        // and the box 适应 must fit — the same `rotatedSourceExtent` underneath, so the fit, the 0F
+        // matte and the overlay cannot disagree about how big the canvas is.
+        if canvasRole == .document { return rotatedSourceExtent }
         if let perspective {
             let pc = CropMath.perspectiveCanvas(crop: crop, in: sourceSizeForPerspective,
                                                 straightenDegrees: straightenDegrees,
@@ -967,12 +982,25 @@ public struct LoupeFraming: Equatable, Sendable {
     /// quantity `RenderGraph.plan` subtracts from the window (`inset`), so the loupe never grows a
     /// second copy of the canvas arithmetic.
     private func canvasOrigin(decodeScale: Double, zoom: Double) -> (x: Int, y: Int) {
-        // 301b — the canvas **is** the crop frame at every angle, so the picture starts at the
-        // canvas' own origin: there is no AABB half margin and no 279 pivot correction left to
+        // 301b — for `.export` the canvas **is** the crop frame at every angle, so the picture starts
+        // at the canvas' own origin: there is no AABB half margin and no 279 pivot correction left to
         // apply. `RenderGraph.plan` hands S0 `inset == 0` for the same reason. Re-deriving the
         // pre-301 number here is what put a 1:1 window 443 px (x) / 850 px (y) away from the
         // derived crop it is supposed to name (`LoupeZoomTests` measured exactly that).
-        (0, 0)
+        //
+        // 307 — for `.document` the picture *does* sit `(canvas − frame)/2` inside the box, and this
+        // window indexes that box, so the margin is the document canvas' own inset at this zoom:
+        // `(rotatedCropExtent − crop) / 2 × zoom`, the same number `plan` computes as
+        // `(baseline − frame)/2`. Both are integer at the end (`outputWindow` is an `ImageRect`).
+        switch canvasRole {
+        case .export:
+            return (0, 0)
+        case .document:
+            let extent = rotatedCropExtent
+            let dx = max(extent.width - cropWidthPixels, 0) / 2
+            let dy = max(extent.height - cropHeightPixels, 0) / 2
+            return (Int((dx * zoom).rounded()), Int((dy * zoom).rounded()))
+        }
     }
 
     /// The document the renderer should be given for this state, **as an output window** routed
@@ -1022,7 +1050,8 @@ public struct LoupeFraming: Equatable, Sendable {
             cameraWindow: nil,
             cameraWindowInS5: state.mode == .fit
                 ? nil : outputWindow(of: state, decodeScale: decodeScale),
-            allowsUpscale: false)
+            allowsUpscale: false,
+            canvasRole: canvasRole)
         let contentInS5 = transform.contentInS5
         // **The fit window is the integer S3 canvas, and the overlay must divide by that same
         // window.** 261 handed `frameView` the *continuous* `windowSize` (`rotatedCropExtent`) but

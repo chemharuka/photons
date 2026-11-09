@@ -83,12 +83,21 @@ final class FitToCrop259Tests: XCTestCase {
         }
     }
 
-    // MARK: - 4. the crop workspace enters at the same fit
+    // MARK: - 4. the crop workspace enters at the fit of **its own** canvas
 
+    /// 307 — the entry is still *one* fit with *one* 90 % margin (259's actual claim: no second × 0.9,
+    /// no second formula). What changed is **which rectangle** it frames: the crop workspace's canvas
+    /// is the turned whole photograph's AABB (`CanvasRole.document`), so its fit is that box's fit —
+    /// not the crop frame's. The two differ by exactly `AABB / frame`, which is why this used to read
+    /// 0.72 and now reads 0.36 on the (0.25…0.75) crop: `0.36 = 0.9 · min(2560/6000, 1600/4000)`, the
+    /// **whole photograph's** fit, and the crop frame's fit is `0.72 = 0.36 · 6000/3000`. A canvas
+    /// counted twice would give `0.18`, and `CanvasRole307Tests` prints the five numbers that rule it
+    /// out at θ = 0 (`canvasSize == frameSize`, `canvasInset(.export) == (0,0)`).
     func testCropWorkspaceEntryIsTheOrdinaryFitNumber() {
         let viewport = ImageSize(width: 2560, height: 1600)
+        let source = ImageSize(width: 6000, height: 4000)
         let layout = CropWorkspaceLayout(
-            source: ImageSize(width: 6000, height: 4000), quarterTurns: 0, straighten: 0,
+            source: source, quarterTurns: 0, straighten: 0,
             canvas: CGRect(x: 0, y: 0, width: Double(viewport.width), height: Double(viewport.height)))
         let crops = [CropRect.full,
                      CropRect(left: 0.25, top: 0.25, right: 0.75, bottom: 0.75),
@@ -99,10 +108,18 @@ final class FitToCrop259Tests: XCTestCase {
             angled.straighten = degrees
             for crop in crops {
                 let entry = angled.entry(crop: crop)
-                let f = LoupeFraming(viewport: viewport, sourceWidth: 6000, sourceHeight: 4000,
-                                     crop: crop, straightenDegrees: degrees)
-                XCTAssertEqual(entry.entryZoom, f.fitZoom, accuracy: 1e-6,
-                               "\(degrees)° · \(crop.keyString): entry must be the ordinary fit")
+                var group = GeometryGroup.identity
+                group.rotationDegrees = degrees
+                group.crop = crop.normalizedRect
+                let box = CropGeometry(geometry: group, source: source).canvasExtent(.document)
+                let expected = LoupeFraming.fitZoom(viewportWidth: Double(viewport.width),
+                                                    viewportHeight: Double(viewport.height),
+                                                    extent: (box.width, box.height),
+                                                    isWholeFrame: crop.coversFrame)
+                print(String(format: "259 · %.0f° · %@ · entry %.6f · document-canvas fit %.6f",
+                             degrees, crop.keyString, entry.entryZoom, expected))
+                XCTAssertEqual(entry.entryZoom, expected, accuracy: 1e-6,
+                               "\(degrees)° · \(crop.keyString): entry must be the *canvas'* fit")
             }
         }
     }
