@@ -419,7 +419,7 @@ final class SharpenScaleTests: XCTestCase {
     /// Those are countable and load-independent; the milliseconds stay in the log for an idle machine.
     func testTheCostIsOneStageThatEntersOnlyWhenNonZero() throws {
         let graph = try makeGraph(image(1500, 2731) { _, _ in 0.18 }, identity: "sharpen-scale-cost")
-        let off = EditModel.neutral
+        let off = sharpen(0)
         let on = sharpen(150, radius: 1.0)
         let zero = sharpen(0, radius: 1.0)
 
@@ -454,13 +454,14 @@ final class SharpenScaleTests: XCTestCase {
                            "其余阶段的集合都不许动（S=\(S)）")
         }
 
-        // **amount = 0 is byte-for-byte the neutral frame** — "not encoded and multiplied by zero" is
+        // **amount = 0 is byte-for-byte the identity frame** — "not encoded and multiplied by zero" is
         // a pixel claim, so it is read off the pixels (on a small frame; the cost frame is 4.1 Mpx).
+        // 314: the identity is the explicit-0 document, not `neutral` (which is 50 / 2.0 now).
         let small = try makeGraph(step(transition: 1), identity: "sharpen-cost-zero")
-        let neutralPixels = try render(small, .neutral, scale: 1)
+        let identityPixels = try render(small, sharpen(0), scale: 1)
         let zeroPixels = try render(small, zero, scale: 1)
-        XCTAssertEqual(neutralPixels.sha256(), zeroPixels.sha256(),
-                       "amount = 0 的帧必须与中性帧逐字节相同")
+        XCTAssertEqual(identityPixels.sha256(), zeroPixels.sha256(),
+                       "amount = 0 的帧必须与显式 0 帧逐字节相同")
 
         // The milliseconds: printed only (see the note above).
         var marginal: [Double] = []

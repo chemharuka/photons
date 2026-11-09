@@ -37,6 +37,17 @@ final class DetailFXTests: XCTestCase {
     private static let preEffectsNeutralSHA =
         "23f2b0da1b1aa0f65bb1cf9298748769c2ac769b2698b3d46131792cac1f4d06"
 
+    /// 314: `EditModel.neutral` now carries the resting **50 / 2.0** sharpen, so it is no longer the
+    /// frame the pre-164 / pre-S3.8 pins above were recorded against. This is the same document with
+    /// an **explicit `amount = 0`** — the document that *is* the identity (314 §2.1). Every byte pin
+    /// and every stage-count expectation in this file measures S3.8/S3.9 in isolation and therefore
+    /// starts from here.
+    private var unsharpened: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0)
+        return e
+    }
+
     // MARK: - fixtures
 
     private func makeGraph(_ image: LinearImage, identity: String = "detailfx-tests") throws -> RenderGraph {
@@ -271,7 +282,7 @@ final class DetailFXTests: XCTestCase {
     /// encoded*, not encoded-and-multiplied-by-zero.
     func testNeutralIsByteIdenticalAndNeverRunsS3_8() throws {
         let graph = try makeGraph(flat())
-        var untouched = EditModel.neutral
+        var untouched = unsharpened
 
         var reset = untouched
         reset.effects.texture = 0
@@ -313,9 +324,9 @@ final class DetailFXTests: XCTestCase {
     func testClarityLiftsLocalContrastWithoutMovingBrightnessOrDrawingAHalo() throws {
         let (image, edgeY) = twotone()
         let graph = try makeGraph(image)
-        var edit = EditModel.neutral
+        var edit = unsharpened
         edit.effects.clarity = 100
-        let base = try render(graph, .neutral)
+        let base = try render(graph, unsharpened)
         let out = try render(graph, edit)
 
         let x0 = 20, y0 = 20, w = image.width / 2 - 40, h = image.height - 40
@@ -389,9 +400,9 @@ final class DetailFXTests: XCTestCase {
     func testTextureMovesFineDetailAndLeavesTheStructuralEdgeAlone() throws {
         let (image, edgeY) = twotone()
         let graph = try makeGraph(image)
-        var edit = EditModel.neutral
+        var edit = unsharpened
         edit.effects.texture = 100
-        let base = try render(graph, .neutral)
+        let base = try render(graph, unsharpened)
         let out = try render(graph, edit)
 
         let x0 = 20, y0 = 20, w = image.width / 2 - 40, h = image.height - 40
@@ -444,7 +455,7 @@ final class DetailFXTests: XCTestCase {
     // MARK: - 5. 键 / 历史 / 解码
 
     func testEachControlIsItsOwnStageAndNoneOfThemRedevelops() throws {
-        let base = EditModel.neutral
+        let base = unsharpened
         func stages(_ mutate: (inout EditModel) -> Void) -> Set<RenderStage> {
             var e = base
             mutate(&e)
@@ -593,7 +604,7 @@ final class DetailFXTests: XCTestCase {
         let (image, _) = twotone()
         let graph = try makeGraph(image, identity: "k2-pre164")
 
-        var textureClarity = EditModel.neutral
+        var textureClarity = unsharpened
         textureClarity.effects.texture = 60
         textureClarity.effects.clarity = -30
         let moved = try render(graph, textureClarity)
@@ -602,7 +613,7 @@ final class DetailFXTests: XCTestCase {
                        "8fb04f80c9c8933e5b128b7b4b6d7e464762f6e78d4cc1aca56164ecfb4dd0c6",
                        "纹理/清晰度 搬家后必须与 abbf59f 的同一帧逐字节相同")
 
-        var vignette = EditModel.neutral
+        var vignette = unsharpened
         vignette.effects.vignetteAmount = -60
         vignette.effects.vignetteMidpoint = 60
         vignette.effects.vignetteFeather = 40
@@ -619,7 +630,7 @@ final class DetailFXTests: XCTestCase {
     func testNonBayerAtZeroDoesNotMoveTheTexturedFrame() throws {
         let (image, _) = twotone()
         let graph = try makeGraph(image, identity: "nonbayer-zero")
-        var edit = EditModel.neutral
+        var edit = unsharpened
         edit.effects.texture = 60
         edit.effects.clarity = -30
         let a = try render(graph, edit)

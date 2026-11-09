@@ -223,7 +223,8 @@ final class SharpenRadiusFloorTests: XCTestCase {
             if let t = result.output { graph.recycle(output: t) }
             return result.trace
         }
-        let off = EditModel.neutral, on = sharpen(150, radius: 1.0)
+        // 314: `off` is the **explicit-0** document — `neutral` now carries 50 / 2.0 and enters S3.10.
+        let off = sharpen(0, radius: 1.0), on = sharpen(150, radius: 1.0)
         _ = try traced(off, 1); _ = try traced(on, 1)
         _ = try traced(off, 0.293); _ = try traced(on, 0.293)
         for S in [0.293, 1.0] {

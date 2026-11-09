@@ -171,8 +171,18 @@ final class SharpenStageTests: XCTestCase {
             return v
         }
 
+        // 314: the identity document is the **explicit `amount = 0`** one, not `EditModel.neutral`
+        // (a new document now carries 50 / 2.0 and therefore sharpens). So the baseline is each
+        // document with an explicit 0, and the comparison varies only the three shape numbers —
+        // which must still move nothing, because the stage is absent.
+        func withZeroAmount(_ e: EditModel) -> EditModel {
+            var v = e
+            v.sharpen = SharpenGroup(amount: 0)
+            return v
+        }
+
         for (name, doc) in [("neutral", EditModel.neutral), ("push", push), ("crop-rot", cropped)] {
-            let plain = sha(try render(graph, doc))
+            let plain = sha(try render(graph, withZeroAmount(doc)))
             let zero = sha(try render(graph, withZeroSharpen(doc)))
             XCTAssertEqual(plain, zero, "\(name): amount 0 改动像素")
             print("185 · 身份 \(name): \(plain.prefix(16)) == \(zero.prefix(16))")
@@ -188,16 +198,20 @@ final class SharpenStageTests: XCTestCase {
             RenderKeyChain.links(identity: "sharpen", sourceSize: size, canvas: size, content: size,
                                  edit: e, display: DisplayOptions(headroom: 1))
         }
-        XCTAssertNil(links(EditModel.neutral).sharpen)
+        // 314: `EditModel.neutral` is 50 / 2.0 — the stage exists for a new document. The *explicit
+        // 0* document is the one with no link.
+        XCTAssertNotNil(links(EditModel.neutral).sharpen, "314: 默认 50 没有长出 S3.10 链接")
         XCTAssertNil(links(withZeroSharpen(EditModel.neutral)).sharpen, "amount 0 长出 S3.10 链接")
         XCTAssertNotNil(links(sharpen(1)).sharpen)
 
         // The key **text** grows no token either — the document's material, not only the link.
         let zeroMaterial = withZeroSharpen(EditModel.neutral).keyMaterial(.sharpen)
         XCTAssertFalse(zeroMaterial.contains("alg") == false)
-        let neutralKey = links(EditModel.neutral).display
-        XCTAssertEqual(neutralKey, links(withZeroSharpen(EditModel.neutral)).display,
+        let zeroKey = links(withZeroAmount(EditModel.neutral)).display
+        XCTAssertEqual(zeroKey, links(withZeroSharpen(EditModel.neutral)).display,
                        "amount 0 改动了 display 键")
+        XCTAssertNotEqual(zeroKey, links(EditModel.neutral).display,
+                          "314: 默认 50 与显式 0 共用 display 键")
 
         // …and the decode inputs, which is the key every cached rung was written against.
         let inputs = withZeroSharpen(EditModel.neutral)
@@ -325,7 +339,8 @@ final class SharpenStageTests: XCTestCase {
 
     func testDetailZeroOnlyAmplifiesLargeStructure() throws {
         let g = try makeGraph(twoBands(), identity: "sharpen-detail")
-        let src = try render(g, .neutral)
+        // 314: the reference is the **explicit-0** document — `neutral` now carries 50 / 2.0.
+        let src = try render(g, sharpen(0))
         let before = codes(src)
         let width = src.width
 
@@ -352,7 +367,8 @@ final class SharpenStageTests: XCTestCase {
 
     func testMaskingProtectsFlatNoiseAndKeepsTheEdge() throws {
         let g = try makeGraph(noiseAndEdge(), identity: "sharpen-mask")
-        let src = try render(g, .neutral)
+        // 314: the flat field's own noise is read off the **explicit-0** frame (see above).
+        let src = try render(g, sharpen(0))
         let before = codes(src)
         let width = src.width
 
@@ -460,7 +476,7 @@ final class SharpenStageTests: XCTestCase {
         // presence does not add a render stage to the graph. That is the invariant a regression
         // would break; the milliseconds stay in the log for anyone with an idle machine.
         let g = try makeGraph(flat(), identity: "sharpen-cost")
-        let off = EditModel.neutral
+        let off = sharpen(0)
         let on = sharpen(100, radius: 3.0, detail: 100, masking: 50)
 
         // One warm-up each, so the first pipeline compile is not in the measurement.
@@ -486,9 +502,9 @@ final class SharpenStageTests: XCTestCase {
             marginal.append(b.gpuMilliseconds - a.gpuMilliseconds)
         }
 
-        // The default position (半径 1.0 / 细节 25) is the one a document actually carries, so its cost
-        // is measured too — the 3.0/100 pair above is the worst case, not the typical one.
-        let typical = sharpen(100, radius: 1.0, detail: 25, masking: 0)
+        // The typical position (314: 半径 2.0 / 细节 25) is the one a document actually carries, so its
+        // cost is measured too — the 3.0/100 pair above is the worst case, not the typical one.
+        let typical = sharpen(100, radius: 2.0, detail: 25, masking: 0)
         var typicalMarginal: [Double] = []
         for _ in 0..<2 {
             let (_, a) = try renderWithTrace(g, off)

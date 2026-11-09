@@ -21,6 +21,15 @@ import Metal
 /// reproducible.
 final class ToneMapTests: XCTestCase {
 
+    /// 314: `EditModel.neutral` now carries the resting **50 / 2.0** sharpen, and S3.10 sits after S2
+    /// — it would sit between the tone map and the numbers these tests read. Every tone-map
+    /// measurement therefore starts from the **explicit-0** document (the identity, 314 §2.1).
+    private var unsharpened: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0)
+        return e
+    }
+
     // MARK: - fixtures
 
     private func makeGraph(_ image: LinearImage, identity: String = "tone-test") throws -> RenderGraph {
@@ -189,7 +198,7 @@ final class ToneMapTests: XCTestCase {
         let opts = RenderOptions(scale: 1,
                                  display: DisplayOptions(headroom: 8, linearOutput: true),
                                  useCache: false, wantsPixels: true)
-        let neutral = EditModel.neutral
+        let neutral = unsharpened
 
         func luma(highlights: Double) throws -> Double {
             var edit = neutral
@@ -236,7 +245,7 @@ final class ToneMapTests: XCTestCase {
                                  useCache: false, wantsPixels: true)
 
         func output(highlights: Double) throws -> [Double] {
-            var edit = EditModel.neutral
+            var edit = unsharpened
             edit.light.highlights = highlights
             let d = try XCTUnwrap(graph.render(edit, options: opts).display)
             return (0..<ls.count).map { i in
@@ -393,7 +402,7 @@ final class ToneMapTests: XCTestCase {
                                  useCache: false, wantsPixels: true)
 
         func linearLuma(highlights: Double) throws -> [Double] {
-            var edit = EditModel.neutral
+            var edit = unsharpened
             edit.light.highlights = highlights
             let r = try graph.render(edit, options: opts)
             defer { if let t = r.output { graph.recycle(output: t) } }
@@ -929,7 +938,7 @@ final class ToneMapTests: XCTestCase {
                                      useCache: false, wantsPixels: true)
             func codes(shadows: Double = 0, midtones: Double = 0,
                        highlights: Double = 0) throws -> [Double] {
-                var edit = EditModel.neutral
+                var edit = unsharpened
                 edit.light.shadows = shadows
                 edit.light.midtones = midtones
                 edit.light.highlights = highlights
@@ -990,7 +999,7 @@ final class ToneMapTests: XCTestCase {
                                     display: DisplayOptions(headroom: 8, linearOutput: true),
                                     useCache: false, wantsPixels: true)
         func hdrP99(highlights: Double) throws -> Double {
-            var edit = EditModel.neutral
+            var edit = unsharpened
             edit.light.highlights = highlights
             let d = try XCTUnwrap(hdrGraph.render(edit, options: hdrOpts).display)
             let lumas = stride(from: 0, to: d.rgba.count, by: 4).map {
