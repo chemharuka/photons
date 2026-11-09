@@ -295,7 +295,25 @@ final class ThumbnailMetalSurface {
         guard let context = renderer.ciContext else { return nil }
         let ci = CIImage(cgImage: image)
         guard let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) else { return nil }
-        context.render(ci, to: texture, commandBuffer: nil,
+        // 316 — **the second time this convention bit us** (the first is `ThumbnailHDRDecoder.makeCGImage`,
+        // 241). The two payloads are written into the *same* texture, which the shader samples with
+        // texture row 0 at the top of the drawable:
+        //
+        //   · `texture.replace` copies the `CGImage` bytes verbatim ⇒ row 0 = image top. Upright.
+        //   · `CIContext.render(_:to: MTLTexture)` writes the image with its **bottom** row at texture
+        //     row 0 (Core Image is y-up, a texture's row 0 is the top). Uploaded as-is the cell shows
+        //     the picture upside down — invisible until 313 gave this branch `.shaderWrite` and it
+        //     stopped being all-black (316 measured: top band 0.021, bottom band 1.501).
+        //
+        // So the CI branch flips its own image before the render, nothing else: the alternative
+        // ("render into an `RGBAh` CGImage, then `replace`") would unify the two paths but costs an
+        // extra full-size CPU round trip (~20 MB at 1920×1278) on every cell. A CIImage transform is a
+        // coordinate change the render fuses into its sampling, so it is the cheap side of the tie.
+        // If a third upload path is ever added, it must be checked against `ThumbnailPQOrientationTests`,
+        // which measures the texture's top/bottom bands for both families.
+        let flipped = ci.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
+            .concatenating(CGAffineTransform(translationX: 0, y: CGFloat(height))))
+        context.render(flipped, to: texture, commandBuffer: nil,
                        bounds: CGRect(x: 0, y: 0, width: width, height: height),
                        colorSpace: space)
         return texture
