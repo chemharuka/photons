@@ -353,16 +353,18 @@ public struct FrameTransform: Sendable, Equatable {
     public func viewPointToUnrotatedSource(_ point: Point) -> Point {
         let s3 = Self.apply(s5ToS3, point)
         let frame = geometry.framePoint(canvasX: s3.x, canvasY: s3.y)
-        let sx = Double(source.width) / Double(max(decodedSource.width, 1))
-        let sy = Double(source.height) / Double(max(decodedSource.height, 1))
-        return Point(frame.x * sx + cropOrigin.x, frame.y * sy + cropOrigin.y)
+        // 298 — S3 is the **full-resolution** source grid (261); the decoded rung is only the
+        // renderer's allocation. No rung factor belongs in this walk (the inverse below has none
+        // either), or the frame measures `decoded / source` of itself on every non-1.0 rung.
+        return Point(frame.x + cropOrigin.x, frame.y + cropOrigin.y)
     }
 
     /// S2 (absolute S1 coordinates, un-rotated) → S5. Continuous geometry (see above).
     public func unrotatedSourceToView(_ point: Point) -> Point {
-        let sx = Double(decodedSource.width) / Double(max(source.width, 1))
-        let sy = Double(decodedSource.height) / Double(max(source.height, 1))
-        let frame = Point((point.x - cropOrigin.x) * sx, (point.y - cropOrigin.y) * sy)
+        // 298 — see above: `geometry` is built on `source` (full resolution), so the frame offset
+        // must not be scaled by `decodedSource / source`. That residual factor made the 0.5 preview
+        // rung's stand-in exactly half-size (the reported top-left-quarter `切图` placeholder).
+        let frame = Point(point.x - cropOrigin.x, point.y - cropOrigin.y)
         let p = geometry.canvasPoint(frameX: frame.x, frameY: frame.y)
         return Self.apply(s3ToS5, Point(p.x, p.y))
     }
