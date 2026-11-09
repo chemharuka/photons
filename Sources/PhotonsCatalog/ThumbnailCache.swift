@@ -68,16 +68,34 @@ public enum ThumbPipeline: String, Sendable, CaseIterable, Codable {
 public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     case legacy = "v1"
     case hd = "hd1920q75p3pq10"
+    /// 308 — the grid/list/filmstrip thumbnail: **1920 px, 8-bit Display P3 PQ, JPEG q0.75**.
+    ///
+    /// One file per photo at the render's own 1920, decoded by ImageIO straight to the cell's pixel
+    /// size (`kCGImageSourceThumbnailMaxPixelSize`). Storing 512 was tried and rejected: the encoder
+    /// is not the cost — JPEG at 1920 is 370 KB against the HEIC's 372 KB, so nothing is saved by
+    /// going smaller — and the *decode* is 12.4× faster (14.7 ms vs 183 ms to a 512 cell). The
+    /// downsample inside the decode also averages PQ codes before they are re-quantised, which is
+    /// why the 1920 file bands **less** on screen (0.032 EV residual) than a native 512 file
+    /// (0.047 EV). 1024 was measured and is worse than both — do not add a middle rung.
+    case hdJPEG = "hd1920q75p3pq8"
 
     /// The longest edge the spec promises. 0 means "the tier decides" (legacy).
-    public var longEdge: Int { self == .hd ? 1920 : 0 }
+    public var longEdge: Int {
+        switch self {
+        case .legacy: return 0
+        case .hd, .hdJPEG: return 1920
+        }
+    }
     public var fileExtension: String { self == .hd ? "heic" : "jpg" }
-    public var quality: Double { self == .hd ? 0.75 : ThumbnailJPEG.quality }
+    public var quality: Double { self == .legacy ? ThumbnailJPEG.quality : 0.75 }
     /// 223 — the HD primary item's bit depth (HEIF's one legal HDR depth) and transfer curve.
+    /// 308 — the 512 tier is deliberately 8-bit (§5: no 10-bit, no gain map).
     public var bitDepth: Int { self == .hd ? 10 : 8 }
-    public var isHDR: Bool { self == .hd }
-    /// The colour space the HD file is tagged with: **Display P3 PQ**, not Rec.2020 PQ.
-    public var colorSpaceName: String? { self == .hd ? "displayP3_PQ" : nil }
+    public var isHDR: Bool { self != .legacy }
+    /// The colour space the file is tagged with: **Display P3 PQ**, not Rec.2020 PQ.
+    public var colorSpaceName: String? { self == .legacy ? nil : "displayP3_PQ" }
+    /// `true` for both files of the `hd` namespace (1920 HEIC and 512 JPEG).
+    public var isHDFamily: Bool { self != .legacy }
     /// Bumped when the meaning of a spec changes without changing its spelling.
     ///
     /// 241 — v2: the row order the cell decodes was corrected (Core Image's texture read-back is
@@ -140,10 +158,10 @@ public enum ThumbRecipe {
     /// NR/detail amounts — are appended last, and only when non-default. A neutral document keeps
     /// every pre-change HD key byte for byte; a `9.dng` / adjusted-detail document gets a new key,
     /// which is what makes the grid rebuild instead of serving the default decoder's picture.
-    public static func editFingerprint(_ document: EditModel) -> String {
+    public static func editFingerprint(_ document: EditModel, spec: ThumbSpec = .hd) -> String {
         let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
-        var material = "\(stageKeys)|\(StageAlgorithmVersion.material)|\(ThumbSpec.hd.rawValue)"
-            + "|sv\(ThumbSpec.hd.schemaVersion)"
+        var material = "\(stageKeys)|\(StageAlgorithmVersion.material)|\(spec.rawValue)"
+            + "|sv\(spec.schemaVersion)"
         let inputs = document.decodeInputs
         if let version = inputs.versionComponent { material += "|\(version)" }
         if let detail = inputs.detailComponent { material += "|\(detail)" }
@@ -235,7 +253,7 @@ public struct ThumbKey: Hashable, Sendable {
 
     /// `p` or `g-<fingerprint>`: the directory this key's file lives in (P1f).
     public var namespace: String {
-        if spec == .hd { return ThumbNamespace.hd }
+        if spec.isHDFamily { return ThumbNamespace.hd }
         return pipeline == .preview ? ThumbNamespace.preview : ThumbNamespace.graph
     }
 
@@ -249,7 +267,7 @@ public struct ThumbKey: Hashable, Sendable {
         self.pipeline = pipeline
         self.recipeDigest = pipeline == .preview ? ThumbRecipe.placeholderDigest : recipeDigest
         self.spec = spec
-        self.editFingerprint = spec == .hd ? editFingerprint : ThumbRecipe.placeholderDigest
+        self.editFingerprint = spec.isHDFamily ? editFingerprint : ThumbRecipe.placeholderDigest
     }
 
     public static func preview(contentHash: String, tier: ThumbTier) -> ThumbKey {
@@ -272,6 +290,18 @@ public struct ThumbKey: Hashable, Sendable {
         ThumbKey(contentHash: contentHash, tier: .t2048, pipeline: .graph,
                  recipeDigest: ThumbRecipe.placeholderDigest, spec: .hd,
                  editFingerprint: ThumbRecipe.editFingerprint(document))
+    }
+
+    /// 308 — the 1920 px PQ JPEG the grid, the browser list and the filmstrip read.
+    ///
+    /// Same inputs as `hd` (content hash + document, edit fingerprint included, so a commit makes
+    /// a new key), a different file family, and the same `.t2048` sentinel: the file *is* a 1920
+    /// image, so the LRU's large-tier staleness rule applies to it exactly as it does to the HEIC.
+    /// The cell's own pixel size does not enter the key — the decode shrinks, the file does not.
+    public static func hdJPEG(contentHash: String, document: EditModel) -> ThumbKey {
+        ThumbKey(contentHash: contentHash, tier: .t2048, pipeline: .graph,
+                 recipeDigest: ThumbRecipe.placeholderDigest, spec: .hdJPEG,
+                 editFingerprint: ThumbRecipe.editFingerprint(document, spec: .hdJPEG))
     }
 
     /// The exact string that gets hashed. Kept public and stable so `grep` on a cache directory
@@ -310,8 +340,8 @@ public struct ThumbKey: Hashable, Sendable {
     /// photo sit in one place; `preview`/`graph` keep the digest shard, where grouping by edit is
     /// meaningless (their keys already carry the recipe, and the tier ladder is what they shard by).
     public func relativePath(in root: URL) -> URL {
-        let s0 = spec == .hd ? contentShard0 : shard0
-        let s1 = spec == .hd ? contentShard1 : shard1
+        let s0 = spec.isHDFamily ? contentShard0 : shard0
+        let s1 = spec.isHDFamily ? contentShard1 : shard1
         return root.appendingPathComponent(namespace, isDirectory: true)
             .appendingPathComponent(s0, isDirectory: true)
             .appendingPathComponent(s1, isDirectory: true)
@@ -525,11 +555,14 @@ public final class ThumbnailCache {
     /// the winner's file, and the next lookup simply regenerates it — the cache has no correctness
     /// role, and being conservative here would mean keeping files forever.
     private func retainNewestHDOnly(for key: ThumbKey) {
-        guard key.spec == .hd else { return }
+        guard key.spec.isHDFamily else { return }
         let dir = url(for: key).deletingLastPathComponent()
+        // One prune per **family**: a photo legitimately owns one `.heic` (1920, loupe stand-in)
+        // and one `.jpg` (512, cells) at a time, so each extension keeps its own newest file.
+        let ext = "." + key.spec.fileExtension
         let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
         var owners: [(path: String, modified: Date)] = []
-        for name in names where name.hasSuffix(".heic") && !name.hasPrefix(".") {
+        for name in names where name.hasSuffix(ext) && !name.hasPrefix(".") {
             let path = dir.appendingPathComponent(name).path
             guard Self.hdOwner(ofFileAt: path) == key.contentHash else { continue }
             let modified = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
@@ -747,7 +780,7 @@ public final class ThumbnailCache {
         // 308: an HD file is one per *photo*, not one per edit. Tag it with its owner and keep the
         // newest file in the content-hash shard (see `retainNewestHDOnly`). The tag comes first: the
         // prune only ever deletes files it can attribute.
-        if key.spec == .hd {
+        if key.spec.isHDFamily {
             tagOwner(dest.path, contentHash: key.contentHash)
             retainNewestHDOnly(for: key)
         }
@@ -803,18 +836,22 @@ public final class ThumbnailCache {
             }
         }
         for document in documents {
-            let key = ThumbKey.hd(contentHash: contentHash, document: document)
-            let path = url(for: key)
-            guard fm.fileExists(atPath: path.path) else { continue }
-            if (try? fm.removeItem(at: path)) != nil { removed += 1 }
+            // 308 — both families: the 1920 HEIC and the 512 JPEG of every known document.
+            for key in [ThumbKey.hd(contentHash: contentHash, document: document),
+                        ThumbKey.hdJPEG(contentHash: contentHash, document: document)] {
+                let path = url(for: key)
+                guard fm.fileExists(atPath: path.path) else { continue }
+                if (try? fm.removeItem(at: path)) != nil { removed += 1 }
+            }
         }
         // 308 — and every *other* HD file this photo owns: one content-hash shard is one directory, so
         // "deleted the library entry, its pixels are gone" is now a scan of one directory instead of a
-        // guess at the documents an undo stack may have left behind.
+        // guess at the documents an undo stack may have left behind. Both extensions are scanned:
+        // `.heic` and `.jpg` are two families of the same photo.
         let hdShard = ThumbKey.hd(contentHash: contentHash, document: .neutral).relativePath(in: root)
             .deletingLastPathComponent()
         for name in (try? fm.contentsOfDirectory(atPath: hdShard.path)) ?? []
-        where name.hasSuffix(".heic") {
+        where name.hasSuffix(".heic") || name.hasSuffix(".jpg") {
             let path = hdShard.appendingPathComponent(name).path
             guard Self.hdOwner(ofFileAt: path) == contentHash else { continue }
             if (try? fm.removeItem(atPath: path)) != nil { removed += 1 }
