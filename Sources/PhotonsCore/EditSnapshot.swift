@@ -969,9 +969,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
         // 185 — S3.10. `detail` and `masking` are compared against the group's own resting values, so
-        // a document that only touched 蒙版 still carries that leaf (and 数量 = 0 carries nothing).
-        if differs(edit.sharpen.amount, 0) { effects.sharpenAmount = edit.sharpen.amount }
-        if differs(edit.sharpen.radius, 1.0) { effects.sharpenRadius = edit.sharpen.radius }
+        // a document that only touched 蒙版 still carries that leaf (and 数量 = 50 — the 314 resting
+        // value — carries nothing, while an explicit 0 is off-resting and *is* written).
+        if differs(edit.sharpen.amount, 50) { effects.sharpenAmount = edit.sharpen.amount }
+        if differs(edit.sharpen.radius, 2.0) { effects.sharpenRadius = edit.sharpen.radius }
         if differs(edit.sharpen.detail, 25) { effects.sharpenDetail = edit.sharpen.detail }
         if differs(edit.sharpen.masking, 0) { effects.sharpenMasking = edit.sharpen.masking }
         s.effects = effects.isEmpty ? nil : effects

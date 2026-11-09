@@ -241,7 +241,7 @@ final class DiffCoverageTests: XCTestCase {
             flat("effects.nonBayerColorNR") { $0.effects.nonBayerColorNR = 45 },
             flat("effects.dehaze") { $0.effects.dehaze = 20 },
             flat("sharpen.amount") { $0.sharpen.amount = 80 },
-            flat("sharpen.radius") { $0.sharpen.radius = 2 },
+            flat("sharpen.radius") { $0.sharpen.radius = 2.5 },
             flat("sharpen.detail") { $0.sharpen.detail = 50 },
             flat("sharpen.masking") { $0.sharpen.masking = 20 },
 

@@ -29,6 +29,16 @@ import PhotonsCore
 ///   · the atlas read costs **≤ +0.6 ms** of S3.9 at 4.10 Mpx, three masks.
 final class LocalDetailTests: XCTestCase {
 
+    /// 314: `EditModel.neutral` now carries the resting **50 / 2.0** sharpen, so a frame compared
+    /// against it also carries S3.10's ringing. The tests below measure S3.9 in isolation (mask
+    /// confinement, 1 px overshoot), so their baseline is the document with an **explicit 0** — the
+    /// one that is the identity (314 §2.1).
+    private var unsharpened: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0)
+        return e
+    }
+
     // MARK: - fixtures
 
     private static var repoRoot: URL {
@@ -344,7 +354,7 @@ final class LocalDetailTests: XCTestCase {
         let (image, _) = twotone()
         let graph = try makeGraph(image)
 
-        var plain = EditModel.neutral
+        var plain = unsharpened
         plain.masks = [leftMask(LocalAdjustments.identity)]
         var boosted = plain
         boosted.masks[0].adjustments.texture = 60
@@ -399,7 +409,7 @@ final class LocalDetailTests: XCTestCase {
         // The ring lies *outside* the hard-edged mask, so the "full weight" reference has to be a mask
         // that covers it: the full-canvas one, same texture value. Both frames share their S3.9 input
         // (S1.6 is identity in every document here), so the only difference at a ring pixel is `w`.
-        var fullCover = EditModel.neutral
+        var fullCover = unsharpened
         fullCover.masks = [fullCanvasMask(LocalAdjustments(amount: 100, texture: 60))]
         let fullFrame = codes(try XCTUnwrap(try render(graph, fullCover).display))
 
@@ -493,7 +503,7 @@ final class LocalDetailTests: XCTestCase {
             let (image, edge) = twotone(riser: riser)
             let graph = try makeGraph(image)
 
-            var plain = EditModel.neutral
+            var plain = unsharpened
             plain.masks = [fullCanvasMask(LocalAdjustments.identity)]
             var sharp = plain
             sharp.masks[0].adjustments.sharpen = sharpen

@@ -2505,8 +2505,10 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
 /// The ranges are the kernel's ranges — a slider the panel can produce and the shader cannot honour
 /// would be a slider that lies:
 ///
-///   · `amount` 0…150 — USM strength (`A = amount/100`). **0 means S3.10 does not exist** for the
-///     document: no pass, no key token, no pixel. This is the whole neutrality contract.
+///   · `amount` 0…150 — USM strength (`A = amount/100`). The **resting value is 50** (314): a new
+///     document sharpens, and 50/2.0 is not written to JSON because it *is* the resting value. An
+///     **explicit 0** means S3.10 does not exist for the document: no pass, no key token, no pixel.
+///     That — the explicit 0, not the absence of the key — is the whole neutrality contract.
 ///   · `radius` 0.5…3.0 px — the Gaussian's σ, in **content pixels** of the render's own grid, so a
 ///     0.5-scale fit preview and a 1:1 window sharpen the same picture detail (「按缩放归一」).
 ///   · `detail` 0…100 — the weight of the < σ/2 px band. 0 = only structures ≥ about σ/2 px; 100 =
@@ -2531,7 +2533,7 @@ public struct SharpenGroup: Sendable, Equatable, Codable {
     public static let amountRange = 0.0 ... 150.0
     public static let radiusRange = 0.5 ... 3.0
 
-    public init(amount: Double = 0, radius: Double = 1.0,
+    public init(amount: Double = 50, radius: Double = 2.0,
                 detail: Double = 25, masking: Double = 0) {
         self.amount = amount
         self.radius = radius
@@ -2539,11 +2541,14 @@ public struct SharpenGroup: Sendable, Equatable, Codable {
         self.masking = masking
     }
 
-    /// All four at their resting values. `detail` and `masking` have non-zero defaults because they
-    /// are *shape* parameters of a pass that does not exist at amount 0 — they are stored, not
-    /// applied, and they cannot summon the stage (`EditModel.hasSharpen` is the amount alone).
+    /// All four at their resting values (314: 50 / 2.0 / 25 / 0). This is what "the user never
+    /// opened the 细节 card" means, and — because `EditModel.encode` skips a group at `isIdentity` —
+    /// exactly what is *not* written to JSON. `detail` and `masking` have non-zero resting values
+    /// because they are *shape* parameters of a pass that does not exist at amount 0 — they are
+    /// stored, not applied, and they cannot summon the stage (`EditModel.hasSharpen` is the amount
+    /// alone).
     public var isIdentity: Bool {
-        amount == 0 && radius == 1.0 && detail == 25 && masking == 0
+        amount == 50 && radius == 2.0 && detail == 25 && masking == 0
     }
 
     public init(from decoder: any Decoder) throws {
