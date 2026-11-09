@@ -5,7 +5,7 @@ import AppKit
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 054 — the canvas **around** the picture is `#0F0F0F`, not black.
+/// 054 — the canvas **around** the picture is a grey matte (`#202020` since 315), not black.
 ///
 /// The user's report ("能否把背景的黑色设置为黑灰色？比如 0F0F0F 这种") is not about a layer colour: in
 /// fit mode the bands around the photograph are **inside the canvas texture**, because S2/S4 write
@@ -17,12 +17,12 @@ import PhotonsCore
 ///
 /// What is pinned here, in the order a mistake would show up:
 ///
-///   1. **One constant, four places.** `CanvasPresenter.CanvasMatte` is the value; the shader's literal
+///   1. **One value, every place.** `CanvasBackdrop.current` is the value (`CanvasMatte` forwards to it);
 ///      is parsed out of `present.metal` and compared against it, and both layer backgrounds are
 ///      asserted to come from the same `NSColor`.
 ///   2. **The photograph is untouched.** A canvas-sized frame with the picture in the middle 50 %:
 ///      every pixel *inside* the picture's rect is byte-identical to the same render with no picture
-///      rect (i.e. to pre-054 output), while the four corners are `(15, 15, 15)`.
+///      rect (i.e. to pre-054 output), while the four corners are the matte code (`(32, 32, 32)`).
 ///   3. **A frame that covers the canvas loses nothing.** The whole-frame `pixelSHA256` of the full-cover
 ///      fixture equals the hash recorded **before** this change, for both the 16-bit and the 8-bit path
 ///      — the anti-proof is the next test, which shows what the hash looks like when the matte *is*
@@ -45,30 +45,34 @@ final class CanvasMatteGreyTests: XCTestCase {
                                      q8: "7e929bc128876d32982f233373720fcd4109b89d06fcc3e11e5fec3f01e4af51")
     }
 
+    /// The stop the canvas is drawn with **now** — the tests below assert the pixels against the
+    /// preference, not against a literal, so a change of default moves the expectation with it.
+    private static var matteCode: Double { Double(CanvasPresenter.CanvasMatte.eightBitValue) }
+
     // MARK: - 1. one constant, four places
 
-    /// `#0F0F0F` is 15 of 255 in **display encoding**; the 16-bit layer stores linear light, so the two
+    /// `#202020` is 32 of 255 in **display encoding**; the 16-bit layer stores linear light, so the two
     /// numbers must be the same colour through the sRGB transfer function, not the same literal.
-    func testTheMatteIsHexZeroFZeroFZeroF() {
-        XCTAssertEqual(CanvasPresenter.CanvasMatte.eightBitValue, 0x0F, "#0F is 15")
-        XCTAssertEqual(CanvasPresenter.CanvasMatte.displayEncoded, 15.0 / 255, accuracy: 1e-12)
-        // sRGB EOTF, the same branch `srgb_encode_inverse` in `present.metal` takes at 15/255 (above the
+    func testTheMatteIsTheDefaultBackdropStop() {
+        XCTAssertEqual(CanvasPresenter.CanvasMatte.eightBitValue, 0x20, "#20 is 32")
+        XCTAssertEqual(CanvasPresenter.CanvasMatte.displayEncoded, 32.0 / 255, accuracy: 1e-12)
+        // sRGB EOTF, the same branch `srgb_encode_inverse` in `present.metal` takes at 32/255 (above the
         // 0.04045 knee, so the pow branch — not a plain division).
-        let expectedLinear = pow((15.0 / 255 + 0.055) / 1.055, 2.4)
+        let expectedLinear = pow((32.0 / 255 + 0.055) / 1.055, 2.4)
         XCTAssertEqual(CanvasPresenter.CanvasMatte.linear, expectedLinear, accuracy: 1e-12)
 
         let encoded = CanvasPresenter.CanvasMatte.clearColor(linear: false)
         for (name, v) in [("r", encoded.red), ("g", encoded.green), ("b", encoded.blue)] {
-            XCTAssertEqual(v, 15.0 / 255, accuracy: 1e-12, "encoded clear colour, \(name)")
+            XCTAssertEqual(v, 32.0 / 255, accuracy: 1e-12, "encoded clear colour, \(name)")
         }
         XCTAssertEqual(encoded.alpha, 1)
         let linear = CanvasPresenter.CanvasMatte.clearColor(linear: true)
         for (name, v) in [("r", linear.red), ("g", linear.green), ("b", linear.blue)] {
             XCTAssertEqual(v, expectedLinear, accuracy: 1e-12, "linear clear colour, \(name)")
         }
-        // The 8-bit quantisation of both numbers is 15: what a screen shows for `#0F0F0F`.
-        XCTAssertEqual(Int((CanvasPresenter.CanvasMatte.displayEncoded * 255).rounded()), 15)
-        print("canvas matte: #0F0F0F = 15/255 encoded, \(CanvasPresenter.CanvasMatte.linear) linear")
+        // The 8-bit quantisation of both numbers is 32: what a screen shows for `#202020`.
+        XCTAssertEqual(Int((CanvasPresenter.CanvasMatte.displayEncoded * 255).rounded()), 32)
+        print("canvas matte: #202020 = 32/255 encoded, \(CanvasPresenter.CanvasMatte.linear) linear")
     }
 
     /// **067 — the shader has no matte at all, and that is the point.**
@@ -175,7 +179,7 @@ final class CanvasMatteGreyTests: XCTestCase {
         let matte = NSColor.canvasMatte
         let srgb = try XCTUnwrap(matte.usingColorSpace(.sRGB), "no sRGB colour")
         for (name, v) in [("r", srgb.redComponent), ("g", srgb.greenComponent), ("b", srgb.blueComponent)] {
-            XCTAssertEqual(v, CGFloat(15.0 / 255), accuracy: 1e-6, "NSColor.canvasMatte \(name)")
+            XCTAssertEqual(v, CGFloat(32.0 / 255), accuracy: 1e-6, "NSColor.canvasMatte \(name)")
         }
         XCTAssertEqual(srgb.alphaComponent, 1)
 
@@ -184,24 +188,37 @@ final class CanvasMatteGreyTests: XCTestCase {
         let readBack = try XCTUnwrap(NSColor(cgColor: layerColor)?.usingColorSpace(.sRGB))
         for (name, v) in [("r", readBack.redComponent), ("g", readBack.greenComponent),
                           ("b", readBack.blueComponent)] {
-            XCTAssertEqual(v, CGFloat(15.0 / 255), accuracy: 1e-6, "metalLayer.backgroundColor \(name)")
+            XCTAssertEqual(v, CGFloat(32.0 / 255), accuracy: 1e-6, "metalLayer.backgroundColor \(name)")
         }
 
-        // The container layer too, from the source: two assignments, both from the constant, and no
-        // `NSColor.black` background left in the loupe. P2 split the canvas out of the controller, so
-        // the scan is a **directory**, not a file list: pinning names would fail on the next move.
+        // The container layer too, from the source, and no `NSColor.black` background left in the
+        // loupe. P2 split the canvas out of the controller, so the scan is a **directory**, not a file
+        // list: pinning names would fail on the next move.
+        //
+        // 315 — three reads, one per surface that **stores** the colour, and each is a single value
+        // per surface rather than a duplicate assignment:
+        //   1. `LoupeController.loadView`    → `container.layer` (behind the canvas, first build)
+        //   2. `LoupeController.observeCanvasBackdrop` → the same container layer, re-read on
+        //      `.canvasBackdropDidChange` (a preference change must reach the cached layer)
+        //   3. `LoupeCanvasView.applyCanvasBackdrop` → one read for the two layers of the canvas
+        //      (`metalLayer.backgroundColor` + the 258 photo-switch cover that copies it)
         let text = try Self.loupeSourcesText()
-        XCTAssertEqual(text.components(separatedBy: "NSColor.canvasMatte.cgColor").count - 1, 2,
-                       "both the metal layer and the container layer take the matte from the constant")
+        XCTAssertEqual(text.components(separatedBy: "NSColor.canvasMatte.cgColor").count - 1, 3,
+                       "the container layer (initial + refresh) and the canvas' own two layers")
+        let canvasView = try String(contentsOf: Self.canvasViewURL, encoding: .utf8)
+        XCTAssertEqual(canvasView.components(separatedBy: "NSColor.canvasMatte.cgColor").count - 1, 1,
+                       "the canvas reads the colour once and gives it to both of its layers")
+        XCTAssertTrue(canvasView.contains("metalLayer.backgroundColor = colour"))
+        XCTAssertTrue(canvasView.contains("canvasCover.backgroundColor = colour"))
         XCTAssertFalse(text.contains("backgroundColor = NSColor.black.cgColor"),
                        "a canvas background is still literal black")
-        print("layers: metalLayer + container = NSColor.canvasMatte = (#0F0F0F)")
+        print("layers: metalLayer + container = NSColor.canvasMatte = (#202020)")
     }
 
     // MARK: - 2. the letterbox is grey, the photograph is untouched
 
     /// A canvas-sized frame with the photograph in the middle 50 % — the fit mode the user reported.
-    /// Four corners `(15, 15, 15)`; every pixel inside the picture's rect identical to the same render
+    /// Four corners at the matte code; every pixel inside the picture's rect identical to the same render
     /// without a picture rect, which is byte-for-byte what this pass wrote before 054 existed.
     func testFitLetterboxCornersAreMatteGreyAndThePictureIsUntouched() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
@@ -234,17 +251,18 @@ final class CanvasMatteGreyTests: XCTestCase {
                                  ("bottom-left", 0, canvas.height - 1),
                                  ("bottom-right", canvas.width - 1, canvas.height - 1)] {
                 let got = Self.displayCode(Self.pixel(matteTarget, x, y), linear: linear)
-                XCTAssertEqual(got, 15, accuracy: 1, "\(name) is \(got) of 255, want 15 (#0F0F0F)")
+                XCTAssertEqual(got, Self.matteCode, accuracy: 1,
+                               "\(name) is \(got) of 255, want \(Self.matteCode) (#202020)")
             }
             // The letterbox is uniformly grey, not just at the corners: a row through the top band and a
             // column through the left band.
             for x in stride(from: 0, to: canvas.width, by: 37) {
                 let got = Self.displayCode(Self.pixel(matteTarget, x, 3), linear: linear)
-                XCTAssertEqual(got, 15, accuracy: 1, "letterbox row \(x),3 = \(got)")
+                XCTAssertEqual(got, Self.matteCode, accuracy: 1, "letterbox row \(x),3 = \(got)")
             }
             for y in stride(from: 0, to: canvas.height, by: 41) {
                 let got = Self.displayCode(Self.pixel(matteTarget, 7, y), linear: linear)
-                XCTAssertEqual(got, 15, accuracy: 1, "letterbox column 7,\(y) = \(got)")
+                XCTAssertEqual(got, Self.matteCode, accuracy: 1, "letterbox column 7,\(y) = \(got)")
             }
 
             // ②  the photograph, byte for byte.
@@ -302,9 +320,9 @@ final class CanvasMatteGreyTests: XCTestCase {
         var matteColoured = 0
         for (x, y) in [(0, 0), (canvas.width - 1, 0), (0, canvas.height - 1),
                        (canvas.width / 2, canvas.height / 2), (13, 77)] {
-            if abs(Self.displayCode(Self.pixel(t16, x, y), linear: true) - 15) <= 1 { matteColoured += 1 }
+            if abs(Self.displayCode(Self.pixel(t16, x, y), linear: true) - Self.matteCode) <= 1 { matteColoured += 1 }
         }
-        print("full-canvas frame: \(h16.exact.prefix(16))… unchanged; \(matteColoured) of 5 samples read 15")
+        print("full-canvas frame: \(h16.exact.prefix(16))… unchanged; \(matteColoured) of 5 samples read the matte")
     }
 
     /// **The anti-proof.** The same full-canvas frame, presented with a picture rect that covers none of
@@ -329,7 +347,8 @@ final class CanvasMatteGreyTests: XCTestCase {
         for (name, x, y) in [("top-left", 0, 0), ("centre", canvas.width / 2, canvas.height / 2),
                              ("bottom-right", canvas.width - 1, canvas.height - 1)] {
             let got = Self.displayCode(Self.pixel(target, x, y), linear: true)
-            XCTAssertEqual(got, 15, accuracy: 1, "\(name) = \(got), want 15 when everything is matte")
+            XCTAssertEqual(got, Self.matteCode, accuracy: 1,
+                           "\(name) = \(got), want the matte when everything is matte")
         }
         print("anti-proof: matte over the whole frame hashes \(h.exact.prefix(16))… ≠ pre-054 "
               + "\(Pre054.fullCoverLinear16.exact.prefix(16))…")
@@ -373,12 +392,13 @@ final class CanvasMatteGreyTests: XCTestCase {
             // …and without a backdrop the same pixels are the canvas colour, not black and not the
             // photograph's edge: that is the fallback order (067).
             let bare = Self.displayCode(Self.pixel(withoutRect, x, y), linear: false)
-            XCTAssertEqual(bare, 15, accuracy: 1, "\(name) without a backdrop must be #0F0F0F")
+            XCTAssertEqual(bare, Self.matteCode, accuracy: 1,
+                           "\(name) without a backdrop must be the matte")
         }
         let inside = Self.pixel(withRect, canvas.width / 2, canvas.height / 2)
         XCTAssertEqual(Double(inside[0]), 0.42, accuracy: 1.0 / 255, "the main frame is still the frame")
         print("backdrop: corners are the backdrop (0.90, 0.20, 0.60), centre is the frame; "
-              + "without a backdrop the same corners are #0F0F0F")
+              + "without a backdrop the same corners are the matte")
     }
 
     // MARK: - 5. the histogram cannot see it
@@ -424,7 +444,7 @@ final class CanvasMatteGreyTests: XCTestCase {
                                        into: presented, linearize: true),
                       presenter.lastFailure ?? "the present pass failed")
         let corner = Self.displayCode(Self.pixel(presented, 0, 0), linear: true)
-        XCTAssertEqual(corner, 15, accuracy: 1, "the presented canvas corner is not #0F0F0F")
+        XCTAssertEqual(corner, Self.matteCode, accuracy: 1, "the presented canvas corner is not the matte")
 
         let after = try graph.measureFrameHistogram(fromFrame: texture, edit: .neutral, bins: 256,
                                                     content: result.drawnRect)
@@ -487,6 +507,14 @@ final class CanvasMatteGreyTests: XCTestCase {
 
     /// `CanvasPresenter.swift` — the matte's remaining producer is the clear colour, and it is asserted
     /// where it is written rather than where it is used.
+    private static var canvasViewURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/PhotonsUI/Loupe/LoupeCanvasView.swift")
+    }
+
     private static var presenterURL: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

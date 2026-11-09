@@ -34,7 +34,7 @@ public final class LoupeCanvasView: NSView {
     /// The canvas is a `CAMetalLayer`: its last drawable keeps showing the last photo no matter what
     /// the controller does to its own bookkeeping. 235's stand-in is only installed once a thumbnail
     /// is in hand, so a cold cache left that drawable visible — the reported 「残留上一个照片的像素
-    /// 缓存」. This sheet is synchronous, full-canvas and the same `#0F0F0F` as the matte, so the old
+    /// 缓存」. This sheet is synchronous, full-canvas and the same `#202020` as the matte, so the old
     /// photo can never be the first thing the new selection shows.
     ///
     /// **277 — it is a sublayer of the canvas, not a third top-level layer.** The canvas' invariant is
@@ -126,16 +126,17 @@ public final class LoupeCanvasView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         // The canvas is the matte surface the photo sits on, so a fit photo reads as a photo. 054: it
-        // is `#0F0F0F`, the same value the present pass paints outside the picture — this colour is
-        // only seen before the first drawable arrives.
-        metalLayer.backgroundColor = NSColor.canvasMatte.cgColor
+        // is the matte the present pass paints outside the picture — this colour is only seen before
+        // the first drawable arrives. 315: it is a preference (`CanvasBackdrop.current`), so it is
+        // re-read on `.canvasBackdropDidChange` instead of being frozen here.
+        applyCanvasBackdrop()
         metalLayer.isOpaque = true
         // 235 — a subview's layer composites above the view's backing layer, so this sits on top of
         // the Metal content and below every overlay the controller adds around the canvas.
         //
         // 258 — the matte cover goes first: it must hide the layer's previous drawable at a photo
-        // change, and the stand-in (when one is ready) is drawn on top of it.
-        canvasCover.backgroundColor = metalLayer.backgroundColor
+        // change, and the stand-in (when one is ready) is drawn on top of it. Its colour is the one
+        // `applyCanvasBackdrop` just wrote, so it is not copied a second time here (315).
         canvasCover.isHidden = true
         canvasCover.frame = bounds
         // Above the layer's own contents but below every view-backed sublayer (the stand-in, the
@@ -150,9 +151,36 @@ public final class LoupeCanvasView: NSView {
         brushRing.autoresizingMask = [.width, .height]
         brushRing.isHidden = true
         addSubview(brushRing)
+        // 315 — the stop is a preference, and this view stores it in two layers. `.main` queue: the
+        // layers belong to the main thread and `set(_:)` is called from the main thread.
+        canvasBackdropToken = NotificationCenter.default.addObserver(
+            forName: .canvasBackdropDidChange, object: nil, queue: .main) { [weak self] _ in
+                self?.applyCanvasBackdrop()
+            }
+    }
+
+    /// 315 — the token for `.canvasBackdropDidChange`. This view caches the matte in two layers
+    /// (`metalLayer.backgroundColor`, and the photo-switch cover that copies it), so it is one of the
+    /// places that must be told; the pass's clear colour is recomputed per present and is not cached.
+    private var canvasBackdropToken: NSObjectProtocol?
+
+    /// 315 — re-read the stop into every layer of the canvas that **stores** it.
+    ///
+    /// Two, and both are seen before/behind a drawable: the backing `CAMetalLayer`'s background (the
+    /// cold start, before the first present) and the 258 photo-switch cover, which is a sublayer and
+    /// therefore does not inherit the parent's background colour. Idempotent, so the initial build and
+    /// the notification take the same path.
+    public func applyCanvasBackdrop() {
+        let colour = NSColor.canvasMatte.cgColor
+        metalLayer.backgroundColor = colour
+        canvasCover.backgroundColor = colour
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    deinit {
+        if let canvasBackdropToken { NotificationCenter.default.removeObserver(canvasBackdropToken) }
+    }
 
     public override func makeBackingLayer() -> CALayer { CAMetalLayer() }
 

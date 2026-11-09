@@ -213,7 +213,7 @@ final class CanvasRole307Tests: XCTestCase {
 
     // MARK: - 4. ② the two blacks, on one 1200×800 · 15° frame
 
-    func testDocumentCanvasIs000000InsideAnd0F0F0FOutside() throws {
+    func testDocumentCanvasIs000000InsideAndTheBackdropOutside() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
         let viewport = ImageSize(width: 1200, height: 800)
         let viewportBox = self.source
@@ -261,13 +261,16 @@ final class CanvasRole307Tests: XCTestCase {
                            "canvas corner (\(x),\(y)) is not 000000")
             blackInside += 1
         }
-        // Outside the canvas → the pass' clear colour, #0F0F0F.
+        // Outside the canvas → the pass' clear colour, i.e. the **current** backdrop stop (315: read
+        // the constant, never a literal — a change of default is not a change of this invariant).
+        let matte = Int(CanvasPresenter.CanvasMatte.eightBitValue)
+        let mattePixel = [UInt8(matte), UInt8(matte), UInt8(matte)]
         var outside = 0
         for (x, y) in [(2, 2), (viewport.width - 3, 2), (2, viewport.height - 3),
                        (viewport.width - 3, viewport.height - 3)] where
             x < r.x || x >= r.maxX || y < r.y || y >= r.maxY {
-            XCTAssertEqual(Int(pixel(presented, x, y)[0]), 15,
-                           "outside the canvas (\(x),\(y)) is not #0F0F0F")
+            XCTAssertEqual(Int(pixel(presented, x, y)[0]), matte,
+                           "outside the canvas (\(x),\(y)) is not the backdrop")
             outside += 1
         }
         // The photograph still reaches the canvas' own edge — a turned rectangle touches its AABB at
@@ -283,23 +286,23 @@ final class CanvasRole307Tests: XCTestCase {
                              "the canvas' centre is not photograph")
 
         // Count the whole surface: every non-photograph pixel inside the canvas is exactly 0, every
-        // pixel outside it exactly 15 — i.e. the two blacks did not swap.
-        var zeroInside = 0, fifteenOutside = 0, wrongInside = 0, wrongOutside = 0
+        // pixel outside it exactly the backdrop — i.e. the two blacks did not swap.
+        var zeroInside = 0, matteOutside = 0, wrongInside = 0, wrongOutside = 0
         for y in 0..<viewport.height {
             for x in 0..<viewport.width {
                 let p = pixel(presented, x, y)
                 let inside = x >= r.x && x < r.maxX && y >= r.y && y < r.maxY
                 if inside {
-                    if p == [0, 0, 0] { zeroInside += 1 } else if p == [15, 15, 15] { wrongInside += 1 }
-                } else if p == [15, 15, 15] { fifteenOutside += 1 } else { wrongOutside += 1 }
+                    if p == [0, 0, 0] { zeroInside += 1 } else if p == mattePixel { wrongInside += 1 }
+                } else if p == mattePixel { matteOutside += 1 } else { wrongOutside += 1 }
             }
         }
-        print("307 · ② 000000 inside \(zeroInside) · 0F0F0F outside \(fifteenOutside)"
-              + " · stray 0F inside \(wrongInside) · stray !0F outside \(wrongOutside)")
+        print("307 · ② 000000 inside \(zeroInside) · backdrop \(matte) outside \(matteOutside)"
+              + " · stray backdrop inside \(wrongInside) · stray !backdrop outside \(wrongOutside)")
         XCTAssertEqual(wrongInside, 0, "the matte leaked inside the canvas")
         XCTAssertEqual(wrongOutside, 0, "the canvas' black leaked outside the box")
         XCTAssertGreaterThan(zeroInside, 0)
-        XCTAssertGreaterThan(fifteenOutside, 0)
+        XCTAssertGreaterThan(matteOutside, 0)
     }
 
     // MARK: - 6. ③ the frame may enter 000000, never the 0F outside the canvas
@@ -430,7 +433,7 @@ final class CanvasRole307Tests: XCTestCase {
     /// inside it — the reported 「0F 遮罩按最初照片的大小，照片被裁切」. Under `.document` the matte is
     /// outside the AABB and the corners inside it are `000000`. Flip `canvasRole` back and the
     /// measurement above goes from 0 stray-15-inside to a whole band.
-    func testTheRefutationPuts0FInsideThePhotographWhenTheCanvasIsTheFrame() throws {
+    func testTheRefutationPutsTheBackdropInsideThePhotographWhenTheCanvasIsTheFrame() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
         let viewport = ImageSize(width: 1200, height: 800)
         let graph = try RenderGraph(input: RenderInput(image: rampImage(source.width, source.height),
@@ -455,6 +458,8 @@ final class CanvasRole307Tests: XCTestCase {
                       presenter.lastFailure ?? "the present pass failed")
 
         // The AABB's rectangle in the viewport, at the same zoom and the same centre.
+        let matte = Int(CanvasPresenter.CanvasMatte.eightBitValue)
+        let mattePixel = [UInt8(matte), UInt8(matte), UInt8(matte)]
         let ox = (Double(viewport.width) - Double(box.width) * zoom) / 2
         let oy = (Double(viewport.height) - Double(box.height) * zoom) / 2
         var matteInsideTheAABB = 0
@@ -465,14 +470,14 @@ final class CanvasRole307Tests: XCTestCase {
                     && Double(y) >= oy && Double(y) < oy + Double(box.height) * zoom
                 guard inAABB else { continue }
                 let p = pixel(presented, x, y)
-                if p == [15, 15, 15] { matteInsideTheAABB += 1 }
-                if p != [0, 0, 0] && p != [15, 15, 15] { photoTexels += 1 }
+                if p == mattePixel { matteInsideTheAABB += 1 }
+                if p != [0, 0, 0] && p != mattePixel { photoTexels += 1 }
             }
         }
-        print("307 · gate① · export role at 15°: 0F inside the photograph's AABB = \(matteInsideTheAABB) px"
-              + " · photograph texels drawn = \(photoTexels)")
+        print("307 · gate① · export role at 15°: backdrop \(matte) inside the photograph's AABB = "
+              + "\(matteInsideTheAABB) px · photograph texels drawn = \(photoTexels)")
         XCTAssertGreaterThan(matteInsideTheAABB, 0,
-                             "the refutation must show the 0F band inside the AABB — it is the report")
+                             "the refutation must show the backdrop band inside the AABB — it is the report")
         XCTAssertEqual(result.drawnRect, ImageRect(x: 360, y: 240, width: 480, height: 320),
                        "the export canvas is the 480×320 crop frame, not the 547×434 AABB")
     }

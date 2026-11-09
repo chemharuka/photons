@@ -26,7 +26,7 @@ using namespace metal;
 //
 // They are drawn in that order into one encoder with no blending, so the picture simply covers the
 // backdrop where the two overlap. The rest of the canvas keeps the pass's clear colour
-// (`CanvasPresenter.CanvasMatte`, `#0F0F0F`).
+// (`CanvasPresenter.CanvasMatte`, `#202020`).
 //
 // The drawable format decides the transfer function of the values it stores:
 //

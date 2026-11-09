@@ -210,7 +210,7 @@ public struct FramePlacement: Equatable, Sendable {
 ///
 /// 054–065 passed the picture's rectangle through four call sites (settled frame, bridge frame,
 /// bridge stop, bridge teardown) and three of them could forget or mis-space it; the fragment then
-/// painted the frame's `float4(0)` letterbox as black, or painted `#0F0F0F` at a rect the picture had
+/// painted the frame's `float4(0)` letterbox as black, or painted `#202020` at a rect the picture had
 /// already left. A request cannot be forgotten — there is no overload without one — and its geometry
 /// is derived, not passed alongside:
 ///
@@ -304,30 +304,28 @@ public struct PresentRequest {
 /// `RenderGraph` and the drawable.
 public final class CanvasPresenter {
 
-    /// 054 — the colour of the canvas **around** the picture: `#0F0F0F`.
+    /// 054 — the colour of the canvas **around** the picture: `#202020` (315).
     ///
     /// Since 067 this colour has exactly **one** producer on screen: the render pass's clear colour.
     /// The shader does not carry it any more (it used to paint it per fragment from `photoRect`,
-    /// which is how a present that forgot the rect drew black instead), and the two layer backgrounds
+    /// which is how a present that forgot the rect drew black instead), and the layer backgrounds
     /// in `LoupeController` keep it for the frames before the first drawable arrives. The bands around
     /// a fitted picture are *not* a layer colour and no longer anything the pass computes: S2/S4 write
     /// `float4(0)` outside the photograph, the picture quad simply does not cover those pixels, and
     /// the clear colour shows through. The texture's zeros are never sampled — which is also what
     /// leaves the photograph's bytes and the histogram (measured on S4 over the photograph) untouched.
     ///
-    /// The value is a **display-encoded** (`sRGB`-encoded) 8-bit code, because that is the space
-    /// `#0F0F0F` is written in. The 16-bit layer stores linear light, so that path needs `linear` —
-    /// the same number through the sRGB EOTF.
+    /// **315 — this is now a facade over `CanvasBackdrop.current`.** The value is a preference, so the
+    /// three members are `var`: a caller reads the stop that is on the canvas *now*, not the one that
+    /// was compiled in. Everything that needs the colour goes through here or through
+    /// `CanvasBackdrop.current`; nothing carries a literal.
     public enum CanvasMatte {
-        /// `#0F` — 15 of 255.
-        public static let eightBitValue: UInt8 = 0x0F
-        /// `0F0F0F` as the display-encoded value every 8-bit path stores.
-        public static let displayEncoded: Double = Double(eightBitValue) / 255
+        /// `#20` — 32 of 255 at the default stop.
+        public static var eightBitValue: UInt8 { CanvasBackdrop.current.eightBitValue }
+        /// The same colour as the display-encoded value every 8-bit path stores.
+        public static var displayEncoded: Double { CanvasBackdrop.current.displayEncoded }
         /// The same colour as linear light, for the `rgba16Float` / extended-linear drawable.
-        public static let linear: Double = {
-            let v = displayEncoded
-            return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
-        }()
+        public static var linear: Double { CanvasBackdrop.current.linear }
 
         /// The render pass's clear colour, in the transfer function of the attachment.
         public static func clearColor(linear: Bool) -> MTLClearColor {
@@ -537,7 +535,7 @@ public final class CanvasPresenter {
     // MARK: - the one draw
 
     /// **The only place this type draws.** At most two quads — the low-resolution whole picture, then
-    /// the photograph — into one encoder that has already cleared the canvas to `#0F0F0F`.
+    /// the photograph — into one encoder that has already cleared the canvas to `#202020`.
     ///
     /// They are separate draws, not one shader with a branch, for the reason 037 gave and 067 keeps:
     /// a GPU cannot predicate a texture fetch, so a uniform branch still pays for the fetch. Two draws

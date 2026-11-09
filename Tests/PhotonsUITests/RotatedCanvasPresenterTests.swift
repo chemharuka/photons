@@ -42,7 +42,7 @@ final class RotatedCanvasPresenterTests: XCTestCase {
         return [raw[2], raw[1], raw[0]]   // b, g, r → r, g, b
     }
 
-    func testRotatedEmptyPixelsAreBlackAndTheLetterboxIsStill0F() throws {
+    func testRotatedEmptyPixelsAreBlackAndTheLetterboxIsStillTheBackdrop() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "no Metal device")
         let graph = try RenderGraph(input: RenderInput(image: borderImage(400, 400),
                                                        identity: "rotated-present"))
@@ -66,14 +66,16 @@ final class RotatedCanvasPresenterTests: XCTestCase {
                                               into: presented, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
 
-        // Window letterbox: the pass's clear colour, #0F0F0F.
+        // Window letterbox: the pass's clear colour — the current backdrop stop, read from the one
+        // constant (315), not a literal.
+        let matte = Int(CanvasPresenter.CanvasMatte.eightBitValue)
         for (x, y) in [(2, 2), (697, 2), (2, 697), (697, 697)] {
-            XCTAssertEqual(Int(pixel(presented, x, y)[0]), 15,
-                           "letterbox (\(x),\(y)) is not #0F0F0F")
+            XCTAssertEqual(Int(pixel(presented, x, y)[0]), matte,
+                           "letterbox (\(x),\(y)) is not the backdrop")
         }
         // Rotated-out empty pixels: the canvas' own corners — inside the crop frame, outside the
         // turned photograph. S0 writes `float4(0)` (transparent), so the composite shows the window
-        // matte: under 301 the *only* visible black is the #0F0F0F one, and the old opaque 0/255 ring
+        // matte: under 301 the *only* visible black is the backdrop one, and the old opaque 0/255 ring
         // (an artefact of the AABB band) is gone. The render itself is still 0/0/0/0 — asserted below.
         for (x, y) in [(152, 152), (547, 152), (152, 547), (547, 547)] {
             XCTAssertEqual(pixel(presented, x, y), [0, 0, 0],
