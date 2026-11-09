@@ -43,6 +43,12 @@ public final class CatalogSession {
     /// The "active" photo: the one the loupe shows and the inspector edits.
     public private(set) var anchorID: String?
 
+    /// Set by `deleteAssets` just before the rows go away: the photo the anchor should hand over to
+    /// when it is the anchor that got deleted. `reload()` consumes it exactly once, so a later
+    /// reload for an unrelated reason (filter, folder, relink) keeps its original "fall back to the
+    /// first row" behaviour.
+    private var pendingAnchorSuccessor: String?
+
     // MARK: document
 
     /// The live document for the anchor photo. **Read-only from outside**: a slider goes through
@@ -470,7 +476,13 @@ public final class CatalogSession {
         // Drop selections that no longer exist (a reload can follow an import).
         let ids = Set(assets.map(\.id))
         selection.formIntersection(ids)
-        if let a = anchorID, !ids.contains(a) { anchorID = assets.first?.id }
+        let successor = pendingAnchorSuccessor
+        pendingAnchorSuccessor = nil
+        if let a = anchorID, !ids.contains(a) {
+            // A delete hands the anchor to the next photo the user saw, not to the first row. Any
+            // other reload keeps `pendingAnchorSuccessor == nil` and falls back to the first row.
+            anchorID = successor.flatMap { ids.contains($0) ? $0 : nil } ?? assets.first?.id
+        }
         if anchorID == nil { anchorID = assets.first?.id }
         if selection.isEmpty, let first = anchorID { selection = [first] }
         // A fresh library (or a new root) can leave `edit` pointing at the previous document; load
@@ -1704,6 +1716,11 @@ public final class CatalogSession {
     @discardableResult
     public func deleteAssets(_ ids: [String]) -> DeleteReport? {
         guard let catalog, !ids.isEmpty else { return nil }
+        // Decide the successor from the order seen *before* the rows go away. The query afterwards
+        // can only answer "what is first now", which is exactly the bug (back to the first photo).
+        pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
+                                                                removing: Set(ids),
+                                                                anchor: anchorID)
         do {
             let report = try catalog.deleteAssets(ids: ids, thumbnails: thumbnailCache)
             lastAvailabilityError = nil
@@ -1712,6 +1729,7 @@ public final class CatalogSession {
             reload()
             return report
         } catch {
+            pendingAnchorSuccessor = nil
             lastAvailabilityError = "\(error.localizedDescription)"
             return nil
         }
