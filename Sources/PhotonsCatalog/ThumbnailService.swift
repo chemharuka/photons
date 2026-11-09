@@ -255,6 +255,14 @@ public final class ThumbnailService: @unchecked Sendable {
         public var waitSamples = 0
         public var totalWaitMilliseconds = 0.0
         public var maxWaitMilliseconds = 0.0
+        /// 311 — the cache write (temp file + rename + prune) of the last job, and its average.
+        /// The third leg of a warm, next to the producer's render and encode.
+        public var lastWriteMilliseconds = 0.0
+        public var totalWriteMilliseconds = 0.0
+        public var writeSamples = 0
+        public var averageWriteMilliseconds: Double {
+            writeSamples == 0 ? 0 : totalWriteMilliseconds / Double(writeSamples)
+        }
 
         public var lookups: Int { hits + missGenerated + missCancelled + missFailed }
         public var hitRatio: Double { lookups == 0 ? 0 : Double(hits) / Double(lookups) }
@@ -613,7 +621,18 @@ public final class ThumbnailService: @unchecked Sendable {
         }
 
         do {
+            // 311 — the third leg of a warm's cost: the write itself (temp file + rename + the
+            // one-file-per-photo prune). Measured, because "render+encode+write" is the number the
+            // acceptance asks for and an estimate would hide the disk.
+            let writeStart = DispatchTime.now()
             try cache.store(payload.data, for: job.key)
+            let writeMs = Double(DispatchTime.now().uptimeNanoseconds
+                                 - writeStart.uptimeNanoseconds) / 1e6
+            lock.lock()
+            counters.lastWriteMilliseconds = writeMs
+            counters.totalWriteMilliseconds += writeMs
+            counters.writeSamples += 1
+            lock.unlock()
         } catch {
             finish(job, origin: .failed, data: nil, payload: nil, error: error.localizedDescription)
             return

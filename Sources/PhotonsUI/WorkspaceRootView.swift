@@ -518,9 +518,43 @@ public final class WorkspaceRootView: NSView {
         observeModel()
 
         // 303 — weak on both sides: the session does not keep the workspace (or its refresher) alive.
-        session.addEditObserver { [weak refresher = editThumbnailRefresher] assetID in
+        session.addEditObserver { [weak self, weak refresher = editThumbnailRefresher] assetID in
             refresher?.noteEdit(assetID: assetID)
+            self?.noteCanvasWarm(assetID: assetID)
         }
+    }
+
+    /// 311 — queue the anchor photo's canvas warm behind 303's window. Edits of any other photo
+    /// (a grid adjustment, a paste over a selection) do not touch the loupe's stand-in.
+    private func noteCanvasWarm(assetID: String) {
+        guard assetID == session.anchorID else { return }
+        canvasWarmRefresher.noteEdit(assetID: assetID)
+    }
+
+    /// 311 — the photo **on screen** needs its new HD key rendered even when no browser cell is
+    /// visible to ask for it. The loupe's stand-in (`cachedCanvasPlaceholder`) is cache-only, so
+    /// after a crop the canvas had nothing to put up until the user edited again; 303's refresher
+    /// only serves the grid/filmstrip. One `.hd` request at `.prefetch` for the anchor photo's
+    /// current document closes that hole — the provider dedupes by key and cancels the superseded
+    /// one, so two doors (this observer and `finishCropTool`) cost one render.
+    private func warmAnchorHDPreview(assetID: String) {
+        guard assetID == session.anchorID,
+              let asset = session.anchorAsset,
+              let cache = session.thumbnailCache else { return }
+        ThumbnailProvider.shared(for: cache)
+            .warmHDPreview(for: asset,
+                           fileURL: session.fileURL(for: asset),
+                           document: session.edit)
+    }
+
+    /// The same window discipline 303 gives the browsers, for the canvas' own stand-in.
+    ///
+    /// 311 — the edit observer fires on **every** slider tick; asking for a 1920 render per tick
+    /// would spend the drag re-encoding frames nobody sees, and would leave a file behind for every
+    /// abandoned intermediate document. One warm per settled edit, for the document as it is *then*.
+    /// The crop door (`finishCropTool`) deliberately does not wait for this window.
+    private lazy var canvasWarmRefresher = EditThumbnailRefresher { [weak self] assetID in
+        self?.warmAnchorHDPreview(assetID: assetID)
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }

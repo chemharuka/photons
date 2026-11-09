@@ -3950,6 +3950,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard cropTool.isActive else { return false }
         let applied = cropTool.finish(outcome)
         leaveCropTool()
+        // 311 — the frame just committed a new document, so the loupe's stand-in key moved and the
+        // cache has nothing under it. Warm it here as well as in the workspace's edit observer: a
+        // loupe without that observer (a headless render, a detached canvas) still gets the fill,
+        // and the provider's key set makes the second call free.
+        if applied { warmAnchorHDPreview() }
         if outcome != .cancel { onTransformConfirmed?() }
         // 202 ① — the **mode** left, whichever door was used. Published after the mode and the camera,
         // so a listener that switches the panel cannot race a still-open tool (a workspace switch
@@ -5419,6 +5424,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
             guard let image else { return }
             self.installFirstFramePlaceholder(image, photo: identity, startedAt: started)
         }
+    }
+
+    // MARK: - 311: warm the stand-in for the document that is open now
+
+    /// Ask the shared provider for the anchor photo's HD thumbnail under its **current** document.
+    ///
+    /// The stand-in `armFirstFramePlaceholder` installs is cache-only on purpose (generating one
+    /// there would put a decode in front of the frame the user is waiting for). After a transform
+    /// commit the key moves and that cache is empty, so the loupe showed the matte until some other
+    /// surface re-rendered the photo. This is the "render it now" call — asynchronous, summary-only
+    /// (no decode, no memory entry), deduped and cancellable inside the provider. Nothing here
+    /// touches `firstFramePlaceholder`'s synchronous path.
+    private func warmAnchorHDPreview() {
+        guard let session, let asset = session.anchorAsset,
+              let cache = session.thumbnailCache else { return }
+        ThumbnailProvider.shared(for: cache)
+            .warmHDPreview(for: asset,
+                           fileURL: session.fileURL(for: asset),
+                           document: session.edit)
     }
 
     private func installFirstFramePlaceholder(_ image: CGImage, photo: String,

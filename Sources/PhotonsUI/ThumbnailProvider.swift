@@ -146,6 +146,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
         public var placeholderSRGBDecodes = 0
         /// Policy downgrades by reason (`dngCeiling`), 006 §6.1. Printed, not estimated.
         public var skipReasons: [String: Int] = [:]
+        /// 311 — canvas warms: requests actually handed to the service, and the ones a digest in
+        /// `warmedHDKeys` already covered (the "one file per document" counter pair).
+        public var warmRequests = 0
+        public var warmCoalesced = 0
 
         public var cacheHits: Int { memoryHits + diskHits }
         public var lookups: Int { memoryHits + diskHits + generated }
@@ -201,6 +205,20 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// a hand-off, not a second store of the library.
     private var documentsByKey: [String: EditModel] = [:]
     private var documentOrder: [String] = []
+    /// 311 — the warm request in flight, by key. It is the whole dedupe: an ask for the digest that
+    /// is already queued joins it, an ask for a document that moved on cancels it. Deliberately
+    /// **not** a set of "already asked" digests: the cache keeps only the newest HD file per photo
+    /// (308's retention), so undoing to an earlier document must be able to re-render it.
+    private var warmInFlight: (digest: String, ticket: ThumbTicket)?
+    /// 311 — the last warm's split: how long it sat in the queue, and how long the producer ran.
+    /// Two numbers, because they answer different questions ("did the commit queue behind
+    /// something?" vs "what does one HD render cost?").
+    private var lastWarmWait: Double = 0
+    private var lastWarmProduce: Double = 0
+    /// 311 — the producer's own split: the graph render, and the JPEG encode. The whole point of
+    /// retiring the HEIC is that the second number was the expensive half of a warm.
+    private var lastHDRenderMilliseconds: Double = 0
+    private var lastHDEncodeMilliseconds: Double = 0
     /// 223 — digest → the display size its bitmap was last stored at (the back-compat lookup).
     private var displaySizesByDigest: [String: ImageSize] = [:]
     private var displaySizeOrder: [String] = []
@@ -432,8 +450,11 @@ public final class ThumbnailProvider: @unchecked Sendable {
         let key: ThumbKey
         if spec.isHDFamily {
             let doc = document ?? ThumbnailProvider.document(from: asset)
-            key = spec == .hd ? ThumbKey.hd(contentHash: asset.contentHash, document: doc)
-                              : ThumbKey.hdJPEG(contentHash: asset.contentHash, document: doc)
+            // 311 — one HD family. The 1920 PQ **JPEG** is the file every surface reads: the grid's
+            // cells, the filmstrip and (now) the loupe's first-frame stand-in. A `.hd` request is
+            // mapped onto it rather than producing the retired HEIC: two files per photo meant two
+            // encodes per render, and the HEIC was the expensive one.
+            key = ThumbKey.hdJPEG(contentHash: asset.contentHash, document: doc)
             rememberDocument(doc, for: key.digest)
         } else {
             let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
@@ -485,9 +506,12 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// The cached thumbnail for a photo, at its **own** aspect and already decoded to the display's
     /// colour space — the picture the loupe puts up while the real frame is still being developed.
     ///
-    /// 284 — the HD family is decoded as **EDR** (`RGBAh`, extended linear Display P3, measured
-    /// headroom): the grid and the filmstrip already show the same PQ file through a `CAMetalLayer`,
-    /// so the stand-in has to carry the same light or the switch flashes from HDR to SDR white.
+    /// 311 — the file is the **1920 PQ JPEG** (`ThumbKey.hdJPEG`, 308's family promoted): one file
+    /// per photo, written by the same render the cells use, so a commit's warm is one render and
+    /// **one** encode instead of a HEIC plus a JPEG. The 8-bit PQ codes still decode through Core
+    /// Image to a 16-bit extended-linear Display P3 bitmap (`decodeHDForPlaceholder`), so the
+    /// stand-in carries the same light as the frame that replaces it (284).
+    ///
     /// Without a Metal device the stand-in is 8-bit Display P3 (not sRGB: the file is P3, and a P3 →
     /// sRGB conversion would flatten exactly the saturated colours the user is comparing).
     ///
@@ -499,7 +523,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// The returned `CGImage` is never cropped: its aspect is the photo's, so the caller can fit it
     /// into the canvas without stretching.
     public func cachedCanvasPlaceholder(for asset: Asset, document: EditModel) -> CGImage? {
-        let hd = ThumbnailProvider.hdKey(for: asset, document: document)
+        let hd = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
         if let cached = placeholderImage(for: hd.digest) { return cached }
         if cache.exists(hd), let data = cache.data(for: hd),
            let image = ThumbnailProvider.decodeHDForPlaceholder(data) {
@@ -525,9 +549,101 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return nil
     }
 
+    // MARK: - 311: the canvas stand-in for the document that is open now
+
+    /// Ask for the HD thumbnail of **this** document, so the loupe's cache-only stand-in has
+    /// something to show the moment a transform commit lands.
+    ///
+    /// `cachedCanvasPlaceholder` above is deliberately cache-only, and every commit changes the
+    /// document → changes the key → leaves the canvas with nothing to put up until the user edits
+    /// *again* (which is what woke 303's `EditThumbnailRefresher`). In the loupe no browser cell is
+    /// on screen to ask for the new key, so nobody rendered it. This is that missing door: one `hd`
+    /// request at `.prefetch`, **summary-only** (`completion: nil` → no 1920 decode, no memory
+    /// entry; the bytes on disk are the whole product), so it costs the main thread nothing.
+    ///
+    /// Idempotent and cancellable, both by key:
+    ///   · a digest already in `warmedHDKeys` is never asked for twice — a crop commit wakes two
+    ///     doors (the session's observer and `finishCropTool`), and an unchanged commit is a no-op;
+    ///   · a **new** digest cancels the request it superseded, and the service drops those bytes
+    ///     instead of writing them, so a slider drag that moves the document twenty times lands
+    ///     one file, not twenty.
+    ///
+    /// Returns whether a request was handed to the service (a deduped call returns `false`) — the
+    /// number the acceptance reads instead of guessing from timings.
+    @discardableResult
+    public func warmHDPreview(for asset: Asset, fileURL: URL?, document: EditModel) -> Bool {
+        let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        // The file is the product. If it is already there (a re-render of a document the user came
+        // back to) there is nothing to ask for; a stat is cheaper than a queue round trip.
+        if cache.exists(key) {
+            note { $0.warmCoalesced += 1 }
+            return false
+        }
+        lock.lock()
+        if let inFlight = warmInFlight, inFlight.digest == key.digest {
+            counters.warmCoalesced += 1
+            lock.unlock()
+            return false
+        }
+        let superseded = warmInFlight
+        warmInFlight = nil
+        counters.warmRequests += 1
+        lock.unlock()
+
+        // The document moved on: the older rendering's bytes are obsolete, and a second file for a
+        // superseded key is the "20 edits → 20 renders" failure this pairing exists to prevent.
+        if let superseded, superseded.digest != key.digest { superseded.ticket.cancel() }
+        guard let fileURL else { return true }
+        // `produce` only receives a key and a source URL — the edit rides through this hand-off.
+        // The callback is bookkeeping only: the bytes on disk are the whole product, so nothing is
+        // decoded here and nothing enters the memory LRU.
+        rememberDocument(document, for: key.digest)
+        let ticket = service.request(ThumbRequestSpec(key: key, source: fileURL), priority: .prefetch) {
+            [weak self] result in
+            guard let self else { return }
+            self.lock.lock()
+            // `waitedMilliseconds` is enqueue→finish, i.e. it **contains** the producer. The two
+            // numbers the report needs are: time spent behind other work, and the render itself.
+            self.lastWarmWait = max(0, result.waitedMilliseconds - result.producedMilliseconds)
+            self.lastWarmProduce = result.producedMilliseconds
+            if self.warmInFlight?.digest == result.key.digest { self.warmInFlight = nil }
+            self.lock.unlock()
+        }
+        lock.lock()
+        warmInFlight = (key.digest, ticket)
+        lock.unlock()
+        return true
+    }
+
+    /// 311 — the last canvas warm's two halves, in milliseconds: time spent queued behind other
+    /// work, and the producer's own render + encode. `nil` until one finishes. Read by the
+    /// acceptance rather than timed with a stopwatch around the commit.
+    public var lastWarmLatency: (queued: Double, rendering: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard lastWarmProduce > 0 else { return nil }
+        return (lastWarmWait, lastWarmProduce)
+    }
+
+    /// 311 — the last HD producer's two halves: graph render, JPEG encode. Read by the acceptance
+    /// to show where a warm's time goes; `(0, 0)` until one runs.
+    public var lastHDProduction: (render: Double, encode: Double) {
+        lock.lock(); defer { lock.unlock() }
+        return (lastHDRenderMilliseconds, lastHDEncodeMilliseconds)
+    }
+
     private func placeholderImage(for digest: String) -> CGImage? {
         lock.lock(); defer { lock.unlock() }
         return placeholderImages[digest]
+    }
+
+    /// 311 — test door: forget the decoded stand-in for one digest so the next
+    /// `cachedCanvasPlaceholder` is the **disk** read of the file a warm wrote, which is the path a
+    /// fresh loupe takes. Production never needs it (the L1 is an 8-entry cache, not state).
+    func forgetPlaceholder(for digest: String) {
+        lock.lock()
+        placeholderImages.removeValue(forKey: digest)
+        placeholderOrder.removeAll { $0 == digest }
+        lock.unlock()
     }
 
     private func rememberPlaceholder(_ image: CGImage, for digest: String) {
@@ -679,54 +795,39 @@ public final class ThumbnailProvider: @unchecked Sendable {
     // MARK: - HD thumbnail (218 → 223)
 
     /// Render one HD thumbnail: the **same** `RenderGraph` the loupe and the exporter use, at a
-    /// scale whose long edge is at most 1920, then the existing PQ encoder
-    /// (`HDREncoding.write`) with the four pinned parameters: Display P3 primaries, PQ curve,
-    /// 10-bit HEIC, q0.75.
+    /// scale whose long edge is at most 1920, then **one** encoder.
     ///
     /// One render, not two: unlike 218's gain-map base + auxiliary image, a PQ file *is* the
     /// extended-range picture, so the linear exit (`s4_display_linear` in P3) is the only frame
     /// needed. Reusing this door is what keeps "grid thumbnail == export preview" a fact instead of
     /// a claim — and it is why 223 does not add a second encoder.
     ///
-    /// 308 — the same render now serves **two** files: the 1920 HEIC (the loupe's first-frame
-    /// stand-in, `cachedCanvasPlaceholder`) and the 512 PQ JPEG the grid/list/filmstrip read. A
-    /// `.hdJPEG` request therefore writes the HEIC as a by-product when it is missing, instead of
-    /// rendering the photo a second time at 1920 for the loupe.
+    /// 308 — the file is the 512-shaped **1920 PQ JPEG** the grid/list/filmstrip read.
+    /// 311 — and it is the **only** file: the 1920 HEIC the loupe's stand-in used to read as a
+    /// by-product is gone. Encoding it was the expensive half of a warm (HEVC frame cost, serialised
+    /// inside the process) and no surface needs two files for one photo. The loupe reads this JPEG.
     private func produceHD(_ key: ThumbKey, source: URL) throws -> ThumbPayload {
         let document: EditModel
         lock.lock(); document = documentsByKey[key.digest] ?? .neutral; lock.unlock()
+        let renderStart = CACurrentMediaTime()
         let rendered = try renderHD(key: key, source: source, document: document)
+        let renderMs = (CACurrentMediaTime() - renderStart) * 1000
 
-        let data: Data
-        let provenance: String
-        switch key.spec {
-        case .hdJPEG:
-            // The loupe's 1920 stand-in. Written straight through the cache (not the service), so
-            // this is one producer call and one single-flight job, not a nested request. Failure to
-            // write it must not fail the JPEG: the cells asked for the JPEG.
-            let hdKey = ThumbKey.hd(contentHash: key.contentHash, document: document)
-            if !cache.exists(hdKey) {
-                if let heic = try? Self.encodeHEIC(rendered.image) {
-                    try? cache.store(heic, for: hdKey)
-                }
-            }
-            guard let jpeg = ThumbnailPQJPEG.encode(linear: rendered.linear,
-                                                    longEdge: ThumbSpec.hdJPEG.longEdge,
-                                                    quality: ThumbSpec.hdJPEG.quality) else {
-                throw ThumbProviderError.encodeFailed(source)
-            }
-            data = jpeg
-            provenance = "graph-pq-jpeg"
-        default:
-            data = try Self.encodeHEIC(rendered.image)
-            provenance = "graph-pq"
+        let encodeStart = CACurrentMediaTime()
+        guard let jpeg = ThumbnailPQJPEG.encode(linear: rendered.linear,
+                                                longEdge: ThumbSpec.hdJPEG.longEdge,
+                                                quality: ThumbSpec.hdJPEG.quality) else {
+            throw ThumbProviderError.encodeFailed(source)
         }
+        let encodeMs = (CACurrentMediaTime() - encodeStart) * 1000
 
         lock.lock()
         runsPerKey[key.digest, default: 0] += 1
         runsPerContent[key.contentHash, default: 0] += 1
+        lastHDRenderMilliseconds = renderMs
+        lastHDEncodeMilliseconds = encodeMs
         lock.unlock()
-        return ThumbPayload(data: data, source: provenance,
+        return ThumbPayload(data: jpeg, source: "graph-pq-jpeg",
                             sourceLongEdge: rendered.longEdge)
     }
 
@@ -748,7 +849,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
         guard let decoder = rawDecoder() else { throw ThumbProviderError.noRAWDecoder }
 
-        let longEdge = ThumbSpec.hd.longEdge
+        let longEdge = ThumbSpec.hdJPEG.longEdge
         // Decode no larger than needed for 1920 (a 60 MP RAW at 0.25 already covers it), and never
         // so small that the thumbnail has to upscale. The 512 JPEG is a downscale of this frame.
         let sourceEdge = ThumbnailProvider.sourceLongEdge(url: source) ?? longEdge
@@ -784,20 +885,6 @@ public final class ThumbnailProvider: @unchecked Sendable {
         return HDRender(image: linear.withLinear(LinearPixels(linear)),
                         linear: LinearPixels(linear),
                         longEdge: max(linear.width, linear.height))
-    }
-
-    /// The 1920 PQ HEIC bytes. One `CGImageDestinationFinalize`, into a temp file because
-    /// `HDREncoding.write` takes a URL.
-    private static func encodeHEIC(_ image: DisplayImage) throws -> Data {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "photons-hd-thumb-\(UUID().uuidString).heic")
-        defer { try? FileManager.default.removeItem(at: tmp) }
-        let options = ExportOptions(format: .heic,
-                                    quality: ThumbSpec.hd.quality,
-                                    bitDepth: ThumbSpec.hd.bitDepth,
-                                    hdr: HDRExport(enabled: true, kind: .pq))
-        try HDREncoding.write(image, to: tmp, options: options)
-        return try Data(contentsOf: tmp)
     }
 
     /// Pixel size of the file's primary image without decoding it (ImageIO metadata only).
