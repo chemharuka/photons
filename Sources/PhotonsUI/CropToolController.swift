@@ -215,16 +215,21 @@ public final class CropToolController {
     private var rotating = false
     private var rotateStart: Double = 0
 
-    /// The 803aff6 "框必须内切于旋转后的照片" rule — **on since 301** (方案 A, 帧优先).
+    /// The 803aff6 "框必须内切于旋转后的照片" rule — **off since 307**, back on 132's contract.
     ///
-    /// 132 had made it opt-in so a crop could leave the picture and show black corners. Once the
-    /// output canvas is the rotated crop frame itself, black corners would be *inside* the output
-    /// (the crop frame may still cover the turned photo's empty corners), so the frame is kept
-    /// inscribed: `effectiveCrop` — which the overlay, the readout, 应用 and the renderer all read —
-    /// shrinks it to the turned picture. That is what makes the crop frame's four corners and the
-    /// rendered picture support edge the same rectangle. A test flips it to `false` to prove the
-    /// old containment behaviour is still reachable.
-    var clampsToRotatedFrame = true
+    /// 301 turned it on because the output canvas *was* the crop frame, so a frame reaching into the
+    /// turned photo's black corners would have put black into the export. 307 separates the two
+    /// canvases (`CanvasRole`): the interaction canvas is the turned **whole photograph's AABB**, and
+    /// the user's rule for it is 「裁剪框可以拖到 00 的文档画布里，不能拖到 0F 的背景遮罩里」. So the
+    /// frame may sit in the black corners (`000000`, inside the canvas) and is stopped by
+    /// `CropTool.clampToCanvas` at the canvas edge — never by the photograph's turned quad, which is
+    /// what made the limit feel like 「照片像素」.
+    ///
+    /// The export needs no black corner either: moving the straighten from 0 to θ **once** inscribes
+    /// the draft (`setAngle(uiValue:)`), so the rect 应用 writes is inside the turned picture by
+    /// construction. A test flips this to `true` to prove the old containment behaviour is still
+    /// reachable.
+    var clampsToRotatedFrame = false
 
     public init(session: CatalogSession?) {
         self.session = session
@@ -309,17 +314,54 @@ public final class CropToolController {
     /// The slider's value in the UI's own convention: positive = clockwise.
     public var angleUIValue: Double { CropTool.clampStraighten(draft.straighten) }
 
+    /// The rect the **straighten** is measured against: the draft's frame as it stood when the angle
+    /// left 0°. Every 0 → θ inscription is taken from this base, not from the rect the previous tick
+    /// produced, so a 150-tick slider drag shrinks the frame **once**, not 150 times. A manual crop
+    /// drag clears it, so a later angle change is cut from what the user just set.
+    private var straightenBaseCrop: CropRect?
+
     /// 123 — the one UI→document angle write. `TransformSession.setAngle(uiValue:)` chooses the
     /// sign; this method only carries its answer into the draft.
+    ///
+    /// **307 — the one-shot inscription.** Pulling the straighten away from 0° cuts the frame into
+    /// the turned photograph (`clampsToRotatedFrame(keepsInsideRotatedFrame: true)`), and writes that
+    /// rect into the **draft** — so 「应用」 records the inscribed frame as the document's crop and the
+    /// export has no black corner (measured 0.000 %). It is deliberately *not* a standing clamp:
+    /// `clampsToRotatedFrame` is `false`, so once the angle holds still the frame may be dragged into
+    /// the black corners of the document canvas (000000, still inside the canvas) — the user's
+    /// 「裁剪框可以拖到 00 的文档画布里」. Only the canvas edge stops it, in `CropTool.clampToCanvas`.
     public func setAngle(uiValue: Double) {
         var session = TransformSession(geometry: draftGeometry, source: uprightSource)
         session.setAngle(uiValue: uiValue)
-        draft.straighten = session.draft.straightenDegrees
+        let previous = draft.straighten
+        let next = session.draft.straightenDegrees
+        draft.straighten = next
+        if next != 0 {
+            if previous == 0 || straightenBaseCrop == nil {
+                straightenBaseCrop = draft.crop.clamped(allowsOutsideSource: true)
+            }
+            if let base = straightenBaseCrop {
+                draft.crop = CropMath.clampedToRotatedFrame(base, in: sourceSize, degrees: next,
+                                                            keepsInsideRotatedFrame: true)
+            }
+        } else {
+            // Back to upright: the frame is legal as it stands, and the next lift cuts from it.
+            straightenBaseCrop = nil
+        }
         draftChanged()
     }
 
-    /// The canvas the draft will produce, in pixels.
+    /// The canvas the draft will produce, in pixels — the **export** canvas (the crop frame, 301).
     public var effectiveCanvas: ImageSize { cropGeometry.canvas }
+
+    /// 307 — **which canvas the screen is showing**: the document canvas while 裁切 is on (the turned
+    /// whole photograph's AABB, `000000` in its corners, `0F` outside it), the export canvas otherwise.
+    ///
+    /// One decision, read by the projection (`LoupeFraming`), the transform (`FrameTransform`) and the
+    /// renderer (`RenderOptions.canvasRole`) — the three places 301/301b had drifted apart. The crop
+    /// tool always hands the canvas `crop == .full` (`canvasEdit`), so the frame *is* the photograph
+    /// and the document role's centred inset is exact, not an approximation.
+    public var canvasRole: CanvasRole { isActive ? .document : .export }
 
     // MARK: the draft's rect, as the turned picture allows it
 
@@ -405,6 +447,7 @@ public final class CropToolController {
         drag = nil
         rotating = false
         lastHandle = nil
+        straightenBaseCrop = nil
         // 077: the tool session is what makes 「裁切完成后只保留一个记录」 a property of the history
         // rather than a property of this file's discipline. From here to `apply()` / `cancel()` the
         // history records nothing, so no handle position, angle or draft rect can become a row.
@@ -1231,6 +1274,9 @@ public final class CropToolController {
         clampCalls &+= 1
         if clamped != candidate { clampMoves &+= 1 }
         draft.crop = clamped
+        // 307 — a frame the user moved is the new base for any later straighten inscription; the
+        // one they had at 0° is stale the moment they take manual control.
+        straightenBaseCrop = nil
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.

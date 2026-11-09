@@ -1,6 +1,31 @@
 import Foundation
 import Observation
 
+// MARK: - 307: **which** canvas a render is asking about
+//
+// A rotated-and-cropped document has two honest canvases, and 305/307 lost the distinction by
+// spelling both of them "the canvas":
+//
+//   · **.export** — the picture the file gets (301, 方案 A): the crop frame itself. `canvas == frame`,
+//     no baseline, no inset, no black corner inside the output. Every pixel of this canvas is a
+//     photograph pixel, which is what makes an export byte-identical to the pre-301 one at θ = 0.
+//   · **.document** — the box the user sees while *forming* the crop (user 2026-11-01: 画布 = 包住
+//     全部照片像素的最小矩形). The turned photograph's AABB (`photoExtent`), the crop frame placed
+//     inside it at `(canvas − frame)/2`, the photograph turned inside the canvas, and the corners the
+//     photograph does not cover painted `000000` — the `0F0F0F` matte is only ever *outside* this
+//     box. A crop frame may be dragged into those black corners; it may not leave the box.
+//
+// The type exists so a caller has to name which one it means. A `Bool` would be merged back into one
+// "canvas" by the next change; this cannot be, and `RenderGraph.plan` branches on it in exactly one
+// place. `CropGeometry.canvas` / `canvasInset` keep their 301 meaning (`.export`), so every existing
+// caller is unchanged by construction.
+public enum CanvasRole: String, Sendable, Equatable, CaseIterable {
+    /// The interaction canvas: the turned whole photograph's AABB. 000000 inside, 0F outside.
+    case document
+    /// The output canvas: the turned crop frame (301). What the file gets.
+    case export
+}
+
 // MARK: - 123: the transform's one geometry
 //
 // The rotation used to be derived in three places — the slider wrote an angle, the overlay turned
