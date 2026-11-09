@@ -46,7 +46,9 @@ final class CropToolOverlayView: NSView {
 
     private static let bracketArm: CGFloat = 18
     private static let bracketWidth: CGFloat = 2.5
-    private static let edgeBarLength: CGFloat = 22
+    /// The bar on an edge grip: 22 pt long, centred on the edge's midpoint. Internal so 312 can
+    /// measure the drawn length from a test.
+    static let edgeBarLength: CGFloat = 22
 
     override func draw(_ dirtyRect: NSRect) {
         guard let layout, layout.corners.count == 4, bounds.width > 1, bounds.height > 1 else {
@@ -109,9 +111,9 @@ final class CropToolOverlayView: NSView {
         if grip.kind.isCorner {
             // Two arms pointing **in** along the frame's own edges, so the bracket sits on the
             // picture rather than in the dimmed margin.
-            let corner = cornerIndex(grip.kind)
-            let along = unit(from: p, to: layout.corners[(corner + 1) % 4])
-            let down = unit(from: p, to: layout.corners[(corner + 3) % 4])
+            let corner = Self.cornerIndex(grip.kind)
+            let along = Self.unit(from: p, to: layout.corners[(corner + 1) % 4])
+            let down = Self.unit(from: p, to: layout.corners[(corner + 3) % 4])
             let path = NSBezierPath()
             path.lineWidth = w
             path.lineCapStyle = .square
@@ -124,24 +126,81 @@ final class CropToolOverlayView: NSView {
             return
         }
 
-        // An edge grip: a short bar lying along the edge it moves, centred on its midpoint.
-        let half = Self.edgeBarLength / 2
-        let along: CGPoint
-        switch grip.kind {
-        case .top, .bottom: along = CGPoint(x: 1, y: 0)
-        case .left, .right: along = CGPoint(x: 0, y: 1)
-        default: along = CGPoint(x: 1, y: 0)
-        }
+        // An edge grip: a short bar lying along the edge it moves, centred on its midpoint. 312: the
+        // bar's geometry is one pure function — the same value this path strokes and the test asserts.
+        let bar = Self.edgeBarGeometry(for: grip.kind, in: layout)
         let path = NSBezierPath()
         path.lineWidth = w + 1
         path.lineCapStyle = .round
-        path.move(to: CGPoint(x: p.x - along.x * half, y: p.y - along.y * half))
-        path.line(to: CGPoint(x: p.x + along.x * half, y: p.y + along.y * half))
+        path.move(to: bar.start)
+        path.line(to: bar.end)
         colour.setStroke()
         path.stroke()
     }
 
-    private func cornerIndex(_ kind: CropToolHandle) -> Int {
+    // MARK: - the edge bar's geometry (312)
+
+    /// An edge grip's bar: centre, direction and length, in view points. Pure data — `draw` strokes
+    /// `start…end` and the test measures the very same value, so there is no second arithmetic that
+    /// could happen to agree.
+    struct EdgeBar: Equatable {
+        var centre: CGPoint
+        /// Unit vector along the side the bar rides.
+        var along: CGPoint
+        var length: CGFloat
+        var start: CGPoint {
+            CGPoint(x: centre.x - along.x * length / 2, y: centre.y - along.y * length / 2)
+        }
+        var end: CGPoint {
+            CGPoint(x: centre.x + along.x * length / 2, y: centre.y + along.y * length / 2)
+        }
+    }
+
+    /// The bar of an edge grip, read off the frame's own corners.
+    ///
+    /// The direction used to be a constant — `(.top, .bottom) → (1,0)`, `(.left, .right) → (0,1)` —
+    /// which is right only for an upright frame. A straighten turns the quad (088), so a bar on a
+    /// constant axis stops being parallel to its own side: that is what the user saw
+    /// (「裁剪框在旋转时，四边中心的拖动指示条不会跟着旋转」). The corner brackets already read their
+    /// direction from `layout.corners`; the edge bars now do the same, from the same four points.
+    ///
+    /// The old constants survive only as the **degenerate fallback**: when a side's two corners
+    /// coincide there is no direction to read, and a path must never receive a NaN.
+    static func edgeBarGeometry(for kind: CropToolHandle, in layout: CropToolLayout) -> EdgeBar {
+        let centre = layout.grips.first(where: { $0.kind == kind })?.point
+            ?? sideMidpoint(kind, in: layout) ?? .zero
+        return EdgeBar(centre: centre, along: edgeDirection(kind, in: layout), length: edgeBarLength)
+    }
+
+    /// The corner pair that is `kind`'s side, in `CropToolLayout.corners` order
+    /// (top-left, top-right, bottom-right, bottom-left).
+    static func sideCorners(_ kind: CropToolHandle) -> (from: Int, to: Int)? {
+        switch kind {
+        case .top: return (0, 1)
+        case .right: return (1, 2)
+        case .bottom: return (3, 2)
+        case .left: return (0, 3)
+        default: return nil
+        }
+    }
+
+    static func sideMidpoint(_ kind: CropToolHandle, in layout: CropToolLayout) -> CGPoint? {
+        guard layout.corners.count == 4, let pair = sideCorners(kind) else { return nil }
+        let a = layout.corners[pair.from], b = layout.corners[pair.to]
+        return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+    }
+
+    /// The unit direction of `kind`'s side: the same corner-to-corner vector the brackets use. At 0°
+    /// this is exactly the old constant (the projection puts both corners on one axis), and when the
+    /// side collapses it falls back to that constant rather than dividing by zero.
+    static func edgeDirection(_ kind: CropToolHandle, in layout: CropToolLayout) -> CGPoint {
+        let fallback: CGPoint = (kind == .left || kind == .right)
+            ? CGPoint(x: 0, y: 1) : CGPoint(x: 1, y: 0)
+        guard layout.corners.count == 4, let pair = sideCorners(kind) else { return fallback }
+        return unit(from: layout.corners[pair.from], to: layout.corners[pair.to], fallback: fallback)
+    }
+
+    private static func cornerIndex(_ kind: CropToolHandle) -> Int {
         switch kind {
         case .topLeft: return 0
         case .topRight: return 1
@@ -150,10 +209,11 @@ final class CropToolOverlayView: NSView {
         }
     }
 
-    private func unit(from a: CGPoint, to b: CGPoint) -> CGPoint {
+    private static func unit(from a: CGPoint, to b: CGPoint,
+                             fallback: CGPoint = CGPoint(x: 1, y: 0)) -> CGPoint {
         let dx = b.x - a.x, dy = b.y - a.y
         let length = (dx * dx + dy * dy).squareRoot()
-        guard length > 1e-6 else { return CGPoint(x: 1, y: 0) }
+        guard length > 1e-6 else { return fallback }
         return CGPoint(x: dx / length, y: dy / length)
     }
 }
