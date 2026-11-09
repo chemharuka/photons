@@ -231,6 +231,27 @@ public final class CropToolController {
     /// reachable.
     var clampsToRotatedFrame = false
 
+    /// 310 — `true` re-attaches the ratio lock's reshape to the **`.inside`** drag; the reverse gate
+    /// only, the app never sets it. The shipped behaviour is `false`: a frame moved by its inside is
+    /// translated, never resized (the lock constrains the handles and a new frame, not the move).
+    var reshapesLockOnInsideDrag = false
+
+    /// 310 — how many times `CropTool.clampToCanvas`'s **shrink** branch fired (the only place the
+    /// canvas is allowed to change a frame's size). The claim of 310 is that moving a frame never
+    /// needs it; the tests assert 0 for a whole drag, which is what makes «到边只停住» measurable
+    /// instead of merely plausible.
+    public private(set) var canvasShrinkTicks = 0
+
+    /// 310 — **the move owns the size.** Set when a drag starts on the frame's inside, cleared by
+    /// every gesture that is *about* a size (a grip, a new frame, a ratio preset, a straighten).
+    ///
+    /// While it is set, neither the drag tick nor the ⑦ refresh (`clampToView`, which the app calls
+    /// on every `refreshCropTool`) may re-shape the rect to `draft.lock`. That is the whole of the
+    /// user's rule: 「拖动裁剪框裁剪框大小不变」 — the lock is what a *sizing* gesture honours, not a
+    /// constraint that silently re-cuts a frame the user is carrying across the canvas. The flag
+    /// deliberately survives the mouse-up: a refresh one turn later would otherwise undo the drag.
+    private var lockReshapeSuspended = false
+
     public init(session: CatalogSession?) {
         self.session = session
     }
@@ -336,6 +357,9 @@ public final class CropToolController {
         let previous = draft.straighten
         let next = session.draft.straightenDegrees
         draft.straighten = next
+        // 310 — turning the picture re-inscribes the frame, so it *is* a sizing gesture: re-arm the
+        // lock's reshape (the inscription keeps the rect's own ratio and the canvas keeps the size).
+        lockReshapeSuspended = false
         if next != 0 {
             if previous == 0 || straightenBaseCrop == nil {
                 straightenBaseCrop = draft.crop.clamped(allowsOutsideSource: true)
@@ -447,6 +471,7 @@ public final class CropToolController {
         drag = nil
         rotating = false
         lastHandle = nil
+        lockReshapeSuspended = false       // 310 — a new session, a new lock question
         straightenBaseCrop = nil
         // 077: the tool session is what makes 「裁切完成后只保留一个记录」 a property of the history
         // rather than a property of this file's discipline. From here to `apply()` / `cancel()` the
@@ -515,6 +540,7 @@ public final class CropToolController {
         }
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         draftPhotoID = session?.anchorID
+        lockReshapeSuspended = false       // 310 — Esc restores the document, lock included
         cancelledCount += 1
     }
 
@@ -532,6 +558,7 @@ public final class CropToolController {
         session?.cancelToolSession()
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         draftPhotoID = session?.anchorID
+        lockReshapeSuspended = false       // 310 — leaving the tool forgets the move
     }
 
     // MARK: the draft's commands (never touch the document)
@@ -545,6 +572,7 @@ public final class CropToolController {
         guard isActive, let session else { return }
         draft = Draft(geometry: session.edit.geometry)
         draftPhotoID = session.anchorID
+        lockReshapeSuspended = false       // 310 — the document's lock is the question again
     }
 
     /// 169 §2b — the crop session was opened on photo A and the user clicked photo B **without
@@ -561,6 +589,7 @@ public final class CropToolController {
         endDrag()
         draft = Draft(geometry: session.edit.geometry)
         draftPhotoID = session.anchorID
+        lockReshapeSuspended = false       // 310 — another photo, another lock question
         entryGeometry = session.edit.geometry
         if !session.isToolSessionActive {
             session.beginToolSession("裁切", label: "裁切与旋转")
@@ -647,6 +676,7 @@ public final class CropToolController {
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
         if preset != .free { rememberLocked(preset: preset) }
+        lockReshapeSuspended = false       // 310 — a ratio preset *is* about the size
         draftChanged()
     }
 
@@ -655,6 +685,7 @@ public final class CropToolController {
         let source = source ?? sourceSize
         draft.lock = lock
         draft.crop = CropTool.matching(lock, crop: draft.crop, source: source)
+        lockReshapeSuspended = false       // 310 — choosing a lock re-arms its reshape
         draftChanged()
     }
 
@@ -844,6 +875,7 @@ public final class CropToolController {
         let top = min(max(c.centerY - height / 2, 0), 1 - height)
         draft.lock = lock
         draft.crop = CropRect(left: left, top: top, right: left + width, bottom: top + height)
+        lockReshapeSuspended = false       // 310 — a typed/swapped ratio is about the size
         draftChanged()
     }
 
@@ -997,8 +1029,9 @@ public final class CropToolController {
         let before = draft.crop.clamped(allowsOutsideSource: true)
 
         // The ratio lock is a document constraint and has to survive the clamp. Applied to the size
-        // about the frame's centre, before the canvas question is asked.
-        let shaped = reshapedForLock(before, source: src)
+        // about the frame's centre, before the canvas question is asked. **310** — not while the user
+        // is *moving* the frame: a refresh must never re-cut the size a drag just carried.
+        let shaped = lockReshapeSuspended ? before : reshapedForLock(before, source: src)
         let base = seen(shaped, source: src)
         let next = clampToCanvas(base, mapping: mapping, source: src)
 
@@ -1048,8 +1081,12 @@ public final class CropToolController {
     /// the one caller that knows the angle the user is currently looking at.
     private func clampToCanvas(_ rect: CropRect, mapping: LoupeMapping,
                                source: ImageSize) -> CropRect {
-        CropTool.clampToCanvas(rect, mapping: mapping, source: source,
-                               degrees: CropTool.clampStraighten(draft.straighten))
+        var ticks = canvasShrinkTicks
+        let clamped = CropTool.clampToCanvas(rect, mapping: mapping, source: source,
+                                             degrees: CropTool.clampStraighten(draft.straighten),
+                                             shrinkTicks: &ticks)
+        canvasShrinkTicks = ticks
+        return clamped
     }
 
     /// The document canvas the frame is allowed to occupy, in normalized turned-frame coordinates —
@@ -1220,6 +1257,11 @@ public final class CropToolController {
 
         rotating = rotate && (handle == .outside || handle == .inside)
         rotateStart = draft.straighten
+        // 310 — the size belongs to whoever is about to change it: a press on the inside suspends the
+        // lock's reshape (a move never resizes), a press on a grip or outside re-arms it (those
+        // gestures *are* about a size). `rotating` is a picture turn, which may re-inscribe the rect
+        // in `setAngle`, so it re-arms as well.
+        lockReshapeSuspended = (handle == .inside) && !rotate
         // The hand grabs the frame **it can see**, which at a non-zero straighten is the constrained
         // one (`effectiveCrop`), not the stored intent behind it. `clamped()` (224) keeps even the
         // mouse-down snapshot inside the document canvas.
@@ -1268,9 +1310,15 @@ public final class CropToolController {
             draft.crop = next
             return
         }
-        let candidate = reshapedForLock(next, source: source)
-        let clamped = CropTool.clampToCanvas(candidate, mapping: mapping, source: source,
-                                             degrees: CropTool.clampStraighten(draft.straighten))
+        // 310 — a move is a translation, full stop: the tick's rect is the mouse-down size slid by the
+        // hand. `reshapedForLock` is the **sizing** law (a grip, a new frame, a preset), and running it
+        // on `.inside` is what made a locked frame shrink / change ratio as it approached the canvas
+        // (measured: 0.9000 × 0.8000 → 0.8000 × 0.8000 on the first tick). The switch re-attaches it
+        // for the reverse gate only.
+        let candidate = (drag.handle == .inside && !reshapesLockOnInsideDrag)
+            ? next
+            : reshapedForLock(next, source: source)
+        let clamped = clampToCanvas(candidate, mapping: mapping, source: source)
         clampCalls &+= 1
         if clamped != candidate { clampMoves &+= 1 }
         draft.crop = clamped
