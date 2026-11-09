@@ -340,7 +340,8 @@ public enum CropTool {
                                      mapping: LoupeMapping,
                                      source: ImageSize,
                                      degrees: Double = 0,
-                                     tolerance: Double = 0) -> CropRect {
+                                     tolerance: Double = 0,
+                                     shrinkTicks: UnsafeMutablePointer<Int>? = nil) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
         // 2026-11-02 — the **document canvas**, not `[0,1]²`. `documentCanvasCropRect` degenerates to
         // `[0,1]²` at every right angle, so nothing that used to be legal became illegal and every
@@ -358,6 +359,11 @@ public enum CropTool {
                               top: result.centerY - height / 2,
                               right: result.centerX + width / 2,
                               bottom: result.centerY + height / 2)
+            // 310 — the branch is **counted**, because the claim «拖动不改尺寸» is exactly «this line
+            // never fires while the user moves a frame». A non-zero number means the rect was
+            // genuinely larger than the canvas, which after 307 can only happen to a frame that no
+            // drag produced.
+            shrinkTicks?.pointee &+= 1
         }
 
         // Move the least amount that puts the rect inside the canvas. Horizontal and vertical slides
