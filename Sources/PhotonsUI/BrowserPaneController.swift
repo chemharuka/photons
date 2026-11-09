@@ -829,6 +829,22 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         Set(integers(in: photosTable.rows(in: photosScroll.contentView.bounds)))
     }
 
+    /// 303 — after an edit, re-ask for the one photo that moved. Only a row that is on screen is
+    /// refreshed; an off-screen row computes the new key when it is configured again.
+    public func refreshThumbnail(forAssetID id: String) {
+        guard isViewLoaded, let session,
+              let row = session.assets.firstIndex(where: { $0.id == id }),
+              visibleRows().contains(row),
+              let cell = photosTable.view(atColumn: 0, row: row,
+                                          makeIfNecessary: false) as? PhotoRowCell,
+              cell.assetID == id else { return }
+        // An in-flight request still carries the pre-edit key; cancel it so it cannot repaint the
+        // old frame after the new one arrives.
+        thumbRequests[row]?.cancel()
+        thumbRequests.removeValue(forKey: row)
+        applyThumbnail(to: cell, row: row, asset: session.assets[row])
+    }
+
     private func integers(in range: NSRange) -> Range<Int> {
         range.length <= 0 ? 0..<0 : range.location..<(range.location + range.length)
     }

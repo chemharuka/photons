@@ -60,6 +60,36 @@ public final class CatalogSession {
     /// `EditModel` (a struct comparison on every observation pass, for no extra information).
     public private(set) var editRevision = 0
 
+    /// 303 — callbacks for "a document edit moved the pixels of this asset". The loupe already watches
+    /// `editRevision`; the three browsers need the **asset id** so they can refresh the one visible
+    /// thumbnail instead of invalidating the library. Keys are removal tokens; the closures are
+    /// expected to capture their owner weakly (see `WorkspaceRootView`).
+    @ObservationIgnored
+    private var editObservers: [UUID: (String) -> Void] = [:]
+
+    /// 303 — observe document edits. The returned token removes the observer again. Not called for
+    /// `publishViewState` (the mask overlay is view state, not a pixel change).
+    @discardableResult
+    public func addEditObserver(_ observer: @escaping (String) -> Void) -> UUID {
+        let token = UUID()
+        editObservers[token] = observer
+        return token
+    }
+
+    /// Remove an observer registered by `addEditObserver`.
+    public func removeEditObserver(_ token: UUID) {
+        editObservers.removeValue(forKey: token)
+    }
+
+    private func notifyEditObservers(assetID: String?) {
+        guard let assetID else { return }
+        for observer in editObservers.values { observer(assetID) }
+    }
+
+    /// The asset a live document edit belongs to: the loaded photo, or the anchor when no document is
+    /// loaded (tests and a session with no library). `nil` = nothing to refresh.
+    private var editedAssetID: String? { loadedEditAssetID ?? anchorAsset?.id }
+
     /// When the last document change landed. Slider→frame latency is measured from here, so the
     /// reported number includes the 50 ms debounce window rather than hiding it.
     public private(set) var lastEditChangedAt: CFAbsoluteTime = 0
@@ -1012,6 +1042,7 @@ public final class CatalogSession {
         edit = next
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        notifyEditObservers(assetID: target)
     }
 
     /// The old `applyEdit` body, also used by commands whose target is already the loaded anchor
@@ -1023,6 +1054,7 @@ public final class CatalogSession {
         edit = next
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        notifyEditObservers(assetID: editedAssetID)
     }
 
     /// Publish a change that is **not** a document edit — today that is only `showMaskID`.
@@ -1154,6 +1186,7 @@ public final class CatalogSession {
         edit = MaskViewState.restoring(base, keeping: edit.showMaskID)
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        notifyEditObservers(assetID: editedAssetID)
     }
 
     /// ⇧⌘Z.
@@ -1176,6 +1209,7 @@ public final class CatalogSession {
         if let id = loadedEditAssetID ?? anchorAsset?.id {
             invalidateBackdrops(for: [id])
         }
+        notifyEditObservers(assetID: editedAssetID)
     }
 
     /// Write the stack's current document to the catalog. One transaction, `saveDevelop`'s.
@@ -1265,6 +1299,7 @@ public final class CatalogSession {
         editRevision &+= 1
         lastEditChangedAt = CFAbsoluteTimeGetCurrent()
         history.migrateHealSpots(sourceSize: sourceSize)
+        notifyEditObservers(assetID: editedAssetID)
         persist()
         return true
     }

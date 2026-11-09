@@ -784,6 +784,23 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    /// 303 — after an edit, re-ask for the one photo that moved. Only a cell that is **on screen**
+    /// is refreshed: an off-screen row will compute the new key when it is configured again, and
+    /// walking the whole library here is exactly the 10k-row stall this feature must avoid.
+    public func refreshThumbnail(forAssetID id: String) {
+        guard isViewLoaded, let session,
+              let index = session.assets.firstIndex(where: { $0.id == id }) else { return }
+        let path = IndexPath(item: index, section: 0)
+        guard collectionView.indexPathsForVisibleItems().contains(path),
+              let cell = collectionView.item(at: path) as? AssetGridItem,
+              let asset = cell.cardView.asset, asset.id == id else { return }
+        // An in-flight request still carries the pre-edit key. Letting it land after the new one
+        // would repaint the old frame, so it is cancelled before the re-request.
+        thumbRequests[index]?.cancel()
+        thumbRequests.removeValue(forKey: index)
+        applyThumbnail(to: cell, index: index, asset: asset)
+    }
+
     private func reconcileThumbnails(force: Bool) {
         guard isViewLoaded, let session, !session.assets.isEmpty else { return }
         guard let provider = provider() else { return }
