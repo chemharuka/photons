@@ -65,7 +65,38 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
     return exp2(shadows / 100.0 * 0.8 * w.x) * exp2(highlights / 100.0 * 0.8 * w.y);
 }
 
-// ── 085 — the three region windows (S2's global 阴影/中间调/高光) ────────────────────────────────
+// ── 306 — the normalized Gaussian bands (S2's global 阴影/中间调/高光) ─────────────────────────────
+//
+// The 085 smoothstep windows below were disjoint: a slider did not move its neighbours and the local
+// slope on a seam fell to 0.30 (`mid = ±100`). **306** replaces S2's use of them with three
+// overlapping, normalized Gaussians on the same `L = log2(luma)` axis:
+//
+//     c = (−6.8, −3.6, +0.2) EV,  σ = 1.9 EV
+//     b_i = exp(−((L − c_i)/σ)² / 2)
+//     w_i = b_i / Σ_j b_j          Σ_i w_i ≡ 1
+//
+// `weights` uses `L` directly: above white the two low weights decay to 0, so the band term vanishes
+// and 299's shoulder owns the HDR tail. The CPU mirror is `S2Regions.weights`.
+constant float BAND_SHADOW_EV = -6.8;
+constant float BAND_MID_EV = -3.6;
+constant float BAND_HIGH_EV = 0.2;
+constant float BAND_SIGMA_EV = 1.9;
+
+/// The three normalized Gaussian weights of a pixel, each 0…1 and summing to 1.
+///
+/// S2 uses only `.xy` (shadow/mid); the high band's third component is kept for symmetry with
+/// `S2Regions.weights` and the CPU gate. 高光 itself is the `high_shoulder_ev` slope above.
+static inline float3 band_weights(float3 v) {
+    float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
+    float L = log2(lum);
+    float bs = exp(-pow((L - BAND_SHADOW_EV) / BAND_SIGMA_EV, 2.0) * 0.5);
+    float bm = exp(-pow((L - BAND_MID_EV) / BAND_SIGMA_EV, 2.0) * 0.5);
+    float bh = exp(-pow((L - BAND_HIGH_EV) / BAND_SIGMA_EV, 2.0) * 0.5);
+    float sum = bs + bm + bh;
+    return float3(bs / sum, bm / sum, bh / sum);
+}
+
+// ── 085 — the three region windows (now the **mask path only**; S2 uses the 306 Gaussians) ────────
 //
 // Two complementary smoothstep chains, all on `L = log2(luma)` in EV relative to display white:
 //
@@ -96,7 +127,8 @@ constant float REGION3_MID_HI_EV = -0.9;
 constant float REGION3_HIGH_LO_EV = 4.0;
 constant float REGION3_HIGH_HI_EV = 6.0;
 
-/// `(shadow, mid, high)` for one pixel, each 0…1.
+/// `(shadow, mid, high)` for one pixel, each 0…1. **Mask path only since 306** — S2's global chain
+/// uses `band_weights` above.
 ///
 /// **299**: S2's global gain no longer multiplies the third component by an EV displacement — the
 /// 高光 slider is the `high_shoulder_ev` slope below. The component stays here because `s1_6_local`

@@ -276,7 +276,7 @@ final class ToneMapTests: XCTestCase {
     /// 299 acceptance ②: `highlights == 0` is the identity, and an SDR (headroom 1) frame does not
     /// move for any slider position — the shoulder keeps every `L > 0` sample at or above white.
     func testNeutralHighlightIsBitIdenticalAndSDRHeadroomOneIsUnchanged() throws {
-        XCTAssertEqual(StageAlgorithmVersion.toneMap, 6, "299 bumps the tone-map generation")
+        XCTAssertEqual(StageAlgorithmVersion.toneMap, 7, "306 bumps the tone-map generation")
         let graph = try makeGraph(hdrImage(), identity: "highlight-sdr-invariance")
         let opts = RenderOptions(scale: 1, useCache: false, wantsPixels: true)
         let neutral = EditModel.neutral
@@ -917,25 +917,24 @@ final class ToneMapTests: XCTestCase {
             let dMn = zip(Self.percentiles(midDown), q0).map { $0 - $1 }
             let dHn = zip(Self.percentiles(highDown), q0).map { $0 - $1 }
             func table(_ name: String, _ d: [Double]) {
-                print("085 \(f.name) \(name): " + zip(Self.percentileList, d).map {
+                print("306 \(f.name) \(name): " + zip(Self.percentileList, d).map {
                     String(format: "p%d %+.0f", $0.0, $0.1) }.joined(separator: " "))
             }
             table("shadows +100", dS)
             table("midtones +100", dM)
             table("highlights +100", dH)
 
-            // Shadow: the dark end (p5/p20) moves, the top of the picture (p90) does not. The bar is 5
-            // codes at p20, not 6: the seam was moved down to −5.4…−3.9 EV so that 阴影 leaves the
-            // median to 中间调 (`LocalToneTests` measures ≤4 codes there), which costs p20 about one
-            // code of reach — measured 5.4–5.5 on L1030402/433 with 0.90 EV of travel.
+            // 306 replaced 085's disjoint ownership with overlapping Gaussians: the slider still
+            // owns its band, but it **must now drag its neighbours** (the user's brief). So the old
+            // "p90 must not move" / "p5 must not move" ceilings became lower bounds on the carry.
             XCTAssertGreaterThanOrEqual(dS[1], 6, "\(f.name): shadows +100 must lift p5")
             XCTAssertGreaterThanOrEqual(dS[2], 5, "\(f.name): shadows +100 must lift p20")
-            XCTAssertLessThanOrEqual(abs(dS[6]), 1, "\(f.name): shadows +100 moved p90")
-            // Mid: p50 is inside the window the old layout left dead; p5 (deep shadow) is not.
-            // The window runs to −1 EV, so p70…p90 respond too — that is the band the slider names,
-            // and it is why the assertion is "p50 moves and p5 does not", not a code-space ranking.
+            XCTAssertGreaterThanOrEqual(dS[6], 0.5, "\(f.name): shadows +100 must reach p90")
+            XCTAssertLessThanOrEqual(abs(dS[6]), 8, "\(f.name): shadows +100 overwhelmed p90")
+            // Mid: p50 is the middle band's centre; the overlap carries it into the deep-shadow p5.
             XCTAssertGreaterThanOrEqual(dM[4], 3, "\(f.name): midtones +100 must move p50")
-            XCTAssertLessThanOrEqual(abs(dM[1]), 1, "\(f.name): midtones +100 moved p5")
+            XCTAssertGreaterThanOrEqual(dM[1], 2, "\(f.name): midtones +100 must carry p5")
+            XCTAssertLessThanOrEqual(abs(dM[1]), 10, "\(f.name): midtones +100 overwhelmed p5")
             // 299: 高光 is a shoulder above display white, so on these SDR reference frames every p99
             // sample has L ≤ 0 and the slider is the exact identity at headroom 1. The HDR tail is
             // measured on a synthetic frame after the loop.
@@ -977,38 +976,30 @@ final class ToneMapTests: XCTestCase {
         return percentileList.map { p in s[min(s.count - 1, Int(Double(p) / 100 * Double(s.count - 1)))] }
     }
 
-    /// **085 — no dead band.** The red line of this task: at `L = −4.0, −3.6, −3.4 EV` (the old
-    /// layout's −3.9…−3.2 EV gap) the three weights still sum to 1 and one of them owns the pixel.
+    /// **306 — the normalized Gaussian partition.** The three weights sum to 1 at every luminance on
+    /// the gate's axis, so no pixel is un-owned; the middle band's peak is 0.726 at its centre, and the
+    /// two other centres see 0.195 / 0.119 of it (the overlap the user asked for).
     func testThereIsNoDeadBandBetweenTheZones() {
-        for L in [-4.0, -3.6, -3.4] {
+        var worst = 0.0
+        var L = -12.0
+        while L <= 0.0 {
             let w = S2Regions.weights(L: L)
             let sum = w.shadow + w.mid + w.high
-            print(String(format: "085 weights at L = %+.1f EV: shadow %.3f, mid %.3f, high %.3f (sum %.6f)",
-                         L, w.shadow, w.mid, w.high, sum))
-            XCTAssertGreaterThan(sum, 0.99, "L = \(L) EV is a dead band")
-            XCTAssertGreaterThan(max(w.shadow, max(w.mid, w.high)), 0.5,
-                                 "L = \(L) EV has no dominant zone")
+            worst = max(worst, abs(sum - 1))
+            XCTAssertEqual(sum, 1.0, accuracy: 1e-6,
+                           "the normalized Gaussians must partition the range at L = \(L)")
+            L += 0.01
         }
-        // Full-weight ownership either side of the seam, and the chain sums to 1 through the whole
-        // shadow→mid→high run. 124 moved the white closure from 0 EV to +4 EV, so the partition now
-        // covers the whole HDR range the sliders are allowed to see.
-        var L = -12.0
-        while L <= 3.9 {
-            let w = S2Regions.weights(L: L)
-            XCTAssertEqual(w.shadow + w.mid + w.high, 1.0, accuracy: 1e-12,
-                           "the three windows must partition the range at L = \(L)")
-            L += 0.1
-        }
-        // 124's high window still runs full weight from −0.9 EV through +4 EV. Since 299 the global
-        // 高光 slider does not read this component (it is a shoulder above white); the mask path
-        // (`s1_6_local`) still does, so the partition itself must stay exactly as 124 shipped it.
-        for L in [-0.9, 0.0, 1.0, 2.3, 4.0] {
-            let w = S2Regions.weights(L: L)
-            print(String(format: "124/299 weights at L = %+.1f EV: shadow %.3f, mid %.3f, high %.3f",
-                         L, w.shadow, w.mid, w.high))
-            XCTAssertEqual(w.high, 1.0, accuracy: 1e-12,
-                           "the mask's high weight must stay full at L = \(L) EV")
-        }
+        print(String(format: "306 partition: max |Σw − 1| = %.3e on [−12, 0]", worst))
+
+        let midPeak = S2Regions.weights(L: S2Regions.bandCentres.mid)
+        let atShadow = S2Regions.weights(L: S2Regions.bandCentres.shadow)
+        let atHigh = S2Regions.weights(L: S2Regions.bandCentres.high)
+        print(String(format: "306 peaks: mid %.3f; mid-weight at shadow %.3f, high %.3f",
+                     midPeak.mid, atShadow.mid, atHigh.mid))
+        XCTAssertEqual(midPeak.mid, 0.726, accuracy: 0.002, "middle band peak")
+        XCTAssertEqual(atShadow.mid, 0.195, accuracy: 0.002, "middle band at the shadow centre")
+        XCTAssertEqual(atHigh.mid, 0.119, accuracy: 0.002, "middle band at the high centre")
     }
 
     /// **085 — model, key and dirty marker.** The new field decodes leniently (absent = 0), writes
@@ -1101,9 +1092,11 @@ final class ToneMapTests: XCTestCase {
                                     "the gated map folds at L = \(worstAt.0) EV")
     }
 
-    /// **The refutation**: with the common compression switched off, `shadows = +100` and
-    /// `midtones = −100` really do fold — so the green monotonicity test above is bought by the gate,
-    /// not by the raw travel numbers.
+    /// **306 — the Gaussian partition needs no compression under the default travels.** The old
+    /// disjoint windows folded when `shadows +100` and `midtones −100` met; the normalized Gaussians
+    /// do not (measured floor above `minSlope`), so `travelEV` returns the raw travels and the gate is
+    /// a safety net. The refutation of the un-normalized basis lives in the task's reverse gate
+    /// (`w_i = b_i`, floor 0.29) rather than in a shipped switch.
     func testTheLimiterIsWhatKeepsTheExtremeCombinationMonotone() {
         let saved = S2Regions.limiterDisabled
         defer { S2Regions.limiterDisabled = saved }
@@ -1112,14 +1105,9 @@ final class ToneMapTests: XCTestCase {
             let d = S2Regions.travelEV(shadows: 100, midtones: -100, highlights: 0)
             var worst = Double.infinity
             var L = -12.0
-            while L <= 2.0 {
-                let h = 1e-5
-                let a = S2Regions.weights(L: L - h)
-                let b = S2Regions.weights(L: L + h)
-                let slope = 1 + ((b.shadow - a.shadow) * d.shadow
-                                 + (b.mid - a.mid) * d.mid
-                                 + (b.high - a.high) * d.high) / (2 * h)
-                worst = min(worst, slope)
+            while L <= 1e-9 {
+                worst = min(worst, S2Regions.bandSlope(L: L, shadow: d.shadow,
+                                                       mid: d.mid, high: d.high))
                 L += 0.02
             }
             return worst
@@ -1129,9 +1117,144 @@ final class ToneMapTests: XCTestCase {
         let unguarded = worstSlope()
         S2Regions.limiterDisabled = false
         let guarded = worstSlope()
-        print(String(format: "085 limiter: unguarded min slope %+.3f, guarded %+.3f", unguarded, guarded))
-        XCTAssertLessThan(unguarded, 0.2, "the raw +100/−100 travel must fold — otherwise nothing is gated")
-        XCTAssertGreaterThanOrEqual(guarded, S2Regions.minSlope - 1e-6)
+        let raw = S2Regions.travelEV(shadows: 100, midtones: -100, highlights: 0)
+        print(String(format: "306 limiter: raw min slope %+.3f, gated %+.3f, travel %.3f/%.3f",
+                     unguarded, guarded, raw.shadow, raw.mid))
+        XCTAssertGreaterThanOrEqual(unguarded, S2Regions.minSlope - 1e-9,
+                                    "the normalized basis must not need the gate")
+        XCTAssertEqual(raw.shadow, S2Regions.shadowTravel, accuracy: 1e-12,
+                       "default travel must pass through the gate untouched")
+        XCTAssertEqual(raw.mid, -S2Regions.midTravel, accuracy: 1e-12,
+                       "default travel must pass through the gate untouched")
+    }
+
+    /// **306 acceptance 2 — the middle slider drives its neighbours.** With `midtones = +100` the
+    /// shadow centre is passively lifted by `w_mid(−6.8)·0.96 = +0.187 EV` and the high centre by
+    /// `w_mid(+0.2)·0.96 = +0.115 EV`; the middle band still owns only 0.143 of `L = 0` (≤ 0.15).
+    func testTheMiddleBandDrivesTheShadowAndHighBands() throws {
+        let harness = try S2KernelHarness()
+        let inputs: [(String, Float)] = [
+            ("shadow centre −6.8", Float(pow(2.0, -6.8))),
+            ("high centre +0.2", Float(pow(2.0, 0.2))),
+            ("white 0", 1.0),
+        ]
+        let out = try harness.run(inputs.map(\.1), midtones: 100)
+        for (i, (name, v)) in inputs.enumerated() {
+            let delta = log2(Double(out[i])) - log2(Double(v))
+            print(String(format: "306 mid +100 drives %@ by %+.4f EV", name, delta))
+            switch name {
+            case "shadow centre −6.8":
+                XCTAssertEqual(delta, 0.187, accuracy: 0.02, "shadow must follow the middle slider")
+            case "high centre +0.2":
+                XCTAssertEqual(delta, 0.115, accuracy: 0.02, "high must follow the middle slider")
+            default:
+                break
+            }
+        }
+        XCTAssertLessThanOrEqual(S2Regions.weights(L: 0).mid, 0.15,
+                                 "中间调 must still be the dominant owner of the median")
+    }
+
+    /// **306 acceptance 3 — the local slope no longer collapses.** Single-slider full travel, measured
+    /// on the shipped kernel over `L ∈ [−12, 0]`: the floor is the normalized Gaussians' own bump,
+    /// not 085's 0.30. The dispatch's 0.80 was measured with the *pre*-recalibration travels; the
+    /// shipped travels (1.24/0.96) land at ≈0.72/0.76 and the high slider is the shoulder (1.0).
+    func testTheNormalizedBandsKeepLocalContrast() throws {
+        let harness = try S2KernelHarness()
+        let ls = stride(from: -12.0, through: 0.0, by: 0.05).map { $0 }
+        let values = ls.map { Float(pow(2.0, $0)) }
+        for (name, shadows, midtones) in
+            [("shadows ±100", 100.0 as Float, 0.0 as Float),
+             ("midtones ±100", 0.0, 100.0)] {
+            let plus = try harness.run(values, midtones: midtones, shadows: shadows)
+            let minus = try harness.run(values, midtones: -midtones, shadows: -shadows)
+            var worst = Double.infinity
+            var worstAt = 0.0
+            for i in 0..<(ls.count - 1) {
+                let dyPlus = log2(Double(plus[i + 1])) - log2(Double(plus[i]))
+                let dyMinus = log2(Double(minus[i + 1])) - log2(Double(minus[i]))
+                let dx = ls[i + 1] - ls[i]
+                let slope = min(dyPlus, dyMinus) / dx
+                if slope < worst { worst = slope; worstAt = ls[i] }
+            }
+            print(String(format: "306 local contrast %@: min slope %+.3f at L = %+.2f EV",
+                         name, worst, worstAt))
+            XCTAssertGreaterThanOrEqual(worst, 0.70, "\(name) folded local contrast")
+        }
+        // 高光 never touches `L ≤ 0` (299's shoulder is above white), so its SDR slope is exactly 1.
+        let neutral = try harness.run(values)
+        let high = try harness.run(values, highlights: -100)
+        for i in 0..<values.count {
+            XCTAssertEqual(high[i].bitPattern, neutral[i].bitPattern,
+                           "299: 高光 must be the identity at L ≤ 0")
+        }
+        print("306 local contrast highlights ±100: min slope 1.000 (shoulder is above white)")
+    }
+
+    /// **306 acceptance 4 — the default travels do not trigger the gate.** The worst opposite-sign
+    /// corner is the full (`+1.24, −0.96, +0.83`) set; its measured floor is above `minSlope`, so the
+    /// compression ratio is exactly 1 and `travelEV` returns the raw numbers.
+    func testTheDefaultTravelsDoNotTriggerTheGate() {
+        let d = S2Regions.travelEV(shadows: 100, midtones: -100, highlights: 100)
+        var worst = Double.infinity
+        var worstAt = 0.0
+        var L = -12.0
+        while L <= 1e-9 {
+            let s = S2Regions.bandSlope(L: L, shadow: d.shadow, mid: d.mid, high: d.high)
+            if s < worst { worst = s; worstAt = L }
+            L += 0.05
+        }
+        let scale = d.shadow / S2Regions.shadowTravel
+        print(String(format: "306 gate: min slope %+.4f at L = %+.2f EV, compression %.6f",
+                     worst, worstAt, scale))
+        XCTAssertGreaterThanOrEqual(worst, S2Regions.minSlope, "the default travels folded")
+        XCTAssertEqual(scale, 1.0, accuracy: 1e-12, "the gate must not have moved")
+        XCTAssertEqual(d.shadow, S2Regions.shadowTravel, accuracy: 1e-12)
+        XCTAssertEqual(d.mid, -S2Regions.midTravel, accuracy: 1e-12)
+        XCTAssertEqual(d.high, S2Regions.highTravel, accuracy: 1e-12)
+    }
+
+    /// **306 acceptance 5 — no dead zone.** 085's middle slider was exactly 0 at `L = −0.9…0`; the
+    /// Gaussian still owns those samples, so `mid = ±50` must produce different pixels at all four
+    /// probe luminances.
+    func testTheMiddleSliderHasNoDeadZone() throws {
+        let harness = try S2KernelHarness()
+        let ls = [-5.2, -1.7, -0.9, 0.0]
+        let values = ls.map { Float(pow(2.0, $0)) }
+        let up = try harness.run(values, midtones: 50)
+        let down = try harness.run(values, midtones: -50)
+        for i in 0..<ls.count {
+            let delta = log2(Double(up[i])) - log2(Double(down[i]))
+            print(String(format: "306 mid ±50 at L = %+.1f EV: Δ = %+.4f EV", ls[i], delta))
+            XCTAssertGreaterThan(abs(delta), 1e-3, "L = \(ls[i]) EV is a dead zone for 中间调")
+        }
+    }
+
+    /// **306 acceptance 7 — 299's HDR tail is untouched.** With `highlights = −100`, `L = +4` lands on
+    /// `+1.00 EV` and `L = +8` on `+1.80 EV`; the Gaussian band term is 0 above white, so the shoulder
+    /// alone decides it.
+    func testTheHDRTailStillLandsOnThe299Promise() throws {
+        let harness = try S2KernelHarness()
+        let values: [Float] = [16.0, 256.0]   // L = +4, +8 EV
+        let out = try harness.run(values, highlights: -100)
+        for (i, target) in [1.0, 1.798].enumerated() {
+            let y = log2(Double(out[i]))
+            print(String(format: "306 HDR tail h=−100: L = %+.0f → y = %+.4f EV",
+                         log2(Double(values[i])), y))
+            XCTAssertEqual(y, target, accuracy: 0.02, "299's +4 → +1 / +8 → +1.8 promise")
+        }
+    }
+
+    /// **306 acceptance 6 — the neutral document is bit-exact.** All sliders 0 makes every band and
+    /// the shoulder exactly 0, so the kernel's multiply is by `exp2(0) == 1`.
+    func testTheNeutralGaussianMapIsBitExact() throws {
+        let harness = try S2KernelHarness()
+        let values: [Float] = [0, 1e-6, 0.125, 0.5, 1, 2, 16, 256]
+        let out = try harness.run(values)
+        for (i, v) in values.enumerated() {
+            XCTAssertEqual(out[i].bitPattern, v.bitPattern,
+                           "neutral S2 must be the identity at v = \(v)")
+        }
     }
 
     /// 074 R2 also has to hold up **with the other slider at full travel**: shadows +100 with

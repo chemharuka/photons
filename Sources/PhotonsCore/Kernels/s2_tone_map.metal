@@ -7,29 +7,26 @@ using namespace metal;
 //
 // 098 moved contrast out of this file: it is now S1.8/228 (`s1_8_contrast.metal`), a global
 // gain-domain power curve in the display-referred domain, **after** this stage. What is left here
-// is the three-window EV chain (085) — 阴影 / 中间调 / 高光 — and the final clamp. It is exact identity
-// at all zeros, which is what M1 has to prove.
+// is the three-band EV chain and the final clamp. It is exact identity at all zeros, which is what
+// M1 has to prove.
 //
-// **085 replaced the two-window layout with three complementary windows.**
+// **306 replaced the complementary smoothstep windows with normalized overlapping Gaussians.**
 //
-//     shadow  1 − a,  a = smoothstep(−5.4, −3.9, L)     (deep shadow → mid)
-//     mid     a(1 − b), b = smoothstep(−2.4, −0.9, L)  (mid → high)
-//     high    b(1 − c), c = smoothstep(+4.0, +6.0, L)  (high → white, closing above the HDR range)
+//     c = (−6.8, −3.6, +0.2) EV,  σ = 1.9 EV
+//     b_i = exp(−((L − c_i)/σ)²/2),  w_i = b_i / Σ_j b_j      (Σ w ≡ 1)
 //
-// Because `a` reaches 1 before `b` starts, the three weights sum to 1 over the whole shadow→high run:
-// every luminance has a full-weight owner and there is no gap. **299 replaces the 124 closure for
-// the global 高光 slider**: the slider no longer multiplies the high weight by an EV displacement.
-// It sets a slope `k` and the kernel applies `high_shoulder_ev` above display white (see
-// `tone_shape.metal`). That is what makes 「+4 EV → +1 EV」 possible: a displacement would need 3 EV
-// through the HDR tail, while a shoulder changes the asymptote without folding the map. `a` and `b`
-// (阴影 / 中间调), their travels and the monotonicity gate are unchanged; the high weight in
-// `region_weights3` is still used by the mask path (`s1_6_local`).
+// The three weights overlap, so 中间调 drags 阴影 and 高光 with it (the user's brief) instead of the
+// disjoint ownership 085 had; the local slope on a seam no longer collapses (measured floor 0.76
+// versus 0.30). The convex combination cannot ring. **299's high shoulder is unchanged**: `.z` is
+// the slope `k` and `high_shoulder_ev` owns `L > 0`; the high band's weight is not multiplied into a
+// displacement, so the SDR image and the `+4 EV → +1 EV` tail promise are preserved.
 //
-// Travel and its monotonicity gate are **CPU-side** (`S2Regions.travelEV`): 0.90 / 0.70 / 0.60 EV at
-// full slider, compressed by one common factor when opposite-sign combinations would push the
-// derivative below 0.400. S2 receives `b.xy` as EV and `b.z` as the 高光 **slope** `k`.
+// Travel and its monotonicity gate are **CPU-side** (`S2Regions.travelEV`): 1.24 / 0.96 / 0.83 EV at
+// full slider, with the exact `1 + Σ w_i′(L)·d_i` minimum checked on `L ∈ [−12, 0]`. Under the
+// default travels the gate never triggers. S2 receives `b.xy` as EV and `b.z` as the 高光 slope `k`.
 //
-// Direction (派单 008 A): Lightroom's, i.e. **all three region sliders brighten towards +**.
+// Direction (派单 008 A): Lightroom's, i.e. **all three region sliders brighten towards +**. The
+// 074 two-window `region_weights` / `region_weights3` remain for `s1_6_local` (the mask path).
 //
 // Matte (派单 008 B): the canvas may be larger than the picture (letterbox) and everything outside the
 // content rect is 0. A shadow/highlight lift treats 0 as a picture pixel, which is how "drag shadows"
@@ -41,7 +38,7 @@ using namespace metal;
 // the same distinction.
 
 struct S2Params {
-    // 085/299 — dShadow (EV), dMid (EV), 高光 slope `k` (1 = identity), identity.
+    // 306 — dShadow (EV), dMid (EV), 高光 slope `k` (1 = identity), identity.
     // `S2Regions.travelEV` has already multiplied the first two by the travel and applied the
     // monotonicity gate; `k` comes from `S2Regions.highSlope`. Layout is unchanged (32-byte stride).
     float4 b;
@@ -83,10 +80,11 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // stage must still not clamp it away before its own maths.)
     float3 v = c.rgb;
 
-    // 085: the shadow/mid windows (`tone_shape.metal#region_weights3`), on `L = log2(luma)` — EV
-    // relative to display white, the histogram's own HDR axis — so a window's width is
-    // exposure-invariant. `p.b.xy` is the gated EV travel from `S2Regions`.
-    float3 w = region_weights3(v);
+    // 306: the normalized Gaussian bands (`tone_shape.metal#band_weights`), on `L = log2(luma)` —
+    // EV relative to display white, the histogram's own HDR axis. `p.b.xy` is the gated EV travel
+    // from `S2Regions`. Above white the two low weights decay to 0, so the band term is exactly 0
+    // there and 299's shoulder owns the HDR tail.
+    float3 w = band_weights(v);
     float luma = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
     float L = log2(luma);
     // 299: 高光 is the C¹ slope shoulder above white, not the third weight times a displacement.

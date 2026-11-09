@@ -954,7 +954,7 @@ private struct CalParamsU {
 }
 
 private struct S2Params {
-    // 085/299 — dShadow, dMid (EV, already gated by `S2Regions.travelEV`), the 高光 slope `k`
+    // 306 — dShadow, dMid (EV, already gated by `S2Regions.travelEV`), the 高光 slope `k`
     // (1 = identity), identity.
     var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
@@ -3997,9 +3997,9 @@ public final class RenderGraph {
             let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
             let identity = edit.light.highlights == 0
                 && edit.light.midtones == 0 && edit.light.shadows == 0
-            // 085: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
-            // kernel only weights and exponentiates. 299: 高光 is a slope above white, so `.z` is
-            // `k` rather than the gated `d.high` (which the mask path still reads).
+            // 306: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
+            // kernel only weights (normalized Gaussians) and exponentiates. 299: 高光 is a slope
+            // above white, so `.z` is `k` rather than the gated `d.high` (which the mask path reads).
             let d = S2Regions.travelEV(shadows: edit.light.shadows,
                                        midtones: edit.light.midtones,
                                        highlights: edit.light.highlights)
@@ -5842,10 +5842,12 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         let sceneLinearWork = a.amount > 0 && (a.exposure != 0 || a.temperature != 0 || a.tint != 0
             || a.highlights != 0 || a.shadows != 0 || a.whites != 0 || a.blacks != 0)
         let active = enabled && sceneLinearWork
-        // 085 — the local lifts take the same gated EV travels as the global ones (中间调 pinned at 0:
-        // a local adjustment has no midtone slider yet). Same windows + same travel + same gate is what
-        // makes "the masked slider is the global slider" a measurement rather than a hope.
-        let d = S2Regions.travelEV(shadows: a.shadows, midtones: 0, highlights: a.highlights)
+        // 085/306 — the local lifts keep 074's two windows and their own travels. 306 changed the
+        // **global** chain to normalized Gaussians but deliberately left the mask path alone (§4):
+        // `maskTravelEV` carries the old 0.90 / 0.70 / 0.60 and the old gate, so `s1_6_local`'s
+        // pixels do not move. The same slider therefore still means different things inside and
+        // outside a mask until the two paths are unified.
+        let d = S2Regions.maskTravelEV(shadows: a.shadows, midtones: 0, highlights: a.highlights)
         return LocalAdjustU(
             a: SIMD4(gain.r, gain.g, gain.b, Float(min(max(a.amount, 0), 100) / 100)),
             b: SIMD4(Float(a.contrast), Float(d.high), Float(d.shadow), Float(a.whites)),

@@ -137,6 +137,12 @@ public enum StageAlgorithmVersion {
     /// **1** — S1.8's first arithmetic (098): contrast as a multiscale guided-filter decomposition of
     /// `Y` in the scene-linear domain, with three fixed band weights and a fixed pivot. Starts at 1.
     public static let contrast = 3
+    /// **7** — 306: the global 阴影/中间调/高光 weights became three normalized overlapping
+    /// Gaussians (`c = −6.8/−3.6/+0.2 EV`, `σ = 1.9`) instead of 085's disjoint smoothstep windows,
+    /// and the travels were recalibrated (1.24/0.96/0.83 EV) so each band's centre keeps its old
+    /// displacement. The same stored numbers now move neighbouring zones and every luminance on a
+    /// seam; the mask path (`s1_6_local`) deliberately stays on 074's windows and travels.
+    ///
     /// **6** — 299: 高光 became a C¹ slope shoulder above the display-white point
     /// (`k = 1 + 0.8·highlights/100`, `Δ(L) = (k−1)(L − 0.25(1 − e^{−L/0.25}))` for `L > 0`).
     /// The same stored `highlights` number now changes every `L > 0` pixel, while `L ≤ 0` is the
@@ -158,7 +164,7 @@ public enum StageAlgorithmVersion {
     ///
     /// **2** — 0107: contrast became a displacement in log2 EV over a held core with a bounded shoulder
     /// and a toe shift (no upper asymptote, no 4× slope); 074 R2 moved the region lifts to EV windows.
-    public static let toneMap = 6
+    public static let toneMap = 7
     /// Unchanged (vibrance/saturation only, since 076).
     public static let color = 1
     /// Unchanged (S3.4's eight-band grey mix).
