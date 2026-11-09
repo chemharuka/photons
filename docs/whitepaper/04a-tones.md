@@ -113,48 +113,55 @@ $$
 
 **它解决什么问题**
 
-三个滑杆分别抬或压暗部、中间调、亮部，而互不打架。判据有两条：每个亮度必须有一个满权主人，中间不能有死带（两个滑杆都不作用的带）。
+三个滑杆分别抬或压暗部、中间调、亮部。判据是两条：每个亮度都必须有主人（中间不能有死带），而一个滑杆在作用自己的区段时还要**带动邻居**——用户的口径是「中间调调节以中间区域为主，但也能带动阴影和高光。其他的也类似，避免局部对比度的损失」。085 的两条互补 smoothstep 链是互斥的：相邻控件带动严格为 0，单拉中间调时窗口缝隙上的输出斜率只有 0.30。306 把权重换成三个归一化重叠高斯。
 
 **算法**
 
-权重是两条互补的 smoothstep 链，坐标是 $L=\log_2 Y$（相对显示白的 EV，直方图自己的轴）：
+坐标仍是 $L=\log_2 Y$（相对显示白的 EV，直方图自己的轴）。三个中心坐在参考帧的阴影 / 中位 / 高光上，宽度 1.9 EV：
 
 $$
-a=\mathrm{ss}(-5.4,-3.9,L),\quad b=\mathrm{ss}(-2.4,-0.9,L),\quad c=\mathrm{ss}(4.0,6.0,L)
-$$
-
-$$
-w_s=1-a,\qquad w_m=a(1-b),\qquad w_h=b(1-c)
-$$
-
-$a$ 在 $b$ 起步之前就已到 1，所以 $L<+4$ 时 $w_s+w_m+w_h=1$：没有哪个亮度是没人管的（`Sources/PhotonsCore/Kernels/tone_shape.metal`）。**299 起，全局高光不再用 $w_h$ 乘位移**，而是用一条白点以上的斜率肩；$w_h$ 仍由蒙版路径（`s1_6_local`）读取，见「取舍」。全局增益因此是
-
-$$
-v \leftarrow v\cdot 2^{\,w_s d_s+w_m d_m+\Delta(L)}
-$$
-
-$d_s,d_m$ 是**已经过门**的 EV 位移：
-
-$$
-d_i=\frac{s_i}{100}\Delta_i,\qquad \Delta_s=0.90,\ \Delta_m=0.70
-$$
-
-（`Sources/PhotonsCore/S2Regions.swift`。）两个行程反号时会把局部斜率压穿，所以有一道公共压缩：
-
-$$
-\text{deficit}=\max\left\{|d_m-d_s|,\ |d_h-d_m|,\ \tfrac{1.5}{2.0}|d_h|\right\},\qquad \text{deficit}>1-\sigma\ \Rightarrow\ d\leftarrow d\cdot\frac{\sigma}{\text{deficit}}
-$$
-
-$\sigma=0.500$；门本身和第三个（蒙版仍用的）EV 行程 `d_h` 都保持 085/124 的数值（`Sources/PhotonsCore/S2Regions.swift`）。方向照 Lightroom：`+` 提亮该区，`−` 压暗（`Sources/PhotonsCore/Kernels/s2_tone_map.metal`）。
-
-**高光 = 白点以上的 C¹ 斜率肩（299）。** 记 $h=\mathrm{clamp}(\text{highlights},-100,100)/100$，滑杆设定的是渐近斜率而不是 EV 位移：
-
-$$
-k(h)=1+0.8h,\qquad k(-100)=0.20,\ k(0)=1,\ k(+100)=1.80
+c_s=-6.8,\quad c_m=-3.6,\quad c_h=+0.2\ \text{EV},\qquad \sigma=1.9\ \text{EV}
 $$
 
 $$
-\Delta(L)=
+b_i=\exp\!\left(-\frac{((L-c_i)/\sigma)^2}{2}\right),\qquad
+w_i=\frac{b_i}{\sum_j b_j}\qquad\Longrightarrow\qquad \sum_i w_i\equiv 1
+$$
+
+归一化是硬条件，不是装饰：不归一的高斯（darktable `toneequal` 的老路）在相邻区会出现反号瓣；凸组合则永远落在三个滑杆值之间，不会振铃。权重是 $C^\infty$、全轴支撑，所以每个控件都能带动另外两个。中档峰值权重 0.726（$L=-3.6$），另两档中心看到的中间调权重是 0.195 / 0.119。全局增益是
+
+$$
+v\leftarrow v\cdot 2^{\,w_s d_s+w_m d_m+w_h d_h+S(L)}
+$$
+
+$d_s,d_m,d_h$ 是**已经过门**的 EV 位移。306b 把高光也放进凸组合：$L=0$ 处 $w_h=0.856$，所以白点附近的 SDR 也跟高光走（$h=-100$ 时 $L=0$ 动 $-0.71$ EV），这就是「其他的也类似」。权重直接用 $L$，不在白点冻结：$L\to+\infty$ 时 $w_h\to1$，band 项趋于常数 $d_h$；299 的 HDR 尾由差额肩 $S$ 补足（下面）。蒙版路径（`s1_6_local`）仍用 074 的两窗口和第三个 EV 行程。
+
+**行程重标定。** 高斯峰值是 0.726，若沿用旧行程（0.90 / 0.70 / 0.60），每个档位中心的实际位移会掉 27 %。所以满行程乘 $1/0.726=1.378$：
+
+$$
+\Delta_s=1.24,\qquad \Delta_m=0.96,\qquad \Delta_h=0.83\ \text{EV}
+$$
+
+单拉中间调时，阴影中心（−6.8 EV）被动抬 $0.195\cdot0.96=+0.187$ EV，高光中心（+0.2 EV）被动抬 $0.119\cdot0.96=+0.115$ EV；$L=0$ 处的中间调权重是 0.143（「以中间为主」）。
+
+**单调性门。** 归一化不保证 $d(\text{out})/dL$ 不折；门把精确判据放在 CPU：
+
+$$
+\frac{d(\log_2 v')}{dL}=1+\sum_i w_i'(L)\,\Delta_i
+$$
+
+在 $L\in[-12,0]$、步长 0.05 EV 上取最小值；低于 `minSlope = 0.500` 时才按 `scale = (1 − minSlope)/(1 − min)` 等比压缩三个 $\Delta$。默认行程下实测最坏 0.5287（$L=-5.35$，$+1.24/-0.96/+0.83$ 的反号角），门从不触发；单个滑杆的斜率地板是阴影 0.717、中间调 0.765、高光 0.774（高光进了 band，不再是 1.000）。085 的 0.30 因此成为历史。
+
+**高光 = band + 白点以上的差额肩（306b）。** 记 $h=\mathrm{clamp}(\text{highlights},-100,100)/100$，滑杆仍设定渐近斜率：
+
+$$
+k(h)=1+c\,h,\qquad c=0.579214093\ldots
+$$
+
+$c$ 由 $h=-100$、$L=+4$ 时总位移 $=-3.0$ 数值解出（`S2Regions.highSlopeCoefficient` 用二分；解析式 $c=(3.0-w_h(+4)\cdot0.83)/3.75$）。于是 $k(-100)=0.420786$、$k(0)=1$、$k(+100)=1.579214$。差额肩是
+
+$$
+S(L)=
 \begin{cases}
 0, & L\le 0\\
 (k-1)\left(L-w\left(1-e^{-L/w}\right)\right), & L>0
@@ -162,18 +169,18 @@ $$
 \qquad w=0.25\ \text{EV}
 $$
 
-`k = 1` 时 $\Delta\equiv 0$（浮点精确），$L\le 0$ 对任意 $k$ 都逐位恒等。斜率从白点的 1 连续过渡到 $k$，所以白点上没有折角；$L=+4$、$h=-100$ 时 $\Delta=-0.8\cdot3.75=-3.0$，输出 $y=+1.00$ EV。实测的 $y$（EV）：
+$S(0)=0$、$S'(0)=0$，所以白点是 $C^1$。$L=+4$、$h=-100$：band 贡献 $w_h(+4)\cdot(-0.83)=-0.827947$，肩补 $-2.172053$，合计 $-3.0$，输出 $y=+1.000$ EV。$L=+8$ 用同一 $k$ 得 $y=+2.681$ EV（与 299 的 1.798 相差 0.88，这是高光进 band 后的真实结果，不重录旧数）。实测的 $y$（EV）：
 
 | L (EV) | h=−100 | h=−50 | h=0 | h=+50 | h=+100 |
 |---|---|---|---|---|---|
-| 0.5 | 0.273 | 0.386 | 0.500 | 0.614 | 0.727 |
-| 1 | 0.396 | 0.698 | 1.000 | 1.302 | 1.604 |
-| 2 | 0.600 | 1.300 | 2.000 | 2.700 | 3.400 |
-| 2.3 | 0.660 | 1.480 | 2.300 | 3.120 | 3.940 |
+| 0.5 | −0.419 | 0.040 | 0.500 | 0.960 | 1.419 |
+| 1 | −0.221 | 0.389 | 1.000 | 1.611 | 2.221 |
+| 2 | 0.173 | 1.087 | 2.000 | 2.914 | 3.827 |
+| 2.3 | 0.295 | 1.297 | 2.300 | 3.303 | 4.305 |
 | 4 | 1.000 | 2.500 | 4.000 | 5.500 | 7.000 |
-| 8 | 1.800 | 4.900 | 8.000 | 11.100 | 14.200 |
+| 8 | 2.681 | 5.341 | 8.000 | 10.659 | 13.319 |
 
-$dy/dL=1+(k-1)(1-e^{-L/w})\ge k$，最小局部斜率就是 $k$（−100 时 0.20，+100 时 1.80）；$0<k$，所以肩永不打折。又因为 $w(1-e^{-L/w})<L$，有 $y\ge kL\ge0$：白点以上的像素仍留在白点以上，SDR（headroom 1）渲染逐位不变——**高光在 SDR 上没有可见作用，它是 HDR 尾部的压缩器**；白点附近仍由 `whites`（138）负责。
+SDR 的局部斜率由 band 决定（单杆地板 0.717 / 0.765 / 0.774）；白点以上肩的渐近斜率是 $k$（$h=-100$ 时 0.421），这是**有意的** HDR 尾压缩，因此不进单调性门（门的域仍是 $L\in[-12,0]$）。$h=0$ 且 $L\le0$ 仍是逐位恒等；$h\ne0$ 时高光会动 SDR 近白——「高光只压 HDR 尾」的旧口径已被 306b 取代。
 
 **参数与范围**
 
@@ -182,29 +189,33 @@ $dy/dL=1+(k-1)(1-e^{-L/w})\ge k$，最小局部斜率就是 $k$（−100 时 0.2
 | `shadows` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1252`） |
 | `midtones` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1251`） |
 | `highlights` | −100…100 | 0 | 滑杆单位（`Sources/PhotonsCore/EditModel.swift:1247`） |
-| 阴影/中间调满行程 | 0.90 / 0.70 | — | EV（`Sources/PhotonsCore/S2Regions.swift`） |
-| 高光斜率 $k$ | 0.20…1.80 | 1（恒等） | — （`Sources/PhotonsCore/S2Regions.swift`） |
+| 波段中心 $c$ | −6.8 / −3.6 / +0.2 | — | EV（`Sources/PhotonsCore/S2Regions.swift`） |
+| 波段宽度 $\sigma$ | 1.9 | 1.9 | EV（`Sources/PhotonsCore/S2Regions.swift`） |
+| 全局满行程 | 1.24 / 0.96 / 0.83 | — | EV（`Sources/PhotonsCore/S2Regions.swift`） |
+| 蒙版满行程 | 0.90 / 0.70 / 0.60 | — | EV（074，`S2Regions.maskTravelEV`） |
+| 高光斜率 $k$ | 0.421…1.579 | 1（恒等） | — （`Sources/PhotonsCore/S2Regions.swift`） |
 | 高光膝宽 $w$ | 0.25 | 0.25 | EV（`Sources/PhotonsCore/S2Regions.swift`） |
-| 最小斜率 $\sigma$ | 0.500 | 0.500 | — （`Sources/PhotonsCore/S2Regions.swift`） |
-| 窗口边界 | −5.4/−3.9，−2.4/−0.9，+4.0/+6.0 | — | EV（`Sources/PhotonsCore/Kernels/tone_shape.metal`） |
+| 最小斜率 | 0.500 | 0.500 | — （`Sources/PhotonsCore/S2Regions.swift`） |
 
 **实现**
 
-分工很清楚：kernel 只做阴影/中间调的权重、`high_shoulder_ev` 肩和一次 `exp2`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal`），行程、斜率与单调性门都在 CPU（`S2Regions.travelEV` / `highSlope` / `highShoulderEV`）——kernel 收到的是 EV 与 $k$，不是滑杆位置。“图不会折”因此是一个可计算的属性，而不是窗口宽度选得巧。
+kernel 做归一化高斯的三个权重、`dot(w, d)`、`high_shoulder_ev` 差额肩和一次 `exp2`（`Sources/PhotonsCore/Kernels/tone_shape.metal`、`s2_tone_map.metal`）；行程、斜率 $k$ 与单调性门都在 CPU（`S2Regions.weights` / `travelEV` / `highSlopeCoefficient` / `highSlope` / `highShoulderEV`）——kernel 收到的是三个 EV 与 $k$，不是滑杆位置。“图不会折”因此是一个可计算的属性，而不是窗口宽度选得巧。蒙版路径用 `S2Regions.maskTravelEV` 保留 074 的旧数值，`s1_6_local` 的像素不动。
 
-S2 在入口**不夹取**：`v = c.rgb` 直接进权重（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:83`），只在本阶段末尾取 `max(v, 0)`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:97`）。原因是解码器会给零以下的样本，抬升已把它们拉过零的像素是真画面（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:78`）。alpha 0 与内容矩形两道守卫在像素运算之前（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:66`、`Sources/PhotonsCore/Kernels/s2_tone_map.metal:73`），否则抬暗部会把黑边一起点亮。
+S2 在入口**不夹取**：`v = c.rgb` 直接进权重（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:81`），只在本阶段末尾取 `max(v, 0)`（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:99`）。原因是解码器会给零以下的样本，抬升已把它们拉过零的像素是真画面。alpha 0 与内容矩形两道守卫在像素运算之前（`Sources/PhotonsCore/Kernels/s2_tone_map.metal:64`、`s2_tone_map.metal:71`），否则抬暗部会把黑边一起点亮。
 
 **开源对照**
 
-- darktable `toneequal`（`src/iop/toneequal.c`）：在场景线性相机 RGB 上按曝光八度建高斯权重系，解线性系统得到各区增益；本实现是显示参考域的三个互补窗口，没有空间项、没有解法——https://github.com/darktable-org/darktable/blob/master/src/iop/toneequal.c
-- RawTherapee `shadows/highlights`（`rtengine/ipshadowshighlights.cc`）：带半径的 Lab 亮度分带，是局部算子；本实现是逐像素、无半径的窗口，作用域只由蒙版决定——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/ipshadowshighlights.cc
+- darktable `toneequal`（`src/iop/toneequal.c`）：场景线性相机 RGB 上的八度高斯权重 + 线性解法；它**不归一化**，所以相邻区会有反号瓣。本实现是显示参考域的三个归一化高斯，没有空间项、没有解法——https://github.com/darktable-org/darktable/blob/master/src/iop/toneequal.c
+- RawTherapee / ART 的 `shadows/highlights`：固定分母的钟形权重（$\sum g(0)=1.7726$），凸组合因此不振铃；本实现的分母是逐像素精确的 $\sum b_i$，所以 $\sum w\equiv1$ 是浮点事实而不是常数近似——https://github.com/Beep6581/RawTherapee/blob/dev/rtengine/ipshadowshighlights.cc
+- LightZone 的分割 B 样条（`Spline.java`）：用精确的单位分割保证各段权重和恒为 1；本实现用高斯做同一件事，换来 $C^\infty$ 和全轴支撑。
 
 **取舍**
 
-- 单个 `shadows +100` 拿不到 0.90 EV：门会把它压到 0.50（`Sources/PhotonsCore/S2Regions.swift`）。阴影/中间调的满行程是标称值，不是保证值。
-- 高光只压缩白点以上的 HDR 尾部；SDR 里白点以上的像素本来就是白的，所以拖高光滑杆在 headroom 1 下看不到变化。这是 299 的有意行为，白点附近的观感由 `whites` 负责。
-- 两条接缝都是钉死的 1.5 EV（`Sources/PhotonsCore/S2Regions.swift:83`），不随画幅、不随内容自适应；动态范围很窄的图可能整幅落在某条接缝上，三个滑杆于是都动它。
-- 蒙版内的阴影/高光仍用 074 的两窗口 `region_weights`（`Sources/PhotonsCore/Kernels/tone_shape.metal:53`），与全局的三段**故意**不同步（`Sources/PhotonsCore/Kernels/tone_shape.metal:30`）。同一次拖动，全局与蒙版的响应因此不完全同形。
+- 单个 `shadows +100` / `midtones +100` / `highlights +100` 的满行程 1.24 / 0.96 / 0.83 EV 在中心成立，但接缝上的局部斜率会降到 0.717 / 0.765 / 0.774（085 是 0.30）；派单里 0.80 的数字是用**重标定前**的 0.90 / 0.70 / 0.60 行程测的，那时是 0.795 / 0.828 / 0.836。若要同时保住中心行程和 0.80 地板，需要更大的 $\sigma$ 或更远的中心，二者都会改变用户已经认可的区段位置。
+- 高光进了 band，但在 $\sigma=1.9$ 的归一化三高斯里，它对**阴影中心**的带动只有 0.00075 EV（对中间调中心是 0.0815 EV）。要让高光把阴影中心抬到 0.03 EV 需要 $\sigma\approx2.8$，而那时中间调对阴影的带动会变成 0.447，破坏验收 2 的 0.187±0.02 和「以中间为主」。这是一个有意的取舍，不是漏项。
+- $L=+8$、$h=-100$ 的输出从 299 的 1.798 EV 变成 2.681 EV：高光现在先作为 band 压 SDR 近白，肩只补差额；旧数字依赖「高光不进 band」，无法同时保留。
+- 蒙版内的阴影/高光仍用 074 的两窗口 `region_weights` / `region_weights3`（`Sources/PhotonsCore/Kernels/tone_shape.metal`），与全局的三段**故意**不同步。同一次拖动，全局与蒙版的响应因此不完全同形，等「两套体统一」的单独任务。
+- 权重中心与宽度是固定常数，不随画幅、不随内容自适应；动态范围很窄的图会整幅落在同一组权重上，三个滑杆于是都动它。
 
 ## 4.4 白点与黑点
 

@@ -2,7 +2,8 @@ import XCTest
 import Metal
 @testable import PhotonsCore
 
-/// 派单 079 §2.1.2 — **the mask's tone sliders are the global ones.**
+/// 派单 079 §2.1.2 — **the mask's tone sliders are the global ones** (except 299's 高光 and 306's
+/// Gaussian 阴影/中间调, which are intentionally still separate bodies).
 ///
 /// The defect this file pins: `s1_6_local` carried 019's arithmetic (affine ±0.15 level, a linear-light
 /// power for contrast, `1 − smoothstep(0, 0.5, lum)` / `smoothstep(0.5, 1, lum)` for the region lifts)
@@ -22,9 +23,12 @@ import Metal
 ///   ④ a neutral mask is **bit-identical** to no mask, and the tone bodies cost **< 0.2 ms** on a
 ///      4.10 Mpx frame.
 ///
-/// "The same numbers" is asserted the strong way: a mask that covers everything and carries one slider
-/// at ±100 must produce the *same pixels* as the global slider at ±100. The mask's coverage is 1 in the
-/// measured core, so the only possible difference is the arithmetic — which is the whole point.
+/// "The same numbers" is asserted the strong way for the end points and contrast: a mask that covers
+/// everything and carries one of those sliders at ±100 must produce the *same pixels* as the global
+/// slider. **306 carved the region lifts out of that equivalence**: S2's global 阴影/中间调 are now
+/// normalized Gaussians with recalibrated travels, while `s1_6_local` deliberately keeps 074's two
+/// windows and 0.90 EV (中部 path unification is a later task). The region tests therefore pin the
+/// local shape on its own and only *print* the global response.
 final class LocalToneTests: XCTestCase {
 
     // MARK: - fixtures
@@ -147,16 +151,14 @@ final class LocalToneTests: XCTestCase {
         return log2(max(percentile(lumas, 50), 1e-9))
     }
 
-    /// `shadows = +100` inside a mask: the **median stays** and **p5 lifts** — the shape the global
-    /// slider has had since 074 R2, and the shape 019's linear-luma window could not have (that window
-    /// was centred on mid-grey: `1 − smoothstep(0, 0.5, lum)` is 0.705 at lum 0.18, which is why the old
-    /// local slider lifted the whole masked picture).
+    /// `shadows = +100` inside a mask: the **median stays** and **p5 lifts** — 074 R2's shape for the
+    /// local path.
     ///
-    /// The median limit is 074's own convention (`ToneMapTests`: 2 codes when the frame's p50 is above
-    /// −4 EV, 5 when it sits *inside* the shadow window's foot). A frame whose median is inside the
-    /// window cannot be "median-neutral" by construction — and that is the **global** slider's measured
-    /// behaviour, not the mask's: the two are the same pixels here (asserted below, and the response
-    /// curves are compared percentile by percentile).
+    /// **306 removed the "a full-coverage mask is the global slider" comparisons for the region
+    /// lifts.** The global chain is now three normalized Gaussians with recalibrated travels, while
+    /// `s1_6_local` deliberately stays on 074's two windows and 0.90 EV (§4 of 306: the two bodies are
+    /// unified in a later task). The printed global columns remain as context, but the test no longer
+    /// asserts a median/percentile/mean equivalence that the task intentionally broke.
     func testMaskedShadowsLiftTheToeAndLeaveTheMedian() throws {
         for name in Self.frames {
             let image = try frame(name)
@@ -182,22 +184,15 @@ final class LocalToneTests: XCTestCase {
             let p5EV = log2(linear(local[1]) / max(linear(base[1]), 1e-6))
             let p50EV = medianEV(image, pixels)
             let medianLimit = p50EV >= -3.9 ? 1.0 : 4.0    // 074's budget, see the doc comment
-            print(String(format: "079 local shadows +100 %@: p50 %.2f EV, Δmedian %+.1f code (limit %.0f), "
-                         + "Δp5 %+.1f code (%+.2f EV), Δp20 %+.1f, Δp95 %+.1f; global Δmedian %+.1f; "
-                         + "correlation %.4f, worst |Δ| vs global %.2f code",
+            print(String(format: "079/306 local shadows +100 %@: p50 %.2f EV, Δmedian %+.1f code "
+                         + "(limit %.0f), Δp5 %+.1f code (%+.2f EV), Δp20 %+.1f, Δp95 %+.1f; "
+                         + "global Δmedian %+.1f (reported, no longer compared)",
                          name, p50EV, medianShift, medianLimit, p5, p5EV,
-                         dLocal[2], dLocal[7], dGlobal[4], pearson(dLocal, dGlobal),
-                         meanAbsDifference(maskedImage, globalImage, pixels) * 255))
+                         dLocal[2], dLocal[7], dGlobal[4]))
 
             XCTAssertLessThanOrEqual(abs(medianShift), medianLimit,
                                      "\(name): a masked shadows lift must not move the median")
-            XCTAssertEqual(medianShift, dGlobal[4], accuracy: 0.5,
-                           "\(name): the mask must not add a median shift the global slider does not have")
             XCTAssertGreaterThanOrEqual(p5, 4.0, "\(name): the masked shadow lift must reach p5")
-            XCTAssertGreaterThanOrEqual(pearson(dLocal, dGlobal), 0.98,
-                                        "\(name): the masked and the global response must be one curve")
-            XCTAssertLessThanOrEqual(meanAbsDifference(maskedImage, globalImage, pixels) * 255, 1.0,
-                                     "\(name): a fully covered mask is the global slider")
         }
     }
 
@@ -337,8 +332,10 @@ final class LocalToneTests: XCTestCase {
     /// curve", since S1.6 is upstream of S2 and both paths run the same functions
     /// (`tone_shape.metal`) in the same order.
     ///
-    /// **299** pins shadows and the end points only: the global 高光 became a shoulder above white,
-    /// while the mask keeps 074's EV displacement on purpose (a later task unifies them).
+    /// **299** pins the end points only: the global 高光 became a shoulder above white, while the mask
+    /// keeps 074's EV displacement on purpose (a later task unifies them). **306** adds 阴影 to the
+    /// same exclusion: the global chain is now normalized Gaussians and `s1_6_local` still runs 074's
+    /// two windows with the old travels, so a full-coverage mask is *not* the global slider there.
     func testMaskedToneIsTheGlobalTone() throws {
         let image = try frame(Self.frames[0])
         let graph = try makeGraph(image, identity: "local-tone-same")
@@ -370,13 +367,9 @@ final class LocalToneTests: XCTestCase {
                  masked: { _ in doc { $0.whites = 100 } }, global: { _ in globalDoc { $0.whites = 100 } }),
             Case(name: "whites−100", unit: -100,
                  masked: { _ in doc { $0.whites = -100 } }, global: { _ in globalDoc { $0.whites = -100 } }),
-            Case(name: "shadows+100", unit: 100,
-                 masked: { _ in doc { $0.shadows = 100 } }, global: { _ in globalDoc { $0.shadows = 100 } }),
-            Case(name: "shadows−100", unit: -100,
-                 masked: { _ in doc { $0.shadows = -100 } }, global: { _ in globalDoc { $0.shadows = -100 } }),
-            // 299: 高光 is deliberately **not** in this list. The global slider is a C¹ slope shoulder
-            // above display white; the mask still runs 074's EV displacement (`LocalAdjustU.b.y`).
-            // The two bodies are unified by a later task, not here.
+            // 299/306: 高光 and 阴影 are deliberately **not** in this list. The global chain is a
+            // Gaussian band partition plus 299's shoulder; the mask still runs 074's windows and
+            // travels. The two bodies are unified by a later task, not here.
         ]
 
         for c in cases {

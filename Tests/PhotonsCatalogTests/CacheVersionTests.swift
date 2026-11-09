@@ -170,8 +170,8 @@ final class CacheVersionTests: XCTestCase {
         // The stages whose arithmetic moved after `graph-v1` was set (098 moved contrast out of S2;
         // 159/228 gave it the display-domain residual operator; 124 moved 高光's white closure above
         // the HDR range).
-        XCTAssertEqual(StageAlgorithmVersion.toneMap, 6,
-                       "299: 高光 is a C¹ slope shoulder above display white")
+        XCTAssertEqual(StageAlgorithmVersion.toneMap, 7,
+                       "306: normalized Gaussian bands (1.24/0.96/0.83 EV travel)")
         XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 8,
                        "179: 原色校准 joined S1 (a 3×3 primaries matrix at its exit)")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
@@ -565,7 +565,7 @@ final class CacheVersionTests: XCTestCase {
         XCTAssertEqual(edit.keyMaterial(.toneMap),
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
-        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=6"))
+        XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=7"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=8"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=4"))
     }

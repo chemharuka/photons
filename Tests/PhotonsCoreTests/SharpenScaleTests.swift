@@ -377,7 +377,7 @@ final class SharpenScaleTests: XCTestCase {
         // repair to S1 source pixels and bumped it 1 → 2. The claim is "249 touched heal only".
         let unchanged: [(RenderStage, Int)] = [
             (.geometry, 4), (.sceneLinear, 8), (.maskAtlas, 6), (.localApply, 4),
-            (.curve, 2), (.contrast, 3), (.toneMap, 6), (.color, 1), (.bw, 1), (.localColor, 1),
+            (.curve, 2), (.contrast, 3), (.toneMap, 7), (.color, 1), (.bw, 1), (.localColor, 1),
             (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4),
             (.vignette, 3), (.grain, 1), (.display, 1),
         ]

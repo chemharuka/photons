@@ -196,23 +196,23 @@ final class WindowTests: XCTestCase {
              "16a31c311a637d4cb5444b50d86fa1826e64864bcf86073a5de46a84a8c83eab|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
             // 159: the contrast link is seeded by the tone map and feeds colour; alg=3.
             // 228 换算子后重钉（alg=2→3）
-            ("toneMap", "22bb19d09c0be8809bca124e7b4fcf4d170f5e1429535b160fa5c37f068b020e",
-             "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff|hi=-30.00000;sh=15.00000;alg=6"),
+            ("toneMap", "a89f38baaf38871928dad58f11268d922e773d07d15abc63fd57d3b32d2f0d36",
+             "fbafdf0c6cfac2eac33f569c5b01c3f4aaf16cf2560b5e45ca0d0bf05abed6ff|hi=-30.00000;sh=15.00000;alg=7"),
             // 228 换算子后重钉（alg=2→3）
-            ("contrast", "a4c9893c5648460db4fd76fd997ecd795e4af7a3bf6a824ecf05ce25244c96a3",
-             "22bb19d09c0be8809bca124e7b4fcf4d170f5e1429535b160fa5c37f068b020e|contrast|con=20.00000;alg=3"),
+            ("contrast", "02e27a184fc01e3bad8e580cce222fea5c8f2771b854bf20752a077a7be0b315",
+             "a89f38baaf38871928dad58f11268d922e773d07d15abc63fd57d3b32d2f0d36|contrast|con=20.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("color", "be20f5b37597ca4d8ac1aaf7e76cb665eb2f1f681cf9c54f50dbc8f0413f06fd",
-             "a4c9893c5648460db4fd76fd997ecd795e4af7a3bf6a824ecf05ce25244c96a3|vib=15.00000;sat=-10.00000;alg=1"),
+            ("color", "662fbec3ee6ea1e2b1b9ffc9da10c7dbac97c292f3365a69119d4c897f6a6438",
+             "02e27a184fc01e3bad8e580cce222fea5c8f2771b854bf20752a077a7be0b315|vib=15.00000;sat=-10.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("hsl", "1f43e64d2fa5015d94883b9d32f89f386b9dcf2a924711f896a2e00f0c2f16e2",
-             "be20f5b37597ca4d8ac1aaf7e76cb665eb2f1f681cf9c54f50dbc8f0413f06fd|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
+            ("hsl", "f95e2bbd6346f92461eb0b5ff303ad23768709a8950e85f62f217115c16d6851",
+             "662fbec3ee6ea1e2b1b9ffc9da10c7dbac97c292f3365a69119d4c897f6a6438|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
             // 228 换算子后重钉（alg=2→3）
-            ("vignette", "2dd482514281af6326aead61d0f2cdd6489e112fe8e4f68ba92ab318711f306e",
-             "1f43e64d2fa5015d94883b9d32f89f386b9dcf2a924711f896a2e00f0c2f16e2|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
+            ("vignette", "5d1edd0a09a6a514ae50b25db99b7da171fbcbc69f618186a5eb4ec087a464cd",
+             "f95e2bbd6346f92461eb0b5ff303ad23768709a8950e85f62f217115c16d6851|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
             // 228 换算子后重钉（alg=2→3）
-            ("display", "3232eadea8a5bf07ace83976378412cd3320a006e8c41e71217a5c2bdeeb768f",
-             "2dd482514281af6326aead61d0f2cdd6489e112fe8e4f68ba92ab318711f306e|sRGB;bits=8;headroom=1.000|1500x1000"),
+            ("display", "c47b2d78518e7199f22a1016936b587668dc6d7dfae9494fb2113bf169ccd647",
+             "5d1edd0a09a6a514ae50b25db99b7da171fbcbc69f618186a5eb4ec087a464cd|sRGB;bits=8;headroom=1.000|1500x1000"),
         ]
 
         let actual: [String: String] = [
