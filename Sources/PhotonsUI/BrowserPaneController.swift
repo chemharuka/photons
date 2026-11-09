@@ -724,7 +724,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         let display = displayPixels
         cell.thumbnailDisplayPixels = display
         let document = document(for: asset)
-        let key = ThumbnailProvider.hdKey(for: asset, document: document)
+        let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
         if let cached = provider.serveFromMemory(for: key, display: display) {
             cell.applyThumbnail(cached, key: key, display: display)
             return
@@ -750,7 +750,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let provider = provider(), thumbRequests[row] == nil else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
         let token = provider.request(index: row, asset: asset, fileURL: url,
-                                     document: document(for: asset), tier: tier, spec: .hd,
+                                     document: document(for: asset), tier: tier, spec: .hdJPEG,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(row: idx, key: key, display: display, image: image)
@@ -817,7 +817,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             guard row < session.assets.count else { continue }
             let asset = session.assets[row]
             let display = displayPixels
-            let key = ThumbnailProvider.hdKey(for: asset, document: document(for: asset))
+            let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset))
             if provider.memoryImage(for: key, display: display) != nil { continue }
             if thumbRequests[row] != nil { continue }
             requestThumbnail(row: row, asset: asset, tier: cellTier, display: display,
