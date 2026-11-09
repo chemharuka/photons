@@ -118,10 +118,15 @@ extension InspectorView {
 
     // MARK: 底部三件
 
-    /// 九宫格 / 应用 / 取消 — 卡片最后一行（086）。
+    /// 九宫格 / 应用 / 取消 — 卡片最后一行（086）。317：同排左边多一个「不出像素」勾选框。
     @ViewBuilder
     private func cropBottomRow(_ tool: CropToolController?) -> some View {
         HStack(spacing: 6) {
+            StaysInsidePixelsCheckbox(isOn: tool?.cropStaysInsidePixels ?? false,
+                                      onToggle: { tool?.setCropStaysInsidePixels($0) })
+                .fixedSize()
+                .background(CropRowProbeHost(rowID: CropCardID.staysInsidePixels))
+            Spacer(minLength: 4)
             CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
                      help: "裁切框上的三分线（视图态，不进文档）",
                      action: { loupe?.cropTool.toggleGrid() })
@@ -1185,6 +1190,50 @@ struct CropChip: View {
     static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }
 }
 
+// MARK: - 317 「不出像素」
+
+/// The 裁切 card's **「不出像素」** checkbox — a real `NSButton(checkboxWithTitle:)`, like every other
+/// leaf in this card, so the panel acceptance can find it, read its state and click it without an
+/// accessibility tree.
+///
+/// The checkbox owns **no state**: `isOn` is `CropToolController.cropStaysInsidePixels` (a preference,
+/// `photons.cropStaysInsidePixels`) and the click goes back through `setCropStaysInsidePixels`, which
+/// is also where the one-shot inscription lives. A second copy here would let the box and the law
+/// disagree, which is 082's rule for every row of this card.
+struct StaysInsidePixelsCheckbox: NSViewRepresentable {
+
+    static let title = "不出像素"
+    static let identifier = "inspector.crop.staysInsidePixels"
+
+    let isOn: Bool
+    let onToggle: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSButton {
+        let box = NSButton(checkboxWithTitle: Self.title, target: context.coordinator,
+                           action: #selector(Coordinator.fire(_:)))
+        box.setButtonType(.switch)
+        box.controlSize = .small
+        box.font = .systemFont(ofSize: 11)
+        box.state = isOn ? .on : .off
+        box.toolTip = "勾选后裁切框只能在照片像素内移动（不出黑角），尺寸不变"
+        box.setAccessibilityIdentifier(Self.identifier)
+        return box
+    }
+
+    func updateNSView(_ box: NSButton, context: Context) {
+        context.coordinator.onToggle = onToggle
+        box.state = isOn ? .on : .off
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onToggle: onToggle) }
+
+    final class Coordinator: NSObject {
+        var onToggle: (Bool) -> Void
+        init(onToggle: @escaping (Bool) -> Void) { self.onToggle = onToggle }
+        @objc func fire(_ sender: NSButton) { onToggle(sender.state == .on) }
+    }
+}
+
 // MARK: - 键入的自定义比例（104: 内联字段取代居中面板）
 
 /// The one `W:H` commit. 104 replaced the centred `CropRatioPrompt` panel with the inline field in
@@ -1242,6 +1291,8 @@ enum CropCardID {
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"
+    /// 317: the 「不出像素」 checkbox, in the same bottom row, left of 九宫格.
+    static let staysInsidePixels = "staysInsidePixels"
 
     /// 082: the four section titles, in the order they are stacked.
     static var sections: [String] { CropSection.displayOrder.map(\.rawValue) }
