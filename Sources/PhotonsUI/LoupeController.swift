@@ -7025,7 +7025,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 0.5 rung a `.full` crop was projected as a top-left quarter and only jumped to the whole
         // picture once the 1.0 rung landed. Dividing here makes the publication rung-independent and
         // value-for-value the same frame `framing()` draws.
-        publishIngestedSource(graphAtFrame?.sourceSize, decodeScale: Double(frame.decodeScale))
+        //
+        // 298 — **published after the stand-in and the matte come down, not before.** The publication
+        // re-places the stand-in through `framing()`, and on the 0.5 rung the old mapping measured it
+        // half-size; doing that before this present's `presentCanvas` left the wrong rect on screen
+        // for the drawable wait. Publishing once the photo is actually on the layer means no frame is
+        // ever drawn with a stand-in rect that disagrees with the photograph's quad.
         let canvas = viewportPixels
         // 068: **while the hand is moving, nothing new goes on the canvas.** A frame that lands now was
         // either rendered for a canvas the hand has already left, or for this one — but fitted into a
@@ -7126,6 +7131,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 258 — the new photo's pixels are on the layer now; the matte cover is no longer hiding
         // anything (and leaving it up would hide the picture itself).
         canvasView.endPhotoSwitchCover()
+        // 298 — the new ingested source is published only now: the stand-in is down, so the
+        // re-placement inside cannot paint a half-size rect between this present and the matte's
+        // teardown. `presentCanvas` above still ran on the frame's own geometry (settledPlacement).
+        publishIngestedSource(graphAtFrame?.sourceSize, decodeScale: Double(frame.decodeScale))
         presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.

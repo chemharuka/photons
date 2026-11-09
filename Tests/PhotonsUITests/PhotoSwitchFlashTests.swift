@@ -226,6 +226,79 @@ final class PhotoSwitchFlashTests: XCTestCase {
         XCTAssertFalse(loupe.firstFramePlaceholderVisible, "the stand-in outlived the real frame")
     }
 
+    /// 298 — **the stand-in's rectangle is the presented frame's rectangle on every tick it is up.**
+    ///
+    /// The reported defect was no jump at all: while the viewer waited for the new frame, the stand-in
+    /// was re-placed through a `FrameTransform` that still carried the decode rung, so on the 0.5
+    /// preview rung it covered only the top-left quarter and the matte showed through the other
+    /// three. This drives the shipped long-tail state — the viewed photo's resident buffer is its
+    /// 0.5 preview rung, exactly what a return to a frame the ladder has not promoted yet sees —
+    /// and compares the stand-in against `lastPresented.pictureQuad`, the real frame's own quad, on
+    /// every sampled tick. The 2 pt tolerance is geometric, not a relaxation to an aspect ratio.
+    func testTheStandInRectEqualsThePresentedQuadOnTheSwitchTick() throws {
+        let first = try fixture("L1030433.dng")
+        let second = try fixture("L1030402.dng")
+        let (editor, assets) = try makeEditor(files: [first, second], seeded: [true, true])
+        let loupe = editor.rootView.loupeController
+        let session = editor.session
+
+        editor.session.selectOnly(assets[0].id)
+        pump(0.05)
+        editor.session.mode = .loupe
+        editor.rootView.showModule(for: .loupe)
+        XCTAssertTrue(waitFor(90) { loupe.lastFrame != nil }, "A never presented")
+        let presented = try XCTUnwrap(loupe.lastPresented,
+                                      "A presented but recorded no quad")
+
+        // Deterministically put A back on the 0.5 rung: a 60 MP full development takes hundreds of
+        // milliseconds, so leaving and returning before it lands is the state a real re-entry
+        // sees. The seam is the controller's own (it installs the buffer and its identity exactly
+        // the way `makeFrame` leaves them), so the gate cannot pass just because the full rung
+        // happened to win the race first.
+        let stored = try pixelSize(of: first)
+        let rung = ImageSize(width: max(1, stored.width / 2), height: max(1, stored.height / 2))
+        let preview = LinearImage(width: rung.width, height: rung.height,
+                                  rgba: [Float16](repeating: 0,
+                                                  count: rung.width * rung.height * 4),
+                                  colorSpace: "extendedLinearSRGB", decoderVersion: "test")
+        loupe.installDecodedRungForTesting(preview, scale: 0.5)
+
+        let scale = max(1, loupe.backingScale)
+        let expected = CGRect(x: Double(presented.pictureQuad.x) / scale,
+                              y: Double(presented.pictureQuad.y) / scale,
+                              width: Double(presented.pictureQuad.width) / scale,
+                              height: Double(presented.pictureQuad.height) / scale)
+
+        // Leave and come straight back. B never gets a frame, so `decoded` is still A's 0.5 rung
+        // when A is re-armed; that is what makes the stand-in's own rect the measurement.
+        session.activate(assets[1].id)
+        editor.rootView.showModule(for: .loupe)
+        session.activate(assets[0].id)
+        editor.rootView.showModule(for: .loupe)
+
+        var sampled = 0
+        for _ in 0..<8 {
+            guard loupe.firstFramePlaceholderVisible && loupe.isCanvasCoveredForTesting else { break }
+            let rect = loupe.placeholderRectForTesting
+            print(String(format: "298 stand-in tick %d: rect %.1f,%.1f %.1fx%.1f"
+                         + " · presented quad %.1f,%.1f %.1fx%.1f",
+                         sampled, rect.minX, rect.minY, rect.width, rect.height,
+                         expected.minX, expected.minY, expected.width, expected.height))
+            XCTAssertLessThanOrEqual(abs(rect.minX - expected.minX), 2,
+                                     "tick \(sampled): stand-in left edge is not the frame's")
+            XCTAssertLessThanOrEqual(abs(rect.minY - expected.minY), 2,
+                                     "tick \(sampled): stand-in top edge is not the frame's")
+            XCTAssertLessThanOrEqual(abs(rect.width - expected.width), 2,
+                                     "tick \(sampled): stand-in width is not the frame's")
+            XCTAssertLessThanOrEqual(abs(rect.height - expected.height), 2,
+                                     "tick \(sampled): stand-in height is not the frame's")
+            sampled += 1
+            pump(0.002)
+        }
+        XCTAssertGreaterThanOrEqual(sampled, 1,
+                                    "no tick showed a covered stand-in — the fixture missed the 0.5 rung")
+    }
+
     /// 反向门 ① — without the clear/cover step the very first sample is still A's texture.
     func testReverseGateWithoutClearingTheOldFrameShowsThePreviousPhoto() throws {
         let first = try fixture("L1030433.dng")
