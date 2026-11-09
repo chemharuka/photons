@@ -78,9 +78,10 @@ public struct CropGeometry: Sendable, Equatable {
         self.rotation = RotationMatrix(degrees: geometry.straightenDegrees)
         self.crop = crop
         self.source = oriented
-        // 162: the canvas is the crop's own pixel size at 0/90/180/270 and the rotated crop's exact
-        // bounding box at every other angle. A right angle therefore cannot grow the canvas — that
-        // was 132's mistake, and the user's first 162 report.
+        // 301 (方案 A): the canvas is the **rotated crop frame itself** — its own `W × H`, at every
+        // angle. `CropMath.canvasSize` therefore returns `frameSize` (the AABB rule 162 introduced is
+        // gone); a right angle is the same answer it always was. The keystone keeps its quadrilateral
+        // canvas inside `canvasSize`.
         self.canvas = CropMath.canvasSize(crop: crop, in: source,
                                           straightenDegrees: geometry.straightenDegrees,
                                           quarterTurns: geometry.quarterTurns,

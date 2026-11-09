@@ -266,22 +266,12 @@ static inline void s0_body(texture2d<float, access::read> src,
         }
     }
 
-    // ── 279 · the kept picture is the **crop**, not the photograph ──────────────────────────────
-    // With the AABB origin (`(I−R)(cropCentre−photoCentre)`) the canvas' margins are *outside* the
-    // turned crop but still inside the photograph, so the final `0…1²` guard below is not the
-    // picture's edge: it would show the neighbouring photograph in the canvas corners and make a
-    // 45° crop look unrelated to its frame. Clip the sample to the crop rect here. `p.c` is the
-    // crop in the turned frame (`cropped` is in the same space before the 90° un-turn); the
-    // keystone carries its own rect, so its block is skipped. Only the rotating, unflipped
-    // instantiation runs this — θ = 0 has `canvas == frame` and no margins, and 274 owns the flip
-    // dimension.
-    if (HAS_ROTATION && !HAS_FLIP && p.h0.w <= 0.5) {
-        if (cropped.x < p.c.x || cropped.x > p.c.x + p.c.z ||
-            cropped.y < p.c.y || cropped.y > p.c.y + p.c.w) {
-            dst.write(float4(0.0, 0.0, 0.0, 0.0), gid);
-            return;
-        }
-    }
+    // ── 301 · no crop-rect clip ─────────────────────────────────────────────────────────────────
+    // The canvas is the rotated crop frame itself (方案 A), so there are no AABB margins to hide:
+    // `p.c` is the whole canvas domain and the honest test is the `0…1²` photograph guard below.
+    // Before 301 this block compared the **photograph-space** sample `cropped` with the
+    // **canvas-space** `p.c`; once an inset crop was inscribed it painted valid pixels black
+    // (measured 7.4 % at 9°). Deleted.
 
     // ── 183 · the keystone ──────────────────────────────────────────────────────────────────────
     // A 3×3 homography between the **canvas' normalized box** and the picture's own, applied to the

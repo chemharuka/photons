@@ -1894,14 +1894,13 @@ public final class RenderGraph {
         // `window == nil`, so a zoomed crop workspace composed its full-size frame on the
         // photograph's own canvas — the crop's pivot instead of the AABB' — and the two pictures
         // disagreed by up to 59 code values (24.8 % of pixels by more than 2).
-        let expandedCanvas: ImageSize? = perspectiveCanvas == nil
-            && edit.geometry.straightenDegrees != 0
-            ? CropMath.canvasSize(crop: crop, in: sourceSize,
-                                  straightenDegrees: edit.geometry.straightenDegrees,
-                                  quarterTurns: edit.geometry.quarterTurns,
-                                  allowsOutsideSource: true,
-                                  perspective: nil)
-            : nil
+        // 301 (方案 A, 帧优先): there is no expanded baseline any more. The canvas **is** the rotated
+        // crop frame (`CropMath.canvasSize`), so the picture's frame and the canvas are the same
+        // rectangle at every angle. `baseline == frame`, `inset == 0`, and `S0` samples `p.c` over
+        // the canvas' whole domain. The old AABB branch is what put a tilted black ring around the
+        // photograph; the inset quantities below therefore all reduce to zero without a second
+        // rule (they still exist for the kind check and the downstream arithmetic).
+        let expandedCanvas: ImageSize? = nil
         // The whole output at this scale: the AABB when there is an angle, the picture otherwise.
         let baseline = expandedCanvas.map {
             ImageSize(width: max(1, Int((Double($0.width) * scale).rounded())),

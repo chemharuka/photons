@@ -42,10 +42,14 @@ final class CanvasSpacesTests: XCTestCase {
                                                          allowsOutsideSource: true)
                         XCTAssertEqual(cg.canvas, legacy,
                                        "canvas drifted: \(source.keyString) \(crop.keyString) θ=\(degrees) q=\(turns)")
-                        // The continuous extent and the integer canvas agree to within the one `ceil`.
+                        // 301 — the canvas **is the crop frame** at every angle. `frameExtent` is
+                        // still the turned frame's AABB (the crop's legal region, S4's builder),
+                        // which at an angle is *larger* than the frame; it is no longer the canvas.
+                        XCTAssertEqual(cg.canvas, cg.frameSize,
+                                       "canvas is not the crop frame: \(source.keyString) \(crop.keyString) θ=\(degrees) q=\(turns)")
                         let e = cg.frameExtent
-                        XCTAssertEqual(Double(cg.canvas.width), e.width, accuracy: 1.0)
-                        XCTAssertEqual(Double(cg.canvas.height), e.height, accuracy: 1.0)
+                        XCTAssertGreaterThanOrEqual(e.width + 1e-9, Double(cg.canvas.width))
+                        XCTAssertGreaterThanOrEqual(e.height + 1e-9, Double(cg.canvas.height))
                     }
                 }
             }
@@ -91,21 +95,22 @@ final class CanvasSpacesTests: XCTestCase {
         }
     }
 
-    // MARK: the inset — the half pixel that used to be truncated
+    // MARK: the inset — 301 removes it from the render
 
-    func testTheInsetIsContinuousNotTruncated() {
-        // A 1000 × 700 crop turned by 7° has a fractional extent; whatever the parity of
-        // `canvas − frame`, the continuous inset must be exactly half the difference.
-        let source = ImageSize(width: 4000, height: 3000)
-        let cg = CropGeometry(geometry: geometry(CropRect.full, degrees: 7), source: source)
-        let dx = Double(cg.canvas.width - cg.frameSize.width)
-        let dy = Double(cg.canvas.height - cg.frameSize.height)
-        XCTAssertEqual(cg.canvasInset.x, dx / 2, accuracy: 1e-12)
-        XCTAssertEqual(cg.canvasInset.y, dy / 2, accuracy: 1e-12)
-        // The historical integer spelling truncates; the type must not.
-        let truncated = CropMath.canvasOrigin(crop: cg.crop, in: cg.source,
-                                              straightenDegrees: 7, quarterTurns: 0)
-        XCTAssertEqual(Double(truncated.x), dx / 2, accuracy: 0.5)
+    func testTheCanvasHasNoInsetAtAnyAngle() {
+        // 301 (方案 A) — the canvas *is* the rotated crop frame, so the renderer's inset is exactly
+        // zero: `plan` no longer grows a baseline and `CropMath.canvasOrigin` answers `(0, 0)`.
+        // (`CropGeometry.canvasInset` still spells the old AABB margin; it is no longer what places
+        // the picture in the output, which is why this test asks the render path's own function.)
+        for degrees in [0.0, 7, 9, 15, 45, -12.5] {
+            let source = ImageSize(width: 4000, height: 3000)
+            let cg = CropGeometry(geometry: geometry(CropRect.full, degrees: degrees), source: source)
+            XCTAssertEqual(cg.canvas, cg.frameSize, "θ=\(degrees): the canvas must be the frame")
+            let origin = CropMath.canvasOrigin(crop: cg.crop, in: source,
+                                               straightenDegrees: degrees, quarterTurns: 0)
+            XCTAssertEqual(origin.x, 0, "θ=\(degrees): the canvas origin must be zero")
+            XCTAssertEqual(origin.y, 0, "θ=\(degrees): the canvas origin must be zero")
+        }
     }
 
     // MARK: frame ⇄ canvas
@@ -123,15 +128,23 @@ final class CanvasSpacesTests: XCTestCase {
         }
     }
 
-    func testFrameCornersLandInsideTheCanvas() {
+    func testTheCropFrameIsTheCanvas() {
+        // 301 — the crop frame and the output canvas are the same rectangle, so the frame's four
+        // corners are `(0, 0) … (W, H)` in canvas pixels at every angle. (The old assertion read the
+        // AABB `frameQuadInCanvas`, whose margin is no longer part of the output.)
         for degrees in angles {
             let cg = CropGeometry(geometry: geometry(CropRect.full, degrees: degrees),
                                   source: ImageSize(width: 4000, height: 3000))
-            for corner in cg.frameQuadInCanvas {
-                XCTAssertGreaterThanOrEqual(corner.x, -0.5, "θ=\(degrees)")
-                XCTAssertGreaterThanOrEqual(corner.y, -0.5, "θ=\(degrees)")
-                XCTAssertLessThanOrEqual(corner.x, Double(cg.canvas.width) + 0.5, "θ=\(degrees)")
-                XCTAssertLessThanOrEqual(corner.y, Double(cg.canvas.height) + 0.5, "θ=\(degrees)")
+            XCTAssertEqual(cg.canvas, cg.frameSize, "θ=\(degrees)")
+            let corners = [(0.0, 0.0), (Double(cg.canvas.width), 0.0),
+                           (Double(cg.canvas.width), Double(cg.canvas.height)),
+                           (0.0, Double(cg.canvas.height))]
+            XCTAssertEqual(corners.count, 4)
+            for corner in corners {
+                XCTAssertGreaterThanOrEqual(corner.0, -0.5, "θ=\(degrees)")
+                XCTAssertGreaterThanOrEqual(corner.1, -0.5, "θ=\(degrees)")
+                XCTAssertLessThanOrEqual(corner.0, Double(cg.canvas.width) + 0.5, "θ=\(degrees)")
+                XCTAssertLessThanOrEqual(corner.1, Double(cg.canvas.height) + 0.5, "θ=\(degrees)")
             }
         }
     }

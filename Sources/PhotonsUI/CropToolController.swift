@@ -215,10 +215,16 @@ public final class CropToolController {
     private var rotating = false
     private var rotateStart: Double = 0
 
-    /// The 803aff6 "框必须内切于旋转后的照片" rule — **off by default since 132** (user 2026-10-29:
-    /// the crop may leave the picture; the pixels outside are black, and the frame turns red instead
-    /// of being pulled back). A test flips it to prove the old containment behaviour still exists.
-    var clampsToRotatedFrame = false
+    /// The 803aff6 "框必须内切于旋转后的照片" rule — **on since 301** (方案 A, 帧优先).
+    ///
+    /// 132 had made it opt-in so a crop could leave the picture and show black corners. Once the
+    /// output canvas is the rotated crop frame itself, black corners would be *inside* the output
+    /// (the crop frame may still cover the turned photo's empty corners), so the frame is kept
+    /// inscribed: `effectiveCrop` — which the overlay, the readout, 应用 and the renderer all read —
+    /// shrinks it to the turned picture. That is what makes the crop frame's four corners and the
+    /// rendered picture support edge the same rectangle. A test flips it to `false` to prove the
+    /// old containment behaviour is still reachable.
+    var clampsToRotatedFrame = true
 
     public init(session: CatalogSession?) {
         self.session = session
