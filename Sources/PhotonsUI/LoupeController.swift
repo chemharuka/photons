@@ -33,7 +33,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let canvas: ImageSize
         public let content: ImageSize
         /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.photoRect`,
-        /// carried so the present pass can paint the canvas matte (`#0F0F0F`) around the picture and
+        /// carried so the present pass can paint the canvas matte (`#202020`) around the picture and
         /// never over it. The letterbox bands are *in* the texture (S2/S4 write 0 outside the picture), so
         /// this rect is the only thing that says where they are.
         public let photoRect: ImageRect
@@ -41,7 +41,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// opposed to `photoRect` (where the photograph is). They differ exactly when the document is
         /// straightened *and* the frame is a window (1:1 and beyond, or zoomed out): there the canvas
         /// is the turned crop's bounding box, and painting only the picture left its margin to the
-        /// clear colour `#0F0F0F` — 「旋转后缩小，画布外的遮罩侵入了画布」. Equal to `photoRect` at
+        /// clear colour `#202020` — 「旋转后缩小，画布外的遮罩侵入了画布」. Equal to `photoRect` at
         /// every right angle and at 适应, where the picture *is* the whole canvas.
         public let presentRect: ImageRect
         /// The output window this frame was rendered for, in **content pixels** of the whole frame
@@ -1273,8 +1273,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     public override func loadView() {
         container.wantsLayer = true
-        // 054: the view behind the canvas is the same `#0F0F0F` as the matte the pass paints, so a
-        // resize that exposes it for a frame shows grey, not a black edge.
+        // 054: the view behind the canvas is the same matte the pass paints, so a resize that exposes
+        // it for a frame shows grey, not a black edge. 315: it follows `CanvasBackdrop.current` and is
+        // re-read on `.canvasBackdropDidChange` (`observeCanvasBackdrop`).
         container.layer?.backgroundColor = NSColor.canvasMatte.cgColor
         canvasView.frame = container.bounds
         canvasView.autoresizingMask = [.width, .height]
@@ -1348,6 +1349,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         observeModel()
         observeScreenChanges()
+        observeCanvasBackdrop()
         refreshDisplay()
         syncZoomSlider()
     }
@@ -1522,6 +1524,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
             guard (note.object as? NSWindow) === window else { return }
             self.endLiveResize()
         })
+    }
+
+    /// 315 — the canvas colour is a preference now. Two things in this controller **store** it: the
+    /// container layer behind the canvas (what a resize exposes for a frame). The canvas' own layers
+    /// observe the notification themselves (`LoupeCanvasView.applyCanvasBackdrop`), and the pass's
+    /// clear colour is recomputed per present — but the frame already on the screen was cleared with
+    /// the old stop, so it is re-presented: same texture, same geometry, only the clear colour differs,
+    /// and the photograph's pixels are untouched (`rePresentFrozen` draws the frozen frame again).
+    private func observeCanvasBackdrop() {
+        screenTokens.append(NotificationCenter.default.addObserver(
+            forName: .canvasBackdropDidChange, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.container.layer?.backgroundColor = NSColor.canvasMatte.cgColor
+                self.rePresentFrozen()
+            })
     }
 
     /// Re-read the screen's EDR budget and apply it to the layer. A no-op when nothing moved, so a
@@ -6856,7 +6873,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///     that content belongs. So a grown window shows more of the photograph's surroundings at
     ///     preview resolution instead of a grey or black band.
     ///   · **no backdrop cached yet** (a document opened seconds ago) → that area is the canvas colour
-    ///     `#0F0F0F`. Never black, never stretched: the fallback is the clear colour, in that order.
+    ///     `#202020`. Never black, never stretched: the fallback is the clear colour, in that order.
     @discardableResult
     private func rePresentFrozen() -> Bool {
         guard let frozen = frozenFrame, let presenter else { return false }

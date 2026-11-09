@@ -12,7 +12,7 @@ import Observation
 //   · **.document** — the box the user sees while *forming* the crop (user 2026-11-01: 画布 = 包住
 //     全部照片像素的最小矩形). The turned photograph's AABB (`photoExtent`), the crop frame placed
 //     inside it at `(canvas − frame)/2`, the photograph turned inside the canvas, and the corners the
-//     photograph does not cover painted `000000` — the `0F0F0F` matte is only ever *outside* this
+//     photograph does not cover painted `000000` — the `202020` matte is only ever *outside* this
 //     box. A crop frame may be dragged into those black corners; it may not leave the box.
 //
 // The type exists so a caller has to name which one it means. A `Bool` would be merged back into one

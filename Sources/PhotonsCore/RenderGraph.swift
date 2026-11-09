@@ -85,7 +85,7 @@ public struct RenderOptions: Sendable {
     /// frame: the output picture, no baseline, no inset. `.document` is the interaction canvas — the
     /// turned whole photograph's AABB (`CropGeometry.canvas(.document)`), with the crop frame centred
     /// inside it at `(canvas − frame)/2`, the photograph turned about that centre and the corners it
-    /// does not cover written `000000`. The `0F0F0F` matte is then only what lies **outside** the
+    /// does not cover written `000000`. The `202020` matte is then only what lies **outside** the
     /// box, which is the user's 2026-11-09 report: 0F 遮罩没有按旋转后的源画布大小.
     ///
     /// It is one value, not two booleans, and `plan` branches on it in exactly one place, because a
@@ -656,7 +656,7 @@ public final class RenderResult {
     ///
     /// `drawnRect` answers "where is the photograph", which is what a measurement wants. The present
     /// pass needs the other question — "how much of the surface is canvas" — because everything the
-    /// picture quad does not cover is painted with the pass's clear colour, `#0F0F0F`, which belongs
+    /// picture quad does not cover is painted with the pass's clear colour, `#202020`, which belongs
     /// *outside* the canvas only. A windowed (1:1 and beyond) render of a straightened document drew
     /// the picture alone, so the canvas' own margin — the turned crop's bounding box minus the crop,
     /// `(AABB − crop)/2` per side, 33 × 46 px at 25 % of a 2000 px crop — was the matte instead of
@@ -1918,7 +1918,7 @@ public final class RenderGraph {
         // the turned *whole photograph*'s AABB, so an expanded baseline comes back for that role and
         // only for it: `baseline = photoExtent × scale`, `inset = (baseline − frame)/2`, and S0's
         // existing "sampled past the photograph is background" branch paints the corners `000000`
-        // while the `0F0F0F` matte is left to the present pass outside this box. The export role is
+        // while the `202020` matte is left to the present pass outside this box. The export role is
         // byte-for-byte the 301 line above; the value is a `CanvasRole`, not a flag pair, so a future
         // caller cannot switch half of it.
         let expandedCanvas: ImageSize?

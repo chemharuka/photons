@@ -401,9 +401,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = true   // ⌘ / ⇧ come from AppKit
         collectionView.allowsEmptySelection = false
-        // 054/061: the grid's own surface is the canvas matte (`#0F0F0F`), not the window background
-        // showing through a clear collection view. Same constant as the loupe's bands, so the two
-        // views are one colour instead of "darkish" and "slightly different darkish".
+        // 054/061: the grid's own surface is the canvas matte, not the window background showing
+        // through a clear collection view. Same stop as the loupe's bands, so the two views are one
+        // colour instead of "darkish" and "slightly different darkish". 315: the stop is a preference,
+        // and both surfaces store it — `canvasBackdropChanged` re-reads them.
         collectionView.backgroundColors = [.canvasMatte]
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -441,6 +442,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         scroll.backgroundColor = .canvasMatte
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        // 315 — both of those assignments **store** the colour; a preference change has to reach them.
+        NotificationCenter.default.addObserver(self, selector: #selector(canvasBackdropChanged),
+                                              name: .canvasBackdropDidChange, object: nil)
         // Scrolling is what changes "what is visible", and that is what decides which in-flight
         // requests stay alive (006 §5). `postsBoundsChangedNotifications` is the cheapest hook —
         // no delegate, no timer.
@@ -510,6 +514,14 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     @objc private func clipViewBoundsChanged() {
         scheduleThumbnailReconcile()
+    }
+
+    /// 315 — the two surfaces that store the matte (`NSCollectionView.backgroundColors` and the
+    /// enclosing scroll view's background) re-read it when the preference moves. Both are set in
+    /// `loadView` from the same `NSColor.canvasMatte`, so this keeps "one colour" true after a change.
+    @objc private func canvasBackdropChanged() {
+        collectionView.backgroundColors = [.canvasMatte]
+        scrollView.backgroundColor = .canvasMatte
     }
 
     // MARK: model plumbing
