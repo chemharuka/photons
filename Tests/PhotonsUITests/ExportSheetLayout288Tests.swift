@@ -4,12 +4,14 @@ import SwiftUI
 @testable import PhotonsExport
 @testable import PhotonsUI
 
-/// 288 — 导出面板统一行栅格：每行同一套列、滑杆光条化、读数统一百分比。
+/// 302 — 导出面板改版 A：**三列**栅格（标签 / 控件 / 读数）、pitch 32、12 pt 控件。
 ///
-/// These tests read the hosted layout back through `ExportRowGridProbe` (one transparent background
-/// per column) — the same honest-anchor trick 217/243 used — plus `ExportControlFontProbe` for the
-/// font audit. They also pin the source-level rules that have no AppKit leaf under `swift test`
-/// (SwiftUI draws its own text and its `Slider` has no tick-mark API we can read).
+/// 288 的五列（96 / 8 / 240 / 46 / 52 / 64）是列表的度量，46 / 52 / 64 三列在商业产品里没有
+/// 对应物 —— 那是「重心不稳」的来源。302 把它收回表单，但 288 的**列对齐思想**原样保留：
+/// 同一列不许漂。这里的六条断言逐条按新栅格重写，一条没删。
+///
+/// 读回手段仍是 `ExportRowGridProbe`（每一列一块透明背景）+ `ExportControlFontProbe`（字号），
+/// 外加源码层守卫（SwiftUI 的 `Slider` 在 hosted `swift test` 里没有刻度 API 可读）。
 @MainActor
 final class ExportSheetLayout288Tests: XCTestCase {
 
@@ -45,15 +47,29 @@ final class ExportSheetLayout288Tests: XCTestCase {
                          draftStore: MemoryDraftStore())
     }
 
+    /// 302 —— 三段都展开的那份 hosted 视图：栅格断言要看**全部**行，不是首屏那 10 个 band。
+    private var allExpanded: ExportSectionCollapseStore {
+        ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: true,
+            ExportSheetView.hdrSection: true,
+            ExportSheetView.afterSection: true
+        ])
+    }
+
     private struct Hosted {
         let host: NSHostingView<ExportSheetView>
         let window: NSWindow
     }
 
-    private func host(model sheet: ExportSheetModel) throws -> Hosted {
+    private func host(model sheet: ExportSheetModel,
+                      expanded: Bool = true) throws -> Hosted {
         NSApplication.shared.setActivationPolicy(.accessory)
-        let host = NSHostingView(rootView: ExportSheetView(model: sheet))
-        host.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
+        let view = ExportSheetView(model: sheet,
+                                   sectionStore: expanded ? allExpanded
+                                                          : ExportSectionCollapseStore.memory())
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0,
+                            width: ExportRowGrid.panelWidth, height: ExportRowGrid.contentMaxHeight)
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.contentView = host
@@ -78,20 +94,19 @@ final class ExportSheetLayout288Tests: XCTestCase {
         descendants(of: host).compactMap { $0 as? ExportRowGridProbe }
     }
 
-    private func gridProbe(_ kind: ExportRowGridProbe.Kind, _ rowID: String,
-                           in host: NSView) throws -> ExportRowGridProbe {
-        let match = gridProbes(in: host).first { $0.kind == kind && $0.rowID == rowID }
-        return try XCTUnwrap(match, "no \(kind.rawValue) grid probe for \(rowID)")
-    }
-
     private func frame(of view: NSView, in host: NSView) -> NSRect {
         view.convert(view.bounds, to: host)
     }
 
-    /// The acceptance reads the label's **right** edge and the other columns' left edges.
+    /// 验收读的是：标签的**右**沿、控件的左沿、读数整块的**右**沿。
     private func edge(of probe: ExportRowGridProbe, in host: NSView) -> CGFloat {
         let rect = frame(of: probe, in: host)
-        return probe.kind == .label ? rect.maxX : rect.minX
+        switch probe.kind {
+        case .label, .value, .readout, .summary, .buttons:
+            return rect.maxX
+        default:
+            return rect.minX
+        }
     }
 
     private func numberField(_ axID: String, in host: NSView) throws -> NumberTextField {
@@ -116,85 +131,91 @@ final class ExportSheetLayout288Tests: XCTestCase {
         return try String(contentsOf: source, encoding: .utf8)
     }
 
-    // MARK: - §3.1 one grid
+    // MARK: - §3.1 one grid（288 五列 → 302 三列）
 
-    /// Every row on the sheet — five numeric rows plus every picker/text row — reports the same five
-    /// column x values. The numeric rows are checked in the three hosts that build them (default,
-    /// 长边, 长边百分比), because 长边 and 百分比 are mutually exclusive.
-    func testEveryRowSharesTheFiveColumnGrid() throws {
+    /// 每一行都报同一套三列 x：标签右沿 118、控件左沿 138、读数右沿 540（面板右 padding）。
+    /// 长边 / 百分比 / 原尺寸三种尺寸模式各自单独建一次视图，数值框仍落在同一根 x 上。
+    func testEveryRowSharesTheThreeColumnGrid() throws {
         let sheet = model()
-        let defaultHosted = try host(model: sheet)
-        let rows = gridProbes(in: defaultHosted.host).filter { $0.kind == .row }
-        XCTAssertGreaterThanOrEqual(rows.count, 13, "面板至少要有 13 行走同一栅格")
+        let hosted = try host(model: sheet)
+        let rows = gridProbes(in: hosted.host).filter { $0.kind == .row }
+        XCTAssertGreaterThanOrEqual(rows.count, 13, "三段展开后至少要有 13 行走同一栅格")
 
-        let kinds: [(ExportRowGridProbe.Kind, String)] = [
-            (.label, "label-右缘"), (.control, "control-左缘"), (.value, "value-左缘"),
-            (.unit, "unit-左缘"), (.accessory, "accessory-左缘")
+        let kinds: [(ExportRowGridProbe.Kind, String, CGFloat)] = [
+            (.label, "标签右沿", ExportRowGrid.labelRight),
+            (.control, "控件左沿", ExportRowGrid.controlLeft),
+            (.readout, "读数右沿", ExportRowGrid.readoutRight)
         ]
-        var baselines: [ExportRowGridProbe.Kind: CGFloat] = [:]
-        for (kind, name) in kinds {
-            let probes = gridProbes(in: defaultHosted.host).filter { $0.kind == kind }
+        for (kind, name, expected) in kinds {
+            let probes = gridProbes(in: hosted.host).filter { $0.kind == kind }
             XCTAssertGreaterThanOrEqual(probes.count, rows.count,
                                         "\(name)：每行都要有占位探针")
-            guard let first = probes.first else { XCTFail("\(name)：没有探针"); continue }
-            let baseline = edge(of: first, in: defaultHosted.host)
-            baselines[kind] = baseline
             for probe in probes {
-                let x = edge(of: probe, in: defaultHosted.host)
-                XCTAssertEqual(x, baseline, accuracy: 0.5,
-                               "288 · \(probe.rowID) 的 \(name) x=\(x)，首行 \(baseline)")
+                let x = edge(of: probe, in: hosted.host)
+                XCTAssertEqual(x, expected, accuracy: 0.5,
+                               "302 · \(probe.rowID) 的 \(name) x=\(x)，应为 \(expected)")
             }
         }
 
-        // Row height and within-section spacing.
-        let frames = rows.map { frame(of: $0, in: defaultHosted.host) }
+        // 行高 24、同节内行距 8（pitch 32）—— 节与节之间是 48（32 + 16），没有第三种。
         for row in rows {
-            XCTAssertEqual(frame(of: row, in: defaultHosted.host).height,
+            XCTAssertEqual(frame(of: row, in: hosted.host).height,
                            ExportRowGrid.rowHeight, accuracy: 0.5,
-                           "288 · \(row.rowID) 行高")
+                           "302 · \(row.rowID) 行高")
         }
-        let sorted = frames.sorted { $0.maxY > $1.maxY }
-        var gaps: [CGFloat] = []
+        // 行带之间的缝只有 8（pitch 32）；折叠段标题之前是 16。没有第三种。
+        let sorted = rows.map { frame(of: $0, in: hosted.host) }.sorted { $0.minY < $1.minY }
+        var pitches: [CGFloat] = []
         for index in 1..<sorted.count {
-            let gap = sorted[index - 1].minY - sorted[index].maxY
-            if gap >= 0 && gap < 15 { gaps.append(gap) }
+            let gap = sorted[index].minY - sorted[index - 1].maxY
+            let pitch = sorted[index].minY - sorted[index - 1].minY
+            // 8 = 同一节；48 = 中间隔着一个 24 高的折叠标题（16 + 24 + 8）。
+            XCTAssertTrue(abs(gap - ExportRowGrid.rowSpacing) <= 0.5
+                          || abs(gap - (ExportRowGrid.sectionSpacing + ExportRowGrid.headerHeight
+                                        + ExportRowGrid.rowSpacing)) <= 0.5,
+                          "302 · 出现第三种行缝 \(gap)（只许 8 / 48）")
+            if abs(gap - ExportRowGrid.rowSpacing) <= 0.5 { pitches.append(pitch) }
         }
-        XCTAssertGreaterThanOrEqual(gaps.count, 12, "同 section 的相邻行至少要能量到 12 组")
-        for gap in gaps {
-            XCTAssertEqual(gap, ExportRowGrid.rowSpacing, accuracy: 0.5, "288 · 行距 \(gap)")
+        XCTAssertGreaterThanOrEqual(pitches.count, 12, "同节内至少要能量到 12 组 pitch")
+        for pitch in pitches {
+            XCTAssertEqual(pitch, ExportRowGrid.rowPitch, accuracy: 0.5, "行 pitch")
         }
 
-        // 长边 / 长边百分比 rows live in their own hosts; their columns must match the same grid.
+        // 长边 / 百分比 / 原尺寸：三种模式各自成视图，数值框仍落在同一根 x。
         sheet.preset.sizingMode = .longEdge
         let longHosted = try host(model: sheet)
-        try assertGridColumns(in: longHosted.host, expected: baselines)
-        let longRow = gridProbes(in: longHosted.host).filter {
-            $0.kind == .row && $0.rowID == "export.size.longEdge"
-        }
-        XCTAssertEqual(longRow.count, 1, "长边行必须走同一栅格")
+        try assertThreeColumns(in: longHosted.host)
+        XCTAssertEqual(gridProbes(in: longHosted.host)
+            .filter { $0.kind == .row && $0.rowID == "export.size.longEdge" }.count, 1,
+                       "长边行必须走同一栅格")
 
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
-        try assertGridColumns(in: percentHosted.host, expected: baselines)
-        let percentRow = gridProbes(in: percentHosted.host).filter {
-            $0.kind == .row && $0.rowID == "export.size.percent"
-        }
-        XCTAssertEqual(percentRow.count, 1, "长边百分比行必须走同一栅格")
+        try assertThreeColumns(in: percentHosted.host)
+        XCTAssertEqual(gridProbes(in: percentHosted.host)
+            .filter { $0.kind == .row && $0.rowID == "export.size.percent" }.count, 1,
+                       "长边百分比行必须走同一栅格")
 
-        printAuditTable(in: defaultHosted.host)
-        printAuditTable(in: longHosted.host)
-        printAuditTable(in: percentHosted.host)
+        sheet.preset.sizingMode = .none
+        let noneHosted = try host(model: sheet)
+        try assertThreeColumns(in: noneHosted.host)
+        XCTAssertEqual(gridProbes(in: noneHosted.host)
+            .filter { $0.kind == .row && $0.rowID == "export.size.original" }.count, 1,
+                       "原尺寸行必须走同一栅格")
+
+        printAuditTable(in: hosted.host)
     }
 
-    private func assertGridColumns(in host: NSView,
-                                   expected: [ExportRowGridProbe.Kind: CGFloat]) throws {
+    private func assertThreeColumns(in host: NSView) throws {
         let rows = gridProbes(in: host).filter { $0.kind == .row }
         XCTAssertGreaterThanOrEqual(rows.count, 13)
-        for kind in [ExportRowGridProbe.Kind.label, .control, .value, .unit, .accessory] {
-            guard let baseline = expected[kind] else { continue }
+        let expected: [ExportRowGridProbe.Kind: CGFloat] = [.label: ExportRowGrid.labelRight,
+                                                            .control: ExportRowGrid.controlLeft,
+                                                            .readout: ExportRowGrid.readoutRight]
+        for (kind, anchor) in expected {
             for probe in gridProbes(in: host).filter({ $0.kind == kind }) {
-                XCTAssertEqual(edge(of: probe, in: host), baseline, accuracy: 0.5,
-                               "288 · \(probe.rowID) 的 \(kind.rawValue) 列越界")
+                XCTAssertEqual(edge(of: probe, in: host), anchor, accuracy: 0.5,
+                               "302 · \(probe.rowID) 的 \(kind.rawValue) 列越界")
             }
         }
     }
@@ -203,21 +224,21 @@ final class ExportSheetLayout288Tests: XCTestCase {
         let rows = gridProbes(in: host).filter { $0.kind == .row }
             .sorted { frame(of: $0, in: host).maxY > frame(of: $1, in: host).maxY }
         for row in rows {
-            let values = [ExportRowGridProbe.Kind.label, .control, .value, .unit, .accessory]
+            let values = [ExportRowGridProbe.Kind.label, .control, .readout]
                 .map { kind -> String in
                     guard let probe = gridProbes(in: host).first(where: {
                         $0.kind == kind && $0.rowID == row.rowID
                     }) else { return "-" }
                     return String(format: "%.1f", edge(of: probe, in: host))
                 }
-            print("288 grid · \(row.rowID) · label \(values[0]) · control \(values[1])"
-                  + " · value \(values[2]) · unit \(values[3]) · accessory \(values[4])")
+            print("302 grid · \(row.rowID) · label \(values[0]) · control \(values[1])"
+                  + " · readout \(values[2])")
         }
     }
 
-    // MARK: - §3.4 section header spacing
+    // MARK: - §3.4 section spacing（12 → 16）
 
-    func testSectionHeadersSitTwelvePointsBelowThePreviousSection() throws {
+    func testSectionHeadersSitSixteenPointsBelowThePreviousSection() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
         let rowRects = gridProbes(in: hosted.host).filter { $0.kind == .row }
@@ -225,24 +246,23 @@ final class ExportSheetLayout288Tests: XCTestCase {
         let headerRects = gridProbes(in: hosted.host).filter { $0.kind == .header }
             .map { frame(of: $0, in: hosted.host) }
             .sorted { $0.maxY > $1.maxY }
-        XCTAssertGreaterThanOrEqual(headerRects.count, 7, "七个 section 头都要在")
+        XCTAssertGreaterThanOrEqual(headerRects.count, 3, "三个折叠段的标题都要在")
 
-        // The top-most header (位置, the first section) has no previous row; the six sections below
-        // it are `header.minY - previousRow.maxY`.
-        for header in headerRects.dropLast() {
+        // 首屏的 7 个常驻行之后才是第一个标题；每个标题的上间距都是 16。
+        for header in headerRects {
             let gaps = rowRects.filter { $0.maxY <= header.minY }
                 .map { header.minY - $0.maxY }
                 .filter { $0 >= 0 }
             guard let closest = gaps.min() else {
-                XCTFail("288 · 找不到 section 头上方的行"); continue
+                XCTFail("302 · 找不到 section 头上方的行"); continue
             }
-            print(String(format: "288 header · y %.1f · gap %.1f", header.minY, closest))
-            XCTAssertEqual(closest, ExportRowGrid.sectionHeaderTopSpacing, accuracy: 0.5,
-                           "288 · section 头上间距 \(closest)")
+            print(String(format: "302 header · y %.1f · gap %.1f", header.minY, closest))
+            XCTAssertEqual(closest, ExportRowGrid.sectionSpacing, accuracy: 0.5,
+                           "302 · section 头上间距 \(closest)")
         }
     }
 
-    // MARK: - §3.2 no ticks
+    // MARK: - §3.2 no ticks（保留）
 
     func testSlidersAreContinuousAndShareTheSameTrack() throws {
         let sheet = model()
@@ -257,28 +277,31 @@ final class ExportSheetLayout288Tests: XCTestCase {
         let o = frame(of: opacity, in: hosted.host)
         XCTAssertEqual(q.minX, o.minX, accuracy: 0.5, "两条轨道起点必须相同")
         XCTAssertEqual(q.width, o.width, accuracy: 0.5, "两条轨道终点必须相同")
+        // 302：滑杆贴控件块右沿（388），宽度仍是 140。
         XCTAssertEqual(q.width, ExportRowGrid.sliderWidth, accuracy: 0.5)
+        XCTAssertEqual(q.maxX, ExportRowGrid.controlRight, accuracy: 0.5,
+                       "滑杆右沿必须落在控件块右沿")
 
         let text = try sourceText()
         XCTAssertEqual(ExportRowGrid.sliderTickMarks, 0, "质量 tick=0")
         XCTAssertEqual(ExportRowGrid.sliderTickMarks, 0, "不透明度 tick=0")
         XCTAssertFalse(text.contains(", step:"), "ExportSheet 里不许再给 Slider 传 step")
         XCTAssertFalse(text.contains("numberOfTickMarks"), "不手动画刻度")
-        print(String(format: "288 ticks · quality 0 · opacity 0 · track x %.1f/%.1f width %.1f/%.1f",
+        print(String(format: "302 ticks · quality 0 · opacity 0 · track x %.1f/%.1f width %.1f/%.1f",
                      q.minX, o.minX, q.width, o.width))
     }
 
-    // MARK: - §3.3 percent readout
+    // MARK: - §3.3 percent readout（保留）
 
     func testQualityIsShownAsPercentAndWritesTheStoredFraction() throws {
         let sheet = model()
-        let hosted = try host(model: sheet)
+        let hosted = try host(model: sheet, expanded: false)
 
         let quality = try numberField("export.quality", in: hosted.host)
         XCTAssertEqual(quality.stringValue, "85", "默认 0.85 必须显示 85")
         XCTAssertTrue(descendants(of: hosted.host).compactMap { $0 as? ExportSliderRowProbe }
             .contains { $0.kind == .unit && $0.rowID == "export.quality" },
-                      "质量现在带 % 单位")
+                      "质量带 % 单位")
 
         try type("75", into: quality, in: hosted)
         XCTAssertEqual(sheet.preset.quality, 0.75, accuracy: 1e-12)
@@ -296,50 +319,52 @@ final class ExportSheetLayout288Tests: XCTestCase {
                        "不透明度写入按 5% 量化：73 → 75")
     }
 
-    // MARK: - §3.7 fonts
+    // MARK: - §3.7 fonts（10 → 12）
 
-    func testEveryTextFieldAndPickerIsTenPoint() throws {
+    func testEveryTextFieldAndPickerIsTwelvePoint() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
         let probes = descendants(of: hosted.host).compactMap { $0 as? ExportControlFontProbe }
-        XCTAssertGreaterThanOrEqual(probes.count, 14, "Text/Picker 的字体探针都要在")
+        XCTAssertGreaterThanOrEqual(probes.count, 12, "Text/Picker 的字体探针都要在")
 
         var byRow: [String: (ExportControlKind, CGFloat)] = [:]
         for probe in probes {
             XCTAssertEqual(probe.pointSize, ExportRowGrid.Font.control, accuracy: 1e-9,
-                           "288 · \(probe.rowID) 的 \(probe.kind.rawValue) 字号")
-            XCTAssertLessThanOrEqual(probe.pointSize, 10, "控件字号不得超过 10 pt")
+                           "302 · \(probe.rowID) 的 \(probe.kind.rawValue) 字号")
+            XCTAssertLessThanOrEqual(probe.pointSize, 12, "控件字号不得超过 12 pt")
             byRow[probe.rowID] = (probe.kind, probe.pointSize)
         }
         for (rowID, entry) in byRow.sorted(by: { $0.key < $1.key }) {
-            print(String(format: "288 font · %@ · %@ %.0f pt", rowID, entry.0.rawValue, entry.1))
+            print(String(format: "302 font · %@ · %@ %.0f pt", rowID, entry.0.rawValue, entry.1))
         }
 
         let numberFields = descendants(of: hosted.host).compactMap { $0 as? NumberTextField }
         XCTAssertGreaterThanOrEqual(numberFields.count, 3)
         for field in numberFields {
-            XCTAssertEqual(field.font?.pointSize, 10,
-                           "\(field.accessibilityIdentifier()) 必须 10 pt")
+            XCTAssertEqual(field.font?.pointSize, 12,
+                           "\(field.accessibilityIdentifier()) 必须 12 pt")
         }
 
-        // Source scale: no literal above 10, and the title is the one 13 pt token.
+        // 源码字号表：正文 12、提示 11、节标题 12，面板标题 13 是唯一的大字号。
         let text = try sourceText()
         let regex = try NSRegularExpression(pattern: "\\.font\\(\\.system\\(size: ([0-9.]+)")
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         for match in regex.matches(in: text, range: range) {
             guard let sizeRange = Range(match.range(at: 1), in: text),
                   let size = Double(text[sizeRange]) else { continue }
-            XCTAssertLessThanOrEqual(size, 10, "288 · 源码里出现 \(size) pt 控件字号")
+            XCTAssertLessThanOrEqual(size, 12, "302 · 源码里出现 \(size) pt 控件字号")
         }
-        XCTAssertEqual(ExportRowGrid.Font.control, 10)
-        XCTAssertEqual(ExportRowGrid.Font.label, 10)
-        XCTAssertEqual(ExportRowGrid.Font.sectionHeader, 10)
-        XCTAssertEqual(ExportRowGrid.Font.hint, 9)
+        XCTAssertEqual(ExportRowGrid.Font.control, 12)
+        XCTAssertEqual(ExportRowGrid.Font.label, 12)
+        XCTAssertEqual(ExportRowGrid.Font.value, 12)
+        XCTAssertEqual(ExportRowGrid.Font.unit, 12)
+        XCTAssertEqual(ExportRowGrid.Font.sectionHeader, 12)
+        XCTAssertEqual(ExportRowGrid.Font.hint, 11)
         XCTAssertEqual(ExportRowGrid.Font.title, 13)
         XCTAssertTrue(text.contains("ExportRowGrid.Font.title"), "面板标题用唯一大字号常量")
     }
 
-    // MARK: - §3.5 source guards
+    // MARK: - §3.5 source guards（保留，一个 a11y id 都不许少）
 
     func testNoQualityTextAndEveryAccessibilityIdentifierSurvives() throws {
         let text = try sourceText()
@@ -353,6 +378,6 @@ final class ExportSheetLayout288Tests: XCTestCase {
         for axID in axIDs {
             XCTAssertTrue(text.contains("\"\(axID)\""), "\(axID) 必须仍在控件上")
         }
-        print("288 AX · " + axIDs.joined(separator: ", "))
+        print("302 AX · " + axIDs.joined(separator: ", "))
     }
 }
