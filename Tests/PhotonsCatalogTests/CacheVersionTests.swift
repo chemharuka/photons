@@ -142,9 +142,12 @@ final class CacheVersionTests: XCTestCase {
         // so every stage's key moved **once**, on the day the mechanism arrived — that is the
         // documented one-time migration. What must never happen again is S0 moving because *S2* was
         // bumped, so S2's generation may not appear anywhere in S0's material or S1's:
-        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=4"), true,
-                       "301: canvas = crop frame, geometry 3→4")
-        XCTAssertFalse(edit.keyMaterial(.geometry).contains("alg=5"), "S0 does not carry S2's generation")
+        XCTAssertEqual(edit.keyMaterial(.geometry).hasSuffix(";alg=5"), true,
+                       "307: CanvasRole — the interaction canvas is a second canvas, geometry 4→5")
+        // …and no *other* stage's token rides along: one `;alg=`, at the end (307 re-pinned this from
+        // a literal "alg=5" to the count, so a later bump of any other stage cannot make it vacuous).
+        XCTAssertEqual(edit.keyMaterial(.geometry).components(separatedBy: ";alg=").count, 2,
+                       "S0 carries its own generation and no other stage's")
         XCTAssertFalse(new.toneMap.isEmpty)
         XCTAssertNotEqual(old.geometry, new.geometry,
                           "the unconditional token re-records every key once, S0 included")
@@ -193,8 +196,8 @@ final class CacheVersionTests: XCTestCase {
                        "192: σ 地板删除 + 基面 stride 随尺度")
         // 301: the canvas is the rotated crop **frame** (方案 A), so a straightened, non-full crop's
         // pixels moved — generation 4. (246 had taken it to 3 by folding the keystone into the AABB.)
-        XCTAssertEqual(StageAlgorithmVersion.geometry, 4,
-                       "301: canvas = crop frame; θ ≠ 0 pixels moved, geometry 3 → 4")
+        XCTAssertEqual(StageAlgorithmVersion.geometry, 5,
+                       "307: CanvasRole.document/.export; the export bytes did not move, the keys must")
         // …and the ones that did not, so a bump stays a statement about one stage.
         for stage in [RenderStage.color, .grain, .display] {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), 1,
@@ -567,6 +570,6 @@ final class CacheVersionTests: XCTestCase {
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=6"))
         XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=8"))
-        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=4"))
+        XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=5"))
     }
 }

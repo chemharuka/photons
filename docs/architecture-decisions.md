@@ -676,3 +676,33 @@ Metal 源码形状的断言。
 
 **一条校核**：调研报告提出「`crs:Crop*` 需要反向旋转 + orientation 的逆，这一步今天不存在」——**实际上已经存在**：`EditModel.sourceCrop`（`:1260`）= `CropMath.sourceRect(cropRect, quarterTurns:)`，`XMP.swift:365-379` 就写在这个「文件自己的帧」里，`crs:CropAngle` 取负。所以导出侧不是缺口，别按缺口重做。
 
+## 18. 画布是两个类型，不是一个布尔（307，2026-11-09 定案，代码即如此）
+
+301/301b 把「用户看到的画布」和「导出的画布」都叫 `canvas`，于是同一个矩形必须同时当两件事用。
+用户报的两条症状是同一处定义错误的两面：
+
+> 0F 遮罩没有按照旋转后的源画布大小，按照的是最初照片的大小，导致照片存在裁切；裁剪框的限位变成了
+> 照片像素，而不是源画布。裁剪框可以拖到 00 的文档画布里，不能拖到 0F 的背景遮罩里。
+
+**定案**：`public enum CanvasRole { case document, export }`（`CropGeometry.swift`），一个值、两个
+定义、`RenderGraph.plan` 只有一支 `switch`：
+
+| 角色 | 画布 | 谁用 | 黑 |
+|---|---|---|---|
+| `.export` | 旋转后的**裁切框**（301，`canvas == frameSize`，`canvasInset == (0,0)`） | 导出、CLI、缩略图、金值、非裁切态预览 | 无（框外即输出外） |
+| `.document` | 旋转后**整张照片**的 AABB（`photoExtent`，`canvasInset == (canvas−frame)/2`） | 裁切模式：`canvasEdit` 的渲染面、`LoupeFraming`、overlay、`CropWorkspaceLayout.entry` | 画布内非照片 = `000000`；`0F0F0F` 只在画布外 |
+
+三条随之确定的规则：
+
+1. **导出逐字节不变**。`.export` 是 301 原样（`expandedCanvas = nil`、`inset = 0`），
+   `render-edit-crop-rot-s0.25` 仍是 `ed99453e…`、`render-edit-push-s0.25` 仍是 `ee726906…`（本 lane
+   基点上的实测值；主线 `85f03b6` 重录的 `c68fa5fd…` 含 306b，不在本 lane）。
+2. **限位回到画布**。`CropToolController.clampsToRotatedFrame = false`：框可以进 `000000` 角，
+   `CropTool.clampToCanvas`（`documentCanvasCropRect`）是唯一的边界，出画布才被拉回。
+3. **拉直 0 → θ 一次性内切**。`setAngle(uiValue:)` 把 `clampedToRotatedFrame(.full, keepsInside: true)`
+   写进 draft（以离开 0° 那一刻的框为基准，拖动滑杆不会逐 tick 累积收缩；手工拖框会清掉这个基准），
+   所以「应用」记录的裁切天然没有黑角——实测 9°/15°/45° 导出黑像素 **0.000 %**。
+
+`CanvasRole` 是类型而不是两个 `Bool`，因为 301 与 301b 正是「两个开关各说一半」才分叉的：现在
+`RenderGraph.plan`、`FrameTransform`、`LoupeFraming`、`RenderOptions` 各有一处 `switch`，而
+`CropGeometry.canvas` / `canvasInset` 保留 301 含义，任何旧调用点不改就是 `.export`。

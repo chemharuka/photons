@@ -182,21 +182,22 @@ final class CropMathTests: XCTestCase {
         let before = edit.geometry.renderCrop(source: source)
         edit.geometry.aspectLock = .original
         XCTAssertEqual(edit.geometry.renderCrop(source: source), before)
-        // `;alg=4` is P1f's algorithm-version token (`StageAlgorithmVersion`; 301 bumped geometry
-        // 3 → 4 because deleting S0's crop-rect clip changes the pixels of an inset crop at an angle),
-        // not a lock segment: it is on every stage's material, so the claim "an unconstrained lock
-        // adds nothing" is about the text *after* it. `algorithmVersion: false` is the same material
-        // without the token — the pre-P1f spelling, which is where the "no segment" claim is asserted
-        // byte for byte.
+        // `;alg=5` is P1f's algorithm-version token (`StageAlgorithmVersion`; 301 bumped geometry
+        // 3 → 4 because deleting S0's crop-rect clip changes the pixels of an inset crop at an angle,
+        // and 307 bumped it 4 → 5 because the canvas became two named canvases — the export pixels did
+        // not move, but one crop/angle now has two renders), not a lock segment: it is on every
+        // stage's material, so the claim "an unconstrained lock adds nothing" is about the text
+        // *after* it. `algorithmVersion: false` is the same material without the token — the pre-P1f
+        // spelling, which is where the "no segment" claim is asserted byte for byte.
         XCTAssertEqual(edit.keyMaterial(.geometry),
-                       "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=4",
+                       "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=5",
                        "the unconstrained lock must not add a key segment")
         XCTAssertEqual(edit.keyMaterial(.geometry, algorithmVersion: false),
                        "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00",
                        "and the parameters themselves are byte-identical to the pre-P1f material")
         edit.geometry.aspectLock = .square
         XCTAssertNotEqual(edit.keyMaterial(.geometry),
-                          "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=4",
+                          "pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=00;alg=5",
                           "a constraining lock must invalidate S0")
         XCTAssertTrue(edit.keyMaterial(.geometry).contains(";asp=square"))
     }
