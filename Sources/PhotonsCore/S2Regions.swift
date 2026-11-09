@@ -19,11 +19,20 @@ import Foundation
 /// (darktable's un-normalized `toneequal` is the cautionary tale), and the weights are normalized by
 /// the exact denominator, not by a fitted constant.
 ///
-/// Above display white the three Gaussians are **not** frozen at `L = 0`. S2's global 高光 is 299's
-/// C¹ slope shoulder (`highSlope` / `highShoulderEV`), and the band term only carries the shadow and
-/// middle displacements: as `L → +∞` the two low weights decay to exactly 0, so `Δ_bands → 0` and the
-/// HDR tail is the shoulder alone. Freezing (`L* = min(L, 0)`) would add a constant band offset to the
-/// whole HDR tail; 299's `+4 EV → +1 EV` promise would be lost.
+/// **306b (2026-11-09): 高光 joins the band term too.** All three displacements now enter the
+/// convex combination, so the high slider drags 阴影 and 中间调 as well — the user's 「其他的也类似」
+/// is not half-done any more. Above white the band term approaches the constant `d_high` (every
+/// low weight decays to 0, `w_high → 1`). 299's `+4 EV → +1 EV` tail needs a *further* −3.0 EV, so
+/// the shoulder only has to supply the **difference**:
+///
+///     Δ_total(L) = Σ_i w_i(L)·d_i + S(L)
+///     S(L) = 0                                             L ≤ 0
+///     S(L) = (k−1)(L − w(1 − e^{−L/w}))                    L > 0,  w = 0.25 EV
+///
+/// `S(0) = 0` and `S'(0) = 0`, so the white point is C¹. `k = 1 + c·h` no longer uses 299's fixed
+/// 0.8: `c` is solved numerically so that `h = −1, shadows = mid = 0, L = +4` lands on
+/// `Δ_total = −3.0` (the band already contributes `−0.827947`, the shoulder supplies `−2.172053`).
+/// The solve is in `highSlopeCoefficient` below; the GPU only receives the finished `k`.
 ///
 /// **Travel recalibration.** The Gaussian peak is 0.726, so the old full travels (0.90 / 0.70 / 0.60)
 /// were multiplied by 1/0.726 to keep the displacement at each band's **centre** unchanged:
@@ -48,28 +57,51 @@ public enum S2Regions {
     public static let bandCentres: (shadow: Double, mid: Double, high: Double) = (-6.8, -3.6, 0.2)
     public static let bandSigma: Double = 1.9
 
-    /// 299 — the global 高光 slider is a slope above display white, not an EV displacement.
+    /// 306b — 高光 is both a band and the 299 slope shoulder. The slider is still a slope above
+    /// display white, but its coefficient is solved from the tail promise rather than pinned at 0.8.
     ///
     ///     h = clamp(highlights, −100, 100) / 100
-    ///     k(h) = 1 + 0.8·h          k(−100) = 0.20, k(0) = 1 (exact identity), k(+100) = 1.80
+    ///     k(h) = 1 + c·h            k(−100) = 0.420786, k(0) = 1 (exact identity), k(+100) = 1.579214
     ///
-    /// `Δ(L) = (k−1)·(L − w·(1 − e^{−L/w}))` for `L > 0`, `Δ(L) = 0` otherwise, with the C¹ knee
-    /// width `w = 0.25 EV`. At `L = +4`, `Δ = −0.8·(4 − 0.25·(1 − e^{−16})) = −3.0`, so `y = +1.0`.
-    public static let highSlopeFull: Double = 0.20
+    /// `Δ_total(L) = Σ w_i(L)·d_i + (k−1)·(L − w·(1 − e^{−L/w}))` for `L > 0`.
+    /// At `h = −100, shadows = mid = 0, L = +4`: the band already supplies
+    /// `w_h(+4)·(−0.83) = −0.827947`, so the shoulder must supply the remaining `−2.172053`, i.e.
+    /// `c = (3.0 + band(+4)) / 3.75 = 0.579214093…`. The constant is found by bisection below; the
+    /// closed form is kept only as a comment so the two cannot drift.
     public static let highKneeWidthEV: Double = 0.25
+
+    /// `c` in `k(h) = 1 + c·h`, solved numerically so that 299's `+4 EV → +1 EV` still holds once
+    /// the high band is inside the convex combination.
+    ///
+    /// Let `bandAt4 = w_h(+4)·(−highTravel) = −0.827947…` and `shapeAt4 = 4 − 0.25(1 − e^{−16})`.
+    /// For `h = −1`, `k − 1 = −c`, so `bandAt4 − c·shapeAt4 = −3.0` and
+    /// `c = (3.0 + bandAt4) / shapeAt4 = 0.579214093…`. The bisection runs on the same expression the
+    /// kernel evaluates, so the constant cannot go stale if a travel or centre moves.
+    public static let highSlopeCoefficient: Double = {
+        let target = -3.0
+        let bandAt4 = weights(L: 4).high * (-highTravel)
+        let w = highKneeWidthEV
+        let shapeAt4 = 4 - w * (1 - exp(-4 / w))
+        var lo = 0.0, hi = 1.0
+        for _ in 0..<80 {
+            let mid = (lo + hi) / 2
+            let delta = bandAt4 - mid * shapeAt4
+            if delta > target { lo = mid } else { hi = mid }
+        }
+        return (lo + hi) / 2
+    }()
 
     /// The asymptotic log2 slope above display white for one 高光 slider position.
     public static func highSlope(highlights: Double) -> Double {
         let h = min(max(highlights, -100), 100) / 100
-        return 1 + (1 - highSlopeFull) * h
+        return 1 + highSlopeCoefficient * h
     }
 
-    /// The log2-domain shoulder displacement, in EV, for a sample at `L` EV.
+    /// The log2-domain shoulder displacement `S(L)`, in EV, for a sample at `L` EV.
     ///
-    /// `L ≤ 0` is the identity (the display-white knee is exactly at 0), and `L > 0` starts with
-    /// slope 1 (C¹ at the knee) and asymptotes to `k`. Because `0 ≤ w(1 − e^{−L/w}) < L`, the output
-    /// `y = L + Δ(L)` stays in `[kL, L]`: never negative, so an SDR value still clips to white and
-    /// the headroom-1 render is unchanged.
+    /// `L ≤ 0` is exactly 0 (the band term owns the SDR side now), and `L > 0` starts with slope 0
+    /// (`S'(0) = 0`, so the *total* slope at the knee is the band's) and asymptotes to `k − 1`.
+    /// The shoulder alone stays in `[kL, L]`, so it never manufactures a negative value.
     public static func highShoulderEV(L: Double, highlights: Double) -> Double {
         guard L > 0 else { return 0 }
         let k = highSlope(highlights: highlights)
@@ -79,10 +111,11 @@ public enum S2Regions {
 
     /// The steepest slope `d(log2 v′)/dL` the gate is allowed to produce.
     ///
-    /// 306's normalized Gaussians have a much softer worst case than 085's disjoint windows; with the
-    /// recalibrated travels the measured minimum over `L ∈ [−12, 0]` is above 0.50 for every slider
-    /// combination, so the gate is a safety net rather than a shaper (`limiterDisabled` still exists
-    /// for the refutation test).
+    /// 306b puts all three bands in the slope, so the gate is a genuine three-way check. With the
+    /// frozen travels the measured minimum over `L ∈ [−12, 0]` is **0.528659** at the opposite-sign
+    /// corner `(+1.24, −0.96, +0.83)` (`L = −5.345`), i.e. above `minSlope` and the gate never
+    /// triggers; single-slider floors are 0.717 / 0.765 / 0.774. Above white the slope is deliberately
+    /// owned by the shoulder (`h = −100` asymptotes to `k = 0.421`) and is **not** gated.
     public static let minSlope: Double = 0.500
 
     /// Test-only switch: `true` skips the common compression, so a test can show that the
@@ -97,14 +130,28 @@ public enum S2Regions {
     /// The three weights of one luminance, `(shadow, mid, high)`, each 0…1 and summing to 1.
     ///
     /// `L` is used directly. Above white the two low weights decay to 0 and the high weight tends to
-    /// 1, so the band term vanishes without a clamp; see the type comment for why freezing at 0 would
-    /// break 299's HDR tail.
+    /// 1, so the band term approaches the constant `d_high` without a clamp; the shoulder `S` then
+    /// supplies only the difference needed for 299's tail.
     public static func weights(L: Double) -> (shadow: Double, mid: Double, high: Double) {
         let bs = gaussian(L, bandCentres.shadow)
         let bm = gaussian(L, bandCentres.mid)
         let bh = gaussian(L, bandCentres.high)
         let sum = bs + bm + bh
         return (bs / sum, bm / sum, bh / sum)
+    }
+
+    /// The band term `Σ w_i(L)·d_i`, in EV, for one pixel.
+    public static func bandEV(L: Double,
+                              shadow: Double, mid: Double, high: Double) -> Double {
+        let w = weights(L: L)
+        return w.shadow * shadow + w.mid * mid + w.high * high
+    }
+
+    /// The full log2 displacement, in EV, including the 306b difference shoulder.
+    public static func totalEV(L: Double, shadow: Double, mid: Double, high: Double,
+                               highlights: Double) -> Double {
+        bandEV(L: L, shadow: shadow, mid: mid, high: high)
+            + highShoulderEV(L: L, highlights: highlights)
     }
 
     /// The weights and their analytic `L`-derivatives (for the monotonicity gate).

@@ -954,13 +954,14 @@ private struct CalParamsU {
 }
 
 private struct S2Params {
-    // 306 — dShadow, dMid (EV, already gated by `S2Regions.travelEV`), the 高光 slope `k`
-    // (1 = identity), identity.
+    // 306b — dShadow, dMid, dHigh (EV, already gated by `S2Regions.travelEV`), identity.
     var b: SIMD4<Float>
     // contentOrigin.xy, contentSize.xy in canvas pixels — the letterbox guard (派单 008 B). Without
     // it the region lifts treat the matte's 0 as a picture pixel and the viewport's background bars
     // light up. Same convention as S0's `a`/`b`, S1's `c` and S3c's `c`.
     var c: SIMD4<Float>
+    // 306b — `.x` is the 高光 slope `k` (1 = identity); the rest is padding.
+    var d: SIMD4<Float>
 }
 
 /// 228 — mirror of `ContrastParams` in `Kernels/s1_8_contrast.metal`, byte for byte.
@@ -3997,21 +3998,22 @@ public final class RenderGraph {
             let p = try kernels.pipeline(file: "s2_tone_map", function: "s2_tone_map")
             let identity = edit.light.highlights == 0
                 && edit.light.midtones == 0 && edit.light.shadows == 0
-            // 306: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
-            // kernel only weights (normalized Gaussians) and exponentiates. 299: 高光 is a slope
-            // above white, so `.z` is `k` rather than the gated `d.high` (which the mask path reads).
+            // 306b: the slider → EV map and its monotonicity gate live on the CPU (`S2Regions`); the
+            // kernel only weights (normalized Gaussians) and exponentiates. All three bands are EV
+            // displacements now; 高光 additionally supplies the slope `k` for the difference shoulder.
             let d = S2Regions.travelEV(shadows: edit.light.shadows,
                                        midtones: edit.light.midtones,
                                        highlights: edit.light.highlights)
             var params = S2Params(
-                b: SIMD4(Float(d.shadow), Float(d.mid),
-                         Float(S2Regions.highSlope(highlights: edit.light.highlights)),
-                         identity ? 1 : 0),
+                b: SIMD4(Float(d.shadow), Float(d.mid), Float(d.high), identity ? 1 : 0),
                 // The content rect, so the matte outside it is never tone-mapped (派单 008 B). The
                 // dispatch stays the whole canvas: one guard per pixel is cheaper than a second
                 // encoder, and the guard is what makes "shadows" leave the letterbox alone.
                 c: SIMD4(plan.origin.x, plan.origin.y,
-                         Float(plan.content.width), Float(plan.content.height)))
+                         Float(plan.content.width), Float(plan.content.height)),
+                // 306b: 高光's slope `k`. It is computed on the CPU (c solved from the tail promise);
+                // the kernel only evaluates the shoulder.
+                d: SIMD4(Float(S2Regions.highSlope(highlights: edit.light.highlights)), 0, 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S2Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)

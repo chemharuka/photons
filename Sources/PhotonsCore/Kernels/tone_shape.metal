@@ -16,7 +16,7 @@ using namespace metal;
 // Who reads what:
 //
 //   S1    s1_scene_linear   `s1_end_points<kHybrid>`                      blacks / whites
-//   S2    s2_tone_map       `tone_contrast`, `region_weights`/`region_gain` contrast, shadows/highlights
+//   S2    s2_tone_map       `band_weights` + `high_shoulder_ev`            shadows / mid / high
 //   S1.6  s1_6_local        all three, applied between S1 and S2          all four
 //
 // The order is the *global* order, and the local pass keeps it: gains (S1) → end points (S1) →
@@ -27,10 +27,10 @@ using namespace metal;
 // This file is a **sibling of `primaries.metal`, not a client of it**: the including kernel must
 // `#include "primaries.metal"` first (a kernel may not include the same header twice).
 //
-// **085**: S2's global 阴影/中间调/高光 uses the three-window chain below (`region_weights3`). The
-// local pass (`s1_6_local`) still reads the 074 two-window `region_weights`/`region_gain`; that is
-// deliberately unsynchronised until the local pass is unified (a later task), so both bodies stay
-// here and neither is removed.
+// **306b**: S2's global 阴影/中间调/高光 uses the normalized Gaussian `band_weights` below plus the
+// difference shoulder `high_shoulder_ev`. The mask pass (`s1_6_local`) still reads 074's two-window
+// `region_weights` / `region_gain` and 085's `region_weights3` / `region_gain3`; that is deliberately
+// unsynchronised until the local pass is unified (a later task), so all bodies stay here.
 
 // ── 074 R2 — the two region windows, in EV relative to display white ──────────────────────────────
 //
@@ -75,8 +75,10 @@ static inline float region_gain(float2 w, float shadows, float highlights) {
 //     b_i = exp(−((L − c_i)/σ)² / 2)
 //     w_i = b_i / Σ_j b_j          Σ_i w_i ≡ 1
 //
-// `weights` uses `L` directly: above white the two low weights decay to 0, so the band term vanishes
-// and 299's shoulder owns the HDR tail. The CPU mirror is `S2Regions.weights`.
+// `weights` uses `L` directly: above white the two low weights decay to 0 and `w_high → 1`, so the
+// band term approaches `d_high`. **306b** puts all three bands in the term (高光 drives its neighbours
+// too); 299's shoulder supplies only the *difference* needed to keep `+4 EV → +1 EV`. The CPU mirror
+// is `S2Regions.weights` / `bandEV`.
 constant float BAND_SHADOW_EV = -6.8;
 constant float BAND_MID_EV = -3.6;
 constant float BAND_HIGH_EV = 0.2;
@@ -84,8 +86,9 @@ constant float BAND_SIGMA_EV = 1.9;
 
 /// The three normalized Gaussian weights of a pixel, each 0…1 and summing to 1.
 ///
-/// S2 uses only `.xy` (shadow/mid); the high band's third component is kept for symmetry with
-/// `S2Regions.weights` and the CPU gate. 高光 itself is the `high_shoulder_ev` slope above.
+/// S2 uses all three: 306b feeds `d_high` through the band term as well, so the high slider drags
+/// 阴影 and 中间调 exactly like the other two do. 299's `high_shoulder_ev` is added on top as the
+/// remaining HDR-tail difference.
 static inline float3 band_weights(float3 v) {
     float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
     float L = log2(lum);
@@ -118,8 +121,8 @@ static inline float3 band_weights(float3 v) {
 // the very top instead of eating the HDR range.
 //
 // The CPU owns the travel and its monotonicity gate (`S2Regions`); these functions take **EV**.
-// **299**: this applies to the shadow/mid components and to the mask path only. S2's global 高光 is
-// `high_shoulder_ev` (below), whose parameter `k` is a slope, and its 0.25 EV knee lives above white.
+// **306b**: this shape is the **mask path only**. S2's global chain uses `band_weights` for all three
+// bands and adds `high_shoulder_ev` (below) for the HDR-tail difference.
 constant float REGION3_SHADOW_LO_EV = -5.4;
 constant float REGION3_SHADOW_HI_EV = -3.9;
 constant float REGION3_MID_LO_EV = -2.4;
@@ -130,10 +133,10 @@ constant float REGION3_HIGH_HI_EV = 6.0;
 /// `(shadow, mid, high)` for one pixel, each 0…1. **Mask path only since 306** — S2's global chain
 /// uses `band_weights` above.
 ///
-/// **299**: S2's global gain no longer multiplies the third component by an EV displacement — the
-/// 高光 slider is the `high_shoulder_ev` slope below. The component stays here because `s1_6_local`
-/// (074's mask path) still reads `region_gain3(region_weights3(v), …)` with the EV travel, and its
-/// two-window family is intentionally unchanged. In S2 only `.xy` are used.
+/// The third component stays because `s1_6_local` (074's mask path) still reads
+/// `region_gain3(region_weights3(v), …)` with the EV travel, and its two-window family is
+/// intentionally unchanged. S2's global chain now uses all three of `band_weights`, so 高光 drives its
+/// neighbours there; the mask's 高光 keeps 074's displacement semantics.
 static inline float3 region_weights3(float3 v) {
     float lum = max(dot(max(v, 0.0), kWorkingLumaWeights), 1e-9);
     float L = log2(lum);
@@ -151,18 +154,21 @@ static inline float region_gain3(float3 w, float3 dEV) {
     return exp2(dot(w, dEV));
 }
 
-// ── 299 — 高光: a C¹ log shoulder above display white ────────────────────────────────────────────
+// ── 299 / 306b — 高光: the band plus a C¹ difference shoulder above display white ───────────────
 //
-// The slider is a **slope**, not an EV displacement. `k` is `S2Regions.highSlope` (1 + 0.8h), and
-// the log2-domain output above white is
+// The slider is a **slope**, not an EV displacement. `k` is `S2Regions.highSlope` (1 + c·h, c solved
+// so the tail promise holds with the high band inside the convex combination), and the log2-domain
+// output above white is
 //
-//     y = L + Δ(L),   Δ(L) = 0                                  L ≤ 0
-//                     Δ(L) = (k−1)(L − w(1 − e^{−L/w}))         L > 0,  w = 0.25 EV
+//     y = L + Σ w_i(L)·d_i + S(L)
+//     S(L) = 0                                  L ≤ 0
+//     S(L) = (k−1)(L − w(1 − e^{−L/w}))         L > 0,  w = 0.25 EV
 //
-// so the slope starts at 1 at the white point (no corner) and asymptotes to `k`; at k = 0.20 a +4 EV
-// sample lands at +1.00 EV. `L ≤ 0` and k = 1 are exact identities. `y ≥ kL ≥ 0`, so a value at or
-// above white stays at or above white and the SDR (headroom 1) render is unchanged: this is an HDR
-// tail compressor, not an SDR highlight control (that is 138's `whites`).
+// Above white the band tends to `d_high`; `S` supplies the remainder, so at h = −100 a +4 EV sample
+// still lands at +1.00 EV and the +8 EV tail is +2.681 EV (recomputed with the new k). `L ≤ 0` and
+// k = 1 make `S` exactly 0. The SDR side is no longer the identity at every 高光 position: `w_h(0)`
+// is 0.856, so h = −100 moves L = 0 by −0.71 EV. That is the 306b semantic (高光 must also drive its
+// neighbours); the pure-HDR behaviour is now only the part above white.
 constant float HIGH_KNEE_W_EV = 0.25;
 
 static inline float high_shoulder_ev(float L, float k) {
