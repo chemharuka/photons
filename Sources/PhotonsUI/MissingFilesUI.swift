@@ -12,8 +12,8 @@ import PhotonsCatalog
 //     「原文件已移动」 is how a feature starts contradicting itself;
 //   · the badge — one drawing routine for all three browsers, so a 210 pt card and a 111 pt strip
 //     cell cannot disagree about what the state looks like;
-//   · the context menu — two verbs, enabled only when the selection contains something missing, and
-//     modelled as a value (`State`) so the enablement rule is testable without a menu bar;
+//   · the context menu — two removal verbs for any selection, plus the missing-only search, modelled
+//     as a value (`State`) so the enablement rule is testable without a menu bar;
 //   · the inspector row — an `NSView`-backed line, like `MarqueeText`, so "is it on screen" can be
 //     answered by walking the view tree instead of by trusting the `if`.
 
@@ -24,18 +24,21 @@ public enum MissingFileText {
     /// The badge on a card, a strip cell, a list row and the line in the inspector.
     public static let moved = "原文件已移动"
 
-    public static let deleteMenuTitle = "从库中删除…"
+    /// 「移出照片库」: the entry and its modification records go, the file stays.
+    public static let removeMenuTitle = "移出照片库"
+    /// 「移出并删除…」: the entry goes **and** the original is moved to the Trash.
+    public static let removeAndDeleteMenuTitle = "移出并删除…"
     public static let findMenuTitle = "查找丢失的文件…"
 
     /// The sheet's title. A question, because it is one.
-    public static let deleteConfirmTitle = "从库中删除？"
-    public static let deleteConfirmButton = "从库中删除"
+    public static let removeAndDeleteConfirmTitle = "移出并删除？"
+    public static let removeAndDeleteConfirmButton = "移出并删除"
     public static let cancelButton = "取消"
 
-    /// The sentence the user asked for, count included: the entry and its modification records go,
-    /// the file does not.
-    public static func deleteConfirmMessage(count: Int) -> String {
-        "将从库中移除 \(count) 个条目及其修改记录，原文件不受影响。"
+    /// The sentence the user asked for, counts included: the entries go, and the originals that are
+    /// still on disk go to the Trash (recoverable), not away for good.
+    public static func removeAndDeleteConfirmMessage(count: Int, files: Int) -> String {
+        "将从库中移出 \(count) 个条目，并把其中 \(files) 个原文件移到废纸篓（可在废纸篓中还原）。"
     }
 
     public static let findPanelTitle = "查找丢失的文件"
@@ -103,10 +106,10 @@ public enum MissingFileBadge {
 
 /// The right-click menu for a browser (grid, filmstrip, photo list).
 ///
-/// Two verbs, and both are enabled **only** when the selection contains a missing entry: deleting an
-/// entry whose file is present is not this feature's business (and a right-click must never be one
-/// click away from deleting a good photo), and searching for a file that is where it belongs is a
-/// contradiction.
+/// Two removal verbs for **any** non-empty selection — 「移出照片库」 (the entry and its records go,
+/// the file stays) and 「移出并删除…」 (the entry goes and the original is moved to the Trash) — plus
+/// 「查找丢失的文件…」, which only makes sense when the selection contains a missing entry: searching
+/// for a file that is where it belongs is a contradiction.
 ///
 /// Enablement is a value (`State`), not a side effect of `NSMenuItem` validation, so the rule that
 /// decides it can be asserted directly — the menu items are then *set* from it, which is the only
@@ -122,7 +125,8 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
             self.missingCount = missingCount
         }
 
-        public var canDelete: Bool { hasSelection && missingCount > 0 }
+        public var canRemove: Bool { hasSelection }
+        public var canRemoveAndDelete: Bool { hasSelection }
         public var canFindLost: Bool { hasSelection && missingCount > 0 }
     }
 
@@ -144,14 +148,16 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
 
     public let menu = NSMenu()
 
-    /// Selection as of the last `update(...)`; both actions apply to the **missing** entries only.
+    /// Selection as of the last `update(...)`; 「查找丢失的文件…」 acts on the **missing** entries only.
     public private(set) var state = State()
     public private(set) var targetIDs: [String] = []
-    /// The whole selection as of the last `update(...)` —— 相册动作作用于它，不是只作用于缺失文件。
+    /// The whole selection as of the last `update(...)` —— 两个移出动词和相册动作都作用于它。
     public private(set) var selectedIDs: [String] = []
 
-    /// Run after the user confirms. `Ask` is the sheet's answer, so the decision is made once, here.
-    public var onDelete: (([String]) -> Void)?
+    /// Run after the user picks a removal verb. `移出照片库` does not ask twice; `移出并删除` confirms
+    /// once inside the action (the count is a library question, not a menu question).
+    public var onRemove: (([String]) -> Void)?
+    public var onRemoveAndDelete: (([String]) -> Void)?
     public var onFindLost: (([String]) -> Void)?
     /// 相册动作。两个都拿「整批选中 id + 相册 id」：一次点击一次写入，不是每张一次。
     public var onAddToAlbum: (([String], String) -> Void)?
@@ -162,7 +168,8 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
     /// selection (a right-click on an unselected cell means *that* cell).
     public var willOpen: (() -> Void)?
 
-    public private(set) var deleteItem: NSMenuItem!
+    public private(set) var removeItem: NSMenuItem!
+    public private(set) var removeAndDeleteItem: NSMenuItem!
     public private(set) var findItem: NSMenuItem!
     /// 「加入相册 ▸」与「移出相册 ▸」的父项（没有相册时禁用，不是隐藏：菜单位置稳定）。
     public private(set) var addToAlbumItem: NSMenuItem!
@@ -173,11 +180,19 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         menu.delegate = self
 
-        deleteItem = NSMenuItem(title: MissingFileText.deleteMenuTitle,
-                                action: #selector(deletePressed), keyEquivalent: "")
-        deleteItem.target = self
-        deleteItem.isEnabled = false
-        menu.addItem(deleteItem)
+        removeItem = NSMenuItem(title: MissingFileText.removeMenuTitle,
+                                action: #selector(removeSelectionPressed), keyEquivalent: "")
+        removeItem.target = self
+        removeItem.isEnabled = false
+        menu.addItem(removeItem)
+
+        removeAndDeleteItem = NSMenuItem(title: MissingFileText.removeAndDeleteMenuTitle,
+                                         action: #selector(removeAndDeletePressed), keyEquivalent: "")
+        removeAndDeleteItem.target = self
+        removeAndDeleteItem.isEnabled = false
+        menu.addItem(removeAndDeleteItem)
+
+        menu.addItem(.separator())
 
         findItem = NSMenuItem(title: MissingFileText.findMenuTitle,
                               action: #selector(findPressed), keyEquivalent: "")
@@ -206,7 +221,8 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
         state = AssetContextMenu.state(hasSelection: !selected.isEmpty, missingCount: targets.count)
         targetIDs = targets
         selectedIDs = ids
-        deleteItem.isEnabled = state.canDelete
+        removeItem.isEnabled = state.canRemove
+        removeAndDeleteItem.isEnabled = state.canRemoveAndDelete
         findItem.isEnabled = state.canFindLost
         return state
     }
@@ -254,9 +270,14 @@ public final class AssetContextMenu: NSObject, NSMenuDelegate {
             && !(removeFromAlbumItem.submenu?.items.isEmpty ?? true)
     }
 
-    @objc private func deletePressed() {
-        guard !targetIDs.isEmpty else { return }
-        onDelete?(targetIDs)
+    @objc private func removeSelectionPressed() {
+        guard !selectedIDs.isEmpty else { return }
+        onRemove?(selectedIDs)
+    }
+
+    @objc private func removeAndDeletePressed() {
+        guard !selectedIDs.isEmpty else { return }
+        onRemoveAndDelete?(selectedIDs)
     }
 
     @objc private func findPressed() {
@@ -305,16 +326,30 @@ public struct RelinkOutcome: Sendable, Equatable {
 @MainActor
 public enum MissingFilesPanels {
 
-    /// 「将从库中移除 N 个条目及其修改记录，原文件不受影响。」
-    public static func confirmDelete(count: Int, in window: NSWindow?) -> Bool {
+    /// 「将从库中移出 N 个条目，并把其中 M 个原文件移到废纸篓（可在废纸篓中还原）。」
+    public static func confirmRemoveAndDelete(count: Int, files: Int, in window: NSWindow?) -> Bool {
         let alert = NSAlert()
-        alert.messageText = MissingFileText.deleteConfirmTitle
-        alert.informativeText = MissingFileText.deleteConfirmMessage(count: count)
+        alert.messageText = MissingFileText.removeAndDeleteConfirmTitle
+        alert.informativeText = MissingFileText.removeAndDeleteConfirmMessage(count: count, files: files)
         alert.alertStyle = .warning
-        alert.addButton(withTitle: MissingFileText.deleteConfirmButton)
+        alert.addButton(withTitle: MissingFileText.removeAndDeleteConfirmButton)
         alert.addButton(withTitle: MissingFileText.cancelButton)
         _ = window   // modal on whichever window is key; the sheet API would outlive the call
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// One summary after 「移出并删除…」 when some rows could not be recycled. Those rows are still in
+    /// the library — saying so once is the whole point (a silent no-op looks like a successful delete).
+    public static func reportRemovalFailures(_ outcome: CatalogSession.RemovalOutcome, in window: NSWindow?) {
+        guard !outcome.failures.isEmpty else { return }
+        let alert = NSAlert()
+        alert.messageText = MissingFileText.removeAndDeleteMenuTitle
+        alert.informativeText = "有条目未能移出（文件没有删除，条目仍在库中）：\n"
+            + outcome.failures.joined(separator: "\n")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        _ = alert.runModal()
+        _ = window
     }
 
     /// Folders only — the search is recursive *inside* the chosen folder, so picking a single RAW
@@ -346,10 +381,10 @@ public enum MissingFilesPanels {
     }
 }
 
-// MARK: - the two verbs (one implementation, three browsers)
+// MARK: - the verbs (one implementation, three browsers)
 
-/// What 「从库中删除…」 and 「查找丢失的文件…」 *do*, once for the grid, the filmstrip and the photo
-/// list.
+/// What 「移出照片库」, 「移出并删除…」 and 「查找丢失的文件…」 *do*, once for the grid, the filmstrip and
+/// the photo list.
 ///
 /// The views differ in how they find out which rows the click meant; everything after that — the
 /// sheet, the transaction, the folder panel, the search, the report, the reload — is the same, and
@@ -358,13 +393,38 @@ public enum MissingFilesPanels {
 @MainActor
 public enum MissingFilesActions {
 
-    /// Confirm, delete, reload. Returns what was removed, or nil when the user cancelled / it failed.
+    /// Remove the entries and their modification records. **No confirmation** — the user asked for
+    /// exactly one second step, and it belongs to the verb that touches files. Returns what was
+    /// removed, or nil when the transaction failed.
     @discardableResult
-    public static func delete(_ ids: [String], session: CatalogSession, window: NSWindow?) -> DeleteReport? {
+    public static func remove(_ ids: [String], session: CatalogSession, window: NSWindow?) -> DeleteReport? {
         guard !ids.isEmpty else { return nil }
-        // The sheet's count and the deleted count are the same array, by construction.
-        guard MissingFilesPanels.confirmDelete(count: ids.count, in: window) else { return nil }
         return session.deleteAssets(ids)
+    }
+
+    /// Confirm once, then recycle every original that is still on disk and remove every row that was
+    /// not left behind by a failed recycle. Cancelling changes nothing.
+    ///
+    /// Returns nil when the user cancelled (the caller must not show an alert for that).
+    @discardableResult
+    public static func removeAndDelete(_ ids: [String], session: CatalogSession, window: NSWindow?,
+                                       confirm: ((Int, Int) -> Bool)? = nil,
+                                       recycle: @escaping (URL) throws -> Void = CatalogSession.trashItem)
+        -> CatalogSession.RemovalOutcome? {
+        guard !ids.isEmpty else { return nil }
+        let chosen = session.assets.filter { ids.contains($0.id) }
+        let files = chosen.reduce(into: 0) { count, asset in
+            guard let url = session.fileURL(for: asset),
+                  FileManager.default.fileExists(atPath: url.path) else { return }
+            count += 1
+        }
+        let ask = confirm ?? { count, files in
+            MissingFilesPanels.confirmRemoveAndDelete(count: count, files: files, in: window)
+        }
+        guard ask(ids.count, files) else { return nil }
+        let outcome = session.removeAssetsDeletingFiles(ids, recycle: recycle)
+        MissingFilesPanels.reportRemovalFailures(outcome, in: window)
+        return outcome
     }
 
     /// One folder panel, one recursive search, one relink per hash-verified hit, then one report.

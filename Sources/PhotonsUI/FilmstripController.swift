@@ -229,7 +229,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.addGestureRecognizer(doubleClick)
 
         // Same two verbs as the grid, on the same kind of menu.
-        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
+        contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         contextMenu.albumsProvider = { [weak self] ids in
             AlbumMenuSupport.items(session: self?.session, ids: ids)
@@ -433,9 +434,16 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         return contextMenu.menu
     }
 
-    public func deleteMissingAssets(_ ids: [String]) {
+    /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
+    public func removeAssets(_ ids: [String]) {
         guard let session else { return }
-        MissingFilesActions.delete(ids, session: session, window: view.window)
+        MissingFilesActions.remove(ids, session: session, window: view.window)
+    }
+
+    /// 「移出并删除…」: one confirmation, then recycle the originals and remove the rows.
+    public func removeAndDeleteAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.removeAndDelete(ids, session: session, window: view.window)
     }
 
     public func findAndRelinkMissingAssets(_ ids: [String]) {

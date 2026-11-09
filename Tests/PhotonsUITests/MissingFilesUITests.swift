@@ -144,49 +144,61 @@ final class MissingFilesUITests: XCTestCase {
 
     // MARK: - 2. the menu
 
-    /// Enabled exactly when the selection contains something missing.
-    func testMenuIsEnabledOnlyWhenTheSelectionHasSomethingMissing() {
+    /// Both removal verbs are available for any non-empty selection; the search stays missing-only.
+    func testTheMenuOffersBothRemovalVerbsForAnySelection() {
         let menu = AssetContextMenu()
 
-        var state = menu.update(selectedIDs: ["a"], missingIDs: ["a"])
-        XCTAssertTrue(state.canDelete)
-        XCTAssertTrue(state.canFindLost)
-        XCTAssertTrue(menu.deleteItem.isEnabled)
-        XCTAssertTrue(menu.findItem.isEnabled)
-        XCTAssertEqual(menu.targetIDs, ["a"], "both verbs act on the missing subset")
-        XCTAssertEqual(menu.deleteItem.title, MissingFileText.deleteMenuTitle)
+        // A healthy selection: both removal verbs, no search.
+        var state = menu.update(selectedIDs: ["b", "c"], missingIDs: [])
+        XCTAssertTrue(state.canRemove)
+        XCTAssertTrue(state.canRemoveAndDelete)
+        XCTAssertFalse(state.canFindLost)
+        XCTAssertTrue(menu.removeItem.isEnabled)
+        XCTAssertTrue(menu.removeAndDeleteItem.isEnabled)
+        XCTAssertFalse(menu.findItem.isEnabled)
+        XCTAssertEqual(menu.removeItem.title, "移出照片库")
+        XCTAssertEqual(menu.removeAndDeleteItem.title, "移出并删除…")
         XCTAssertEqual(menu.findItem.title, MissingFileText.findMenuTitle)
 
-        // A healthy selection: nothing to delete, nothing to search for.
-        state = menu.update(selectedIDs: ["b", "c"], missingIDs: [])
-        XCTAssertFalse(state.canDelete)
-        XCTAssertFalse(state.canFindLost)
-        XCTAssertFalse(menu.deleteItem.isEnabled)
-        XCTAssertFalse(menu.findItem.isEnabled)
+        // A fully missing selection: the search is enabled too, and still targets the missing subset.
+        state = menu.update(selectedIDs: ["a"], missingIDs: ["a"])
+        XCTAssertTrue(state.canRemove)
+        XCTAssertTrue(state.canRemoveAndDelete)
+        XCTAssertTrue(state.canFindLost)
+        XCTAssertTrue(menu.findItem.isEnabled)
+        XCTAssertEqual(menu.targetIDs, ["a"], "findLost still acts on the missing subset")
 
         // Nothing selected at all.
         state = menu.update(selectedIDs: [], missingIDs: [])
-        XCTAssertFalse(state.canDelete)
+        XCTAssertFalse(state.canRemove)
+        XCTAssertFalse(state.canRemoveAndDelete)
+        XCTAssertFalse(menu.removeItem.isEnabled)
+        XCTAssertFalse(menu.removeAndDeleteItem.isEnabled)
         XCTAssertFalse(menu.findItem.isEnabled)
 
-        // A mixed selection: the verbs act on the missing one only.
+        // A mixed selection: removal verbs take the whole selection, findLost only the missing one.
         state = menu.update(selectedIDs: ["b", "m1", "m2"], missingIDs: ["m1", "m2"])
         XCTAssertEqual(state.missingCount, 2)
         XCTAssertEqual(menu.targetIDs, ["m1", "m2"])
-        XCTAssertTrue(menu.deleteItem.isEnabled)
+        XCTAssertEqual(menu.selectedIDs, ["b", "m1", "m2"])
+        XCTAssertTrue(menu.removeItem.isEnabled)
+        XCTAssertTrue(menu.removeAndDeleteItem.isEnabled)
 
         // And the rule on its own, independent of any menu object.
-        XCTAssertTrue(AssetContextMenu.state(hasSelection: true, missingCount: 1).canDelete)
-        XCTAssertFalse(AssetContextMenu.state(hasSelection: false, missingCount: 1).canDelete,
+        XCTAssertTrue(AssetContextMenu.state(hasSelection: true, missingCount: 0).canRemove)
+        XCTAssertTrue(AssetContextMenu.state(hasSelection: true, missingCount: 0).canRemoveAndDelete)
+        XCTAssertFalse(AssetContextMenu.state(hasSelection: false, missingCount: 1).canRemove,
                        "a missing row that is not selected is not a target")
     }
 
-    /// The confirmation text names both halves of the promise: the records go, the files do not.
-    func testConfirmationTextCountsAndReassures() {
-        let text = MissingFileText.deleteConfirmMessage(count: 3)
+    /// The confirmation text names the Trash and the way back — not the old "files are untouched".
+    func testRemoveAndDeleteConfirmationNamesTheTrash() {
+        let text = MissingFileText.removeAndDeleteConfirmMessage(count: 3, files: 2)
         XCTAssertTrue(text.contains("3"))
-        XCTAssertTrue(text.contains("修改记录"))
-        XCTAssertTrue(text.contains("原文件不受影响"))
+        XCTAssertTrue(text.contains("2"))
+        XCTAssertTrue(text.contains("废纸篓"))
+        XCTAssertTrue(text.contains("还原"))
+        XCTAssertFalse(text.contains("原文件不受影响"))
     }
 
     // MARK: - 3. the search (pure)

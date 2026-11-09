@@ -33,6 +33,9 @@ public final class UISmokeRunner {
         self.libraryURL = libraryURL
         self.expectedRows = expectedRows
         self.screenshotDirectory = screenshotDirectory
+        // The smoke library is a temporary fixture. Opening it must not become the user's
+        // 「上次打开的库」 — this harness runs in the real app process, with the real defaults.
+        windowController.session.remembersRecentLibrary = false
     }
 
     // MARK: smoke

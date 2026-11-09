@@ -156,6 +156,13 @@ public final class CatalogSession {
     /// Where the choice is remembered (`UserDefaults.standard` in the app).
     private let sortPreferenceStore: PhotoSortPreferences.Store
 
+    /// Where 「上次打开哪个库」 is remembered. Injectable so a test owns its own domain.
+    private let recentLibraryStore: RecentLibrary.Store
+
+    /// Turned off by the smoke/bench harness (`UISmokeRunner`): its temporary library must not become
+    /// the user's "last opened" library. Public because the runner sets it before `run()`.
+    public var remembersRecentLibrary: Bool
+
     // MARK: view state — masks (Q22)
     //
     // None of this is in the document, in a cache key or in history. It is what the canvas and the
@@ -325,9 +332,13 @@ public final class CatalogSession {
     private var filterPersistencePath: String?
 
     public init(filterStore: FilterPersistence.Store = UserDefaults.standard,
-                sortPreferenceStore: PhotoSortPreferences.Store = UserDefaults.standard) {
+                sortPreferenceStore: PhotoSortPreferences.Store = UserDefaults.standard,
+                recentLibraryStore: RecentLibrary.Store = UserDefaults.standard,
+                remembersRecentLibrary: Bool = true) {
         filterPersistence = FilterPersistence.Writer(store: filterStore)
         self.sortPreferenceStore = sortPreferenceStore
+        self.recentLibraryStore = recentLibraryStore
+        self.remembersRecentLibrary = remembersRecentLibrary
         // Restored before the first `open()`, so a session's very first query already lands in the
         // order the user chose last time — there is no "restore after the first paint" flicker.
         sortOrder = PhotoSortPreferences.recall(from: sortPreferenceStore)
@@ -377,6 +388,11 @@ public final class CatalogSession {
         // 081 §3: the 复制设置 checklist is remembered **per library**, so it is read here and not
         // from `UserDefaults`. A library that never stored one answers 全部.
         copySelection = (try? c.copySelection()) ?? .all
+        // 295 B: the next launch has no `--library`, so it has to know which library this was. Only
+        // reached when `Catalog.open` succeeded — a failed open must not overwrite the last good one.
+        if remembersRecentLibrary {
+            RecentLibrary.remember(url, in: recentLibraryStore)
+        }
     }
 
     /// Where this library's filter archive lives. The path is the library *directory*; the hash of it
@@ -1699,6 +1715,66 @@ public final class CatalogSession {
             lastAvailabilityError = "\(error.localizedDescription)"
             return nil
         }
+    }
+
+    /// What 「移出并删除…」 did, in the user's terms.
+    public struct RemovalOutcome: Sendable, Equatable {
+        /// What the row transaction removed (table counts — the same shape `DeleteReport` always had).
+        public var removed: DeleteReport?
+        /// Originals that really went to the Trash (a file already gone is not counted).
+        public var filesTrashed: Int
+        /// Rows that stayed in the library because their original could not be recycled.
+        public var keptIDs: [String]
+        /// One human-readable reason per kept row.
+        public var failures: [String]
+
+        public init(removed: DeleteReport? = nil, filesTrashed: Int = 0,
+                    keptIDs: [String] = [], failures: [String] = []) {
+            self.removed = removed
+            self.filesTrashed = filesTrashed
+            self.keptIDs = keptIDs
+            self.failures = failures
+        }
+    }
+
+    /// The real recycle: `FileManager`'s Trash, so ⌘Z-less deletion is still undoable in the Finder.
+    nonisolated public static func trashItem(_ url: URL) throws {
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+    }
+
+    /// Remove rows **and** recycle their originals. Per entry: recycle first, then delete the row, so
+    /// a row is never gone while its file is still where the library said it was. A recycle failure
+    /// keeps that row and does not stop the others.
+    ///
+    /// A file that is already absent on disk is just a row removal (nothing to recycle, not a failure).
+    @discardableResult
+    public func removeAssetsDeletingFiles(_ ids: [String],
+                                          recycle: (URL) throws -> Void = CatalogSession.trashItem)
+        -> RemovalOutcome {
+        guard catalog != nil, !ids.isEmpty else { return RemovalOutcome() }
+        var toDelete: [String] = []
+        var filesTrashed = 0
+        var keptIDs: [String] = []
+        var failures: [String] = []
+        for asset in assets where ids.contains(asset.id) {
+            if let url = fileURL(for: asset), FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    try recycle(url)
+                    filesTrashed += 1
+                } catch {
+                    keptIDs.append(asset.id)
+                    failures.append("\(asset.filename)：\(error.localizedDescription)")
+                    continue
+                }
+            }
+            toDelete.append(asset.id)
+        }
+        let report = deleteAssets(toDelete)
+        if !toDelete.isEmpty, report == nil {
+            failures.append("移出条目失败：\(lastAvailabilityError ?? "未知错误")")
+        }
+        return RemovalOutcome(removed: report, filesTrashed: filesTrashed,
+                              keptIDs: keptIDs, failures: failures)
     }
 
     /// One 「查找丢失的文件…」 run: search `folder` by file name, then relink every hit whose content

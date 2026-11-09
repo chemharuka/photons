@@ -411,8 +411,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
 
         // Context menu: attach the shared menu, resolve the clicked cell here (only this view knows
-        // where the event landed), and let the two verbs run through the session.
-        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        // where the event landed), and let the verbs run through the session.
+        contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
+        contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         // 相册（078 B10）：同一个 `AssetContextMenu` 对象在三个面共用，所以三个面拿到的
         // 「加入相册 / 移出相册」是同一份代码，不是三份。写入走 session（一次事务），
@@ -918,10 +919,16 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         return collectionView.convert(event.locationInWindow, from: nil)
     }
 
-    /// 「从库中删除…」: confirm, then one transaction (rows + history + thumbnails) and a `reload()`.
-    public func deleteMissingAssets(_ ids: [String]) {
+    /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
+    public func removeAssets(_ ids: [String]) {
         guard let session else { return }
-        MissingFilesActions.delete(ids, session: session, window: view.window)
+        MissingFilesActions.remove(ids, session: session, window: view.window)
+    }
+
+    /// 「移出并删除…」: one confirmation, then recycle the originals and remove the rows.
+    public func removeAndDeleteAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.removeAndDelete(ids, session: session, window: view.window)
     }
 
     /// 「查找丢失的文件…」: one folder panel, one recursive search, one relink per hash-verified hit.
