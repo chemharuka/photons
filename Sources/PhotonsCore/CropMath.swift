@@ -1076,6 +1076,89 @@ public enum CropMath {
                         right: cx + width / 2, bottom: cy + height / 2)
     }
 
+    // MARK: 317 — 「不出像素」: where a frame of a given size may be translated to
+
+    /// 317 — how far a frame's **centre** may travel and still put all four corners inside the
+    /// photograph turned by `degrees`. Measured in pixels along the photograph's own axes, as a
+    /// **half-extent about the picture's centre** (`x`, `y`), so the legal centres are
+    /// `|X₀| ≤ x` and `|Y₀| ≤ y`.
+    ///
+    /// The frame is an axis-aligned rect and the photograph is a convex quad (a turned rectangle),
+    /// so 「四角都在内」 is four half-plane constraints. Turning the *frame* by −θ into the
+    /// photograph's axes makes them two slabs — one per axis — whose support function is exact
+    /// (`a·|cos θ| + b·|sin θ|`, the same arithmetic `rotatedFrameScale` uses):
+    ///
+    ///     |X₀| + A ≤ W/2        |Y₀| + B ≤ H/2
+    ///
+    /// So the feasible set of translations is a box in the photograph's axes and a parallelogram in
+    /// the frame's — **convex**, which is what lets a move be a projection rather than a search.
+    /// `isFeasible == false` means no position at all fits this size: the frame has to be inscribed
+    /// once (a translation cannot help), which is the one place 317 allows a size change.
+    public struct PixelTranslationLimit: Equatable, Sendable {
+        public var x: Double
+        public var y: Double
+
+        /// **Pixels** of slack, and it is not cosmetic. 307's inscription solves for the frame that
+        /// touches the picture's edge, so the frame it returns has a support number that equals the
+        /// half-extent exactly — up to an ULP, on either side of zero. Read strictly, `x < 0` would
+        /// call that frame 「放不下」 and the clamp would refuse to hold the very rect the inscriber
+        /// just produced (measured: 15° inscribed, `limit.y = -1.1e-12`, and a drag then ran straight
+        /// out of the picture untouched).
+        public static let tolerance: Double = 1e-9
+
+        public init(x: Double, y: Double) {
+            self.x = x
+            self.y = y
+        }
+
+        public var isFeasible: Bool {
+            x >= -Self.tolerance && y >= -Self.tolerance
+        }
+    }
+
+    public static func pixelTranslationLimit(of crop: CropRect,
+                                             in source: ImageSize,
+                                             degrees: Double) -> PixelTranslationLimit {
+        let c = crop.clamped(allowsOutsideSource: true)
+        guard c.width > 0, c.height > 0 else { return PixelTranslationLimit(x: 0, y: 0) }
+        let (a, b) = halves(c, in: source)
+        let (cosine, sine) = cosSin(degrees)
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        return PixelTranslationLimit(x: w / 2 - (a * cosine + b * sine),
+                                     y: h / 2 - (a * sine + b * cosine))
+    }
+
+    /// 317 — `crop` **translated** (never resized) so its four corners sit inside the photograph
+    /// turned by `degrees`: the projection of its centre onto the limit above, which is a per-axis
+    /// clamp in the photograph's own axes — no LP, no search, and no axis-aligned box around the
+    /// turned picture (that box is the document canvas, and it is exactly where the `000000` corners
+    /// live).
+    ///
+    /// `nil` when no translation fits (`pixelTranslationLimit` is empty): the caller's answer there
+    /// is the one-shot inscription, not a move.
+    ///
+    /// A frame that is already inside comes back **bit for bit** (`==` on the whole struct). That is
+    /// load-bearing, not an optimisation: 317 §3.4 promises 「开勾选不缩、不动」 field by field, and
+    /// re-deriving a centre through two rotations would shave an ULP off a rect nobody moved.
+    public static func translatedInsidePixels(_ crop: CropRect,
+                                              in source: ImageSize,
+                                              degrees: Double) -> CropRect? {
+        let c = crop.clamped(allowsOutsideSource: true)
+        guard c.width > 0, c.height > 0 else { return c }
+        let limit = pixelTranslationLimit(of: c, in: source, degrees: degrees)
+        guard limit.isFeasible else { return nil }
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let m = CropGeometry.RotationMatrix(degrees: degrees)
+        let sensor = m.invert(x: c.centerX * w - w / 2, y: c.centerY * h - h / 2)
+        let x = min(max(sensor.x, -max(limit.x, 0)), max(limit.x, 0))
+        let y = min(max(sensor.y, -max(limit.y, 0)), max(limit.y, 0))
+        guard x != sensor.x || y != sensor.y else { return c }
+        let back = m.apply(x: x, y: y)
+        let left = (w / 2 + back.x) / w - c.width / 2
+        let top = (h / 2 + back.y) / h - c.height / 2
+        return CropRect(left: left, top: top, right: left + c.width, bottom: top + c.height)
+    }
+
     /// Does `crop`, straightened by `degrees`, sample only inside the sensor — with `tolerance`
     /// **pixels** of slack on each side? The predicate form of `clampedToRotatedFrame`, for callers
     /// that only need yes/no (a status line, a test that must not depend on the clamp's rounding).

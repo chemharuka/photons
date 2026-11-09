@@ -231,6 +231,51 @@ public final class CropToolController {
     /// reachable.
     var clampsToRotatedFrame = false
 
+    // MARK: 317 — 「不出像素」 (a UI preference, never a document field)
+
+    /// The preference's key — `false` (307's behaviour) for every library that never ticked the box.
+    public static let staysInsidePixelsKey = "photons.cropStaysInsidePixels"
+
+    /// Where the box is remembered. Injected so a test can point at its own suite; the app gets
+    /// `UserDefaults.standard`, the same store `CropToolBar.lastCustomRatioText` uses.
+    private let defaults: UserDefaults
+
+    /// The checkbox's state. Stored (not a computed read of `defaults`) so `@Observable` redraws the
+    /// card when it changes; `defaults` is written on every change and re-read by `begin()`.
+    private var staysInsidePixelsStorage = false
+
+    /// 317 — **「不出像素」**: while this is on, a moved frame is stopped by the **rotated
+    /// photograph's pixels**, not by the document canvas.
+    ///
+    /// Two behaviours, and they are the user's two sentences:
+    ///
+    ///   · off (the default, 307) — the frame may be dragged into the canvas' black corners
+    ///     (`000000`) and is stopped only at the canvas edge;
+    ///   · on — the frame's four corners stay inside the turned photo's quad. A **move** is a
+    ///     projection of the translation onto that convex set (§`placedInsidePixels`): it slides and
+    ///     stops, and it never resizes (310). Only a frame that no translation can hold — a full
+    ///     frame at 45° — is inscribed, once, at the moment the box is ticked or the angle changes.
+    ///
+    /// Persisted, so it survives `setAngle`, a photo switch and a re-opened tool; the value is read
+    /// back in `begin()` rather than kept alive by a second copy in the card.
+    public var cropStaysInsidePixels: Bool {
+        get { staysInsidePixelsStorage }
+        set { setCropStaysInsidePixels(newValue) }
+    }
+
+    /// The card's write path. Returns `true` when the state actually changed (the reverse gate and
+    /// the acceptance read it; a click that repeats the state is a no-op).
+    @discardableResult
+    public func setCropStaysInsidePixels(_ on: Bool) -> Bool {
+        defaults.set(on, forKey: Self.staysInsidePixelsKey)
+        guard on != staysInsidePixelsStorage else { return false }
+        staysInsidePixelsStorage = on
+        // §3.5 — the only moment this preference may shrink the frame, and only when it must.
+        if on { inscribeIntoPixelsIfNeeded() }
+        draftChanged()
+        return true
+    }
+
     /// 310 — `true` re-attaches the ratio lock's reshape to the **`.inside`** drag; the reverse gate
     /// only, the app never sets it. The shipped behaviour is `false`: a frame moved by its inside is
     /// translated, never resized (the lock constrains the handles and a new frame, not the move).
@@ -252,8 +297,10 @@ public final class CropToolController {
     /// deliberately survives the mouse-up: a refresh one turn later would otherwise undo the drag.
     private var lockReshapeSuspended = false
 
-    public init(session: CatalogSession?) {
+    public init(session: CatalogSession?, defaults: UserDefaults = .standard) {
         self.session = session
+        self.defaults = defaults
+        self.staysInsidePixelsStorage = defaults.bool(forKey: Self.staysInsidePixelsKey)
     }
 
     /// The session's own upright frame — the only frame the crop tool measures with. A computed
@@ -372,6 +419,10 @@ public final class CropToolController {
             // Back to upright: the frame is legal as it stands, and the next lift cuts from it.
             straightenBaseCrop = nil
         }
+        // 317 — 「改角度之后」: the same one-shot question as the checkbox (307 has already inscribed
+        // into the turned quad, so with the box on this is usually a no-op — it exists for the angle
+        // pairs where it is not).
+        inscribeIntoPixelsIfNeeded()
         draftChanged()
     }
 
@@ -435,6 +486,49 @@ public final class CropToolController {
                                             perspective: perspective)
     }
 
+    /// 317 — **the one place 「不出像素」 may change a size.**
+    ///
+    /// Called when the box is ticked and after an angle change, never per tick. It asks the one
+    /// question the preference asks of a frame: *is there any translation of this size that fits?*
+    /// (`CropMath.pixelTranslationLimit`). If there is, nothing happens — field for field, which is
+    /// §3.4: a 10 %-inset frame at 0° or 9° must come out of the toggle byte-identical. If there is
+    /// not — a full frame at 45°, whose diagonal is wider than the picture on both axes — the frame
+    /// is inscribed **once**, with 307's own arithmetic (`clampedToRotatedFrame(keepsInside…: true)`:
+    /// same centre when it can, same pixel aspect, the largest rect that fits). Because it is a
+    /// **discrete** step (072/077's rule for a flip or a turn), the tool session is closed and
+    /// reopened around it, so 应用 records the inscribed frame as its own row instead of folding it
+    /// into a drag that is still in flight.
+    private func inscribeIntoPixelsIfNeeded() {
+        guard staysInsidePixelsStorage, isActive else { return }
+        let src = sourceSize
+        let angle = CropTool.clampStraighten(draft.straighten)
+        let current = draft.crop.clamped(allowsOutsideSource: true)
+        guard !CropMath.pixelTranslationLimit(of: current, in: src, degrees: angle).isFeasible else {
+            return                          // 放得下：一毫米都不动
+        }
+        let inscribed = CropMath.clampedToRotatedFrame(current, in: src, degrees: angle,
+                                                       keepsInsideRotatedFrame: true)
+        guard inscribed != current else { return }
+        draft.crop = inscribed
+        if let session, session.isToolSessionActive {
+            session.endToolSession(label: "裁切与旋转")
+            session.beginToolSession("裁切", label: "裁切与旋转")
+        }
+    }
+
+    /// 317 — **the four-corner law as a write**: with 「不出像素」 on, any rect about to become the
+    /// draft is **translated** into the turned photograph (never resized — 310; the size question is
+    /// `inscribeIntoPixelsIfNeeded`'s, and it fires only at the two moments above).
+    ///
+    /// A frame that fits nowhere is handed back unchanged rather than shrunk: a move must not resize,
+    /// and §3b leaves the out-of-bounds frame visible — the overlay paints it red through 307's
+    /// `frameExceedsPicture`, no new colour and no backdrop change.
+    private func placedInsidePixels(_ rect: CropRect, source: ImageSize) -> CropRect {
+        guard staysInsidePixelsStorage else { return rect }
+        let angle = CropTool.clampStraighten(draft.straighten)
+        return CropMath.translatedInsidePixels(rect, in: source, degrees: angle) ?? rect
+    }
+
     /// Hand the live draft to the inspector (派单 049). One property write, no render, no document:
     /// the row recomputes two strings, and only while the tool is on. Cleared the moment the tool
     /// closes, so 应用 / 取消 / 离开 all leave the row reading the document again.
@@ -461,6 +555,10 @@ public final class CropToolController {
         guard !isActive, let session else { return false }
         draft = Draft(geometry: session.edit.geometry)
         draftPhotoID = session.anchorID
+        // 317 — 「重开工具保持」: the box is a preference, so it is read back here rather than
+        // remembered twice. When it is on and the document's own crop cannot be held by any
+        // translation, the draft is inscribed before the frame is first drawn.
+        staysInsidePixelsStorage = defaults.bool(forKey: Self.staysInsidePixelsKey)
         // 087 — the state Esc has to come back to. `转动` writes the document on every tick, and a
         // released drag closes/reopens the tool session (one row per gesture), so by the time Esc
         // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
@@ -473,6 +571,8 @@ public final class CropToolController {
         lastHandle = nil
         lockReshapeSuspended = false       // 310 — a new session, a new lock question
         straightenBaseCrop = nil
+        // 317 — before the tool session opens (so the inscribe cannot bracket an empty session).
+        inscribeIntoPixelsIfNeeded()
         // 077: the tool session is what makes 「裁切完成后只保留一个记录」 a property of the history
         // rather than a property of this file's discipline. From here to `apply()` / `cancel()` the
         // history records nothing, so no handle position, angle or draft rect can become a row.
@@ -591,6 +691,9 @@ public final class CropToolController {
         draftPhotoID = session.anchorID
         lockReshapeSuspended = false       // 310 — another photo, another lock question
         entryGeometry = session.edit.geometry
+        // 317 — 换图 keeps the box (it is a preference) and re-asks the size question for B's frame.
+        staysInsidePixelsStorage = defaults.bool(forKey: Self.staysInsidePixelsKey)
+        inscribeIntoPixelsIfNeeded()
         if !session.isToolSessionActive {
             session.beginToolSession("裁切", label: "裁切与旋转")
         }
@@ -665,6 +768,9 @@ public final class CropToolController {
             committed = session.commitEdit(label: "转动", coalesce: false)
         }
         if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        // 317 — 「改角度之后」: the released 转动 gets the one-shot question too (the bare slider's
+        // `setAngle` asks it per move; this is the gesture's `.inside`-rotate twin).
+        inscribeIntoPixelsIfNeeded()
         return committed
     }
 
@@ -1034,17 +1140,19 @@ public final class CropToolController {
         let shaped = lockReshapeSuspended ? before : reshapedForLock(before, source: src)
         let base = seen(shaped, source: src)
         let next = clampToCanvas(base, mapping: mapping, source: src)
+        // 317 — the refresh owes the same containment as the tick: a frame that a drag left outside
+        // the turned photograph (or an external write did) is **translated** in, never resized.
+        let placed = placedInsidePixels(next, source: src)
 
-        if next == base {
-            // The frame already sits inside `[0,1]²`: the only thing that may still have to be
-            // written back is the lock's reshape.
-            guard shaped != before else { return false }
-            draft.crop = shaped
+        if placed != before {
+            draft.crop = placed
             clampMoves &+= 1
             return true
         }
-        guard next != before else { return false }
-        draft.crop = next
+        // The frame is where it already was: the only thing that may still have to be written back
+        // is the lock's reshape.
+        guard shaped != before else { return false }
+        draft.crop = shaped
         clampMoves &+= 1
         return true
     }
@@ -1321,7 +1429,10 @@ public final class CropToolController {
         let clamped = clampToCanvas(candidate, mapping: mapping, source: source)
         clampCalls &+= 1
         if clamped != candidate { clampMoves &+= 1 }
-        draft.crop = clamped
+        // 317 — 「不出像素」: the tick's rect is **translated** into the turned photograph. The size
+        // is the mouse-down size either way (310), and a frame nothing can hold stays where it is
+        // instead of being shrunk by a move (§3b: the overlay paints it red).
+        draft.crop = placedInsidePixels(clamped, source: source)
         // 307 — a frame the user moved is the new base for any later straighten inscription; the
         // one they had at 0° is stale the moment they take manual control.
         straightenBaseCrop = nil

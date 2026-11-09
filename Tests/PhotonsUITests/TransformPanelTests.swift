@@ -376,8 +376,9 @@ final class TransformPanelTests: XCTestCase {
 
         // Nothing is drawn below the bottom row. The bottom row's own probes (grid + the apply/cancel
         // chips) are measured against each other above, so they are excluded here — including them made
-        // this assertion compare the row with itself.
-        let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply]
+        // this assertion compare the row with itself. 317 added a third probe to that row
+        // (「不出像素」, left of 九宫格) and it belongs in the same exclusion for the same reason.
+        let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply, CropCardID.staysInsidePixels]
         let rows = panel.probes
             .filter { $0.rowID != CropCardID.card && $0.rowID != CropCardID.angleCard }
             .filter { !bottomIDs.contains($0.rowID) }
