@@ -48,13 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let controller = newWindow()
-        if let path = args.value("--library") {
-            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        // 295 B: no `--library` → reopen the library the user last opened, if it is still on disk.
+        // A failed open (or a vanished directory) leaves an empty window and forgets the path:
+        // a modal alert at launch is something the user cannot act on, only dismiss.
+        if let url = RecentLibrary.launchURL(explicit: args.value("--library"),
+                                             remembered: RecentLibrary.recall()) {
             do {
                 try controller.openLibrary(at: url)
             } catch {
-                NSAlert(error: error).runModal()
+                RecentLibrary.forget()
             }
+        } else {
+            RecentLibrary.forget()
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)

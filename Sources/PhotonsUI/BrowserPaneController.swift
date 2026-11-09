@@ -203,10 +203,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         photosTable.target = self
         photosTable.doubleAction = #selector(openPhotoRowInLoupe(_:))
 
-        // 右键：the same two verbs the grid and the filmstrip offer, on the same menu object. The
+        // 右键：the same removal verbs the grid and the filmstrip offer, on the same menu object. The
         // list resolves the click through `clickedRow`, which AppKit keeps current for us.
         contextMenu.willOpen = { [weak self] in self?.prepareContextMenu() }
-        contextMenu.onDelete = { [weak self] ids in self?.deleteMissingAssets(ids) }
+        contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
+        contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         // 照片列表也是「菜单入口」的一部分：选中几张 → 右键 → 加入相册（078 B10）。
         contextMenu.albumsProvider = { [weak self] ids in
@@ -657,9 +658,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                            missingIDs: session.missingAssets.map(\.id))
     }
 
-    public func deleteMissingAssets(_ ids: [String]) {
+    /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
+    public func removeAssets(_ ids: [String]) {
         guard let session else { return }
-        MissingFilesActions.delete(ids, session: session, window: view.window)
+        MissingFilesActions.remove(ids, session: session, window: view.window)
+    }
+
+    /// 「移出并删除…」: one confirmation, then recycle the originals and remove the rows.
+    public func removeAndDeleteAssets(_ ids: [String]) {
+        guard let session else { return }
+        MissingFilesActions.removeAndDelete(ids, session: session, window: view.window)
     }
 
     public func findAndRelinkMissingAssets(_ ids: [String]) {
