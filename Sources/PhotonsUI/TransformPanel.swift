@@ -264,6 +264,10 @@ extension InspectorView {
 
     /// 透视 — 垂直 / 水平两条滑杆（183）。两个字段都是**文档**（`GeometryGroup` 的那一对），
     /// 拖动时逐 tick 写、松手提交一行历史；0 是恒等，所以从未碰过的编辑不会多出行。
+    ///
+    /// 347 — 行程直接取 `PerspectiveMap.limit`（现在 ±200）：滑杆与夹取是**同一个数**，而强度
+    /// 的分母是另一条常量（`strengthUnit` = 100），所以把行程拉宽只多出「更远处」，不改变已有读数
+    /// 的含义。读数格式、双击复位、行的布局都是 183 原样。
     @ViewBuilder
     private func cropPerspectiveSection() -> some View {
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {

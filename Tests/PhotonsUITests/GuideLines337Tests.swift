@@ -702,12 +702,141 @@ final class GuideLines337Tests: XCTestCase {
     }
 
 
+    // MARK: - 347 · 行程 ±200（强度分母仍是 100）
+
+    /// **347 ⑤** — 面板真正交给行的行程是 ±200：键入 `200` 落在文档里（不是被夹到 100），读数
+    /// `+200`，双击标题复位回 0。
+    ///
+    /// The range is read from the **field SwiftUI built** (`NumberFieldController.row.range`) rather
+    /// than from a constant here, so a panel left at ±100 is red no matter what core says.
+    func testThePerspectiveSlidersTravelToTwoHundred() throws {
+        let (panel, _) = try transformPanel(width: 330)
+        defer { panel.window.contentView = nil }
+        let session = try XCTUnwrap(panel.session)
+        TestWindows.show(panel.window, key: true)
+
+        let vertical = try XCTUnwrap(panel.view(NumberTextField.self,
+                                                identifier: "inspector.crop.perspective.vertical"),
+                                     "347 ⑤ 垂直透视的读数没有画出来")
+        let horizontal = try XCTUnwrap(panel.view(NumberTextField.self,
+                                                  identifier: "inspector.crop.perspective.horizontal"),
+                                       "347 ⑤ 水平透视的读数没有画出来")
+        let row = try XCTUnwrap(vertical.controller?.row, "347 ⑤ 读数没有控制器")
+        let rowH = try XCTUnwrap(horizontal.controller?.row)
+        print("347 ⑤ 滑杆行程: 垂直 \(row.range) · 水平 \(rowH.range) · 读数格式 \(row.format)")
+        XCTAssertEqual(row.range, -200 ... 200, "347 ⑤ 垂直透视的行程必须是 −200…200")
+        XCTAssertEqual(rowH.range, -200 ... 200, "347 ⑤ 水平透视的行程必须是 −200…200")
+        XCTAssertEqual(row.range, -PerspectiveMap.limit ... PerspectiveMap.limit,
+                       "347 ⑤ 滑杆 = 夹取那一个数")
+
+        // 键入 200 — the readout's own commit path (the drag's, in the drag's order).
+        let rowsBeforeTyping = session.history.count
+        XCTAssertTrue(panel.window.makeFirstResponder(vertical), "347 ⑤ 读数必须能成为第一响应者")
+        let editor = try XCTUnwrap(vertical.currentEditor() as? NSTextView, "347 ⑤ 没有 field editor")
+        editor.insertText("200", replacementRange: editor.selectedRange())
+        XCTAssertEqual(editor.string, "200")
+        vertical.controller?.commit()
+
+        print("347 ⑤ 键入 200 → 文档 \(session.edit.geometry.perspectiveVertical)"
+              + " · 读数「\(vertical.stringValue)」· 强度 "
+              + String(format: "%.17g", PerspectiveMap(vertical: 200, horizontal: 0).verticalStrength))
+        XCTAssertEqual(session.edit.geometry.perspectiveVertical, 200, accuracy: 1e-12,
+                       "347 ⑤ 200 必须落进文档，不许被夹到 100")
+        XCTAssertEqual(vertical.stringValue, "+200", "347 ⑤ 读数必须是 +200")
+
+        // 双击标题复位：透视这一节的两个字段一起回 0，至少一条历史（拖动的合并行可能还开着，
+        // 所以这里说的是「有东西被记下」而不是「恰好 +1」——「一次双击 = 一条」由 179/214 钉住）。
+        let resets = PanelResets(session: session)
+        let rows = session.history.count
+        XCTAssertTrue(resets.reset(fields: CropSection.perspective.fields, label: "透视"),
+                      "347 ⑤ 双击「透视」必须有东西可复位")
+        XCTAssertEqual(session.edit.geometry.perspectiveVertical, 0, accuracy: 1e-12, "347 ⑤ 回 0")
+        XCTAssertEqual(session.edit.geometry.perspectiveHorizontal, 0, accuracy: 1e-12)
+        XCTAssertGreaterThan(session.history.count, rows, "347 ⑤ 复位必须留下一条历史")
+        let afterReset = session.history.count
+        XCTAssertFalse(resets.reset(fields: CropSection.perspective.fields, label: "透视"),
+                       "347 ⑤ 已经是 0 了，不许写空快照")
+        XCTAssertEqual(session.history.count, afterReset, "347 ⑤ 空复位不写历史")
+        print("347 ⑤ 双击「透视」→ v = \(session.edit.geometry.perspectiveVertical)"
+              + " · 历史 \(rowsBeforeTyping)→\(rows)→\(afterReset)"
+              + "（键入 200 +\(rows - rowsBeforeTyping) · 复位 +\(afterReset - rows)"
+              + " · 第二次 +\(session.history.count - afterReset)）")
+    }
+
+    /// **347 ⑥** — 引导线求解器不再在 100 处停住：一张**需要 v = 150** 才能摆正的图。
+    ///
+    /// The fixture is 337's own generator, at a stop the old travel could not reach: two exact
+    /// parallels under `v = +150`, mapped back to source. The fit has to come back within ±1 of it
+    /// and leave the pair ≤ 0.05°, which it could not do while `PerspectiveMap.limit` was 100 (the
+    /// solve then returned `.outOfRange` at the cap).
+    func testTheFitGoesPastOneHundredWhenThePictureNeedsIt() throws {
+        let (session, tool) = try makeTool()
+        XCTAssertTrue(tool.setGuideLinesArmed(true))
+        let v = 150.0
+        let lines = pair(.vertical, vertical: v, horizontal: 0)
+        let before = renderedConvergence(lines, perspective: nil)
+        // What the old travel could do — printed, so 「不再停住」 is a number, not a claim.
+        let atTheOldCap = renderedConvergence(lines, perspective: PerspectiveMap(vertical: 100,
+                                                                                horizontal: 0))
+        print(String(format: "347 ⑥ fixture: 贴前 %.6f° · 滑杆停在旧上限 100 时仍剩 %.6f°", before,
+                     atTheOldCap))
+        XCTAssertGreaterThan(atTheOldCap, 0.05, "347 ⑥ 这张图在 100 处确实摆不正（否则这条测试什么也没证明）")
+
+        XCTAssertNil(draw(tool, from: lines[0].0, to: lines[0].1), "347 ⑥ 一条线还解不出来")
+        let applied = draw(tool, from: lines[1].0, to: lines[1].1)
+        XCTAssertNotNil(applied, "347 ⑥ 两条线应当解出来：\(String(describing: tool.guideLineFailure))")
+        let solution = try XCTUnwrap(applied)
+        let map = PerspectiveMap(vertical: session.edit.geometry.perspectiveVertical,
+                                 horizontal: session.edit.geometry.perspectiveHorizontal)
+        let after = renderedConvergence(lines, perspective: map.hasWarp ? map : nil)
+        print(String(format: "347 ⑥ 求解 v %+8.3f（h %+8.3f）· 残差 %.6f° · 应用后 %.6f° · "
+                     + "%d 次迭代 · 提示「%@」",
+                     solution.vertical, solution.horizontal, solution.worstResidual, after,
+                     solution.iterations, tool.guideLineStatusText ?? "-"))
+
+        XCTAssertEqual(solution.vertical, v, accuracy: 1, "347 ⑥ 求解值必须 ≈ +150")
+        XCTAssertGreaterThan(solution.vertical, 100, "347 ⑥ 不再在 100 处停住")
+        XCTAssertLessThanOrEqual(solution.worstResidual, 0.05, "347 ⑥ 残差 ≤ 0.05°")
+        XCTAssertLessThanOrEqual(after, 0.05, "347 ⑥ 应用后两条线必须平行")
+        XCTAssertEqual(session.edit.geometry.perspectiveHorizontal, 0, accuracy: 1e-12)
+    }
+
+    /// **347 ⑦** — `v = 200` + 「不出像素」→ 导出黑像素 0.000 %；关掉 → 有黑角。
+    ///
+    /// 337 ⑪'s two-sided measurement, at the new end of the travel: the inscription is what keeps a
+    /// doubled keystone out of the file, and with the box off the same frame is allowed to sit on the
+    /// `000000` corners.
+    func testTwoHundredLeavesNoBlackPixelWithConstrainCrop() throws {
+        let (_, tool) = try makeTool(perspective: (200, 0), staysInsidePixels: true)
+        XCTAssertTrue(tool.cropStaysInsidePixels)
+        let geometry = tool.cropGeometry
+        let frame = bounds(of: geometry.documentQuad(of: tool.draft.crop))
+        let black = blackFraction(frame: frame, photo: geometry.photoQuad())
+        let canvas = geometry.canvas(.document)
+        print(String(format: "347 ⑦ 不出像素=开: v 200 · 黑像素 %.4f%% · 画布 %d×%d · 框 %.3f×%.3f（文档单位）",
+                     black * 100, canvas.width, canvas.height,
+                     frame[2].x - frame[0].x, frame[2].y - frame[0].y))
+        XCTAssertEqual(black, 0, accuracy: 1e-9, "347 ⑦ 内切之后导出必须没有黑像素")
+
+        let (_, tool2) = try makeTool(perspective: (200, 0), staysInsidePixels: false)
+        XCTAssertFalse(tool2.cropStaysInsidePixels)
+        let geometry2 = tool2.cropGeometry
+        let frame2 = bounds(of: geometry2.documentQuad(of: tool2.draft.crop))
+        let black2 = blackFraction(frame: frame2, photo: geometry2.photoQuad())
+        print(String(format: "347 ⑦ 不出像素=关: 黑像素 %.4f%% · 框仍整幅 %.2f×%.2f",
+                     black2 * 100, tool2.draft.crop.width, tool2.draft.crop.height))
+        XCTAssertGreaterThan(black2, 0.0001, "347 ⑦ 关掉勾选后黑角可以出现")
+        XCTAssertEqual(tool2.draft.crop, .full, "347 ⑦ 关掉勾选就不内切（框不动）")
+    }
+
     // MARK: - the panel harness (334's, trimmed to what ⑦ reads)
 
     private struct Panel {
         let host: NSHostingView<InspectorView>
         let window: NSWindow
         let state: InspectorWorkspaceState
+        /// 347 — the session behind the card, so a test can read back what a typed slider value wrote.
+        var session: CatalogSession?
 
         var cards: InspectorCardsProbe {
             views(ofType: InspectorCardsProbe.self).first ?? InspectorCardsProbe(frame: .zero)
@@ -753,7 +882,7 @@ final class GuideLines337Tests: XCTestCase {
         CropUITestSupport.pump(0.4)
         host.layoutSubtreeIfNeeded()
         state.select(.transform)
-        let panel = Panel(host: host, window: window, state: state)
+        let panel = Panel(host: host, window: window, state: state, session: session)
         _ = try waitFor { panel.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
         return (panel, loupe)
     }

@@ -1116,10 +1116,13 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// (vertical) / *from the left* (horizontal), i.e. it pulls the near end in and pushes the far
     /// end out — the same direction the user sees a building straighten.
     ///
-    /// Full travel is **6°** of convergence on a square frame (3° at ±50), which is what makes
-    /// `perspectiveVertical = +50` a one-drag fix for the 3° card in the acceptance.
+    /// Full travel is **±200 slider units** (347; it was ±100), and the units are scaled by 100, not by
+    /// the clamp: 100 units is 6° of convergence on a square frame, 200 is 12.39°. That is what keeps
+    /// `perspectiveVertical = +50` a one-drag fix for the 3° card in the acceptance while giving a
+    /// harder keystone somewhere to go.
     ///
-    /// Stored as given; `perspective` is the map S0 actually consumes (clamped, and `nil` at 0/0).
+    /// Stored as given; `perspective` is the map S0 actually consumes (clamped to ±200, and `nil` at
+    /// 0/0).
     /// 0 keeps the pre-183 bytes **and** the pre-183 key: the two keys are written only when the
     /// document is actually keystoned, the `quarterTurns`/`asp`/`car` discipline.
     public var perspectiveVertical: Double
@@ -1317,7 +1320,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     ///
     /// `nil` is the pre-183 render path **and** the pre-183 key: the kernel's warp block is skipped
     /// entirely (the flag in `S0Params` is 0), the canvas is the crop's own pixel size, and the key
-    /// material grows no token. The clamp lives in `PerspectiveMap` (finite, ±100).
+    /// material grows no token. The clamp lives in `PerspectiveMap` (finite, ±200 — 347).
     public var perspective: PerspectiveMap? {
         guard perspectiveVertical != 0 || perspectiveHorizontal != 0 else { return nil }
         return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal)
