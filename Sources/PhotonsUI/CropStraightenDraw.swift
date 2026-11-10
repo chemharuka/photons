@@ -308,7 +308,10 @@ enum CropStraightenLinePainter {
     }
 
     /// Draw the stroke at `alpha` (1 during the gesture, then §`CropDrawStraighten.alpha`).
-    static func draw(_ stroke: CropToolSegment, alpha: Double) {
+    ///
+    /// 337 — `colour` lets 引导线 draw the line the fit **refused** in red while the accepted ones and
+    /// 328's straighten line stay white; the default keeps every existing call site's pixels.
+    static func draw(_ stroke: CropToolSegment, alpha: Double, colour: NSColor = .white) {
         guard alpha > 0.01 else { return }
         // The shadow first, and wider by one pixel on every side: it is what makes a white line
         // readable over a bright sky (the same trick Brightroom's crop guide does with a dark
@@ -320,7 +323,7 @@ enum CropStraightenLinePainter {
 
         let line = path(for: stroke)
         line.lineWidth = lineWidth
-        NSColor.white.withAlphaComponent(alpha).setStroke()
+        colour.withAlphaComponent(alpha).setStroke()
         line.stroke()
     }
 }

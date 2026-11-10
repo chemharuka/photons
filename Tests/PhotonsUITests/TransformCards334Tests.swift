@@ -151,8 +151,10 @@ final class TransformCards334Tests: XCTestCase {
         defer { panel.window.contentView = nil }
         XCTAssertTrue(loupe.isCropToolActive || loupe.beginCropTool(), "334: 进变换就该在裁切模式")
 
+        // 337 inserted 「引导线」 between 画线拉直 and the two keystone sliders (the user: 「校正包括
+        // 旋转、透视、以及新做的引导线UI」); the other four rows keep 334's order.
         XCTAssertEqual(CorrectionCardRow.allCases.map(\.title),
-                       ["拉直", "画线拉直", "垂直透视", "水平透视"])
+                       ["拉直", "画线拉直", "引导线", "垂直透视", "水平透视"])
         let correction = try XCTUnwrap(panel.row(CropCardID.correctionCard))
         var rows: [(String, CGRect)] = []
         for row in CorrectionCardRow.allCases {
