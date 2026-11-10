@@ -14,6 +14,9 @@ import PhotonsCore
 ///     (`LoupeMapping.viewPoint(sourceX:sourceY:)`), to 1e−9°;
 ///   · **the mapping** — view → source includes zoom/pan, the rotation and the keystone's `P`, which
 ///     is what makes a line drawn on a warped picture mean the right angle;
+///   · **所画即所平 (328b)** — with the keystone on, the line the user drew is level *on the screen*,
+///     ≤ 1 px, and 328's source-space answer is 1.69° off where it was drawn;
+///   · **no keystone, same digits (328b)** — twelve lines whose `s` is 328's to `%.12f`;
 ///   · **the frame does not move** while a line is being drawn (§2 / 310);
 ///   · **a misfire is nothing** — 19 pt applies no angle and writes no row;
 ///   · **one gesture is one ⌘Z**;
@@ -100,6 +103,11 @@ final class CropDrawStraightenTests: XCTestCase {
     /// The measurement is the **drawn** angle — the renderer's forward projection at the new document
     /// angle — not a re-derivation of the formula, so a sign error cannot pass by being consistent
     /// with itself.
+    ///
+    /// 328b: `θ` is now the angle **on the screen** (328's suite read it in source pixels, which with
+    /// no keystone is the same line turned by the current straighten). At a current angle of 9° the
+    /// 44.9° source line is drawn at 53.9° — and the user, who draws on the screen, means 竖. The
+    /// expectation follows the drawn angle for exactly that reason.
     func testEveryDrawnLineLandsOnTheNearestAxis() throws {
         let angles: [Double] = [0, 2, -2, 5, -5, 30, -30, 44.9, -44.9, 45.1, 60, -60, 89, -89, 90]
         var worst = 0.0
@@ -111,13 +119,19 @@ final class CropDrawStraightenTests: XCTestCase {
                 let (a, b) = segment(at: theta)
                 let result = try XCTUnwrap(draw(a, b, mapping: map),
                                            "\(theta)°: the gesture produced nothing")
+                // What the eye sees: the line's own angle, turned by the document's current angle.
+                let onScreen = CropDrawStraighten.fold(theta + current)
+                // 竖/横 is a decision about **how far the picture has to turn** (`s` is absolute and
+                // the limit is on `s`), so it is taken on the angle `s` cancels — the source angle
+                // here, which is why 328's decisions survive. The screen angle is what gets measured
+                // (§2.1), not what decides.
                 let expected: CropStraightenAxis = abs(theta) <= 45 ? .horizontal : .vertical
                 XCTAssertEqual(result.axis, expected, "\(theta)°: 贴轴判定")
                 // A line has no direction: compare modulo 180 so a fold at ±90° cannot flake.
-                let angleError = min(abs(result.sourceAngle - theta),
-                                     abs(abs(result.sourceAngle - theta) - 180))
+                let angleError = min(abs(result.viewAngle - onScreen),
+                                     abs(abs(result.viewAngle - onScreen) - 180))
                 XCTAssertLessThanOrEqual(angleError, 1e-9,
-                                         "\(theta)°: the source-space angle is the line's own")
+                                         "\(theta)°: the measured angle is the line's angle on screen")
 
                 // The correction never needs more than the limit: the fold is what keeps it legal.
                 XCTAssertLessThanOrEqual(abs(result.raw), 45 + 1e-9,
@@ -127,15 +141,15 @@ final class CropDrawStraightenTests: XCTestCase {
                 let after = drawnAngle(straighten: result.applied, from: a, to: b)
                 let residual = axisDistance(after, result.axis)
                 worst = max(worst, residual)
-                rows.append(String(format: "%+6.1f° (now %+5.1f°) → %@ %+6.2f° · drawn %+8.4f° · off axis %.2e°",
-                                   theta, current, result.axis == .horizontal ? "横" : "竖",
+                rows.append(String(format: "%+6.1f° (now %+5.1f°, screen %+6.1f°) → %@ %+6.2f° · drawn %+8.4f° · off axis %.2e°",
+                                   theta, current, onScreen, result.axis == .horizontal ? "横" : "竖",
                                    result.applied, after, residual))
                 XCTAssertLessThanOrEqual(residual, 1e-9,
                                          "\(theta)° at \(current)°: the line is \(residual)° off its axis")
             }
         }
-        print("328 ① self-consistency — \(rows.count) lines, worst residual \(String(format: "%.3e", worst))°")
-        for row in rows.prefix(15) { print("328 ① · \(row)") }
+        print("328b ① self-consistency — \(rows.count) lines, worst residual \(String(format: "%.3e", worst))°")
+        for row in rows.prefix(15) { print("328b ① · \(row)") }
     }
 
     // MARK: - ② the mapping (zoom / pan / rotation / keystone)
@@ -415,56 +429,198 @@ final class CropDrawStraightenTests: XCTestCase {
         XCTAssertEqual(tool.straightenStrokeAlpha, 1, accuracy: 1e-12, "清掉后回到不透明")
     }
 
-    // MARK: - ⑨ reverse gate ①: the angle must be taken in source space
+    // MARK: - ⑨ reverse gate ① (328b): the angle must be taken on the screen
 
-    /// With the keystone on, the same line has two angles: the one in the photograph (`P⁻¹` undone
-    /// — §3.1's source space) and the one on the warped screen. **This gate applies both** and asks
-    /// the question §3.1 makes the truth: *is the line level in the photograph?*
+    /// With the keystone on, the same line has two angles: the one in the photograph (`P⁻¹` undone)
+    /// and the one on the warped screen. 328 took the first and printed the cost itself: `s = −20.000°`
+    /// and **1.69° of crooked line still on screen**. 328b takes the second, and this gate measures
+    /// both *where the user looks*.
     ///
-    ///   · the shipped path leaves it at 0° in the sensor grid (residual ≤ 1e−9°);
-    ///   · the view-space reading asks for 1.698° more, so the photograph keeps that tilt — the gate
-    ///     is red by more than a degree, which is why the mapping test's keystone group (`P` in the
-    ///     walk, 40.88 px without it) is the one that pins this down.
+    ///   · the shipped path (`measuresAngleOnScreen = true`) leaves the line level **on the canvas**
+    ///     — residual ≈ 0, and the number is −21.698°, the screen angle negated;
+    ///   · 328's reading (`false`, the same fixture and the same write) leaves it 1.69° off — red, and
+    ///     the gate asserts more than a degree, so flipping the rule back cannot pass unnoticed.
     ///
-    /// The number the *screen* still shows after the shipped path (1.69° at this corner) is the
-    /// keystone's own angular distortion — the pipeline is `P → R`, so the correction levels the
-    /// photograph **before** the keystone — and it is recorded in the report, not hidden here.
-    func testTheAngleMustBeMeasuredInSourceSpaceNotOnScreen() throws {
+    /// The two rows are §2.2 of the work order, printed verbatim.
+    func testTheAngleMustBeMeasuredOnTheScreenNotInSourceSpace() throws {
         let keystone = PerspectiveMap(vertical: 30, horizontal: -15)
         let map = framing(perspective: keystone).mapping(of: .fit)
-        // Off-centre, where the homography bends the picture most.
+        // Off-centre, where the homography bends the picture most — 328 ⑨①'s own fixture.
         let (a, b) = segment(at: 20, centre: CGPoint(x: 900, y: 250))
-
-        let shipped = try XCTUnwrap(draw(a, b, mapping: map))
-        let shippedResidual = axisDistance(shipped.sourceAngle + shipped.applied, shipped.axis)
-
-        // The naive reading: the angle between the two **view** points, applied the same way.
         let va = viewPoint(map, a), vb = viewPoint(map, b)
-        let screenAngle = CropDrawStraighten.fold(CropDrawStraighten.degrees(dx: Double(vb.x - va.x),
-                                                                             dy: Double(vb.y - va.y)))
-        let naiveAxis = CropDrawStraighten.axis(forFoldedAngle: screenAngle)
-        let naiveRaw = CropDrawStraighten.correction(foldedAngle: screenAngle, axis: naiveAxis)
-        let naiveApplied = CropTool.clampStraighten(naiveRaw)
-        let naiveResidual = axisDistance(shipped.sourceAngle + naiveApplied, naiveAxis)
 
-        // And what the screen shows in each case, for the record (§3.1 fixes which one is the goal).
-        let shippedOnScreen = drawnAngle(straighten: shipped.applied, perspective: keystone,
-                                         from: a, to: b)
-        let naiveOnScreen = drawnAngle(straighten: naiveApplied, perspective: keystone,
-                                      from: a, to: b)
+        // 328's reading: the same stroke, angle taken after `P⁻¹`.
+        let legacy = try XCTUnwrap(CropDrawStraighten.draw(from: va, to: vb, mapping: map,
+                                                           angleOnScreen: false))
+        let legacySourceTheta = CropDrawStraighten.fold(CropDrawStraighten.degrees(
+            dx: Double(legacy.sourceEnd.x - legacy.sourceStart.x),
+            dy: Double(legacy.sourceEnd.y - legacy.sourceStart.y)))
+        let legacyScreen = drawnAngle(straighten: legacy.applied, perspective: keystone, from: a, to: b)
+        let legacyResidual = axisDistance(legacyScreen, .horizontal)
 
-        print(String(format: "328 ⑨① gate: source θ %+.3f° → %+.3f° (photograph off %.2e°, screen off %.2f°)",
-                     shipped.sourceAngle, shipped.applied, shippedResidual,
-                     axisDistance(shippedOnScreen, shipped.axis)))
-        print(String(format: "328 ⑨① gate: view θ %+.3f° → %+.3f° (photograph off %.3f°, screen off %.3f°)",
-                     screenAngle, naiveApplied, naiveResidual,
-                     axisDistance(naiveOnScreen, naiveAxis)))
-        XCTAssertLessThanOrEqual(shippedResidual, 1e-9,
-                                 "the shipped path leaves the photograph level")
-        XCTAssertGreaterThan(naiveResidual, 1.0,
-                             "the view-space angle leaves the photograph tilted — the gate must be red")
-        XCTAssertNotEqual(naiveApplied, shipped.applied, accuracy: 1e-6,
-                          "the two spaces must give different numbers on a keystoned picture")
+        // 328b's reading: the stroke's own angle on the canvas.
+        let shipped = try XCTUnwrap(draw(a, b, mapping: map))
+        let shippedScreen = drawnAngle(straighten: shipped.applied, perspective: keystone, from: a, to: b)
+        let shippedResidual = axisDistance(shippedScreen, .horizontal)
+
+        print(String(format: "328b ⑨① 328:  source θ %+.3f° → s %+.3f° → screen off %.3f°",
+                     legacySourceTheta, legacy.applied, legacyResidual))
+        print(String(format: "328b ⑨① 本单: view θ %+.3f° → s %+.3f° → screen off %.3e°",
+                     shipped.viewAngle, shipped.applied, shippedResidual))
+
+        XCTAssertEqual(legacySourceTheta, 20, accuracy: 1e-9, "这条线在照片里就是 20°")
+        XCTAssertEqual(legacy.applied, -20, accuracy: 0.001, "328 的源空间读数")
+        XCTAssertEqual(legacyResidual, 1.69, accuracy: 0.01, "源空间校正后屏幕上仍歪 1.69°")
+        XCTAssertEqual(shipped.applied, -21.698, accuracy: 0.001, "视图空间的读数")
+        // ≈0: what is left is the canvas's per-axis `1/extent` normalisation (the AABB is rounded to
+        // whole pixels, so the last ~1e−4 of shear survives) — 0.011° = 0.19 px, and 150× flatter than
+        // 328's 1.687°, which is the claim. Zero to `1e−9` would be a lie about integer canvases.
+        XCTAssertLessThan(shippedResidual, 0.02, "视图空间校正后屏幕上就是平的")
+        XCTAssertLessThan(shippedResidual * 50, legacyResidual, "而且比 328 平一个数量级以上")
+        XCTAssertNotEqual(shipped.applied, legacy.applied, accuracy: 1e-6,
+                          "有透视时两个空间必须给出不同的数")
+    }
+
+    // MARK: - ⑩ 328b §2.1 — 所画即所平: the line is level *on the screen*
+
+    /// The acceptance the user stated: draw a line, apply, and the line is level **where it was
+    /// drawn**. Three framings (`keystone = 0`, `(+30, 0)`, `(+30, −15)`) × four screen angles
+    /// (`5° / 20° / 40° / 85°`), and after the write the stroke's own two material points are pushed
+    /// through the renderer's real view map at the new angle:
+    ///
+    ///   · horizontal lines → |Δy| ≤ 1 px, vertical lines → |Δx| ≤ 1 px, **on the canvas**;
+    ///   · the same two points through `FrameTransform.sourceToView` at 1:1 — the **export** grid —
+    ///     must satisfy the same bound, because the export is the same `P → R` canvas without the
+    ///     viewport's uniform scale.
+    ///
+    /// The stroke is built in view points, which is what the hand produces: 328's suite built it in
+    /// source pixels and forward-projected, so it never had a 20° line that was 20° *on the screen*.
+    func testADrawnLineEndsLevelOnTheScreenUnderEveryKeystone() throws {
+        let keystones: [(name: String, map: PerspectiveMap?)] = [
+            ("keystone 0", nil),
+            ("(+30, 0)", PerspectiveMap(vertical: 30, horizontal: 0)),
+            ("(+30, −15)", PerspectiveMap(vertical: 30, horizontal: -15)),
+        ]
+        let screenAngles: [Double] = [5, 20, 40, 85]
+        var worstScreen = 0.0, worstExport = 0.0, worstAngle = 0.0
+        var rows: [String] = []
+
+        func exported(_ point: CGPoint, at degrees: Double,
+                      perspective: PerspectiveMap?) -> CGPoint {
+            let transform = FrameTransform(source: source, crop: .full,
+                                           straightenDegrees: degrees, quarterTurns: 0,
+                                           perspective: perspective,
+                                           viewport: nil, zoom: 1)
+            let p = transform.sourceToView(SIMD2<Double>(Double(point.x), Double(point.y)))
+            return CGPoint(x: Double(p.x), y: Double(p.y))
+        }
+
+        for group in keystones {
+            for phi in screenAngles {
+                let map = framing(perspective: group.map).mapping(of: .fit)
+                // The gesture as the canvas sees it: two points ON THE SCREEN, `phi` degrees apart.
+                let half = 300.0, radians = phi * .pi / 180
+                let v0 = CGPoint(x: 600 - half * cos(radians), y: 400 - half * sin(radians))
+                let v1 = CGPoint(x: 600 + half * cos(radians), y: 400 + half * sin(radians))
+                let result = try XCTUnwrap(CropDrawStraighten.draw(from: v0, to: v1, mapping: map),
+                                           "\(group.name) at \(phi)°: the gesture produced nothing")
+                XCTAssertEqual(result.viewAngle, phi, accuracy: 1e-9,
+                               "\(group.name) \(phi)°: the angle measured is the one drawn")
+                let axis: CropStraightenAxis = abs(phi) <= 45 ? .horizontal : .vertical
+                XCTAssertEqual(result.axis, axis, "\(group.name) \(phi)°: 贴轴")
+                XCTAssertFalse(result.wasClamped, "\(group.name) \(phi)°: 被夹了")
+
+                // On the canvas, at the new document angle — the renderer's own forward walk.
+                let after = framing(straighten: result.applied, perspective: group.map)
+                    .mapping(of: .fit)
+                let p = viewPoint(after, result.sourceStart)
+                let q = viewPoint(after, result.sourceEnd)
+                let screenOff = axis == .horizontal ? q.y - p.y : q.x - p.x
+                let screenAngle = CropDrawStraighten.degrees(dx: Double(q.x - p.x),
+                                                             dy: Double(q.y - p.y))
+                // In export pixels (1:1, the frame the file's pixels come from).
+                let e0 = exported(result.sourceStart, at: result.applied, perspective: group.map)
+                let e1 = exported(result.sourceEnd, at: result.applied, perspective: group.map)
+                let exportOff = axis == .horizontal ? e1.y - e0.y : e1.x - e0.x
+
+                worstScreen = max(worstScreen, abs(Double(screenOff)))
+                worstExport = max(worstExport, abs(Double(exportOff)))
+                worstAngle = max(worstAngle, axisDistance(screenAngle, axis))
+                XCTAssertLessThanOrEqual(abs(Double(screenOff)), 1,
+                                         "\(group.name) \(phi)°: 屏幕上偏 \(abs(Double(screenOff))) px")
+                XCTAssertLessThanOrEqual(abs(Double(exportOff)), 1,
+                                         "\(group.name) \(phi)°: 导出偏 \(abs(Double(exportOff))) px")
+                rows.append(String(format: "328b ⑩ %@ %2.0f° → s %+7.3f° · screen Δ %@ %.2e pt · export Δ %@ %.2e px · off axis %.2e°",
+                                   group.name, phi, result.applied,
+                                   axis == .horizontal ? "y" : "x", abs(Double(screenOff)),
+                                   axis == .horizontal ? "y" : "x", abs(Double(exportOff)),
+                                   axisDistance(screenAngle, axis)))
+            }
+        }
+        for row in rows { print(row) }
+        print(String(format: "328b ⑩ worst: screen %.3e pt, export %.3e px, angle %.3e° (12 lines)",
+                     worstScreen, worstExport, worstAngle))
+        XCTAssertLessThanOrEqual(worstScreen, 1)
+        XCTAssertLessThanOrEqual(worstExport, 1)
+        // Not zero, and not because of the angle: the keystoned canvas normalises by `1/extent` **per
+        // axis** over an AABB rounded to whole pixels, so a keystoned picture keeps ~1e−4 of shear.
+        // Over this 600 pt stroke 1 px is 0.095°, so the bound the user cares about is the Δ above —
+        // this one only has to stay well inside it.
+        XCTAssertLessThanOrEqual(worstAngle, 0.02)
+    }
+
+    // MARK: - ⑪ 328b §2.3 — with no keystone the numbers are 328's, digit for digit
+
+    /// §1's last line: turning the measurement into the screen's must not move a single digit when
+    /// there is no keystone — a similarity holds the same angle, so the two readings are the same
+    /// number. Twelve lines × three current angles, compare with Printf `%.12f`: every string equal.
+    func testWithoutAKeystoneTheAngleIsThreeTwentyEightToTwelvePlaces() throws {
+        let angles: [Double] = [0, 3, -3, 7, -7, 20, -20, 30, -30, 44.9, 83, -83]
+        var comparisons = 0
+        var worst = 0.0
+        var rows: [String] = []
+
+        for current in [0.0, 9.0, -17.0] {
+            let map = framing(straighten: current).mapping(of: .fit)
+            for theta in angles {
+                let (a, b) = segment(at: theta)
+                let result = try XCTUnwrap(draw(a, b, mapping: map))
+
+                // 328's arithmetic, re-run on the same stroke: `θ` after `P⁻¹` (the identity here),
+                // its axis, its correction.
+                let sx = Double(result.sourceEnd.x - result.sourceStart.x)
+                let sy = Double(result.sourceEnd.y - result.sourceStart.y)
+                let legacyTheta = CropDrawStraighten.fold(CropDrawStraighten.degrees(dx: sx, dy: sy))
+                let legacyAxis = CropDrawStraighten.axis(forFoldedAngle: legacyTheta)
+                let legacyRaw = CropDrawStraighten.correction(foldedAngle: legacyTheta, axis: legacyAxis)
+                let legacyApplied = CropTool.clampStraighten(legacyRaw)
+
+                // `%.12f` equality, with the sign of a zero normalised away: `−0.0` and `+0.0` are the
+                // same angle (a 0° line at −17° is the one case where the two paths pick different
+                // zeros), and no reader can tell them apart — the numbers, not the sign bit, are the
+                // claim.
+                func twelvePlaces(_ value: Double) -> String {
+                    let text = String(format: "%.12f", value)
+                    return text == "-0.000000000000" ? "0.000000000000" : text
+                }
+                let mine = twelvePlaces(result.applied)
+                let theirs = twelvePlaces(legacyApplied)
+                comparisons += 1
+                worst = max(worst, abs(result.applied - legacyApplied))
+                XCTAssertEqual(result.axis, legacyAxis, "\(theta)° at \(current)°: 轴也不该变")
+                XCTAssertEqual(mine, theirs,
+                               "\(theta)° at \(current)°: 328 的 s = \(theirs), 本单 = \(mine)")
+                if current == 0 {
+                    rows.append(String(format: "328b ⑪ %+6.1f°  s = %@  (= 328 的 %@)",
+                                       theta, mine, theirs))
+                }
+            }
+        }
+        for row in rows { print(row) }
+        print(String(format: "328b ⑪ %d comparisons (12 lines × 3 current angles), worst |Δs| = %.3e°, all %%.12f equal",
+                     comparisons, worst))
+        XCTAssertEqual(comparisons, 36)
+        XCTAssertLessThanOrEqual(worst, 1e-12)
     }
 
     // MARK: - ⑨ reverse gate ②: the nearest axis

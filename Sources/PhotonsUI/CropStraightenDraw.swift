@@ -20,12 +20,26 @@ import PhotonsCore
 //
 // What is *not* borrowed: none of the three publishes its arithmetic, and none of them has to undo a
 // keystone. This file takes the one convention this repository already fixed (`CropTool.straighten`,
-// `:589-641`): a document angle `s` draws the source's `+x` axis at `+s` on the y-down canvas
-// (`testAStraightenedFrameTurnsWithThePicture`), so a source-space direction at `θ` appears at
+// `:589-641`): a document angle `s` turns the drawn picture by `+s` on a y-down canvas
+// (`testAStraightenedFrameTurnsWithThePicture`), so a **screen**-space direction at `θ` appears at
 // `θ + s` and the correction is `s = −θ` for the horizontal axis, `s = ±90° − θ` for the vertical
 // one. **The sign of the correction is therefore the mirror of the hand-rotation gesture's**
 // (`CropTool.straighten` returns `start − Δ` for a hand sweep `Δ`): a line, not a sweep, so the same
 // convention expresses it as `+θ`.
+//
+// 328b — **the angle is the one on the screen.** 328 measured it after mapping both ends back to
+// source pixels (`FrameTransform.viewPointToSource`, keystone `P⁻¹` included), which is the angle of
+// the *thing in the photograph*: with no keystone the two spaces agree, so its 45-line suite was
+// green; with one they do not, and it measured the cost itself — `(+30, −15)` and a 20° line came out
+// `s = −20.000°`, the photograph level and **the line still 1.69° crooked on screen**. The user draws
+// on a screen and judges on a screen (「画一条线，把它校正到横平竖直」), so the number has to be the
+// screen's. That is also the one that cancels: the renderer is `P → R` and everything after `R`
+// (the AABB placed in the letterbox, zoom, pan) is a uniform scale and a translation, so `R` is a
+// rigid rotation of what the user sees and `s` shifts a screen direction by `s`. What is left is the
+// canvas's whole-pixel AABB (`perspectiveCanvas` divides by `1/extent` per axis, so the last ~1e−4 of
+// shear survives): measured, ≤ 0.2 px on a 600 pt stroke, against 328's 1.69° ≈ 18 px.
+// `viewPointToSource` stays for the cross-checks (and, if a caller ever wants it, to ask whether the
+// stroke lies on the photograph), never for the angle.
 
 // MARK: - which axis the line is meant to be
 
@@ -59,14 +73,19 @@ public enum CropStraightenAxis: String, Sendable, Equatable, Hashable {
 /// (`CropTool.clampStraighten`), and `wasClamped` is the difference — the card's slider reads the
 /// **applied** value, so a clamped gesture shows the number that really took effect (§3.4).
 public struct CropStraightenDraw: Equatable, Sendable {
-    /// The two ends as drawn, in **view points** — what the overlay strokes for 0.3 s.
+    /// The two ends as drawn, in **view points** — what the overlay strokes for 0.3 s, and the
+    /// segment whose angle this gesture is about (328b).
     public var start: CGPoint
     public var end: CGPoint
-    /// The same two ends in **source pixels** (upright sensor coordinates, keystone undone).
+    /// The same two ends in **source pixels** (upright sensor coordinates, keystone undone) — the
+    /// material points the stroke picked out of the photograph, kept for the cross-checks and for
+    /// 「这条线落在照片上吗」. **Not** where the angle comes from (328b; see `CropDrawStraighten`).
     public var sourceStart: CGPoint
     public var sourceEnd: CGPoint
-    /// The line's angle in source space, folded into `(−90°, +90°]`.
-    public var sourceAngle: Double
+    /// The line's angle **on the screen**, folded into `(−90°, +90°]`, exactly as the hand drew it —
+    /// the canvas's own current straighten included, because that is what the eye saw. (The
+    /// correction takes that rotation back out: `s` is the document's absolute angle.)
+    public var viewAngle: Double
     /// Which axis the fold put it on.
     public var axis: CropStraightenAxis
     /// The correction the line asks for, before the limit.
@@ -78,13 +97,13 @@ public struct CropStraightenDraw: Equatable, Sendable {
 
     public init(start: CGPoint, end: CGPoint,
                 sourceStart: CGPoint, sourceEnd: CGPoint,
-                sourceAngle: Double, axis: CropStraightenAxis,
+                viewAngle: Double, axis: CropStraightenAxis,
                 raw: Double, applied: Double, wasClamped: Bool) {
         self.start = start
         self.end = end
         self.sourceStart = sourceStart
         self.sourceEnd = sourceEnd
-        self.sourceAngle = sourceAngle
+        self.viewAngle = viewAngle
         self.axis = axis
         self.raw = raw
         self.applied = applied
@@ -126,17 +145,14 @@ public enum CropDrawStraighten {
     ///
     /// `LoupeMapping.sourcePoint` *is* `FrameTransform.viewPointToSource` — the exact walk S0 runs
     /// backwards: letterbox + zoom/pan (S5 → S3), the crop window, `R⁻¹` about the photograph's
-    /// centre, the flips, and — 246 — the keystone's inverse homography `P⁻¹`. That is the whole of
-    /// §3.1: a line drawn on a keystoned picture is measured on the **sensor** grid, not on the
-    /// warped screen, so the number this file produces is the angle of the thing in the photograph.
+    /// centre, the flips, and — 246 — the keystone's inverse homography `P⁻¹`.
     ///
-    /// **The keystone's consequence, recorded rather than hidden.** The render pipeline is
-    /// `P → R` (`CropMath.perspectiveCanvas`: the keystone warps the photo, then the straighten turns
-    /// the warped pixels), so correcting the *photograph's* tilt is exactly a rotation applied after
-    /// `P` — the photograph comes out level, and what the screen still shows is the keystone's own
-    /// angular distortion (measured: 1.69° for a 20° line in the corner of a `(+30, −15)` picture).
-    /// Measuring on the screen instead would level the warped picture and leave the photograph tilted
-    /// by the same amount; §3.1 picks the photograph.
+    /// **328b — this is no longer where the angle comes from.** The walk is what makes the four
+    /// corners of a keystoned picture map back onto the sensor grid, so it is still the cross-check
+    /// (`CropDrawStraightenTests` ②) and it is still how a caller asks where on the photograph a
+    /// stroke landed. It is *not* the measurement: `P⁻¹` is a homography, so it bends a direction, and
+    /// a correction derived from the bent direction levels the photograph while leaving the screen
+    /// crooked (measured, `(+30, −15)` + 20°: 1.69°). The screen is what the user drew on.
 
     public static func sourcePoint(of point: CGPoint,
                                    mapping: LoupeMapping,
@@ -173,11 +189,12 @@ public enum CropDrawStraighten {
     /// The `straighten` a line at `degrees` (folded) asks for — §3.3, in `CropTool.straighten`'s
     /// sign convention.
     ///
-    /// Derivation, one line: a document angle `s` draws the source's `+x` at `+s` on the canvas
-    /// (`testAStraightenedFrameTurnsWithThePicture`, S0 rotates in **pixels**), so a line at `θ`
-    /// appears at `θ + s`. For 横 that has to be 0 → `s = −θ`; for 竖 it has to be `±90°`, and the
-    /// **short** way is `90° − θ` for a line leaning right and `−90° − θ` for one leaning left.
-    /// Either branch is at most 45° of travel, which is why a drawn line can never ask for more
+    /// Derivation, one line: a document angle `s` turns the picture by `s` on the y-down canvas
+    /// (`testAStraightenedFrameTurnsWithThePicture`), and `R` sits after the keystone with only a
+    /// uniform scale and a translation after it, so a **screen** direction at `θ` appears at `θ + s`
+    /// (`328b` — see the file header). For 横 that has to be 0 → `s = −θ`; for 竖 it has to be `±90°`,
+    /// and the **short** way is `90° − θ` for a line leaning right and `−90° − θ` for one leaning
+    /// left. Either branch is at most 45° of travel, which is why a drawn line can never ask for more
     /// than the document's limit — the fold, not the clamp, is what keeps the number legal.
     public static func correction(foldedAngle degrees: Double,
                                   axis: CropStraightenAxis) -> Double {
@@ -197,29 +214,59 @@ public enum CropDrawStraighten {
     /// `nearestAxis` is the reverse gate (internal switch on the controller): with it off the axis is
     /// always 横, which is exactly the bug §4.9② describes — an 83° line then asks for −83° and the
     /// clamp silently turns it 45° instead of 7°.
+    ///
+    /// `angleOnScreen` is 328b's reverse gate and its default *is* the shipped rule. `false` measures
+    /// `θ` after mapping both ends back to sensor pixels — 328's arithmetic, verbatim — so the
+    /// keystone acceptance can be seen going red by the keystone's own angular distortion instead of
+    /// being taken on faith. Nothing in the app writes it.
     public static func draw(from start: CGPoint,
                             to end: CGPoint,
                             mapping: LoupeMapping,
                             pointScale: Double = 1,
                             limit: Double = CropTool.straightenLimit,
-                            nearestAxis: Bool = true) -> CropStraightenDraw? {
+                            nearestAxis: Bool = true,
+                            angleOnScreen: Bool = true) -> CropStraightenDraw? {
         let dx = Double(end.x - start.x), dy = Double(end.y - start.y)
         let length = (dx * dx + dy * dy).squareRoot()
         guard length.isFinite, length >= minimumLengthPoints else { return nil }
 
+        // The material points — the pixels the user drew across. `P⁻¹` included, so they are what the
+        // picture has to be turned *about*; only the gate asks them for an angle.
         let a = sourcePoint(of: start, mapping: mapping, pointScale: pointScale)
         let b = sourcePoint(of: end, mapping: mapping, pointScale: pointScale)
         guard a.x.isFinite, a.y.isFinite, b.x.isFinite, b.y.isFinite else { return nil }
-        let sx = Double(b.x - a.x), sy = Double(b.y - a.y)
-        guard (sx * sx + sy * sy).squareRoot() > 1e-9 else { return nil }
 
-        let folded = fold(degrees(dx: sx, dy: sy))
+        // 328b — §1: the angle the user is looking at. Points are proportional to pixels and the
+        // letterbox/zoom/pan after `R` is a uniform scale, so this is the angle on the screen whatever
+        // the camera is doing; measuring it needs no inverse at all.
+        //
+        // **One rotation has to come back out of it.** `s` is the document's *absolute* angle, not a
+        // delta, and the canvas is drawn at the angle the document already holds (`canvasEdit` — a
+        // 转动 tick is draft-only, 088), so the screen shows `θ_P + current`. The angle that `s` has
+        // to cancel is `θ_P`, the stroke's direction at straighten 0: `θ_P = θ_view − current`. With
+        // no keystone that is exactly 328's source-space angle, which is why 328's numbers survive
+        // (§2.3); with one it is the keystone-warped direction and no longer the photograph's.
+        let current = mapping.transform?.straightenDegrees ?? 0
+        let onScreen = fold(degrees(dx: dx, dy: dy))
+        let folded: Double
+        if angleOnScreen {
+            folded = fold(onScreen - (current.isFinite ? current : 0))
+        } else {
+            // 328's walk, kept live for the gate: a homography bends the direction it sees.
+            let sx = Double(b.x - a.x), sy = Double(b.y - a.y)
+            guard (sx * sx + sy * sy).squareRoot() > 1e-9 else { return nil }
+            folded = fold(degrees(dx: sx, dy: sy))
+        }
+
+        // 竖/横 and the correction both read `folded` — the angle the *picture* has to turn — not the
+        // screen angle: `s` is absolute and the ±45 limit is on `s`, so the fold that decides the axis
+        // is the fold that keeps the number legal (§3.2/§3.3, unchanged from 328).
         let chosen: CropStraightenAxis = nearestAxis ? axis(forFoldedAngle: folded) : .horizontal
         let raw = correction(foldedAngle: folded, axis: chosen)
         let applied = min(max(raw, -limit), limit)
         return CropStraightenDraw(start: start, end: end,
                                   sourceStart: a, sourceEnd: b,
-                                  sourceAngle: folded, axis: chosen,
+                                  viewAngle: onScreen, axis: chosen,
                                   raw: raw, applied: applied, wasClamped: raw != applied)
     }
 
