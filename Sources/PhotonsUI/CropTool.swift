@@ -276,7 +276,35 @@ public enum CropTool {
             let turned = rotation.invert(x: dx, y: dy)
             return (centreX + turned.x, centreY + turned.y)
         }
+        // **327 — a keystoned frame is a quadrilateral, and it is drawn through `P → R`.**
+        //
+        // The straighten-only walk below (`R(−θ)` + the frame's axis-aligned screen map) assumes the
+        // picture's placement is a similarity, which a keystone makes false: `P` is projective, so the
+        // frame a user set — a rectangle of the *photograph* — lands as a quad, and 324's TODO («
+        // overlay 仍走旋转投影 ») was exactly this rectangle being drawn on top of a warped picture.
+        //
+        // The one map is `CropGeometry.documentPoint` (P → R, the same walk `photoQuad()` and the
+        // renderer's `M = R · P` are built from) followed by `LoupeMapping.documentView` (the camera).
+        // Nothing here re-derives a corner, and the no-keystone path is untouched bit for bit.
+        let keystone = mapping.transform?.perspective
+        let keystoneGeometry: CropGeometry? = keystone.flatMap { map in
+            guard map.hasWarp else { return nil }
+            return CropGeometry(
+                geometry: GeometryGroup(crop: c.normalizedRect,
+                                        rotationDegrees: CropTool.clampStraighten(quadRotationDegrees),
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: map.vertical,
+                                        perspectiveHorizontal: map.horizontal),
+                source: source)
+        }
         func view(_ u: Double, _ v: Double) -> CGPoint {
+            if let keystoneGeometry {
+                let p = keystoneGeometry.documentPoint(normalizedX: u, v)
+                if let drawn = mapping.documentView(p) {
+                    return CGPoint(x: carry.applyX(drawn.x) / scale, y: carry.applyY(drawn.y) / scale)
+                }
+            }
             // **Frame space, not source space** (see `LoupeMapping.frameView`): the crop rect is a
             // rectangle of the *straightened* frame, so its four sides stay axis-aligned on screen and
             // a straightened picture turns under a still frame. The quad is turned in image space

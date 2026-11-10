@@ -1380,6 +1380,35 @@ public struct LoupeMapping: Equatable, Sendable {
          originY + (frameY - cropTop) * contentHeight / max(cropHeight, 1e-9))
     }
 
+    /// The **document canvas'** pixel grid ⇄ view points — the grid `CropGeometry.photoQuad()` /
+    /// `documentQuad(of:)` speak, which since 324 is the grid a keystoned crop workspace draws on.
+    ///
+    /// 327 — this is the one exit the overlay's keystone branch uses, and it is the projection the
+    /// picture itself is laid out with (S3 = the `.document` canvas, `s3ToS5` = the camera window),
+    /// so a corner drawn here sits on the pixel the renderer put there. `nil` for a mapping built
+    /// without a `FrameTransform` (the legacy test initializer): there is no camera to ask.
+    public func documentView(_ p: DocumentPoint) -> CGPoint? {
+        guard let transform else { return nil }
+        return Self.apply(transform.s3ToS5, CGPoint(x: p.x, y: p.y))
+    }
+
+    /// The inverse of `documentView` — the walk a pointer makes to reach the document canvas, and
+    /// from there (through `CropGeometry.photoNormalized`) the upright source's own coordinates.
+    public func documentPoint(viewX: Double, viewY: Double) -> DocumentPoint? {
+        guard let transform else { return nil }
+        guard let p = Self.apply(transform.s5ToS3, CGPoint(x: viewX, y: viewY)) else { return nil }
+        return DocumentPoint(p.x, p.y)
+    }
+
+    private static func apply(_ matrix: Matrix3, _ p: CGPoint) -> CGPoint? {
+        let v = matrix.values
+        let x = v[0] * p.x + v[1] * p.y + v[2]
+        let y = v[3] * p.x + v[4] * p.y + v[5]
+        let w = v[6] * p.x + v[7] * p.y + v[8]
+        guard abs(w) > 1e-12 else { return nil }
+        return CGPoint(x: x / w, y: y / w)
+    }
+
     /// Device pixel → source pixel.
     ///
     /// Two steps, and the split is the whole fix:

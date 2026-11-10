@@ -362,15 +362,42 @@ public final class CropToolController {
     /// The draft's geometry with the document's flips and quarter turn carried (the same value
     /// `apply()` writes).
     private var draftGeometry: GeometryGroup {
-        draft.geometry(flipsOf: session?.edit.geometry ?? GeometryGroup.identity)
+        var group = draft.geometry(flipsOf: session?.edit.geometry ?? GeometryGroup.identity)
+        // 327 — the keystone is the document's while a crop session is open (see `effectiveGeometry`).
+        group.perspectiveVertical = livePerspective?.vertical ?? 0
+        group.perspectiveHorizontal = livePerspective?.horizontal ?? 0
+        return group
     }
 
-    /// The draft with the crop replaced by the rect the overlay drew (`effectiveCrop`).
+    /// The draft with the crop replaced by the rect the overlay drew (`effectiveCrop`), and with the
+    /// **document's** keystone.
+    ///
+    /// 327 — `draft.perspectiveVertical/Horizontal` are a copy taken at `begin()`, while the 变换 card's
+    /// two sliders write the **document** (`TransformPanel`: `session.applyEdit { … }`). Every other
+    /// reader in this file already follows the live document (`livePerspective`: the red-frame
+    /// predicate, both clamps, the inscription, the overlay), so a keystone dragged with 裁切 open was
+    /// visible on screen and then **overwritten with the stale copy by 应用** — the picture came out
+    /// flat. The write takes the same answer as the preview, in one place.
     private func effectiveGeometry(_ geometry: GeometryGroup) -> GeometryGroup {
         var geometry = geometry
+        geometry.perspectiveVertical = livePerspective?.vertical ?? 0
+        geometry.perspectiveHorizontal = livePerspective?.horizontal ?? 0
         geometry.crop = effectiveCrop(source: sourceSize)
             .clamped(allowsOutsideSource: true).normalizedRect
         return geometry
+    }
+
+    /// The draft's knobs, brought onto the document's — the refresh's half of the 327 rule above, so
+    /// the bar's readout and the red frame print the keystone that is on screen. Returns whether the
+    /// draft moved (a knob changed), never whether the document did.
+    @discardableResult
+    private func adoptLivePerspective() -> Bool {
+        guard isActive, let live = livePerspective else { return false }
+        guard draft.perspectiveVertical != live.vertical
+                || draft.perspectiveHorizontal != live.horizontal else { return false }
+        draft.perspectiveVertical = live.vertical
+        draft.perspectiveHorizontal = live.horizontal
+        return true
     }
 
     /// The geometry `finish(.confirm)` writes: the draft's fields, with the crop replaced by the one
@@ -1151,6 +1178,9 @@ public final class CropToolController {
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
         clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
+        // 327 — the 变换 card may have moved the knobs since the last refresh; the draft follows the
+        // document before any geometry is asked of it.
+        adoptLivePerspective()
         let src = source ?? sourceSize
         let before = draft.crop.clamped(allowsOutsideSource: true)
 
@@ -1406,7 +1436,8 @@ public final class CropToolController {
 
         let normalized = CropToolController.normalized(point, mapping: mapping, source: source,
                                                        pointScale: scale,
-                                                       rotationDegrees: straightenDelta)
+                                                       rotationDegrees: straightenDelta,
+                                                       perspective: livePerspective)
         guard let normalized else { return true }
 
         rotating = rotate && (handle == .outside || handle == .inside)
@@ -1436,7 +1467,8 @@ public final class CropToolController {
         let scale = pointScale > 0 ? pointScale : 1
         guard let normalized = CropToolController.normalized(point, mapping: mapping,
                                                              source: source, pointScale: scale,
-                                                             rotationDegrees: straightenDelta)
+                                                             rotationDegrees: straightenDelta,
+                                                             perspective: livePerspective)
         else { return }
 
         if rotating {
@@ -1509,8 +1541,26 @@ public final class CropToolController {
     /// point back by `+θ − θ₀` about the image centre, and only then compare it with `rect`.
     static func normalized(_ point: CGPoint, mapping: LoupeMapping, source: ImageSize,
                            pointScale: Double,
-                           rotationDegrees: Double = 0) -> NormalizedPoint? {
+                           rotationDegrees: Double = 0,
+                           perspective: PerspectiveMap? = nil) -> NormalizedPoint? {
         let scale = pointScale > 0 ? pointScale : 1
+        // **327 — the inverse of the keystone projection.** View → the document canvas' pixels →
+        // `photoNormalized` (the exact inverse of `CropGeometry.documentPoint`, P → R undone in one
+        // place). Without this branch a drag on a keystoned picture read the *un-warped* frame and the
+        // grip under the hand moved a different edge.
+        if let perspective, perspective.hasWarp,
+           let document = mapping.documentPoint(viewX: Double(point.x) * scale,
+                                                viewY: Double(point.y) * scale) {
+            let geometry = CropGeometry(
+                geometry: GeometryGroup(crop: .full,
+                                        rotationDegrees: CropTool.clampStraighten(rotationDegrees),
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: perspective.vertical,
+                                        perspectiveHorizontal: perspective.horizontal),
+                source: source)
+            return geometry.photoNormalized(documentX: document.x, document.y)
+        }
         // **Frame space** (`framePoint`), not `sourcePoint`: the draft rect is a rect of the
         // straightened frame, so a grip dragged on screen has to move the edge that is under the hand.
         // Going through the rotating map turned every drag of a straightened picture into an arc
