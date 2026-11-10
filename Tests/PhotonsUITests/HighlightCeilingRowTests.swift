@@ -64,7 +64,7 @@ final class HighlightCeilingRowTests: XCTestCase {
                        16.0, accuracy: 1e-12)
         XCTAssertEqual(notifications, 1, "the loupe re-renders off this notification")
         XCTAssertTrue(DisplayOptions(highlightCeiling: HighlightCeiling.current)
-            .keyString.contains("ceiling=16.0000"),
+            .keyString.contains("ceil=16.0000"),
                       "the render key follows the row, so a cached frame cannot outlive the change")
     }
 

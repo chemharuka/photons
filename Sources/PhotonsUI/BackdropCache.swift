@@ -114,15 +114,27 @@ public final class BackdropCache {
         public let develop: String
         /// `Histogram.editDigest(edit)` — the renderer-side half, one short hex string.
         public let digest: String
+        /// 323 — the picture's ceiling the texture was rendered with, in linear light.
+        ///
+        /// It is **not** in the edit digest because the ceiling is a preference, not a document
+        /// field (320), and it is not in `develop` because the decoder never sees it. Without it the
+        /// low-resolution whole picture — the letterbox backdrop and the histogram's whole-picture
+        /// source — kept the old top after 「最高亮度」 moved: the key did not move, so nothing was
+        /// regenerated and `measureFrameHistogram` on it returned the ceiling it was made at.
+        public let ceiling: Double
 
-        public init(photo: String, develop: String, digest: String) {
+        public init(photo: String, develop: String, digest: String,
+                    ceiling: Double = HighlightCeiling.defaultLinear) {
             self.photo = photo
             self.develop = develop
             self.digest = digest
+            self.ceiling = ceiling
         }
 
         /// The whole document in one string; what "has it moved?" compares.
-        public var identity: String { "\(photo)|\(develop)|\(digest)" }
+        public var identity: String {
+            "\(photo)|\(develop)|\(digest)|\(String(format: "ceil=%.4f", ceiling))"
+        }
     }
 
     /// The whole picture at ≤4096 long edge, `rgba16Float`, in the same space as the frame textures

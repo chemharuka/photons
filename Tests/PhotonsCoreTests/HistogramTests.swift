@@ -640,7 +640,9 @@ final class HistogramTests: XCTestCase {
     /// The cache key is the claim, written down: nothing about a camera, a viewport or a display.
     func testTheCacheKeyNamesThePictureAndTheDocument() {
         let a = Histogram.cacheKey(rungIdentity: "photo-s1.0", editDigest: "deadbeefcafe0001", bins: 256)
-        XCTAssertEqual(a, "hist|v1|photo-s1.0|deadbeefcafe0001|256")
+        // 323: the picture's own ceiling is the fourth field, always spelled — the bins are counted
+        // after S2 clamps at it, so a key that omits it cannot say what it measured.
+        XCTAssertEqual(a, "hist|v1|photo-s1.0|deadbeefcafe0001|256|ceil=4.9246")
         let b = Histogram.cacheKey(rungIdentity: "photo-s1.0", editDigest: "deadbeefcafe0002", bins: 256)
         XCTAssertNotEqual(a, b, "an edit must mint a new key")
         XCTAssertFalse(a.contains("2560"), "no viewport in the key")

@@ -535,7 +535,7 @@ final class HistogramBlacksWhitesTests: XCTestCase {
             // An honest digest — of the *older* edit. This is exactly what a stale backdrop returns,
             // and the controller must not measure it for the edit it is asked about. The numbers are
             // real numbers too (not `nil`), so the **digest** is the only thing refusing the base.
-            return (stale.texture, staleContent, staleDigest,
+            return (stale.texture, staleContent, staleDigest, HighlightCeiling.current,
                     Self.markerHistogram(sample: staleContent,
                                          canvas: ImageSize(width: staleContent.width,
                                                            height: staleContent.height),
@@ -635,8 +635,11 @@ final class HistogramBlacksWhitesTests: XCTestCase {
     /// queue, so a plain array in the test would be a data race on the very wiring under test.
     private final class BaseBox {
         private let lock = NSLock()
+        /// 323: a base is a picture, and the picture's top is a preference — the ceiling it was
+        /// rendered with travels with it, or the measurement above would trust numbers counted at
+        /// another one.
         private var bases: [(texture: MTLTexture, content: ImageRect, digest: String,
-                             histogram: Histogram?)] = []
+                             ceiling: Double, histogram: Histogram?)] = []
         private var asks: [String] = []
 
         /// The closure's body: record what was asked for, answer with the newest base of that document.
@@ -644,7 +647,7 @@ final class HistogramBlacksWhitesTests: XCTestCase {
         /// 070: a base now carries the histogram its own render measured (`collectHistogram` +
         /// `histogramSampleLongEdge`), so the closure hands over numbers as well as pixels.
         func offer(_ edit: EditModel) -> (texture: MTLTexture, content: ImageRect, digest: String,
-                                          histogram: Histogram?)? {
+                                          ceiling: Double, histogram: Histogram?)? {
             let digest = Histogram.editDigest(edit)
             lock.lock()
             defer { lock.unlock() }
@@ -653,10 +656,10 @@ final class HistogramBlacksWhitesTests: XCTestCase {
         }
 
         func add(_ texture: MTLTexture, content: ImageRect, digest: String,
-                 histogram: Histogram?) {
+                 ceiling: Double = HighlightCeiling.current, histogram: Histogram?) {
             lock.lock()
             defer { lock.unlock() }
-            bases.append((texture, content, digest, histogram))
+            bases.append((texture, content, digest, ceiling, histogram))
         }
 
         var askedDigests: [String] {

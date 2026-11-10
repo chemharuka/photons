@@ -97,12 +97,15 @@ final class HDRGainMapTests: XCTestCase {
         XCTAssertLessThan(worst, 1e-3, "the linear exit must be the same picture without its OETF")
     }
 
-    func testDefaultDisplayKeyIsUnchanged() {
-        XCTAssertEqual(DisplayOptions().keyString, "sRGB;bits=8;headroom=1.000")
+    /// The default key's spelling, field by field. 100's rule (the linear suffix appears **only**
+    /// when the flag is on) still holds; 323 added the picture's ceiling after headroom, always.
+    func testTheDefaultDisplayKeySpellsEveryDisplayFact() {
+        XCTAssertEqual(DisplayOptions().keyString, "sRGB;bits=8;headroom=1.000;ceil=4.9246")
         XCTAssertEqual(DisplayOptions(primaries: .displayP3, bitDepth: 16, headroom: 2).keyString,
-                       "displayP3;bits=16;headroom=2.000")
+                       "displayP3;bits=16;headroom=2.000;ceil=4.9246")
         XCTAssertEqual(DisplayOptions(linearOutput: true).keyString,
-                       "sRGB;bits=8;headroom=1.000;linear=true")
+                       "sRGB;bits=8;headroom=1.000;ceil=4.9246;linear=true")
+        XCTAssertFalse(DisplayOptions().keyString.contains("linear"), "the flag is off by default")
     }
 
     func testTheSDRRenderIsByteIdenticalWithAndWithoutTheHDRFlag() throws {

@@ -398,9 +398,16 @@ public struct DisplayOptions: Sendable, Equatable {
     /// the photograph's, measured and clamped before S4 so the histogram and the pointer's readout
     /// stop where the picture does.
     ///
-    /// Default `2^2.3 = 4.925` (`HighlightCeiling.defaultEV`) — the owner's number. It enters the
-    /// cache key **only when it differs from that default**, so every recorded golden and every key
-    /// string from before 320 keeps its exact spelling.
+    /// Default `2^2.3 = 4.925` (`HighlightCeiling.defaultEV`) — the owner's number.
+    ///
+    /// **323 — it is key material, always.** 320 put the ceiling in this struct's `keyString` only
+    /// when it differed from the default *and* only in the **display** link, which is not where it
+    /// acts: S2 clamps at it and the S3.7/S3.8/S3.10 tail guards read it, so those stages' cached
+    /// textures were still the previous ceiling's on a warmed graph. Measured: a second render at
+    /// +4 EV on a graph that had rendered +2.3 first returned 4.9219 (7 stages skipped as hits,
+    /// S2 and S3.10 among them), while a fresh graph returned 16.0000. The ceiling now goes
+    /// through `ceilingKeyString` into the **tone-map link** as well, so S2 and everything below it
+    /// miss — and it is spelled unconditionally so "the key names the ceiling" needs no footnote.
     public var highlightCeiling: Double
 
     public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8, headroom: Double = 1,
@@ -413,17 +420,27 @@ public struct DisplayOptions: Sendable, Equatable {
         self.highlightCeiling = highlightCeiling
     }
 
+    /// **One spelling of the picture's ceiling for key material** — `ceil=%.4f`, in linear units.
+    ///
+    /// Four decimals is 0.014 % of the default: far below anything the row's 0.1 EV grid can name
+    /// (`+2.3` → `4.9246`, `+2.4` → `5.2780`), and coarse enough that two processes computing the
+    /// same `pow(2, ev)` never disagree in the last bit. It is used **twice** on purpose, from one
+    /// property: this struct's `keyString` (the display link, whose payload is the encode) and
+    /// `RenderKeyChain`'s tone-map link (whose payload is the clamp). One spelling means a change
+    /// that skips one of them is a change to the property, not a forgotten call site.
+    public var ceilingKeyString: String { String(format: "ceil=%.4f", highlightCeiling) }
+
     public var keyString: String {
         // Headroom changes the pixels, so it must change the key; "%.3f" keeps 1.0 == "1.000"
         // across processes and avoids 1 vs 1.0000000001 style churn. The linear suffix is appended
         // **only** when the flag is on, so the default key text is byte-identical to before 100.
-        let base = String(format: "%@;bits=%d;headroom=%.3f", primaries.rawValue, bitDepth, headroom)
+        // 323: the picture's ceiling follows headroom — it is the second ceiling, and unlike the
+        // linear flag it is always there (a key that omits the shipped default cannot say whether
+        // the render used it).
+        let base = String(format: "%@;bits=%d;headroom=%.3f;%@",
+                          primaries.rawValue, bitDepth, headroom, ceilingKeyString)
         let linear = linearOutput ? ";linear=true" : ""
-        // 320: the picture's ceiling also changes the pixels, so it changes the key — but only when
-        // it is not the shipped default, which keeps every pre-320 key and golden byte-identical.
-        let ceiling = abs(highlightCeiling - HighlightCeiling.defaultLinear) > 1e-12
-            ? String(format: ";ceiling=%.4f", highlightCeiling) : ""
-        return base + linear + ceiling
+        return base + linear
     }
 }
 
@@ -675,7 +692,19 @@ public enum RenderKeyChain {
             dehaze = link
             toneMapSeed = link
         }
-        toneMap = KeyBuilder(KeyBuilder.digest(of: toneMapSeed)).add(mat(.toneMap)).canonical
+        // 323 — **the picture's ceiling is key material for S2, not only for S4.** `display.keyString`
+        // reaches the chain in the *display* link, and 320 stopped there; but the clamp that reads
+        // `highlightCeiling` runs at the end of S2 (`s2_tone_map.metal`, both branches) and in the
+        // three tail guards below it, so on a warmed graph the tone-map texture came out of the
+        // cache and the ceiling moved nothing. Measured before this line: 2.3 → 4.0 on one graph
+        // gave peak 4.9219 twice with `s2`/`s3.10` skipped as hits; a fresh graph gave 16.0000.
+        // The link is seeded by the curve (or dehaze), so S0/S1/S1.7 keep hitting — the ceiling is
+        // not a scene-linear fact — and every stage from S2 down misses, which is exactly the set
+        // whose pixels it changes.
+        toneMap = KeyBuilder(KeyBuilder.digest(of: toneMapSeed))
+            .add(mat(.toneMap))
+            .add(display.ceilingKeyString)
+            .canonical
 
         // 159: contrast sits **after S2 and before S3** now, so it is seeded by the tone-map digest
         // and seeds S3. It exists only when the document actually carries a contrast value; neutral
