@@ -195,8 +195,10 @@ final class CopySheetCardTests: XCTestCase {
                             InspectorView.cardTitles(in: .transform),
                             InspectorView.cardTitles(in: .masks)].flatMap { $0 })
                            .subtracting(["旋转", "点颜色"]))
-        // 默认不画子项。
-        XCTAssertEqual(view.rows.count, 15, "默认只有卡级行（081 §2）")
+        // 319: 子项默认展开，所以「默认」的这张表就是 15 卡 + 每个参数一行（§2.1）。
+        XCTAssertEqual(view.rows.count, 15 + EditSnapshotChild.allCases.count,
+                       "319：默认画 15 张卡和它们的全部参数")
+
     }
 
     // MARK: - ② 卡片粒度: 白平衡 + 黑电平 + Light
@@ -270,7 +272,9 @@ final class CopySheetCardTests: XCTestCase {
     // MARK: - ③ 子项存在但不展示
 
     func testTurningOnShowsChildrenDrawsEveryParameterAndNarrowsToOne() throws {
-        XCTAssertFalse(CopySettingsSheet.showsChildren, "默认不展示子项（一个常量，不是注释）")
+        // 319: 这个开关现在默认就是「开」—— 用户要的正是「更加细分，而不是只按照卡片来」。
+        XCTAssertTrue(CopySettingsSheet.showsChildren, "319：子项默认展开（081 的常量翻过来了）")
+
         let childCount = EditSnapshotChild.allCases.count
         let rows = CopySettingsAccessoryView.rows(showsChildren: true)
         print("156 rows with children: \(rows.count) = 15 + \(childCount)")
