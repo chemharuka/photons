@@ -771,11 +771,13 @@ public final class CropToolController {
         // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
         // this tool was entered with is what makes 「除非 esc 取消回退」 true after several drags.
         entryGeometry = session.edit.geometry
-        // 354 — the lines are part of the document now, so reopening 裁切 finds the ones the last fit
-        // stood on. Rebuilt through the same value the fit reads, so a line that comes back is a line
-        // the solver can still use.
-        guideLines = Self.guideLines(from: session.edit.geometry.guideLines)
         isActive = true
+        // 354 — the lines are part of the document now, so reopening 裁切 finds the ones the last fit
+        // stood on. 361 — and this is **not** a second copy of the seeding: `reloadGuideLines()` is the
+        // one function that reads them, and the same call is what 重新打开开关 and a document change
+        // (`⌘Z` / 粘贴 / 切图 / 应用) make, so there is never an in-memory set that outlives the
+        // document's.
+        reloadGuideLines()
         isDragging = false
         drag = nil
         rotating = false
@@ -812,7 +814,9 @@ public final class CropToolController {
         // 328 — 画线拉直 is this session's view state: leaving the tool puts the crosshair away and
         // drops any line, whatever the door (↵ 应用 / 完成 / Esc).
         cancelDrawStraighten()
-        cancelGuideLines()
+        // 361 §2.2 — 引导线's lines are **document data**, so leaving the tool only ends the gesture:
+        // 应用/完成 have just written them, and Esc must not un-write what an earlier fit wrote.
+        disarmGuideLines()
         switch outcome {
         case .confirm, .done:
             return confirmDraft()
@@ -896,6 +900,10 @@ public final class CropToolController {
         draft = Draft(geometry: session.edit.geometry)
         draftPhotoID = session.anchorID
         lockReshapeSuspended = false       // 310 — the document's lock is the question again
+        // 361 §2.3 — the document moved, and the lines are the document's: the same seeding function
+        // as 进入裁切, so ⌘Z / 粘贴 / 卡片复位 cannot leave the picture on one keystone and the lines
+        // on another.
+        reloadGuideLines()
     }
 
     /// 169 §2b — the crop session was opened on photo A and the user clicked photo B **without
@@ -921,6 +929,8 @@ public final class CropToolController {
         // new one on top (the old guard here opened one only when none was open, so the *next*
         // entry's door depended on what this one had done).
         closeToolSession()
+        // 361 §2.3 — B's lines, not A's, and through the one seeding function.
+        reloadGuideLines()
         return true
     }
 
@@ -1217,8 +1227,15 @@ public final class CropToolController {
             guideLineFailure = nil
             guideLineMeasuredPairwise = nil
             guideLineRotationFailure = nil
+            // 361 §2.3 — 重新打开开关 is a seeding point too: the lines come back from the document
+            // through the same function 进入裁切 uses, so the switch never depends on what a
+            // previous disarm happened to leave in memory.
+            reloadGuideLines()
         } else {
-            cancelGuideLines()
+            // 361 §2.1 — **关开关只停手势.** Before 361 this called `cancelGuideLines()`, which zeroed
+            // `guideLines`: the user's 「关闭引导线后再打开，之前的引导线也没了」. The lines live in the
+            // document (354); the switch is about the next press, not about the picture.
+            disarmGuideLines()
         }
         onGuideLineChange?()
         return true
@@ -1360,26 +1377,91 @@ public final class CropToolController {
         return solution
     }
 
-    /// §2 / §4.6 — Esc or the button again: drop the stroke and every line, write nothing.
-    /// The document keeps whatever an **earlier successful** fit wrote (that was its own row); this
-    /// only ends the gesture.
+    /// §2 / §4.6 — Esc or the button again: drop the stroke and end the gesture, write nothing.
+    ///
+    /// **361 §2.2** — and *not* the lines. Since 354 they are document data, and the only two doors
+    /// that delete them are 「清除引导线」 (`clearGuideLines`) and 双击线身 (`deleteGuideLine`). Esc
+    /// leaving the tool armed-with-nothing-to-draw is the 337 rule 「Esc 退出引导线模式，线保留」 —
+    /// 337's own code had it clearing them, which is the user's other half of this report.
+    ///
+    /// Kept as the named Esc/取消 door (and the call sites that mean 「收掉手势」), delegating to the
+    /// one reset so there is no second definition of 「what a gesture owns」.
     @discardableResult
-    public func cancelGuideLines() -> Bool {
+    public func cancelGuideLines() -> Bool { disarmGuideLines() }
+
+    /// 361 §2.1 — **the switch off**: stop drawing, drop the live stroke, drop the red rejection, and
+    /// nothing else. `guideLines`, `guideLineSolution` and the document are left exactly as they are.
+    @discardableResult
+    public func disarmGuideLines() -> Bool {
         let wasLive = isDrawingGuideLine || isGuideLinesArmed || guideLineStroke != nil
-            || !guideLines.isEmpty || rejectedGuideLine != nil
+            || rejectedGuideLine != nil
         stopGuideLineTimer()
         isDrawingGuideLine = false
         isGuideLinesArmed = false
         guideLineStroke = nil
         guideLineStrokeAlpha = 1
-        guideLines = []
+        rejectedGuideLine = nil
+        rejectedGuideLineAlpha = 1
+        // **361 reverse gate ①** — `false` is 354's shape (`setGuideLinesArmed(false)` →
+        // `cancelGuideLines()` → `guideLines = []`). Only a test turns it off; shipping is `true`,
+        // and gate ① proves this line is what makes 验收② green.
+        if !guideLinesSurviveDisarm {
+            guideLines = []
+            guideLineSolution = nil
+            guideLineMeasuredPairwise = nil
+            guideLineRotationFailure = nil
+        }
+        if wasLive { onGuideLineChange?() }
+        return wasLive
+    }
+
+    /// **361 reverse gate ①②** — test-only gates, `true` in every shipped build. They exist so the
+    /// acceptance can put the pre-361 behaviour back and watch its own checks go red (the 355
+    /// convention: `clampsFrameToView`, 354's `omitsPerspective`).
+    var guideLinesSurviveDisarm = true
+    /// Process-wide because the case it gates is 「a **new** tool reads the document」 — a fresh
+    /// `CropToolController` is constructed by the loupe, so an instance flag could not reach it.
+    nonisolated(unsafe) static var guideLinesReseedFromDocument = true
+
+    /// 361 §2.3 — **the one seeding point.** 进入裁切, 重新打开开关, 换图 and any document change
+    /// (⌘Z / 粘贴 / 应用 / 卡片复位) read the lines from `GeometryGroup.guideLines` here, so the
+    /// in-memory set is never a second copy that can outlive the document's.
+    ///
+    /// Returns `true` when the set actually changed — the only case that repaints (`onGuideLineChange`
+    /// → `LoupeController.syncGuideLines`), so a document tick that did not touch the lines costs no
+    /// overlay work and cannot disturb the fit's own readout.
+    ///
+    /// A hand that is mid-stroke or mid-drag owns the endpoints: a coalesced write or an unrelated
+    /// document tick must not snatch them away, so those two states are skipped.
+    @discardableResult
+    public func reloadGuideLines() -> Bool {
+        guard Self.guideLinesReseedFromDocument else { return false }
+        guard isActive, let session else { return false }
+        guard !isDrawingGuideLine, !isDraggingGuideLine else { return false }
+        let restored = Self.guideLines(from: session.edit.geometry.guideLines)
+        // Endpoints and axis are the document's; `viewAngle`/`viewLength` are facts about the hand
+        // that produced the line, and `guideLines(from:)` has to recompute the angle from the source
+        // pair. Comparing the whole `GuideLine` would therefore report a change after every fit and
+        // wipe the fit's own status text, so the comparison is the half the document carries.
+        let unchanged = restored.count == guideLines.count
+            && zip(restored, guideLines).allSatisfy {
+                $0.axis == $1.axis && $0.a == $1.a && $0.b == $1.b
+            }
+        guard !unchanged else { return false }
+        guideLines = restored
+        // The draft carries a mirror of the document's lines (354's `Draft(geometry:)` copies them),
+        // and 应用/完成 writes the **draft** — so a mirror that was seeded at `begin()` and never
+        // updated would put an empty set back into the document and silently delete the lines on the
+        // way out of the tool (measured: ⑥ 「离开裁切不该动文档」 went from 2 to 0). One value, one
+        // owner: the document's, copied here.
+        draft.guideLines = session.edit.geometry.guideLines
         guideLineSolution = nil
+        guideLineFailure = nil
         guideLineMeasuredPairwise = nil
         guideLineRotationFailure = nil
         rejectedGuideLine = nil
-        rejectedGuideLineAlpha = 1
-        if wasLive { onGuideLineChange?() }
-        return wasLive
+        onGuideLineChange?()
+        return true
     }
 
     /// **「清除引导线」** — 354 §2.5's explicit door: every line goes, the picture stays where the last
