@@ -2538,8 +2538,8 @@ public struct InspectorView: View {
                         return
                     }
                     let elapsed = Date().timeIntervalSince(started) * 1000
-                    hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n原生 neutralLocation · 界面等待 %.0f ms",
-                                  sample.text, pair.summary, sample.rgb.text, elapsed)
+                    // 339 (user): 取样后的坐标/白平衡数值小字不要了 —— 只留日志。
+                    hint = nil
                     print(String(format: "dropper(native): %.0f ms → %@", elapsed,
                                  pair.summary))
                 }
@@ -2565,9 +2565,7 @@ public struct InspectorView: View {
                 return
             }
             lastPresetID = nil
-            hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
-                          sample.text, solve.whiteBalance.summary, sample.rgb.text,
-                          solve.clamped ? " · 已到量程边界（近似）" : "")
+            hint = nil
             return
         }
         lastPresetID = nil
@@ -2582,18 +2580,14 @@ public struct InspectorView: View {
             }
             let elapsed = Date().timeIntervalSince(started) * 1000
             if let report {
-                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@\n%@\n界面等待 %.0f ms",
-                              sample.text, report.final.summary, sample.rgb.text,
-                              report.text, 0.0)
+                hint = nil
                 print(String(format: "dropper: %.2f%% after %d decode(s) in %.0f ms "
                              + "(wall %.0f ms) → %@%@",
                              report.residual * 100, report.decodes, report.milliseconds,
                              elapsed, report.final.summary,
                              report.converged ? "" : " · 未达 2%"))
             } else {
-                hint = String(format: "吸管 %@ · %@ · 取样前 RGB %@%@",
-                              sample.text, solve.whiteBalance.summary, sample.rgb.text,
-                              solve.clamped ? " · 已到量程边界（近似）" : "")
+                hint = nil
             }
         }
         guard immediate != nil else {

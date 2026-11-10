@@ -17,7 +17,8 @@ import PhotonsCore
 /// 336 之后：`CropApplyFooter` 是**面板的固定页脚** —— `InspectorView.body` 里与 `ScrollView` 并列，
 /// 只在变换工作区出现。这份文件量的是真实宿主窗口里排过版的那一条：
 ///
-///   ① 每个按钮 ≥ 72×26；两钮同一水平线（midY 差 ≤0.5）、间距 ≥8；
+///   ① 每个按钮 ≥ 60×22；两钮同一水平线（midY 差 ≤0.5）、间距 ≥8；
+///      （339：用户说 `.large` 太大不协调，退到 `.regular` 60×22 —— 仍是原来 `.mini` 34×13 的近两倍。）
 ///   ② `应用`.maxX == 检查器内容右沿 − 16（±0.5），页脚底 == 检查器底边 − 12（±0.5）；
 ///   ③ 滚到顶 / 滚到底 / 再滚 200 pt：两个按钮的 frame 三次**完全相同**（Δ≤0.5），
 ///      而同一次滚动里卡内「拉直」行的 y 确实变了（证明滚动真的发生）；
@@ -44,7 +45,7 @@ final class ApplyFooter336Tests: XCTestCase {
 
     // MARK: - ①② 尺寸与位置
 
-    func testTheTwoButtonsAreAtLeast72By26InTheBottomRightCorner() throws {
+    func testTheTwoButtonsAreAtLeast60By22InTheBottomRightCorner() throws {
         let (panel, _) = try transformPanel(width: 330, height: 900)
         defer { panel.window.contentView = nil }
 
@@ -55,12 +56,12 @@ final class ApplyFooter336Tests: XCTestCase {
         print(String(format: "336 ① · 应用 %.2f×%.2f · 取消 %.2f×%.2f（改前 .mini = 34×13）",
                      apply.width, apply.height, cancel.width, cancel.height))
 
-        // ① 尺寸：每个按钮 ≥ 72×26.
+        // ① 尺寸：每个按钮 ≥ 60×22（339 从 72×26 收小）. 
         for (name, rect) in [("应用", apply), ("取消", cancel)] {
             XCTAssertGreaterThanOrEqual(rect.width, CropApplyRow.minSize.width - 0.5,
-                                        "336: 「\(name)」只有 \(rect.width) pt 宽（< 72）")
+                                        "336: 「\(name)」只有 \(rect.width) pt 宽（< 60）")
             XCTAssertGreaterThanOrEqual(rect.height, CropApplyRow.minSize.height - 0.5,
-                                        "336: 「\(name)」只有 \(rect.height) pt 高（< 26）")
+                                        "336: 「\(name)」只有 \(rect.height) pt 高（< 22）")
         }
         // 间距 ≥ 8，同一水平线.
         let gap = apply.minX - cancel.maxX
