@@ -1146,7 +1146,7 @@ public struct ExportSheetView: View {
             .exportControlFont("export.preset", kind: .picker)
             .frame(width: ExportRowGrid.presetWidth, alignment: .trailing)
             .disabled(model.phase == .running)
-            Button("存储…") {
+            Button("存储预设") {
                 newPresetName = model.preset.name ?? ""
                 showingSavePreset = true
             }
