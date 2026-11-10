@@ -295,15 +295,19 @@ final class HighlightCeilingTests: XCTestCase {
         XCTAssertEqual(HighlightCeiling.label(4), "+4.0 EV")
         XCTAssertEqual(HighlightCeiling.label(0), "+0.0 EV")
 
-        // The cache keys carry it **only** when it is not the shipped default, so every pre-320 key
-        // and golden keeps its spelling.
+        // 323: the key carries the ceiling **always**, in one spelling (`ceil=%.4f`, from
+        // `DisplayOptions.ceilingKeyString`), so no key can omit which picture top produced it.
         XCTAssertEqual(DisplayOptions().keyString,
                        DisplayOptions(highlightCeiling: HighlightCeiling.defaultLinear).keyString)
-        XCTAssertFalse(DisplayOptions().keyString.contains("ceiling"))
-        XCTAssertTrue(DisplayOptions(highlightCeiling: 16).keyString.contains("ceiling=16.0000"))
+        XCTAssertTrue(DisplayOptions().keyString.contains("ceil=4.9246"), DisplayOptions().keyString)
+        XCTAssertFalse(DisplayOptions().keyString.contains("ceiling"), "one spelling: ceil=")
+        XCTAssertTrue(DisplayOptions(highlightCeiling: 16).keyString.contains("ceil=16.0000"))
+        XCTAssertNotEqual(DisplayOptions().keyString, DisplayOptions(highlightCeiling: 16).keyString)
         XCTAssertEqual(Histogram.cacheKey(rungIdentity: "r", editDigest: "d", bins: 256),
                        Histogram.cacheKey(rungIdentity: "r", editDigest: "d", bins: 256,
                                           ceiling: HighlightCeiling.defaultLinear))
+        XCTAssertTrue(Histogram.cacheKey(rungIdentity: "r", editDigest: "d", bins: 256)
+                        .hasSuffix("|ceil=4.9246"))
         XCTAssertTrue(Histogram.cacheKey(rungIdentity: "r", editDigest: "d", bins: 256,
                                          ceiling: 16).contains("ceil=16.0000"))
     }

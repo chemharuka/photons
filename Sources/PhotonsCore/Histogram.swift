@@ -281,11 +281,12 @@ public struct Histogram: Sendable, Equatable {
     /// - ceiling: 320 — the picture's ceiling, in linear light. It is part of the **key** because it
     ///   is part of the bins: a ceiling change re-measures instead of serving the old plot (the
     ///   histogram is measured after the clamp, so a value of 4.925 or 16.0 lands in a different
-    ///   bin). Omitted when it is the shipped default, so a pre-320 key keeps its exact spelling.
+    ///   bin). **323 — always spelled**, `ceil=%.4f`, from `DisplayOptions.ceilingKeyString`: a key
+    ///   that omits the shipped default cannot say whether the numbers were measured with it, and
+    ///   the frame path (`histogramFrameKey`) compares these strings to decide "measure or not".
     public static func cacheKey(rungIdentity: String, editDigest: String, bins: Int,
                                 ceiling: Double = HighlightCeiling.defaultLinear) -> String {
         let base = "hist|v1|\(rungIdentity)|\(editDigest)|\(bins)"
-        guard abs(ceiling - HighlightCeiling.defaultLinear) > 1e-12 else { return base }
         return base + String(format: "|ceil=%.4f", ceiling)
     }
 

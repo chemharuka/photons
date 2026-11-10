@@ -609,6 +609,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// a texture another thread is writing at the time.
     public var fullPictureSource: ((EditModel) -> (texture: MTLTexture, content: ImageRect,
                                                    digest: String,
+                                                   ceiling: Double,
                                                    histogram: Histogram?)?)?
 
     /// The serial queue a windowed edit's whole-picture measurement runs on.
@@ -1233,6 +1234,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The identity the last `scheduleRender` was for — a photo change cancels the previous photo's
     /// queued developments instead of paying for pixels nobody will see.
     private var pendingIdentity: String?
+    /// **323 — one scheduled frame in flight, and only the newest request behind it.**
+    ///
+    /// `scheduleRender()` used to queue a render per call, so a slider that posts one change per tick
+    /// (「最高亮度」 does: the row writes the preference and the notification schedules a frame) built a
+    /// queue of ten renders of ten different ceilings, each one paying the full pipeline to be dropped
+    /// at the generation gate. Measured: ten ticks 16 ms apart put the last change on screen **57.6 ms**
+    /// after the release — nearly four frames, on a queue whose newest entry could not start until nine
+    /// stale ones had finished. The rule here is the one the white-balance preview and the pan/zoom
+    /// loops already use: the newest request always wins, and a request that arrives while a frame is
+    /// running replaces any earlier pending one instead of queueing behind it.
+    private var scheduledRenderInFlight = false
+    private var pendingScheduledJob: RenderJob?
+    /// How many scheduled requests were folded into a newer one (diagnostics and the tests).
+    public private(set) var scheduledRenderCoalesced = 0
     /// The rung the last frame that reached the canvas was rendered from. Set when the frame is
     /// *handed over*, before the layer is asked for a drawable: a headless test can still say which
     /// buffer the canvas was given, which is what the acceptance numbers are about.
@@ -1257,7 +1272,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // gated: measuring a frame rendered from another edit is worse than not updating at all.
         fullPictureSource = { [box = fullPictureBox] edit in
             guard let frame = box.current(), frame.digest == Histogram.editDigest(edit) else { return nil }
-            return (frame.texture, frame.content, frame.digest, frame.histogram)
+            return (frame.texture, frame.content, frame.digest, frame.ceiling, frame.histogram)
         }
     }
 
@@ -1559,6 +1574,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 self.pictureLatestKey = nil
                 self.histogramLock.unlock()
                 self.histogramMeasuredKey = nil
+                // 323 — the low-resolution whole picture is a **rendered** picture too, and its key
+                // now carries the ceiling; retire the held one and let the next landed frame serve
+                // its replacement (the same two steps 039's `noteBackdropKeyMoved` uses for an edit,
+                // so a drag tick costs one mark and not one render per tick).
+                self.noteBackdropKeyMoved()
                 self.scheduleRender()
             })
     }
@@ -5115,7 +5135,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case .edit: finishEditRender()
         case .view: finishViewRender()
         case .resize: finishResizeRender()
-        case .scheduled: break
+        case .scheduled: finishScheduledRender()
         }
     }
 
@@ -5276,6 +5296,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         pointerExited()
         viewPending = false
         editPending = false
+        // 323: a scheduled frame waiting for the slot belongs to the photo going away too. The
+        // running one finishes and releases the flag; this one would only render to be dropped.
+        pendingScheduledJob = nil
         // A measurement belongs to the picture it was measured for: drop the cache and the dedupe key,
         // so the next frame of the new picture measures instead of matching a stale key.
         histogramLock.lock()
@@ -5734,9 +5757,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // `Histogram.editDigest(edit)` so every existing key — and the histogram's whole-picture
         // source — keeps its meaning.
         let digest = Histogram.editDigest(edit)
+        // 323: the ceiling is the third half. It is a preference (not in the digest) that S2 clamps
+        // the pixels at, and this texture is a rendered picture — so a ceiling change must retire it
+        // exactly like an edit does, or the letterbox backdrop and the histogram's whole-picture
+        // source keep the previous top.
         return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
                                  digest: backdropPreviewTarget == nil
-                                     ? digest : digest + Self.backdropPreviewMarker)
+                                     ? digest : digest + Self.backdropPreviewMarker,
+                                 ceiling: HighlightCeiling.current)
     }
 
     /// The source half of a preview backdrop's digest (144). Internal so a test can say what it
@@ -5912,6 +5940,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// 070: the scene-linear measurement that came out of the same render (`nil` when it did not
         /// measure one — the consumer then renders its own picture).
         public let histogram: Histogram?
+        /// 323: the picture's ceiling this texture and its measurement were made with, in linear
+        /// light. The consumer compares it with the ceiling it wants **before** trusting the base:
+        /// the bins are the picture's, and the picture's top is a preference that can move without
+        /// the edit digest moving.
+        public let ceiling: Double
     }
 
     /// `nil` until a backdrop has been generated for the document on screen — and immediately after a
@@ -5921,7 +5954,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
               let content = backdrop.content else { return nil }
         return LowResFullFrame(texture: texture, content: content, digest: key.digest,
                                develop: key.develop, photo: key.photo,
-                               histogram: backdrop.histogram)
+                               histogram: backdrop.histogram, ceiling: key.ceiling)
     }
 
     /// An **explicit** request for the whole picture at low resolution, for a caller that cannot wait
@@ -6128,7 +6161,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
         generation += 1
         job.generation = generation
         awaitingFirstFrame = true
+        // 323: single-flight. A request that arrives while a scheduled frame is rendering is the
+        // **next** frame, not a second render of an older one — see `scheduledRenderInFlight`.
+        if scheduledRenderInFlight {
+            pendingScheduledJob = job
+            scheduledRenderCoalesced += 1
+            return
+        }
+        startScheduledRender(job)
+    }
+
+    /// Start one scheduled frame and own the single-flight flag until it lands.
+    private func startScheduledRender(_ job: RenderJob) {
+        scheduledRenderInFlight = true
         queue.async { [weak self] in self?.renderFrame(job) }
+    }
+
+    /// The flag's release: hand the slot to the newest request that arrived while this one ran.
+    private func finishScheduledRender() {
+        scheduledRenderInFlight = false
+        guard let next = pendingScheduledJob else { return }
+        pendingScheduledJob = nil
+        startScheduledRender(next)
     }
 
     /// Which rungs are in memory right now (diagnostics and the first-frame test).
@@ -7714,6 +7768,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // never measured against this one.
             if let source = fullPictureSource?(request.edit),
                source.digest == Histogram.editDigest(request.edit),
+               // 323 — the base is only this measurement's picture when it was **made for the
+               // ceiling in force**: the histogram is counted after S2's clamp, so a base rendered at
+               // 2.3 EV does not hold the bins of 4.0 EV. 320 compared `histogram.headroom` alone,
+               // which is the panel's budget (and `request.ceiling` is that same number — see the
+               // measureHistogram call below); nothing compared the picture's own ceiling, and the
+               // backdrop's key did not carry one at all.
+               abs(source.ceiling - HighlightCeiling.current) < 1e-12,
                let histogram = source.histogram,
                abs(histogram.headroom - request.ceiling) < 1e-9 {
                 // 070: that render measured its **own** scene-linear sample (`collectHistogram` +
