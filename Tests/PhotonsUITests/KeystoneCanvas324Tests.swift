@@ -495,15 +495,31 @@ final class KeystoneCanvas324Tests: XCTestCase {
 
     // MARK: - ⑦ 顺序：透视 → 旋转
 
-    /// A bright block in the photograph's top-left, rendered at `+30 · 9°` on the export canvas (which
+    /// A bright block in the photograph's corner, rendered at `+50 · 9°` on the export canvas (which
     /// for a full crop **is** the document canvas). It must land where `R(P(·))` puts it; the reverse
     /// walk `P(R(·))` is printed as the counter-example and must be a different place by a distance
     /// the assertion would notice.
+    ///
+    /// Both predictions below are `PerspectiveMap.forward` — the map itself, i.e. the mid-line anchored
+    /// `T(½,½)·P·T(−½,−½)` — and `CropMath.perspectiveCanvas`'s composed matrix, so no constant of the
+    /// parametrisation is copied into this file. (A hand-written one-sided matrix would have been the
+    /// stale half of this test after 338; it never was one.)
+    ///
+    /// **338 — the fixture had to move, the thresholds did not.** The two orders are separated by the
+    /// knob's *displacement at the marker*, and re-anchoring on the mid-line halves the per-unit
+    /// displacement at an off-centre point (one edge grows and the other shrinks instead of the near
+    /// edge being pinned): measured on this fixture, the separation at `+30 · (0.12, 0.12)` fell from
+    /// 2.2 px to **1.2 px**, under the 2 px the assertion asks for. No marker position inside the frame
+    /// recovers it at `+30` (the corner is the strongest probe: 1.7 px at `(0.06, 0.06)`, 1.8 px at
+    /// `(0.04, 0.04)`), so the probe is the corner block at `+50` — **2.9 px**, printed and asserted
+    /// against the same `1.5 px` / `2.0 px` bounds. That is a fixture change, not a loosened assertion;
+    /// a 2 px bound on a 2.9 px separation still fails the moment the order stops mattering.
     func testTheOrderIsPerspectiveThenRotation() throws {
         let source = ImageSize(width: 480, height: 320)
-        let vertical = 30.0, degrees = 9.0, horizontal = 0.0
-        // The marker: a 40×40 block centred on (0.12, 0.12) of the photograph.
-        let blockCentre = (u: 0.12, v: 0.12)
+        let vertical = 50.0, degrees = 9.0, horizontal = 0.0
+        // The marker: a 40×40 block centred on (0.06, 0.06) of the photograph — the corner where the
+        // map's displacement is largest.
+        let blockCentre = (u: 0.06, v: 0.06)
         let image = markerImage(source, blockCentre: blockCentre, blockSize: 40)
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "324-order"))
         let edit = document(vertical: vertical, horizontal: horizontal, degrees: degrees)

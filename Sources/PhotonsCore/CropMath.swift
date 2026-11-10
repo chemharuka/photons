@@ -245,37 +245,47 @@ extension AspectLock: Codable {
 /// ## The map
 ///
 /// Each axis is a *keystone* in the classic sense: a projective scale whose denominator is linear in
-/// the distance from the **near edge**, so the near edge is a fixed line and the far edge is scaled.
-/// With the near edge fixed and `v` the knob's strength (negative = the far end grows):
+/// the distance from a **fixed line**. 338 made that line the frame's **mid-line** — a knob has no
+/// near end. `+v` grows one end while it shrinks the other by the same amount, and `−v` is `+v`
+/// **reflected in the mid-line**, exactly: `P(−v) = A·P(+v)·A` element for element (asserted to
+/// 1e−12, and the two renders to a code, by `KeystoneSymmetry338Tests`).
 ///
-///     vertical   (near = bottom, s = 1 − y)     w = 1 + v·s
-///                x ↦ (x − ½)/w + ½              y ↦ 1 − s/w
+///     vertical   (Y = y − ½)     w = 1 − v·Y      x ↦ ½ + (x − ½)/w      y ↦ ½ + Y/w
+///     horizontal (X = x − ½)     w = 1 + v·X      x ↦ ½ + X/w             y ↦ ½ + (y − ½)/w
 ///
-///     horizontal (near = left,   ξ = x)         w = 1 + v·ξ
-///                x ↦ ξ/w                       y ↦ ½ + (y − ½)/w
+/// Both are exact homographies (`[[1,0,0],[0,1,0],[0,v,1]]` conjugated by a translation), the
+/// composition is `M = M_horizontal · M_vertical` (**vertical first** — pinned by
+/// `PerspectiveTests`), and the fixed line is the mid-line: `y = ½` for the vertical knob
+/// (pointwise), `x = ½` for the horizontal one, and `(½, ½)` for the pair.
 ///
-/// Both are exact homographies (`[[1,0,0],[0,1,0],[0,v,1]]`-shaped), the composition is
-/// `M = M_horizontal · M_vertical` (**vertical first** — pinned by `PerspectiveTests`), and the
-/// fixed point is the **near edge's midpoint**: `(½, 1)` for the vertical knob, `(0, ½)` for the
-/// horizontal one, and `(0, 1)` — the bottom-left corner, where both near edges meet — for the pair.
-/// A line at the near edge's half-width `c` with slope `m` becomes vertical exactly when `v = m/c`,
-/// which is why `+50` rectifies the 3° acceptance card to 0.00° rather than to "about" 0°.
+/// Before 338 the same scale was anchored on the **corner** `(0, 1)` (`w = 1 + s·(1 − y)`, near edge
+/// pinned). That is a one-sided family: `+100` scaled the far edge by `1/1.21` and `−100` by
+/// `1/(1−0.21)`, so the two ends of the slider were **reciprocals of each other, not reflections** —
+/// the user's report (「+100 和 −100 行为不一致」). §The strength says what that costs: the
+/// coefficient, not the knob.
 ///
 /// ## The strength
 ///
-/// `|slider| = 100` ⇒ 6° of convergence on a square frame (`v = ∓0.21`; `tan 6° = 0.105 = v/2`),
-/// so `±50` is 3°. The number is a *tangent*, not an angle, which is what makes the correction
-/// exact for a straight line rather than exact only near zero.
+/// The knob's strength is the tangent `v = −slider/100 · 0.21`, and it is **the coefficient the
+/// matrix carries** — one number, no rescaling, so `+v` and `−v` differ by sign and nothing else.
+/// `|slider| = 100` puts the two edges at `1 ∓ v/2`, so the edge pair converges by
+/// `atan(½·v/(1 − v²/4))`: **6.06° at ±100 and 3.03° at ±50**, which is the `2·tan 6° = 0.21` the
+/// constant was chosen for (183's one-sided map actually produced 7.57° / 3.36° at the same slider
+/// positions; this one is the number the doc always named).
+///
+/// The far/near **width ratio** is `(1 − v/2)/(1 + v/2)` = 1.2346 at `±100`, against the 1.2658 a
+/// one-sided map produced at `+100`. That 2.4 % is not slack: a reflected pair requires `v` **odd** in
+/// the slider, and no odd `v` can make `(1 − v/2)/(1 + v/2)` equal `1/(1 + v)` away from `v = 0`. The
+/// two families agree to first order (`R ≈ 1 − v`), which is the tangent both were specified by; the
+/// 3° acceptance card rectifies to 0.16° instead of 0.00° for the same reason (the card tapers
+/// *linearly*, a mirrored keystone is projective — see `testFiftyRectifiesTheThreeDegreeCard`).
 ///
 /// ## The canvas
 ///
 /// The warped picture is a convex quadrilateral; the canvas is the **largest axis-aligned rectangle
-/// inscribed in it that keeps the fixed corner** (`nearCorner`) — the whole point of 近端不动 is that
-/// the near end cannot drift, so the rect is anchored there and grown. `canvasSize` solves that in
-/// closed form (see `inscribedRect`), never by search: for each of the quad's four edges the "inside"
-/// half-plane gives one linear inequality `α·w + β·h ≤ c` on the rect's width and height, and the
-/// product `w·h` is maximised over the (at most four) candidates — the pairwise intersections of the
-/// binding lines and each line's own tangency point. `w = c/(2α), h = c/(2β)`.
+/// inscribed in it**. With the anchor on the mid-line the quad is a symmetric trapezoid, whose width
+/// is monotone in height, so the optimum is its full height at the narrow end; `canvasSize` solves it
+/// in closed form (see `inscribedRect`), never by search.
 public struct PerspectiveMap: Sendable, Equatable {
 
     /// The slider's range, and the one place it is clamped.
@@ -303,34 +313,42 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// `true` when this map changes no pixel — the one predicate the renderer, the key and the UI ask.
     public var hasWarp: Bool { !isIdentity }
 
-    /// The map's own parameters, `v = −slider/100 · 0.21`: **negative** at a positive slider, because
-    /// `w = 1 + v·s` has to *grow* with the distance from the near edge for the far end to expand.
+    /// The slider's strength as a **tangent**, `v = −slider/100 · 0.21`: **negative** at a positive
+    /// slider, because the far end has to grow and `w = 1 − v·Y` has to *shrink* there. This is also
+    /// the coefficient the matrix carries, unchanged — see the type's doc, §The strength.
     public var verticalStrength: Double { -vertical / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
     public var horizontalStrength: Double { -horizontal / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
 
-    /// The far end's scale: `1/(1+v)`. `> 1` at a positive slider (the far edge grows), `< 1` when
-    /// the knob is dragged the other way (a picture that already looks correct gets more keystone).
-    public var verticalFarScale: Double { 1 / (1 + verticalStrength) }
-    public var horizontalFarScale: Double { 1 / (1 + horizontalStrength) }
+    /// The far edge's magnification relative to the frame: `1/(1 − s/2)` at a positive slider, i.e.
+    /// `1.117` at `+100`, with the near edge at `1/(1 + s/2)` = `0.905` — the knob moves both ends now
+    /// (183 pinned one and read `1/(1 + s)` = 1.266; the far/near **ratio** of this map is
+    /// `(1 − s/2)/(1 + s/2)` = 1.235, within 2.4 % — type doc, §The strength).
+    public var verticalFarScale: Double { 1 / (1 + verticalStrength / 2) }
+    public var horizontalFarScale: Double { 1 / (1 + horizontalStrength / 2) }
 
     // MARK: the homography
 
     /// The forward map, `frame → warped frame`, as a row-major 3×3 on `(x, y, 1)`.
     ///
-    /// `M = M_horizontal · M_vertical`, both written out rather than multiplied so the numbers here
-    /// are the ones the doc comment derives:
+    /// `M = M_horizontal · M_vertical`, both written out rather than conjugated and multiplied, so the
+    /// numbers here are the ones the doc comment derives:
     ///
-    ///     M_vertical   = [1, −v_v/2,  v_v/2 ; 0, 1−v_v, v_v ; 0, −v_v, 1+v_v]
-    ///     M_horizontal = [1, 0, 0 ; v_h/2, 1, 0 ; v_h, 0, 1]
+    ///     M_vertical   = [1, −v/2,  v/4 ; 0, 1−v/2,  v/4 ; 0, −v, 1+v/2]
+    ///     M_horizontal = [1+h/2, 0, −h/4 ; h/2, 1, −h/4 ; h, 0, 1−h/2]
+    ///
+    /// with `v`/`h` the strengths (`verticalStrength`), not a rescaled copy. Each row's third entry is
+    /// the `T(½,½)…T(−½,−½)` conjugation's offset, and the whole matrix is odd in `v` (in `h`), so
+    /// `±slider` differ by nothing but sign — the reflection is exact in floating point, not merely
+    /// accurate.
     public var forwardMatrix: [[Double]] {
-        let vv = verticalStrength
-        let vh = horizontalStrength
-        let m1: [[Double]] = [[1, -0.5 * vv, 0.5 * vv],
-                              [0, 1 - vv, vv],
-                              [0, -vv, 1 + vv]]
-        let m2: [[Double]] = [[1, 0, 0],
-                              [0.5 * vh, 1, 0],
-                              [vh, 0, 1]]
+        let v = verticalStrength
+        let h = horizontalStrength
+        let m1: [[Double]] = [[1, -0.5 * v, 0.25 * v],
+                              [0, 1 - 0.5 * v, 0.25 * v],
+                              [0, -v, 1 + 0.5 * v]]
+        let m2: [[Double]] = [[1 + 0.5 * h, 0, -0.25 * h],
+                              [0.5 * h, 1, -0.25 * h],
+                              [h, 0, 1 - 0.5 * h]]
         return PerspectiveMap.multiply(m2, m1)
     }
 
@@ -356,18 +374,20 @@ public struct PerspectiveMap: Sendable, Equatable {
         [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { forward(x: $0.0, y: $0.1) }
     }
 
-    /// The canvas: the largest axis-aligned rectangle inside the warped quad that keeps the fixed
-    /// corner, in normalized units of the **warped** frame (`width ≤ 1` or `> 1` — the far end may
-    /// push past the old frame).
+    /// The canvas: the largest axis-aligned rectangle inside the warped quad, in normalized units of
+    /// the **warped** frame (`width ≤ 1` or `> 1` — the far end may push past the old frame).
     ///
-    /// The quad is convex and contains the fixed corner `(0, 1)` (bottom-left). Measuring from it with
-    /// `u = x`, `t = 1 − y` (both ≥ 0 inside), the rect is `[0, w] × [0, h]` and each edge contributes
-    /// one inequality `α·w + β·h ≤ c` with `α, β ≥ 0` (the outward normal's positive parts), because
-    /// the rect's four corners are `(0,0), (w,0), (0,h), (w,h)`. Maximising `w·h` over that (convex,
-    /// at most four-line) region is exact: the optimum is a pairwise intersection of the binding lines
-    /// or one line's own tangency `(c/2α, c/2β)`, so the answer is the best of ≤ 10 candidates — no
-    /// search, and `testClosedFormAgreesWithAGridSearch` checks every one of them against a 200×200
-    /// grid to 1e-6.
+    /// The quad is convex and contains its narrow end; measuring in `(x, 1 − y)` the rect is a box in
+    /// the quad, and its widest possible value at a given height band is `min(right) − max(left)` over
+    /// that band. The boundaries are piecewise linear with the quad's vertices as kinks, so the
+    /// optimum is at a vertex height or at a band's own stationary point — the code below enumerates
+    /// those candidates and never searches. `testClosedFormIsTheLargestInscribedRectangle` checks the
+    /// answer against a 120 × 120 band sweep over the whole knob grid.
+    ///
+    /// 338 — the anchor moved to the mid-line, so the quad is a symmetric trapezoid and the rect is
+    /// the quad's full height at its **narrow end** (the width is monotone in height, so the area only
+    /// grows as the band lengthens). Before 338 the rect was pinned to the bottom-left corner instead;
+    /// that pinning was the canvas half of the same one-sided parametrisation.
     ///
     /// Degenerate inputs (a knob combination that leaves less than a pixel) are clamped to `minimum`
     /// and reported through `canvas(...)`'s `degenerate` flag — never a zero-sized canvas (§5).
@@ -400,14 +420,14 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// The inscribed rectangle in normalized units of the **frame** (not the warped one): `width` and
     /// `height` are what the canvas is, `x`/`y` where its top-left sits.
     ///
-    /// At a positive slider the near edge is the narrow side, so the rect hugs it (`x = 0`,
-    /// `y = 1 − height`) and the **fixed point `(½, 1)` is inside** — which is what 近端不动 means for
-    /// the picture. At a negative slider the far end is the narrow side and the rect is centred, so
-    /// the near *corners* crop while the fixed point stays put.
+    /// 338 — the anchor is the mid-line, so the rect is the quad's full height at the narrow end, and
+    /// the narrow end is the bottom (`y = 1 − height`, `x` centred) at a positive slider and the top
+    /// (`y = 0`) at a negative one. Nothing is pinned to a corner: `−v`'s rect is `+v`'s reflected, the
+    /// same way the quads are.
     public func inscribedRect() -> (x: Double, y: Double, width: Double, height: Double) {
-        // Work in (u, t) = (x, 1 − y), i.e. right and *up from the near (bottom) edge*. The quad is
-        // convex; `left(t)`/`right(t)` are its two boundaries at height `t`, each a single straight
-        // line between two vertices, so both are piecewise linear with the vertices' `t` as kinks.
+        // Work in (u, t) = (x, 1 − y), i.e. right and *up*. The quad is convex;
+        // `left(t)`/`right(t)` are its two boundaries at height `t`, each a single straight line
+        // between two vertices, so both are piecewise linear with the vertices' `t` as kinks.
         let quad = warpedQuad().map { (u: $0.x, t: 1 - $0.y) }
         func bounds(at t: Double) -> (left: Double, right: Double) {
             var lo = Double.infinity, hi = -Double.infinity
