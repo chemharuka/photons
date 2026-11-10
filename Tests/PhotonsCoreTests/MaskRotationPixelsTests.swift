@@ -118,6 +118,13 @@ final class MaskRotationPixelsTests: XCTestCase {
     private func document(_ p: FrameProbe, sourceUV: NormalizedPoint, source: ImageSize) -> EditModel {
         let radius = 24.0 / Double(min(source.width, source.height))
         var edit = EditModel.neutral
+        // 314 — S3.10 is on by default in a shipped document, and this test reads the **picture's**
+        // centroid by subtracting the frame's darkest non-zero luma: the sharpener's under-shoot
+        // ring around the dot moves that floor, so the whole flat background gains weight and the
+        // centroid is pulled towards the frame centre (measured at HEAD: 4753 px on 9504×6336, which
+        // is half the frame — a measurement artefact, not a mask/geometry fact). `amount = 0` is
+        // 314's spelling of "S3.10 does not exist"; the mask↔picture claim is about S0/S1.5.
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
         edit.geometry = GeometryGroup(crop: p.crop, rotationDegrees: p.angle,
                                       flipHorizontal: false, flipVertical: false)
         edit.masks = [Mask(id: "m-probe",

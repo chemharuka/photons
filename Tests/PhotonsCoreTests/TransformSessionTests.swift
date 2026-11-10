@@ -257,6 +257,11 @@ extension TransformSessionTests {
         let graph = try makeGraph(image, identity: "transform-session-mask")
 
         var edit = EditModel.neutral
+        // 314 — the picture's centroid is read by subtracting the frame's darkest non-zero luma;
+        // S3.10's default 50 puts an under-shoot ring around the dot, the floor moves, and the whole
+        // flat background gains weight (35 px on this 160×120 frame). `amount = 0` is 314's spelling
+        // of "S3.10 does not exist" — the claim is S0↔S1.5, and the sharpener is pinned elsewhere.
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
         edit.geometry = GeometryGroup(crop: .full, rotationDegrees: 9.7)
         edit.masks = [Mask(id: "m-dot", components: [MaskComponent(
             id: "c", feather: 0,
