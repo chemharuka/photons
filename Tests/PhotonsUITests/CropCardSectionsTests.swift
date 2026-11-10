@@ -137,7 +137,11 @@ final class CropCardSectionsTests: XCTestCase {
             for id in rowIDs {
                 let rect = try XCTUnwrap(panel.row(id), "082 §4: 行 \(id) 没有画出来")
                 rows.append((id, rect))
-                XCTAssertGreaterThan(rect.width, 60, "082 §4: \(id) 只剩 \(rect.width) pt 宽")
+                // 343: 「九宫格」与「不出像素」并成一行，它的探针只包住那枚 chip（不再跨整行），
+                // 所以宽度门槛对它不适用 —— 换下面那条「同一行、贴右沿」的断言。
+                if id != CropCardID.grid {
+                    XCTAssertGreaterThan(rect.width, 60, "082 §4: \(id) 只剩 \(rect.width) pt 宽")
+                }
                 XCTAssertLessThanOrEqual(rect.width, contentWidth + 0.5,
                                          "082 §4: \(id) 比内容宽还宽（\(rect.width) > \(contentWidth)）—— 会换行")
                 XCTAssertGreaterThanOrEqual(rect.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5,
@@ -145,6 +149,17 @@ final class CropCardSectionsTests: XCTestCase {
                 XCTAssertLessThanOrEqual(rect.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
                                          "082 §4: \(id) 出了卡片右边")
                 print("082 §4 · \(id) \(NSStringFromRect(rect))")
+            }
+
+            // 343 (user): 「九宫格和不出像素做到同一行内，不出像素左对齐，九宫格右对齐」。
+            if card == cropCard,
+               let box = rows.first(where: { $0.id == CropCardID.staysInsidePixels })?.rect,
+               let grid = rows.first(where: { $0.id == CropCardID.grid })?.rect {
+                XCTAssertLessThanOrEqual(abs(box.midY - grid.midY), 1.0,
+                                         "343: 九宫格与不出像素必须在同一行")
+                XCTAssertGreaterThan(grid.minX, box.maxX, "343: 九宫格在不出像素右边")
+                XCTAssertEqual(grid.maxX, card.maxX - WorkspaceLayout.cardInsetH, accuracy: 1.0,
+                               "343: 九宫格贴右沿")
             }
 
             var headers: [(id: String, rect: CGRect)] = []

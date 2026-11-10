@@ -83,7 +83,6 @@ extension InspectorView {
                                                    label: CropSection.crop.title)
                               })
                 cropStaysInsideRow(tool)
-                cropGridRow(tool)
                 // 336: 取消 / 应用 left this card — it is now the workspace's **fixed footer**
                 // (`CropApplyFooter`, a sibling of the `ScrollView`), so the pair no longer scrolls
                 // away with the cards. The card ends with 九宫格.
@@ -150,12 +149,18 @@ extension InspectorView {
     /// 317 — 「不出像素」，卡片中间那一行（334: 它不再是「底部行」的一份子，应用/取消单独占最底一行）.
     @ViewBuilder
     private func cropStaysInsideRow(_ tool: CropToolController?) -> some View {
+        // 343 (user): 「九宫格和不出像素做到同一行内，不出像素左对齐，九宫格右对齐」—— 两行并成一行，
+        // 检查框占左边、九宫格 chip 贴右沿，中间是弹性空隙。
         HStack(spacing: 6) {
             StaysInsidePixelsCheckbox(isOn: tool?.cropStaysInsidePixels ?? false,
                                       onToggle: { tool?.setCropStaysInsidePixels($0) })
                 .fixedSize()
                 .background(CropRowProbeHost(rowID: CropCardID.staysInsidePixels))
-            Spacer(minLength: 4)
+            Spacer(minLength: 8)
+            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
+                     help: "裁切框上的三分线（视图态，不进文档）",
+                     action: { loupe?.cropTool.toggleGrid() })
+                .background(CropRowProbeHost(rowID: CropCardID.grid))
         }
     }
 
@@ -559,21 +564,27 @@ struct CropAspectRow: View {
             // 086/334: the readback seam that proves a ratio row is never greyed out with no tool either.
             .background(DetailRowEnabledProbe(title: CropSection.crop.title))
 
-            // 原始 / 自由：两道解掉约束的门.
+            // 原始 / 自由：两道解掉约束的门。
+            // 343 (user): 「原始和自由的宽度和 1:1 4:3 这些保持一致」—— 它们排在**同一个四列栅格**里
+            // （各占一格、后两格留空），所以宽度由同一套 `maxWidth: .infinity` 算出，不会比比例按钮窄。
             HStack(spacing: 6) {
                 RatioPresetButtonHost(title: CropAspectPreset.original.displayName,
                                       isOn: tool?.aspectPreset() == .original,
                                       isEnabled: tool != nil,
                                       identifierID: Self.originalID,
                                       action: { tool?.setAspect(.original) })
-                    .fixedSize()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Self.buttonHeight)
                 RatioPresetButtonHost(title: CropAspectPreset.free.displayName,
                                       isOn: tool?.isAspectFree ?? true,
                                       isEnabled: tool != nil,
                                       identifierID: Self.freeID,
                                       action: { tool?.setAspect(.free) })
-                    .fixedSize()
-                Spacer(minLength: 4)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Self.buttonHeight)
+                ForEach(0..<2, id: \.self) { _ in
+                    Color.clear.frame(maxWidth: .infinity).frame(height: Self.buttonHeight)
+                }
             }
             .background(CropRowProbeHost(rowID: Self.extrasProbeID))
 

@@ -418,12 +418,11 @@ final class CropPixelClamp317Tests: XCTestCase {
             .first { $0.rowID == CropCardID.grid })
         let rowRect = row.convert(row.bounds, to: inspector)
         let gridRect = grid.convert(grid.bounds, to: inspector)
-        // 334 之后裁切卡只剩比例 + 自定义 + 不出像素 + 九宫格：九宫格从「与勾选框同一行」改为**独立一行**，
-        // 排在勾选框下面（用户：卡片里保留九宫格）。断言改成「上下相邻、九宫格在下」，语义不变。
-        XCTAssertGreaterThan(gridRect.minY, rowRect.maxY - 0.5,
-                             "317/334: 九宫格在「不出像素」下面一行")
-        XCTAssertLessThanOrEqual(abs(gridRect.minX - rowRect.minX), 1,
-                                 "317/334: 两行左对齐")
+        // 343 (user): 「九宫格和不出像素做到同一行内，不出像素左对齐，九宫格右对齐」—— 回到同一行，
+        // 勾选框在左、九宫格在右。断言按新布局写。
+        XCTAssertLessThanOrEqual(abs(rowRect.midY - gridRect.midY), 1,
+                                 "343: 勾选框与九宫格同一行")
+        XCTAssertGreaterThan(gridRect.minX, rowRect.maxX, "343: 九宫格在勾选框右边")
 
         box.performClick(nil)
         CropUITestSupport.pump(0.05)

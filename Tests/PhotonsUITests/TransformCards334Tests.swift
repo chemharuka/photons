@@ -138,9 +138,12 @@ final class TransformCards334Tests: XCTestCase {
         XCTAssertNil(applyProbe.enclosingScrollView, "336: 页脚必须在 ScrollView 内容之外")
         let grid = try XCTUnwrap(panel.row(CropCardID.grid))
         let stays = try XCTUnwrap(panel.row(CropCardID.staysInsidePixels))
-        XCTAssertGreaterThan(grid.minY, stays.maxY, "336: 九宫格在「不出像素」之下")
-        print(String(format: "336 ② · 卡内最低 = 九宫格 maxY %.1f · card maxY %.1f · 页脚 %@",
-                     grid.maxY, card.maxY, NSStringFromRect(footer)))
+        // 343 (user): 九宫格与「不出像素」回到**同一行** —— 勾选框左、九宫格右。
+        XCTAssertLessThanOrEqual(abs(grid.midY - stays.midY), 1.0,
+                                 "343: 九宫格与「不出像素」同一行")
+        XCTAssertGreaterThan(grid.minX, stays.maxX, "343: 九宫格在勾选框右边")
+        print(String(format: "343 · 同行 · 勾选框 maxX %.1f · 九宫格 minY %.1f · card maxY %.1f · 页脚 %@",
+                     stays.maxX, grid.minY, card.maxY, NSStringFromRect(footer)))
     }
 
     // MARK: - ③ 校正卡：四行 + 水平仪图标
