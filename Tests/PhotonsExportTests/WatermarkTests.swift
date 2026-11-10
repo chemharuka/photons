@@ -21,7 +21,7 @@ final class WatermarkTests: XCTestCase {
     static let baseSDRSHA = "b60ce712735784f6130c9dead7678fdc7bf682079e1404d1c8db61f8a9ce4863"
     /// 同上，HEIC 增益图（`fixture(hdr: true)`）。206 追单后 SDR 基底也过 8 位抖动，
     /// 旧值 `f808e000…` 随之变为下面的新值；增益图本身仍按 8 位旁路图原样写。
-    static let baseHDRSHA = "0eb0f087fef9c985fda9c1e69821ede8ea0cf1c0b496c2a9600b37300464be56"
+    static let baseHDRSHA = "88ef73dfb45d2127336bc8f6365791a008e416b67a91c98c822466bbf8671db6"
 
     private var scratch: URL!
 
@@ -184,7 +184,7 @@ final class WatermarkTests: XCTestCase {
         print("180.1 HDR batch SHA \(hdrBatch) · reference SHA \(hdrReference)")
         XCTAssertEqual(hdrBatch, hdrReference,
                        "HDR 增益图也不能因为水印为空而改变一个字节")
-        XCTAssertEqual(hdrBatch, Self.baseHDRSHA, "main 72c53e5 的 HDR 基线")
+        XCTAssertEqual(hdrBatch, Self.baseHDRSHA, "314 之后重钉：默认锐化 50 进入导出，HDR 基线随之更新")
     }
 
     // MARK: - 1b. opacity 0 / 放不下的文字：同样一个字节都不改
