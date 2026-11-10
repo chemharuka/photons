@@ -401,8 +401,15 @@ public final class CropToolController {
     public func setAngle(uiValue: Double) {
         var session = TransformSession(geometry: draftGeometry, source: uprightSource)
         session.setAngle(uiValue: uiValue)
+        writeStraighten(session.draft.straightenDegrees)
+    }
+
+    /// The **one** draft-angle write: the slider (`setAngle`), the ⌘-drag release
+    /// (`commitStraighten`) and 328's 画线拉直 all come out here, so the 307 one-shot inscription,
+    /// the 310 lock re-arm and the 317 「不出像素」 question happen exactly once per value.
+    private func writeStraighten(_ degrees: Double) {
         let previous = draft.straighten
-        let next = session.draft.straightenDegrees
+        let next = CropTool.clampStraighten(degrees)
         draft.straighten = next
         // 310 — turning the picture re-inscribes the frame, so it *is* a sizing gesture: re-arm the
         // lock's reshape (the inscription keeps the rect's own ratio and the canvas keeps the size).
@@ -617,6 +624,9 @@ public final class CropToolController {
     /// the mode, the draft, the history and the camera cannot take three different routes out.
     @discardableResult
     public func finish(_ outcome: TransformFinish) -> Bool {
+        // 328 — 画线拉直 is this session's view state: leaving the tool puts the crosshair away and
+        // drops any line, whatever the door (↵ 应用 / 完成 / Esc).
+        cancelDrawStraighten()
         switch outcome {
         case .confirm, .done:
             return confirmDraft()
@@ -671,6 +681,7 @@ public final class CropToolController {
     /// 取消 the user asked for, so it does not count as one.
     public func detach() {
         guard isActive else { return }
+        cancelDrawStraighten()
         endDrag()
         isActive = false
         // 077: the session ends with zero rows (the draft is discarded, and any mid-session document
@@ -760,6 +771,172 @@ public final class CropToolController {
     /// write as `setStraighten` — no document write happens per tick.
     public func setStraightenLive(_ degrees: Double) {
         setStraighten(degrees)
+    }
+
+    // MARK: 328 — 画线拉直 (manual straighten by drawing a line)
+
+    /// The card's `line.diagonal` toggle: while this is on, a press on the canvas starts a "draw a
+    /// line" stroke instead of moving the frame (§2). View state, like `showsGrid` — it is never in
+    /// the document, never in the history, and it is dropped when the tool closes.
+    public private(set) var isDrawStraightenArmed = false
+
+    /// A stroke is in flight (mouse down … up).
+    public private(set) var isDrawingStraighten = false
+
+    /// The line on screen, in **view points**: the stroke while the hand is down, and the finished
+    /// line for `CropDrawStraighten.holdSeconds` afterwards. `nil` is 「nothing to draw」.
+    public private(set) var straightenStroke: CropToolSegment?
+
+    /// Its opacity, from `CropDrawStraighten.alpha(elapsed:)`.
+    public private(set) var straightenStrokeAlpha: Double = 1
+
+    /// How many strokes actually turned the picture, and how many were too short to be a line (§2's
+    /// 「20 pt 以下算误触，不应用、不提示，只计数」). The second number is what a QA report reads.
+    public private(set) var drawnStraightenCount = 0
+    public private(set) var tooShortStraightenCount = 0
+
+    /// The last stroke's numbers — the readout the tests (and a future status line) print.
+    public private(set) var lastStraightenDraw: CropStraightenDraw?
+
+    /// §4.9② — the reverse gate. `true` is the shipped rule (`|θ| ≤ 45°` → 横, otherwise 竖); the
+    /// test flips it to prove that without the fold an 83° line is turned 45° the wrong way. Nothing
+    /// in the app writes it.
+    var foldsToNearestAxis = true
+
+    /// The canvas half: the loupe assigns this to push the stroke at the overlay **without** the
+    /// frame's layout pass (`clampToView` must not run mid-stroke — §2's 「画线期间不得移动裁切框」).
+    var onStraightenStrokeChange: (() -> Void)?
+
+    private var strokeTimer: Timer?
+
+    /// The card's button: arm/disarm. Disarming drops the line and writes nothing.
+    @discardableResult
+    public func toggleDrawStraighten() -> Bool {
+        setDrawStraightenArmed(!isDrawStraightenArmed)
+    }
+
+    @discardableResult
+    public func setDrawStraightenArmed(_ armed: Bool) -> Bool {
+        guard isActive else {
+            isDrawStraightenArmed = false
+            return false
+        }
+        guard armed != isDrawStraightenArmed else { return false }
+        if armed {
+            isDrawStraightenArmed = true
+        } else {
+            // The button's second press is §2's 取消: no apply, no row.
+            cancelDrawStraighten()
+        }
+        return true
+    }
+
+    /// Mouse-down while armed: start a stroke. The frame is **not** grabbed — `drag` stays `nil`,
+    /// `isDragging` stays `false`, and nothing in `draft` is touched.
+    @discardableResult
+    public func beginDrawStraighten(atViewPoint point: CGPoint) -> Bool {
+        guard isActive, isDrawStraightenArmed else { return false }
+        stopStrokeTimer()
+        straightenStroke = CropToolSegment(a: point, b: point)
+        straightenStrokeAlpha = 1
+        isDrawingStraighten = true
+        swallowedGestures += 1
+        onStraightenStrokeChange?()
+        return true
+    }
+
+    /// One tick of the draw. **Only the stroke moves** (§2 「画线期间拖动不得移动/改变裁切框」): no
+    /// `draft.crop` write, no `clampToView`, no lock reshape, no inscription — the 310 invariant is
+    /// not re-established here, it is never asked.
+    public func continueDrawStraighten(atViewPoint point: CGPoint) {
+        guard isActive, isDrawingStraighten, let stroke = straightenStroke else { return }
+        straightenStroke = CropToolSegment(a: stroke.a, b: point)
+        straightenStrokeAlpha = 1
+        onStraightenStrokeChange?()
+    }
+
+    /// Mouse-up: measure the line and, if it is long enough, turn the picture **once**.
+    ///
+    /// One gesture is one history row: the value goes through `writeStraighten` and then
+    /// `commitStraighten` (the slider's own release path), which writes the document once and
+    /// closes/reopens the crop session around exactly one snapshot — so ⌘Z is the angle from before
+    /// the line (§3.5). A 19 pt stroke changes nothing and commits nothing.
+    @discardableResult
+    public func endDrawStraighten(mapping: LoupeMapping,
+                                  pointScale: Double = 1) -> CropStraightenDraw? {
+        guard isActive, isDrawingStraighten, let stroke = straightenStroke else { return nil }
+        isDrawingStraighten = false
+        guard let draw = CropDrawStraighten.draw(from: stroke.a, to: stroke.b,
+                                                 mapping: mapping,
+                                                 pointScale: pointScale,
+                                                 nearestAxis: foldsToNearestAxis) else {
+            // §2 — 误触: nothing applied, nothing said, counted for the report.
+            tooShortStraightenCount += 1
+            straightenStroke = nil
+            straightenStrokeAlpha = 1
+            onStraightenStrokeChange?()
+            return nil
+        }
+        straightenStroke = CropToolSegment(a: draw.start, b: draw.end)
+        straightenStrokeAlpha = 1
+        lastStraightenDraw = draw
+        _ = applyDrawnStraighten(draw.raw)
+        scheduleStrokeFade()
+        onStraightenStrokeChange?()
+        return draw
+    }
+
+    /// §2 — Esc / the button: drop the stroke, keep the draft, write nothing.
+    @discardableResult
+    public func cancelDrawStraighten() -> Bool {
+        let wasLive = isDrawingStraighten || isDrawStraightenArmed || straightenStroke != nil
+        stopStrokeTimer()
+        isDrawingStraighten = false
+        isDrawStraightenArmed = false
+        straightenStroke = nil
+        straightenStrokeAlpha = 1
+        if wasLive { onStraightenStrokeChange?() }
+        return wasLive
+    }
+
+    /// The one write, exposed (internal) so a test can drive the clamp through the real door —
+    /// `CropTool.clampStraighten` is the limit, and the card's readout is `draft.straighten`, so a
+    /// clamped value is reported as the value that took effect (§3.4).
+    @discardableResult
+    func applyDrawnStraighten(_ raw: Double) -> Double {
+        guard isActive else { return draft.straighten }
+        writeStraighten(raw)
+        let applied = draft.straighten
+        drawnStraightenCount += 1
+        _ = commitStraighten()
+        return applied
+    }
+
+    /// §2 — 1.5 pt white + 1 px black, held `holdSeconds` and then faded over `fadeSeconds`.
+    private func scheduleStrokeFade() {
+        stopStrokeTimer()
+        let shownAt = Date()
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                let elapsed = Date().timeIntervalSince(shownAt)
+                self.straightenStrokeAlpha = CropDrawStraighten.alpha(elapsed: elapsed)
+                if self.straightenStrokeAlpha <= 0 {
+                    timer.invalidate()
+                    self.strokeTimer = nil
+                    self.straightenStroke = nil
+                    self.straightenStrokeAlpha = 1
+                }
+                self.onStraightenStrokeChange?()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        strokeTimer = timer
+    }
+
+    private func stopStrokeTimer() {
+        strokeTimer?.invalidate()
+        strokeTimer = nil
     }
 
     /// The angle still to be shown on top of the document: `θ − θ₀`, in degrees. 0 at rest and right

@@ -151,7 +151,7 @@ extension InspectorView {
         // 122 A: the old 「转动」 sub-header is gone — the angle row sits directly under the card
         // title. The section keeps its reset on the row itself, wired to the section's declaration.
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-            VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
+            HStack(spacing: 6) {
                 sliderRow("角度",
                           straighten,
                           -CropTool.straightenLimit ... CropTool.straightenLimit,
@@ -167,6 +167,14 @@ extension InspectorView {
                               guard !editing else { return }
                               _ = tool?.commitStraighten()
                           })
+                // 328 — 画线拉直, on the same line as the slider it is the shortcut for.
+                CropDrawStraightenToggle(on: tool?.isDrawStraightenArmed ?? false,
+                                         enabled: tool?.isActive ?? false,
+                                         action: { _ = tool?.toggleDrawStraighten() })
+                    .fixedSize()
+                    // A probe of its own so a panel test can say where the switch sits; its frame
+                    // is the button's, and it never eats a click (`CropRowProbe.hitTest → nil`).
+                    .background(CropRowProbeHost(rowID: CropCardID.drawStraighten))
             }
             .background(CropRowProbeHost(rowID: CropCardID.angle))
         }
@@ -1190,6 +1198,48 @@ struct CropChip: View {
     static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }
 }
 
+// MARK: - 328 「画线拉直」
+
+/// The 裁切 card's **画线拉直** switch, next to the 角度 slider: a `Toggle`-style button with
+/// `line.diagonal`, lit while the canvas is drawing lines instead of moving the frame.
+///
+/// It is a `Button` and not a SwiftUI `Toggle` because the card's other switches are chips of the
+/// same size (`CropChip`), and because a `Toggle` would print a checkbox beside the icon on macOS;
+/// `.isSelected` carries the on/off state to the accessibility tree instead (the same spelling
+/// `CropChip` uses), so the panel acceptance can read it without a second source of truth.
+struct CropDrawStraightenToggle: View {
+
+    let on: Bool
+    var enabled: Bool = true
+    let action: () -> Void
+
+    static let size = CGSize(width: 22, height: 18)
+    static let cornerRadius: CGFloat = 5
+    static let symbol = "line.diagonal"
+    static let label = "画线拉直"
+    static let help = "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消"
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: Self.symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(on ? Color.white : Color.primary)
+                .frame(width: Self.size.width, height: Self.size.height)
+                .background(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .fill(on ? Color.accentColor : Color.clear))
+                .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(on ? 0 : 0.12), lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(Self.help)
+        .disabled(!enabled)
+        .accessibilityLabel(Self.label)
+        .accessibilityIdentifier("inspector.crop.drawStraighten")
+        .accessibilityAddTraits(on ? [.isSelected] : [])
+    }
+}
+
 // MARK: - 317 「不出像素」
 
 /// The 裁切 card's **「不出像素」** checkbox — a real `NSButton(checkboxWithTitle:)`, like every other
@@ -1283,6 +1333,8 @@ enum CropCardID {
     static let angleCard = "angle.card"
     static let aspect = CropAspectRow.probeID
     static let angle = "angle"
+    /// 328: the 画线拉直 switch, on the 角度 row (no row of its own — it is that row's second control).
+    static let drawStraighten = "drawStraighten"
     static let turn = CropTurnRow.probeID
     static let mirror = CropMirrorRow.probeID
     /// 183: the two keystone sliders' frames.

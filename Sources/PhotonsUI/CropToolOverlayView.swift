@@ -38,6 +38,22 @@ final class CropToolOverlayView: NSView {
         didSet { if oldValue != active { needsDisplay = true } }
     }
 
+    /// 328 — the 画线拉直 stroke, in view points, and its opacity. Drawn **after** the frame and the
+    /// grips so the line the hand is pulling is the brightest thing on the canvas; `nil` and `0` are
+    /// both 「nothing to draw」.
+    var straightenStroke: CropToolSegment? {
+        didSet { if oldValue != straightenStroke { needsDisplay = true } }
+    }
+
+    var straightenStrokeAlpha: Double = 1 {
+        didSet { if oldValue != straightenStrokeAlpha { needsDisplay = true } }
+    }
+
+    /// §2's two numbers, re-exported so the acceptance can name what is drawn: 1.5 pt white,
+    /// 1 px black shadow.
+    static let straightenLineWidth = CropStraightenLinePainter.lineWidth
+    static let straightenShadowWidth = CropStraightenLinePainter.shadowWidth
+
     override var isOpaque: Bool { false }
     override var isFlipped: Bool { true }
 
@@ -51,6 +67,13 @@ final class CropToolOverlayView: NSView {
     static let edgeBarLength: CGFloat = 22
 
     override func draw(_ dirtyRect: NSRect) {
+        // 328 — the drawn line is drawn even when the frame has no layout yet (a press on the very
+        // first frame of a mode change); `defer` keeps it out of every early return below.
+        defer {
+            if let stroke = straightenStroke {
+                CropStraightenLinePainter.draw(stroke, alpha: straightenStrokeAlpha)
+            }
+        }
         guard let layout, layout.corners.count == 4, bounds.width > 1, bounds.height > 1 else {
             return
         }

@@ -298,6 +298,9 @@ public final class LoupeCanvasView: NSView {
         if controller?.isCropToolActive == true {
             switch key {
             case "\u{1b}":
+                // 328 — while 画线拉直 is armed, Escape is the gesture's own 取消 (drop the line, keep
+                // the draft); the second Escape leaves 裁切 as it always has.
+                if controller?.cancelStraightenDrawIfArmed() == true { return }
                 controller?.cancelCropTool()
                 return
             case "\r", "\u{3}":

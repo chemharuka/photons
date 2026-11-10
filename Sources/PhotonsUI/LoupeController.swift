@@ -1341,6 +1341,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // document (a released 转动 writes it), so this must not request a frame per tick.
             self.refreshCropTool()
         }
+        // 328 — the 画线拉直 stroke goes to the overlay **on its own path**: the frame's layout pass
+        // (`refreshCropTool` → `clampToView`) must not run while a line is being drawn, or a stroke
+        // could move the very frame §2 says it may not touch.
+        cropTool.onStraightenStrokeChange = { [weak self] in
+            self?.syncStraightenStroke()
+        }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
         // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).
@@ -4382,6 +4388,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
                               backingScale scaleOverride: Double? = nil) -> Bool {
         guard cropTool.isActive, let framing = framing(viewport: viewport) else { return false }
         let scale = scaleOverride ?? backingScale
+        // 328 — armed with 画线拉直, a press on **any** point starts a line: no grip is taken, no
+        // frame is drawn, and `⌘` is not a rotation (the whole canvas is the straighten tool while
+        // the button is on, exactly like Lightroom's 拉直工具). The mapping is not needed until the
+        // release — the stroke is in view points.
+        if cropTool.isDrawStraightenArmed {
+            let started = cropTool.beginDrawStraighten(atViewPoint: point)
+            if started { syncStraightenStroke() }
+            return started
+        }
         let started = cropTool.beginDrag(atViewPoint: point,
                                          mapping: framing.mapping(of: viewState),
                                          source: cropSourceSize, pointScale: scale,
@@ -4396,6 +4411,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func continueCropDrag(atViewPoint point: CGPoint,
                                  viewport: ImageSize? = nil,
                                  backingScale scaleOverride: Double? = nil) {
+        // 328 — a stroke only moves the line: no clamp, no layout, so the frame is byte-identical
+        // from mouse-down to mouse-up (§2 / §4.4).
+        if cropTool.isDrawingStraighten {
+            cropTool.continueDrawStraighten(atViewPoint: point)
+            syncStraightenStroke()
+            return
+        }
         guard cropTool.isActive, cropTool.isDragging, let framing = framing(viewport: viewport) else {
             return
         }
@@ -4409,6 +4431,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Mouse-up: the draft stays; a 转动 gesture writes its angle **once** (one history row and one
     /// frame), a crop gesture writes nothing (the draft still waits for 应用).
     public func endCropDrag() {
+        // 328 — the release of a 画线拉直 stroke: measure, apply once, and leave the line up for 0.3 s.
+        if cropTool.isDrawingStraighten {
+            if let framing = framing() {
+                _ = cropTool.endDrawStraighten(mapping: framing.mapping(of: viewState),
+                                               pointScale: backingScale)
+            } else {
+                cropTool.cancelDrawStraighten()
+            }
+            syncStraightenStroke()
+            refreshCropTool()
+            return
+        }
         let angle = cropTool.draft.straighten
         let committed = session?.edit.geometry.straightenDegrees ?? angle
         cropTool.endDrag()
@@ -4420,8 +4454,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// Escape mid-drag.
     public func cancelCropDrag() {
+        if cropTool.isDrawingStraighten || cropTool.isDrawStraightenArmed {
+            cropTool.cancelDrawStraighten()
+            syncStraightenStroke()
+            refreshCropTool()
+            return
+        }
         cropTool.cancelDrag()
         refreshCropTool()
+    }
+
+    /// 328 — §2's 「Esc 或再点按钮 = 取消」: while 画线拉直 is armed (or a stroke is in flight) Escape
+    /// drops **the line**, not the 裁切 draft, and writes nothing. Returns `true` when it consumed the
+    /// key, so a second Escape is still the tool's own cancel.
+    @discardableResult
+    public func cancelStraightenDrawIfArmed() -> Bool {
+        guard cropTool.isDrawingStraighten || cropTool.isDrawStraightenArmed
+                || cropTool.straightenStroke != nil else { return false }
+        cropTool.cancelDrawStraighten()
+        syncStraightenStroke()
+        refreshCropTool()
+        return true
+    }
+
+    /// 328 — push the stroke the controller is holding at the overlay. One assignment, no layout pass:
+    /// this is the only path a live line travels, so a stroke can never reach `clampToView`.
+    private func syncStraightenStroke() {
+        cropOverlay.straightenStroke = cropTool.straightenStroke
+        cropOverlay.straightenStrokeAlpha = cropTool.straightenStrokeAlpha
     }
 
     /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.
