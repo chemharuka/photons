@@ -4315,12 +4315,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             NSSound.beep()      // nothing to turn: say so instead of a silent no-op
             return false
         }
-        // 077/072's rule for a discrete geometry action inside a crop session: close the session
-        // first (it commits the crop-so-far as its own row, or nothing when the rect did not move),
-        // write the turn, then reopen a fresh one — the draft is re-seeded from the turned document,
-        // so the frame on screen keeps covering the pixels it covered before the press.
-        let inSession = session.isToolSessionActive
-        if inSession { session.endToolSession(label: "裁切与旋转") }
+        // 072's rule for a discrete geometry action: the turn is a click, not a gesture. 356 — it
+        // **closes** a gesture's session (one row for the crop-so-far, or nothing) and never reopens
+        // one, so a second press cannot take a different door because of what the first left behind;
+        // and the row is committed before anything else can be, because `commitEdit` answers `nil`
+        // inside a session (082 measured that on the shipped path: one press left `quarterTurns` at 0
+        // and added no row).
+        session.endToolSession(label: "裁切与旋转")
         // The frame the camera is measured in, **before** the turn — the picture is about to swap its
         // two dimensions, so a window centre in the old frame means something else in the new one.
         //
@@ -4337,16 +4338,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                         height: Int((framingBeforeTurn?.sourceHeight ?? 1).rounded()))
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        guard turned else {
-            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-            return false
-        }
-        // **The row is committed before the crop session is reopened.** `commitEdit` answers `nil`
-        // inside a tool session (077: the session owns the next snapshot), so committing after the
-        // reopen wrote nothing — and the turn then lived only in memory until 应用, which is the
-        // 「点了一下没反应」 a crop session showed (082 measured it: `quarterTurns` stayed 0 and the
-        // history gained no row). Writing the row first is also what P0-10 promised: one press,
-        // one snapshot, with or without the frame up.
+        guard turned else { return false }
+        // **The row is committed here, before anything else can be.** `commitEdit` answers `nil`
+        // inside a tool session (the session owns the next snapshot), and a turn that lived only in
+        // memory until 应用 is the 「点了一下没反应」 a crop session showed (082 measured it:
+        // `quarterTurns` stayed 0 and no row was added). Writing the row first is also what P0-10
+        // promised: one press, one snapshot, with or without the frame up.
         let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
                                            coalesce: false)
         // **The picture turned, so the camera turns with it** (2026-11-02). The window centre is stored
@@ -4370,7 +4367,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             }
             setViewState(next)
         }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
         return committed

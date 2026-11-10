@@ -604,10 +604,13 @@ public final class CropToolController {
         }
         guard inscribed != current else { return }
         draft.crop = inscribed
-        if let session, session.isToolSessionActive {
-            session.endToolSession(label: "裁切与旋转")
-            session.beginToolSession("裁切", label: "裁切与旋转")
-        }
+        // 356 — **nothing else.** This used to close and reopen the tool session here so that the
+        // inscribed frame got its own row instead of folding into a drag still in flight. That made
+        // the *history* decide how many rows one gesture left, and — because a row is what ⌘Z
+        // restores — what the document looked like afterwards. The geometry above is one line and
+        // it is unconditional: the rect is the same whether or not a session is open. The row is
+        // closed by whoever called this: the gesture's own mouse-up (`endDrag`) or the non-gesture
+        // writer, which closes the session *before* it writes.
     }
 
     /// 317 — **the four-corner law as a write**: with 「不出像素」 on, any rect about to become the
@@ -651,6 +654,38 @@ public final class CropToolController {
         session.cropToolDraft = (id, committedGeometry(for: session.edit.geometry))
     }
 
+    // MARK: 356 — the tool session belongs to a gesture
+
+    /// Open the session a **gesture** owns: a mouse-down on the frame, a grip, or the 转动 handle.
+    ///
+    /// Anything a previous gesture left open is closed first, so this gesture's row can never be
+    /// folded into — or silently swallowed by — it. Both doors are the same call whether or not a
+    /// session is open, which is the point: `beginSession` ignores a second open and `endSession`
+    /// answers `nil` without one, so nothing here needs to ask the history what it contains.
+    private func openGestureSession() {
+        closeToolSession(label: "裁切与旋转")
+        session?.beginToolSession("裁切", label: "裁切与旋转")
+    }
+
+    /// Close the session, writing **one** row for what it changed (`base → edit`), or nothing when it
+    /// changed nothing. A no-op when no session is open.
+    ///
+    /// Every non-gesture write in this file calls this **before** it touches the document (双击复位,
+    /// ⌘Z, 粘贴, 引导线应用, 内切, 翻转, 90° 旋转): a session is a gesture's, and a command is not one.
+    private func closeToolSession(label: String? = nil) {
+        _ = session?.endToolSession(label: label)
+    }
+
+    /// The mouse-up half of a gesture that shrank its own row: close the session, and when the entry
+    /// was driven without one (a slider tick, a preset, an internal commit) fall back to the ordinary
+    /// single commit. One row either way — the caller never asks which case it is.
+    @discardableResult
+    private func closeGestureSession(label: String) -> Bool {
+        guard let session else { return false }
+        if session.endToolSession(label: label) { return true }
+        return session.commitEdit(label: label, coalesce: false)
+    }
+
     // MARK: the mode
 
     /// Enter 裁切 mode with a draft seeded from the document.
@@ -689,12 +724,13 @@ public final class CropToolController {
         lastHandle = nil
         lockReshapeSuspended = false       // 310 — a new session, a new lock question
         straightenBaseCrop = nil
-        // 317 — before the tool session opens (so the inscribe cannot bracket an empty session).
+        // 317 — before anything opens (so the inscribe cannot bracket an empty session).
         inscribeIntoPixelsIfNeeded()
-        // 077: the tool session is what makes 「裁切完成后只保留一个记录」 a property of the history
-        // rather than a property of this file's discipline. From here to `apply()` / `cancel()` the
-        // history records nothing, so no handle position, angle or draft rect can become a row.
-        session.beginToolSession("裁切", label: "裁切与旋转")
+        // 077 said 「裁切完成后只保留一个记录」, and 356 keeps it without a session that spans the
+        // whole mode: the draft is the only thing a handle position writes, so nothing is recorded
+        // between here and 应用 anyway, and 应用 writes its one row itself. A session that outlived
+        // the gesture that opened it is exactly what made a later 双击 / ⌘Z / 粘贴 behave differently
+        // depending on what the history happened to contain — so the tool no longer opens one.
         return true
     }
 
@@ -737,8 +773,13 @@ public final class CropToolController {
         let geometry = committedGeometry(for: session.edit.geometry)
         endDrag()
         isActive = false
+        // 356 — 应用 is a command, not a gesture: close whatever a gesture left behind first, then
+        // write the document and commit its **one** row directly. Asking the session for the row
+        // (`endToolSession`) was the same row only when a session happened to be open; with none it
+        // recorded nothing at all and 应用 silently stopped being undoable.
+        closeToolSession(label: "裁切与旋转")
         session.applyEdit { $0.geometry = geometry }
-        let committed = session.endToolSession(label: "裁切与旋转")
+        let committed = session.commitEdit(label: "裁切与旋转", coalesce: false)
         draft = Draft(geometry: geometry)
         draftPhotoID = session.anchorID
         if committed { appliedCount += 1 }
@@ -818,9 +859,10 @@ public final class CropToolController {
         // 317 — 换图 keeps the box (it is a preference) and re-asks the size question for B's frame.
         staysInsidePixelsStorage = defaults.bool(forKey: Self.staysInsidePixelsKey)
         inscribeIntoPixelsIfNeeded()
-        if !session.isToolSessionActive {
-            session.beginToolSession("裁切", label: "裁切与旋转")
-        }
+        // 356 — a photo switch is not a gesture: it closes a gesture's session instead of opening a
+        // new one on top (the old guard here opened one only when none was open, so the *next*
+        // entry's door depended on what this one had done).
+        closeToolSession()
         return true
     }
 
@@ -1286,6 +1328,13 @@ public final class CropToolController {
     /// because a guide-line fit is one discrete gesture and must not fold into a drag still in flight.
     private func writeGuideLineSolution(_ solution: GuideLineSolution) {
         guard let session else { return }
+        // 356 — 引导线应用 is a **command**, not a gesture: close a gesture's session *before* the
+        // write, so the fit's row is written by `commitEdit` in exactly one way from every
+        // precondition. The old shape asked the history afterwards and took two different doors:
+        // inside a session the row was the whole `base → edit` (crop-so-far **and** fit in one row,
+        // so ⌘Z put both back), outside it was the fit alone. Same 40 px of keystone, two different
+        // documents after the next ⌘Z — the user's 「只要历史里有东西，变换就不对」.
+        closeToolSession(label: "引导线")
         let before = session.edit.geometry
         session.applyEdit {
             $0.geometry.perspectiveVertical = solution.vertical
@@ -1295,13 +1344,7 @@ public final class CropToolController {
             $0.geometry.rotationDegrees = CropTool.clampStraighten(solution.straighten)
         }
         guard session.edit.geometry != before else { return }
-        let inSession = session.isToolSessionActive
-        if inSession {
-            _ = session.endToolSession(label: "引导线")
-            session.beginToolSession("裁切", label: "裁切与旋转")
-        } else {
-            _ = session.commitEdit(label: "引导线", coalesce: false)
-        }
+        _ = session.commitEdit(label: "引导线", coalesce: false)
         // The draft carries the document's keystone so the overlay, the red-frame predicate and
         // 应用 all see the picture the fit just produced.
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
@@ -1385,24 +1428,20 @@ public final class CropToolController {
         return draft.straighten - committed
     }
 
-    /// End of one 转动 gesture: write the draft angle **once** (`applyEdit`), close the crop session
-    /// around exactly one row, then reopen it so the crop draft still waits for 应用 (086).
+    /// End of one 转动 gesture: write the draft angle **once** (`applyEdit`), then close the gesture's
+    /// session around exactly one row. 356 — the session is the mouse-down's, so there is no "reopen
+    /// so the crop draft still waits for 应用": the crop draft waits because nothing opens one.
     ///
-    /// Order matters: the document write is what asks the loupe for the one re-render; ending the
-    /// session before it would make `endToolSession` see no movement and add no row.
+    /// Order matters: the document write is what asks the loupe for the one re-render, and it is what
+    /// the row records — so it comes first, then the close.
     @discardableResult
     public func commitStraighten() -> Bool {
         guard isActive, let session else { return false }
         let angle = CropTool.clampStraighten(draft.straighten)
         session.applyEdit { $0.geometry.rotationDegrees = angle }
-        let inSession = session.isToolSessionActive
-        let committed: Bool
-        if inSession {
-            committed = session.endToolSession(label: "转动")
-        } else {
-            committed = session.commitEdit(label: "转动", coalesce: false)
-        }
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
+        // 356 — one door, and it never asks the history which case it is: a session that is open
+        // (the mouse-down's) records `base → edit`; with none, the same one row is committed.
+        let committed = closeGestureSession(label: "转动")
         // 317 — 「改角度之后」: the released 转动 gets the one-shot question too (the bare slider's
         // `setAngle` asks it per move; this is the gesture's `.inside`-rotate twin).
         inscribeIntoPixelsIfNeeded()
@@ -1501,12 +1540,12 @@ public final class CropToolController {
     @discardableResult
     private func flip(horizontal: Bool) -> Bool {
         guard let session else { return false }
-        // 077: a flip is a **discrete** action, not a handle position — 072's promise is 「一次翻转 =
-        // 一次 ⌘Z」. So inside a crop session it closes the session first (that leaves the crop-so-far
-        // as its own row, or nothing when the rect did not move) and reopens a fresh one, which keeps
-        // 「应用 with an unchanged crop commits nothing」 true as well.
-        let inSession = session.isToolSessionActive
-        if inSession { session.endToolSession(label: "裁切与旋转") }
+        // 072's promise is 「一次翻转 = 一次 ⌘Z」, and 356's rule is that a session belongs to a
+        // gesture: a flip is a click, so it **closes** whatever a gesture left open (its row is the
+        // crop-so-far, which 应用 would have written anyway) instead of ending-and-reopening around
+        // itself. The old shape's answer — one row or two, and therefore what the next ⌘Z restored —
+        // depended on whether the history happened to hold a session.
+        closeToolSession(label: "裁切与旋转")
 
         let before = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
         session.applyEdit { model in
@@ -1514,10 +1553,8 @@ public final class CropToolController {
             else { model.geometry.flipVertical.toggle() }
         }
         let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
-        // A flip is discrete (072 §F): never fold it into the drag before it, and two flips are two
-        // rows even when no tool session was open to bracket them.
+        // A flip is discrete (072 §F): never fold it into the drag before it.
         session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转", coalesce: false)
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before
     }
@@ -1533,19 +1570,14 @@ public final class CropToolController {
     @discardableResult
     public func rotateQuarter(clockwise: Bool) -> Bool {
         guard let session else { return false }
-        let inSession = session.isToolSessionActive
-        if inSession { session.endToolSession(label: "裁切与旋转") }
+        // 356 — a turn is a click, not a gesture: close a gesture's session (one row for the
+        // crop-so-far, or nothing) and write the turn's own row. No reopen, so a second press cannot
+        // take a different door because of what the first one left behind.
+        closeToolSession(label: "裁切与旋转")
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        guard turned else {
-            if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-            return false
-        }
-        // The row first, then reopen: inside a tool session `commitEdit` answers `nil` (077 — the session
-        // owns the next snapshot), so committing after the reopen wrote nothing at all (082 measured it
-        // on the shipped path: one press left `quarterTurns` at 0 and added no row).
+        guard turned else { return false }
         session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
         return true
     }
 
@@ -2070,6 +2102,11 @@ public final class CropToolController {
         drag = CropToolDrag(handle: rotating ? .inside : handle,
                             crop: effectiveCrop(source: source).clamped(), grab: normalized)
         isDragging = true
+        // 356 — **mouse-down opens the session**, and nothing else does. From here to the matching
+        // `endDrag` (mouse-up, Esc, a cancelled drag, the canvas going away) the document is the
+        // gesture's to write, and the gesture leaves at most one row. Two ticks later nobody has to
+        // ask the history whether a session is open: the answer is "only during a gesture".
+        openGestureSession()
         return true
     }
 
@@ -2134,10 +2171,17 @@ public final class CropToolController {
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.
+    ///
+    /// 356 — **mouse-up ends the session the mouse-down opened**, whatever the gesture was: a crop
+    /// drag wrote only the draft, so this records nothing; a 转动 wrote the document on its release,
+    /// so this is that row. This is also the cancel/detach door, where the same call records nothing.
+    /// Closing here is what stops a session outliving its gesture and changing the door a later
+    /// 双击 / ⌘Z / 粘贴 takes.
     public func endDrag() {
         isDragging = false
         drag = nil
         rotating = false
+        closeToolSession(label: "裁切与旋转")
     }
 
     /// Escape mid-drag: the frame goes back to where it was at mouse-down, and nothing is written.

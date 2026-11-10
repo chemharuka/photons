@@ -3843,18 +3843,18 @@ public struct PanelResets {
         reset(fields: .all, label: InspectorView.Section.crop.title)
     }
 
-    /// The one writer both crop resets go through: close the tool session (072/077's rule for a
-    /// discrete geometry action inside a crop session), write, commit **one** row, reopen, and hand
-    /// the new document back to the draft.
+    /// The one writer both crop resets go through: close the gesture's tool session, write, commit
+    /// **one** row, and hand the new document back to the draft.
+    ///
+    /// 356 — a double-click is a command, not a gesture, so the close lives in
+    /// `CatalogSession.commitGeometryCommand` where it is unconditional and a no-op without a session.
+    /// The old shape ended a session, wrote, committed and **reopened** one; whether there had been a
+    /// session to end decided how many rows this left, and therefore what the next ⌘Z restored.
+    /// Nothing reopens one now: only a mouse-down does.
     private func cropGeometryVerb(label: String,
                                   _ mutate: (inout GeometryGroup) -> Bool) -> Bool {
-        let inSession = session.isToolSessionActive
-        if inSession { session.endToolSession(label: "裁切与旋转") }
-        var changed = false
-        session.applyEdit { model in changed = mutate(&model.geometry) }
-        let committed = changed ? session.commitEdit(label: label, coalesce: false) : false
-        if inSession { session.beginToolSession("裁切", label: "裁切与旋转") }
-        if changed {
+        let committed = session.commitGeometryCommand(label: label, mutate)
+        if committed {
             loupe?.afterCropGeometryReset()
         }
         return committed
