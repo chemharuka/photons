@@ -77,11 +77,14 @@ final class PanelRowSpecTests: XCTestCase {
         var panels = [host()]
         panels.append(host(workspace: .colour))
         defer { for panel in panels { panel.window.contentView = nil } }
+        // 325: the scopes are the **specs' own namespaces** (`inspector.<section rawValue>.`), not a
+        // hand-written list of six strings — a card that renames itself moves its scope with it.
+        // 色差 is the one legacy id (`inspector.detail.*`, 096's prefix predates the card), so those
+        // two ids are named exactly.
+        let namespaces = Set(specs.map { "inspector.\($0.section.rawValue)" })
         let caIDs = Set(InspectorView.caRows.map { "inspector.detail.\($0.title)" })
         let scoped = Set(panels.flatMap(\.numberFieldIDs)).filter { id in
-            ["inspector.light.", "inspector.color.", "inspector.calibration.",
-             "inspector.correction.", "inspector.detailFX.", "inspector.effects."]
-                .contains { id.hasPrefix($0) } || caIDs.contains(id)
+            namespaces.contains { id.hasPrefix($0 + ".") } || caIDs.contains(id)
         }
         XCTAssertEqual(scoped, Set(ids),
                        "渲染出的行与 spec 行不一致 · 多了 \(Set(scoped).subtracting(ids))"

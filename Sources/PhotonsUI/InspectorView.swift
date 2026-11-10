@@ -1949,6 +1949,26 @@ public struct InspectorView: View {
             /// numbers are a different stage with a different stage key, and a 纹理 drag must be able
             /// to say so.
             case sharpen
+
+            /// 325 — the block's own name, for the **one** place a whole block is copied as a single
+            /// item on the copy sheet. `nil` = no item covers this block as a whole, so nothing may
+            /// draw a name for it: 纹理/清晰度, 去噪/去彩噪, 色差 R/B, 去雾 and the 锐化 four are copied
+            /// row by row, each row carrying its own name off `ToneRow.title`.
+            ///
+            /// 暗角 and 颗粒 are the two blocks the clipboard has always copied whole (the three
+            /// vignette numbers — 「a vignette with a copied amount and an uncopied feather is another
+            /// look」 — and the four grain numbers). Their item needs one name, and joining the rows'
+            /// names is wider than the sheet's 200 pt column (`颗粒数量/颗粒大小/颗粒粗糙度/种子`), so
+            /// the name lives here, beside the rows it covers, in the panel's own vocabulary: 暗角 is
+            /// also the block's first row, 颗粒 is the 效果 card's (S3.7) own word for it. Renaming a
+            /// block renames the copy item — that is the point.
+            public var title: String? {
+                switch self {
+                case .vignette: return "暗角"
+                case .grain: return "颗粒"
+                case .tone, .ca, .presence, .noise, .dehaze, .sharpen: return nil
+                }
+            }
         }
 
         public struct Block: Equatable {
@@ -1992,6 +2012,12 @@ public struct InspectorView: View {
         /// Which block drew `row` (`nil` only if the row is not in this card).
         public func block(containing row: ToneRow) -> Block? {
             blocks.first { $0.rows.contains(row) }
+        }
+
+        /// 325 — the block with this group on this card, for the copy sheet's two group items
+        /// (暗角 / 颗粒). `nil` when the card draws no such block.
+        public func block(group: BlockGroup) -> Block? {
+            blocks.first { $0.group == group }
         }
 
         public func rowStyle(for row: ToneRow) -> RowStyle {

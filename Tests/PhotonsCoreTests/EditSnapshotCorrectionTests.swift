@@ -31,8 +31,11 @@ final class EditSnapshotCorrectionTests: XCTestCase {
         XCTAssertEqual(effects, detailFX + 1, "效果紧跟在细节之后：\(order)")
 
         XCTAssertEqual(EditSnapshotSection.correction.title, "校正")
-        XCTAssertEqual(EditSnapshotSection.correction.children.map(\.title),
-                       ["色差 R", "色差 B", "暗角"])
+        // 325: the names are the panel's now (`PhotonsUI.CopyRowCoverage` reads them off
+        // `PanelCardSpec`), so this Core test pins the *set*, not the strings — a string assertion
+        // here would be the second table the ticket deletes.
+        XCTAssertEqual(EditSnapshotSection.correction.children.map(\.rawValue),
+                       ["caRed", "caBlue", "vignette"])
         XCTAssertEqual(EditSnapshotSection.correction.children, [.caRed, .caBlue, .vignette])
         XCTAssertTrue(EditSnapshotSection.correction.isCopyable)
 

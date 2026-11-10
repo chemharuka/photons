@@ -360,6 +360,10 @@ final class CopySettingsAccessoryView: NSView {
     }
 
     /// A parameter row: indent 18, `.small` font (§2.3), tooltip saying exactly what one row copies.
+    ///
+    /// 325 — the label is `child.title`, which is the **panel row's own string** (or the block's name
+    /// for the two group items). The tooltip spells out the rows a group item stands for, because
+    /// 暗角 / 颗粒 are one checkbox over three and four numbers respectively.
     private func childRow(_ child: EditSnapshotChild, index: Int) -> NSView {
         let box = NSButton(checkboxWithTitle: child.title,
                            target: self, action: #selector(toggledChild(_:)))
@@ -367,7 +371,10 @@ final class CopySettingsAccessoryView: NSView {
         box.state = selection.contains(child) ? .on : .off
         box.controlSize = .small
         box.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        box.toolTip = "只复制这一个参数（\(child.section.title) 卡）"
+        let rows = child.panelRows
+        box.toolTip = rows.count > 1
+            ? "只复制这一组：\(rows.map(\.title).joined(separator: " / "))（\(child.section.title) 卡）"
+            : "只复制这一个参数（\(child.section.title) 卡）"
         childCheckboxes[child] = box
 
         // The indent is measured from the card's **checkbox**, which itself starts right of the
