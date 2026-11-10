@@ -94,7 +94,10 @@ final class ExportSliderRowTests: XCTestCase {
         }
     }
 
-    /// §3 acceptance 1 — both rows are 140 slider + 46 number, measured on the hosted view.
+    /// §3 acceptance 1 — both rows are a flexible slider + 46 number, measured on the hosted view.
+    ///
+    /// 335：滑杆不再写死 140。它从主列起点 138 起、吃掉读数（46 + 8 + `%`）留下的宽度，
+    /// 所以两行的宽度仍然相等（同一个 `%` 单位），但比 140 宽。
     func testBothRowsUseTheSameSliderAndNumberMetrics() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
@@ -111,8 +114,9 @@ final class ExportSliderRowTests: XCTestCase {
                      opacitySlider.frame.width, opacitySlider.frame.height,
                      opacityNumber.frame.width, opacityNumber.frame.height))
 
-        XCTAssertEqual(qualitySlider.frame.width, 140, accuracy: 0.01)
-        XCTAssertEqual(opacitySlider.frame.width, 140, accuracy: 0.01)
+        XCTAssertGreaterThanOrEqual(qualitySlider.frame.width, ExportRowGrid.sliderWidth - 0.01,
+                                    "滑杆不窄于 140（335 之后是吃满主列）")
+        XCTAssertGreaterThanOrEqual(opacitySlider.frame.width, ExportRowGrid.sliderWidth - 0.01)
         XCTAssertEqual(qualityNumber.frame.width, 46, accuracy: 0.01)
         XCTAssertEqual(opacityNumber.frame.width, 46, accuracy: 0.01)
         XCTAssertEqual(qualitySlider.frame.width, opacitySlider.frame.width, accuracy: 0.01,

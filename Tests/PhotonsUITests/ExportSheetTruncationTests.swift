@@ -291,9 +291,9 @@ final class ExportSheetTruncationTests: XCTestCase {
         XCTAssertEqual(truncated.count, 0, "322 · 仍有 \(truncated.count) 段文字被截")
     }
 
-    // MARK: - 2. 列栅格（302 的三条线）
+    // MARK: - 2. 列栅格（335：两条线，424 消失）
 
-    func testTheThreeGridLinesMatch302() throws {
+    func testTheThreeGridLinesMatch335() throws {
         let (_, _, content) = try presentSheet()
         let sheet = content.bounds
 
@@ -302,24 +302,27 @@ final class ExportSheetTruncationTests: XCTestCase {
         let readouts = gridProbes(.readout, in: content).map { frame(of: $0, in: content) }
         XCTAssertGreaterThanOrEqual(labels.count, 13)
         XCTAssertGreaterThanOrEqual(controls.count, 13)
-        XCTAssertGreaterThanOrEqual(readouts.count, 13)
+        XCTAssertGreaterThanOrEqual(readouts.count, 4)
 
-        print(String(format: "322 grid · label right %.1f · control left %.1f · control right %.1f "
+        print(String(format: "335 grid · label right %.1f · main left %.1f · main right %.1f "
                      + "· readout right %.1f · panel right %.1f",
                      labels[0].maxX, controls[0].minX, controls[0].maxX,
                      readouts[0].maxX, sheet.maxX))
 
-        // 302 实测：标签右沿 130（20 + 110）、控件左沿 138（130 + 8）、读数右沿 540（560 − 20）。
+        // 302 的实测值：标签右沿 130（20 + 110）、主列左沿 138（130 + 8）、右沿 540（560 − 20）。
         for rect in labels {
-            XCTAssertEqual(rect.maxX, 130, accuracy: 0.5, "322 · 标签右沿")
+            XCTAssertEqual(rect.maxX, 130, accuracy: 0.5, "335 · 标签右沿")
             XCTAssertEqual(rect.maxX, ExportRowGrid.labelRight, accuracy: 0.5)
         }
         for rect in controls {
-            XCTAssertEqual(rect.minX, 138, accuracy: 0.5, "322 · 控件左沿")
+            XCTAssertEqual(rect.minX, 138, accuracy: 0.5, "335 · 主列左沿")
             XCTAssertEqual(rect.minX, ExportRowGrid.controlLeft, accuracy: 0.5)
+            // 335 —— 主列现在长到面板右 padding：424 那条中间线不存在。
+            XCTAssertEqual(rect.maxX, 540, accuracy: 0.5, "335 · 主列右沿")
+            XCTAssertNotEqual(rect.maxX, 424, accuracy: 0.5, "335 · 旧的 424 线还在")
         }
-        for rect in readouts {
-            XCTAssertEqual(rect.maxX, 540, accuracy: 0.5, "322 · 读数右沿")
+        for rect in readouts where rect.maxX > 400 {
+            XCTAssertEqual(rect.maxX, 540, accuracy: 0.5, "335 · 读数右沿")
             XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding, accuracy: 0.5)
         }
     }
@@ -327,7 +330,7 @@ final class ExportSheetTruncationTests: XCTestCase {
     // MARK: - 3. 行高 / pitch（两行行单独报）
 
     func testPitchStays32AndTheTwoLineRowReportsItsHeight() throws {
-        let (_, _, content) = try presentSheet()
+        let (controller, _, content) = try presentSheet()
         struct Band { let id: String; let rect: NSRect; let isHeader: Bool }
         let bands: [Band] = (gridProbes(.row, in: content).map {
             Band(id: $0.rowID, rect: frame(of: $0, in: content), isHeader: false)
@@ -367,12 +370,20 @@ final class ExportSheetTruncationTests: XCTestCase {
                         .map { String(format: "%@ h %.1f 到下一 band %.1f", $0.key, $0.value.0, $0.value.1) }
                         .joined(separator: ", ")))
         XCTAssertGreaterThanOrEqual(pitch32, 15)
-        XCTAssertEqual(taller.count, 1, "只有半尺寸说明那一行是两行")
+        // 335 —— 主列 286 → 402，那条本来要两行的「半尺寸」说明（需要 377.9 pt）现在一行放得下，
+        // 所以两行行**可以是 0 个**：pitch 于是整表都是 32。若还有两行行，它只能是那一行。
+        XCTAssertLessThanOrEqual(taller.count, 1, "最多只有半尺寸说明那一行是两行")
         if let row = taller["export.hdr.halfSize"] {
             XCTAssertGreaterThan(row.0, ExportRowGrid.rowHeight + 2, "两行行要比 24 高")
             XCTAssertLessThanOrEqual(row.0, 2 * ExportRowGrid.rowHeight, "两行行不超过两行")
         } else {
-            XCTFail("半尺寸说明这一行应该是两行（28 高）")
+            let hint = measure(state(model: controller.model), in: content)
+                .first { $0.row == "export.hdr.halfSize" && $0.role == .hint }
+            print(String(format: "335 pitch · 半尺寸说明一行放得下：需要 %.1f ≤ 主列 %.1f",
+                         hint?.needed ?? -1, hint?.allocated ?? -1))
+            XCTAssertNotNil(hint)
+            XCTAssertGreaterThanOrEqual(hint?.allocated ?? 0, hint?.needed ?? .infinity,
+                                        "没有两行行就必须是一行放得下（不是被截）")
         }
     }
 

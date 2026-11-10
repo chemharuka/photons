@@ -1,17 +1,21 @@
 import AppKit
+import CoreText
 import SwiftUI
 
-/// 302 — 导出面板改版 A 的**一列**栅格。
+/// 335 — 导出面板的**两列**栅格（302 的三列，去掉右侧那条独立「读数列」）。
 ///
-/// 288 的五列（96 / 8 / 240 / 46 / 52 / 64）是列表的度量：46 / 52 / 64 三列在商业产品里没有对应物，
-/// 行高 20 + 行距 6 也装不下 macOS 标准控件，那是「重心不稳」的直接来源。302 把它收回表单：
+/// 302 / 322 的形状是三列：
 ///
-///     [padding 20] [label 110 trailing] [gap 8] [control 286 leading] [gutter 8] [readout 108 trailing] [padding 20]
+///     [padding 20] [label 110 trailing] [gap 8] [control 286] [gutter 8] [readout 108] [padding 20]
 ///
-/// 322 只重算了宽度，三条列线的位置（标签右沿 130 / 控件左沿 138 / 读数右沿 540）一个没动。
+/// 用户在 335 里要的是「右侧没有额外列，主列的宽度对齐到右侧去」：读数列被取消，读数变成主列
+/// **内部**的一段 —— 数值行左起、单位紧跟（PPI），或者值+单位贴着主列右沿（百分数 / px）。于是
+/// 只剩两条列线：
 ///
-/// 读数（值 + 单位）是一个**右对齐到面板右 padding** 的块：块内 46 / 4 / 58 只是为了让数值框和
-/// 单位在每一行都换到同一个 x（288 的列对齐思想），块本身是一条右沿，不再有第三条列。
+///     [padding 20] [label 110 trailing] [gap 8] [main 402 → 右沿 540] [padding 20]
+///
+/// 标签右沿 130 与主列起点 138 是 302 的实测值，一个不动；控件右沿从 424 长到 540，于是
+/// **424 那条中间线消失**（这正是 335 的可判定形式）。
 ///
 /// 行高 24 / 行距 8 → **pitch 32，只有这一种**；节与节之间额外 16，节标题 24，标题到首行 8。
 enum ExportRowGrid {
@@ -24,31 +28,25 @@ enum ExportRowGrid {
     /// 内容自适应上限。
     static let contentMaxHeight: CGFloat = 640
 
-    // MARK: 三列
+    // MARK: 两列
 
     /// 标签列，右对齐。
     ///
     /// 322 量过整张表的标签（三段全展开、20 行）：最长的是「水印不透明度」71.5 pt，加上勾选框
     /// 自己的盒子（16 + 4 + 文字，见 `toggleBoxWidth`）最宽的「写入 XMP」也只 78 —— 110 有 32 pt
-    /// 的余量。所以**不加宽标签列**：加宽它只会把控件列挤窄，而三条列线（130 / 138 / 540）是
-    /// 302 的实测值，不能动。
+    /// 的余量。所以**不加宽标签列**：标签右沿 130 是 302 的实测值，不能动。
     static let labelWidth: CGFloat = 110
-    /// 标签右沿到控件左沿。
+    /// 标签右沿到主列左沿。
     static let gap: CGFloat = 8
-    /// 控件列，左对齐，统一高度 24。
+    /// 主列宽 = 520 − 110 − 8 = 402，右沿落在 560 − 20 = 540。
     ///
-    /// 322：250 → 286。被截的是控件块里的三件东西 —— 「尺寸」行的模式选择 + 像素量读数、
-    /// 「存到」行的路径、「半尺寸」行的说明；这 36 pt 从控件块与读数块之间的空白（50 → 8）里出，
-    /// 所以标签右沿 130、控件左沿 138、读数右沿 540 三条线一个不动。
-    static let controlWidth: CGFloat = 286
-    /// 读数块里的数值框（288 的 46 宽度，保持不变，免得同类型控件换位）。
+    /// 335：286 → 402。多出来的 116 全部来自被取消的读数列（108）与它两侧的走道，
+    /// 所以**控件右沿 424 不再存在** —— 滑杆、文本框、路径都长到 540 这条线上。
+    static var controlWidth: CGFloat { contentWidth - labelWidth - gap }
+    /// 数值框的宽度（288 的 46，保持不变，免得同类型控件换位）。
     static let valueWidth: CGFloat = 46
-    /// 读数块里的单位。
-    ///
-    /// 322：52 → 58 —— 「像素/英寸」量出来 54.3 pt，在 52 里被截成「像素/…」（用户看到的就是
-    /// 「不写入「像素/…」」）。读数块因此 102 → 108，**右沿仍是 540**，多出来的宽度向左长。
-    static let unitWidth: CGFloat = 58
-    static let readoutGap: CGFloat = 4
+    /// 数值框与它右侧单位的间距（302 是 4；335 单位不再占固定列，8 才不会和数字粘在一起）。
+    static let readoutGap: CGFloat = 8
 
     // MARK: 纵向节奏
 
@@ -67,7 +65,10 @@ enum ExportRowGrid {
 
     // MARK: 控件
 
-    /// 288 §2.2 —— 滑杆仍是 140 宽、不传 `step:`，所以没有刻度。
+    /// 288 §2.2 —— 滑杆不传 `step:`，所以没有刻度。
+    ///
+    /// 335：滑杆不再写死 140，而是吃掉主列里读数留下之后的所有宽度（左沿 138、右沿 = 百分数左沿 − 8）。
+    /// 140 现在是**下限**，不是宽度。
     static let sliderWidth: CGFloat = 140
     static let sliderTickMarks = 0
 
@@ -76,28 +77,61 @@ enum ExportRowGrid {
     static var contentWidth: CGFloat { panelWidth - horizontalPadding * 2 }
     /// 标签右沿：20 + 110 = 130。（302 的注释写成 118 是笔误，实测一直是 130。）
     static var labelRight: CGFloat { horizontalPadding + labelWidth }
-    /// 控件左沿：130 + 8 = 138。
+    /// 主列左沿：130 + 8 = 138。
     static var controlLeft: CGFloat { labelRight + gap }
-    /// 控件右沿：138 + 286 = 424。
+    /// 主列右沿：138 + 402 = 540 = 面板右 padding。**不再有 424。**
     static var controlRight: CGFloat { controlLeft + controlWidth }
-    /// 读数块宽：46 + 4 + 58 = 108。
-    static var readoutWidth: CGFloat { valueWidth + readoutGap + unitWidth }
-    /// 读数右沿 = 面板右 padding：560 − 20 = 540。
-    static var readoutRight: CGFloat { panelWidth - horizontalPadding }
-    static var readoutLeft: CGFloat { readoutRight - readoutWidth }
+    /// 主列右沿 = 面板右 padding：560 − 20 = 540。
+    static var contentRight: CGFloat { panelWidth - horizontalPadding }
     /// 行 pitch：24 + 8 = 32。
     static var rowPitch: CGFloat { rowHeight + rowSpacing }
-    /// 控件块与读数块之间的走道（560 − 20·2 − 110 − 8 − 286 − 108 = 8）。
-    static var controlToReadout: CGFloat { contentWidth - labelWidth - gap - controlWidth - readoutWidth }
 
     /// 322 —— 勾选框的点击框宽度，按**标签文字自己**量：16 的盒子 + 4 的间距 + 文字 + 4 的余量。
     ///
     /// 302 把它写死成 34，于是「不扩大」（55.8）、「写入 XMP」（73.9）、「移除位置」（67.7）、
     /// 「半尺寸」（55.8）、「PPI」（39.0）全被截成「…」。勾选框是行修饰，框要跟着自己的字走。
     static func toggleBoxWidth(for title: String) -> CGFloat {
+        toggleTextLead + ceil(textWidth(title)) + toggleTrailingSlack
+    }
+
+    /// 勾选框里文字相对点击框左沿的偏移（16 的盒子 + 4 的间距）。
+    static let toggleTextLead: CGFloat = 20
+    /// 322 给点击框留的右侧余量。它同时是「文字墨迹到标签列右沿」那段可见空隙的一半 ——
+    /// 335 把这段也算进墨迹修正里（见 `labelInkShift`）。
+    static let toggleTrailingSlack: CGFloat = 4
+
+    /// 同一字号同一字重下这段文字的行宽（advance）。
+    static func textWidth(_ text: String, size: CGFloat = Font.label,
+                          weight: NSFont.Weight = .medium) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: size, weight: weight)
+        return (text as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    /// 335 —— 标签的**右侧 side bearing**：advance 宽减去墨迹（glyph outline）右沿。
+    ///
+    /// 用户看到的「PPI 没右对齐」不是文本框没对齐，而是 `I` 的墨迹右边并不贴 advance box 右边：
+    /// 把文本框右沿对到 130 之后，`I` 右边还差一条缝。所以对齐的是**墨迹**：
+    /// 文本往右挪一个 bearing，墨迹右沿才落到 130。
+    ///
+    /// 用 CoreText 的 glyph path bounds 量，不用常量凑：`I`/`F`/`1` 这类窄字形 bearing 大，
+    /// 汉字几乎为 0 —— 这也正是「改了 PPI 不许把「质量」「不透明度」搞乱」能成立的原因。
+    static func labelInkInset(for text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
         let font = NSFont.systemFont(ofSize: Font.label, weight: .medium)
-        let text = ceil((title as NSString).size(withAttributes: [.font: font]).width)
-        return 20 + text + 4
+        let attributed = NSAttributedString(string: text, attributes: [.font: font])
+        let line = CTLineCreateWithAttributedString(attributed)
+        let advance = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        let ink = CTLineGetBoundsWithOptions(line, [.useGlyphPathBounds])
+        return max(0, advance - ink.maxX)
+    }
+
+    /// 335 —— 标签要**往右**挪多少，墨迹右沿才落在 `labelRight` 上。
+    ///
+    /// 文字标签：文本的 advance box 在列右沿，墨迹还差一段 bearing，所以挪 bearing。
+    /// 勾选框：335 让它自己的文字在点击框里右对齐（见 `rowToggle`），于是同样的规则 ——
+    /// 也只挪 bearing。`checkbox` 参数保留给读数用（探针记的是「这个标签是不是勾选框」）。
+    static func labelInkShift(for text: String, checkbox: Bool = false) -> CGFloat {
+        labelInkInset(for: text)
     }
 
     /// 288 §2.4 / 302 §2A —— 字号表。标题 13 只留给面板标题。
@@ -130,10 +164,18 @@ final class ExportRowGridProbe: NSView {
         /// 302：页脚摘要行与按钮带。
         case summary
         case buttons
+        /// 335：行内按钮（「存到」行的换路径按钮）。探针贴在按钮自己的 frame 上 ——
+        /// 量的是布局真给按钮的宽，不是文字的宽。
+        case button
+        /// 335：标签文字的**文本框**（advance box）。墨迹右沿 = 这框的右沿 − 该字的右侧 bearing，
+        /// 所以这条探针的右沿允许超过 130（用户口径：文本框可以出头，墨迹必须齐）。
+        case labelInk
     }
 
     private(set) var kind: Kind = .row
     private(set) var rowID = ""
+    /// `.labelInk` 量的是哪一个字符串（墨迹 bearing 由它算，不写常量）。
+    private(set) var text = ""
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -147,24 +189,26 @@ final class ExportRowGridProbe: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var isOpaque: Bool { false }
 
-    func update(kind: Kind, rowID: String) {
+    func update(kind: Kind, rowID: String, text: String = "") {
         self.kind = kind
         self.rowID = rowID
+        self.text = text
     }
 }
 
 struct ExportRowGridProbeHost: NSViewRepresentable {
     var kind: ExportRowGridProbe.Kind
     var rowID: String
+    var text: String = ""
 
     func makeNSView(context: Context) -> ExportRowGridProbe {
         let probe = ExportRowGridProbe()
-        probe.update(kind: kind, rowID: rowID)
+        probe.update(kind: kind, rowID: rowID, text: text)
         return probe
     }
 
     func updateNSView(_ probe: ExportRowGridProbe, context: Context) {
-        probe.update(kind: kind, rowID: rowID)
+        probe.update(kind: kind, rowID: rowID, text: text)
     }
 }
 
@@ -236,10 +280,20 @@ extension View {
     }
 }
 
-/// 302 —— 面板的一行：三列，宽度固定，空列也占位。
+/// 335 —— 读数在**主列内部**的落位。302 的第三列（读数块）被取消，读数只剩两种排版。
+enum ExportReadoutPlacement {
+    /// 没有读数（大多数行）：控件占满主列。
+    case none
+    /// 读数紧跟控件左边起排 —— PPI：输入框在 138，单位「像素/英寸」随后。
+    case inline
+    /// 读数贴主列右沿（540）—— 百分数 / px 的值 + 单位。
+    case trailing
+}
+
+/// 302 —— 面板的一行：标签列 + 主列，宽度固定，空列也占位。
 ///
-/// 标签右沿 118、控件左沿 138、读数右沿 540 三根线，每一行都一样 —— 这是「同类型控件位置一致」
-/// 的可判定形式。控件块（250）内部再分：控件内容左对齐、行修饰勾选框贴右沿。
+/// 335：标签右沿 130、主列左沿 138、主列右沿 540。**只有两条列线**（302 的第三条线 424 已随
+/// 读数列一起消失）：每一行的控件都长到 540，读数作为主列内部的一段贴右沿。
 struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Accessory: View>: View {
     let rowID: String
     let label: Label
@@ -247,14 +301,17 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
     let value: Value
     let unit: Unit
     let accessory: Accessory
+    let readout: ExportReadoutPlacement
 
     init(rowID: String,
+         readout: ExportReadoutPlacement = .none,
          @ViewBuilder label: () -> Label,
          @ViewBuilder control: () -> Control,
          @ViewBuilder value: () -> Value,
          @ViewBuilder unit: () -> Unit,
          @ViewBuilder accessory: () -> Accessory) {
         self.rowID = rowID
+        self.readout = readout
         self.label = label()
         self.control = control()
         self.value = value()
@@ -266,9 +323,7 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
         HStack(spacing: 0) {
             column(label, width: ExportRowGrid.labelWidth, alignment: .trailing, kind: .label)
             Color.clear.frame(width: ExportRowGrid.gap)
-            controlBlock
-            Spacer(minLength: 0)
-            readout
+            mainColumn
         }
         // 322 —— 两行行（长说明）按内容长高；单行的行仍然正好 24。
         .frame(minHeight: ExportRowGrid.rowHeight)
@@ -276,21 +331,44 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
         .background(ExportRowGridProbeHost(kind: .row, rowID: rowID))
     }
 
-    private var controlBlock: some View {
-        control
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .trailing) { accessory }
-            .frame(width: ExportRowGrid.controlWidth, alignment: .leading)
-            .background(ExportRowGridProbeHost(kind: .control, rowID: rowID))
+    /// 主列：138 起、540 止。读数是它内部的一段，不再是右侧的一列。
+    private var mainColumn: some View {
+        HStack(spacing: 0) {
+            switch readout {
+            case .none:
+                controlBlock(flexible: true)
+            case .inline:
+                controlBlock(flexible: false)
+                readoutBlock
+                Spacer(minLength: 0)
+            case .trailing:
+                controlBlock(flexible: true)
+                Color.clear.frame(width: ExportRowGrid.readoutGap)
+                readoutBlock
+            }
+        }
+        .frame(width: ExportRowGrid.controlWidth, alignment: .leading)
+        .background(ExportRowGridProbeHost(kind: .control, rowID: rowID))
     }
 
-    /// 读数是一个块：值 46（右对齐）+ 4 + 单位 52（左对齐），整块右对齐到面板右 padding。
-    private var readout: some View {
+    private func controlBlock(flexible: Bool) -> some View {
+        control
+            .frame(maxWidth: flexible ? .infinity : nil, alignment: .leading)
+            .overlay(alignment: .trailing) { accessory }
+    }
+
+    /// 读数：值 46（右对齐）+ 8 + 单位（自然宽，右对齐）。
+    ///
+    /// 单位不再占固定列 —— 335 之前是 58 宽的「单位列」，`%` 在 58 里左对齐，于是百分数离右沿
+    /// 还有 50 pt 空白；现在单位自己贴到 540，`85 %` 的 `%` 就是主列的右沿。
+    private var readoutBlock: some View {
         HStack(spacing: ExportRowGrid.readoutGap) {
-            column(value, width: ExportRowGrid.valueWidth, alignment: .trailing, kind: .value)
-            column(unit, width: ExportRowGrid.unitWidth, alignment: .leading, kind: .unit)
+            value
+                .frame(width: ExportRowGrid.valueWidth, height: ExportRowGrid.rowHeight,
+                       alignment: .trailing)
+                .background(ExportRowGridProbeHost(kind: .value, rowID: rowID))
+            unit.background(ExportRowGridProbeHost(kind: .unit, rowID: rowID))
         }
-        .frame(width: ExportRowGrid.readoutWidth, alignment: .trailing)
         .background(ExportRowGridProbeHost(kind: .readout, rowID: rowID))
     }
 

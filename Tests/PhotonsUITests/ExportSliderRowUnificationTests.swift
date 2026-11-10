@@ -98,6 +98,14 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         view.convert(view.bounds, to: host)
     }
 
+    /// 335 —— 这个测试把面板塞进 620 宽的 host（面板自己 560，居中有 +30 的偏移），所以
+    /// 「主列起点 138 / 右沿 540」必须相对**同一行的主列探针**来断言，不能写死绝对值。
+    private func controlRect(_ rowID: String, in host: NSView) -> NSRect? {
+        descendants(of: host).compactMap { $0 as? ExportRowGridProbe }
+            .first { $0.kind == .control && $0.rowID == rowID }
+            .map { rect(of: $0, in: host) }
+    }
+
     private func numberField(_ axID: String, in host: NSView) throws -> NumberTextField {
         let fields = descendants(of: host).compactMap { $0 as? NumberTextField }
         return try XCTUnwrap(fields.first { $0.accessibilityIdentifier() == axID },
@@ -143,7 +151,10 @@ final class ExportSliderRowUnificationTests: XCTestCase {
 
     // MARK: layout
 
-    /// Number x/width are identical on all five rows; only 质量 / 不透明度 carry a slider.
+    /// Number width is identical on all five rows; only 质量 / 不透明度 carry a slider.
+    ///
+    /// 335 —— x 不再相同：PPI 的输入框挪到主列起点 138（单位「像素/英寸」紧跟其后），其余行的
+    /// 值贴主列右沿（540）。宽度仍是同一个 46。
     func testValueRowsShareTheNumberRectWithTheSliderRows() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
@@ -159,8 +170,11 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         XCTAssertEqual(qualityRect.width, 46, accuracy: 0.5)
         XCTAssertEqual(opacityRect.width, 46, accuracy: 0.5)
         XCTAssertEqual(ppiRect.width, 46, accuracy: 0.5)
-        XCTAssertEqual(qualityRect.minX, opacityRect.minX, accuracy: 0.5)
-        XCTAssertEqual(qualityRect.minX, ppiRect.minX, accuracy: 0.5)
+        XCTAssertEqual(qualityRect.minX, opacityRect.minX, accuracy: 0.5,
+                       "质量与不透明度同一行型（值 + %），x 相同")
+        let ppiControl = try XCTUnwrap(controlRect("export.ppi", in: hosted.host))
+        XCTAssertEqual(ppiRect.minX, ppiControl.minX, accuracy: 0.5,
+                       "335 · PPI 输入框在主列起点 138")
 
         XCTAssertTrue(hasProbe(.number, "export.ppi", in: hosted.host))
         try assertTogglePresent("export.ppi.enabled", row: "export.ppi", in: hosted.host)
@@ -168,10 +182,13 @@ final class ExportSliderRowUnificationTests: XCTestCase {
 
         let qualitySlider = try probe(.slider, "export.quality", in: hosted.host)
         let opacitySlider = try probe(.slider, "export.watermark.opacity", in: hosted.host)
-        XCTAssertEqual(qualitySlider.frame.width, 140, accuracy: 0.5)
-        XCTAssertEqual(opacitySlider.frame.width, 140, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(qualitySlider.frame.width, ExportRowGrid.sliderWidth - 0.5)
+        XCTAssertEqual(qualitySlider.frame.width, opacitySlider.frame.width, accuracy: 0.5)
         XCTAssertEqual(rect(of: qualitySlider, in: hosted.host).minX,
                        rect(of: opacitySlider, in: hosted.host).minX, accuracy: 0.5)
+        let qualityControl = try XCTUnwrap(controlRect("export.quality", in: hosted.host))
+        XCTAssertEqual(rect(of: qualitySlider, in: hosted.host).minX,
+                       qualityControl.minX, accuracy: 0.5, "335 · 滑杆左沿 = 主列起点")
 
         sheet.preset.sizingMode = .longEdge
         let longHosted = try host(model: sheet)
@@ -180,6 +197,8 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         XCTAssertFalse(hasProbe(.slider, "export.size.longEdge", in: longHosted.host))
         let longNumber = try probe(.number, "export.size.longEdge", in: longHosted.host)
         let longRect = rect(of: longNumber, in: longHosted.host)
+        // 335 —— 主列探针要在**改 sizingMode 之前**取：视图与 model 共享，改了模式这一行就没了。
+        let longControl = try XCTUnwrap(controlRect("export.size.longEdge", in: longHosted.host))
 
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
@@ -189,32 +208,49 @@ final class ExportSliderRowUnificationTests: XCTestCase {
 
         XCTAssertEqual(longRect.width, 46, accuracy: 0.5)
         XCTAssertEqual(percentRect.width, 46, accuracy: 0.5)
-        XCTAssertEqual(longRect.minX, qualityRect.minX, accuracy: 0.5)
-        XCTAssertEqual(percentRect.minX, qualityRect.minX, accuracy: 0.5)
+        // 335 —— 长边（px）与百分比（%）的单位宽度不同，值贴的是同一根右沿（540）。
+        let pxWidth = ("px" as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: ExportRowGrid.Font.unit)
+        ]).width
+        XCTAssertEqual(longRect.maxX, longControl.maxX - 8 - pxWidth, accuracy: 0.5,
+                       "长边行的值右沿 = 540 − 8 − 「px」")
+        XCTAssertEqual(percentRect.maxX, qualityRect.maxX, accuracy: 0.5,
+                       "百分比行与质量行走同一行型（值 + %）")
     }
 
-    /// The unit column sits at the same x on every row that has one. 288 made 质量 a `%` row too, so
-    /// it now reports a unit probe at the same x as PPI / 不透明度 / 长边百分比.
+    /// The trailing unit sits on the same right edge on every row that has one. 288 made 质量 a `%`
+    /// row too, so it reports a unit probe at the same edge as 不透明度 / 长边百分比.
+    ///
+    /// 335 —— 单位不再占一条固定的列：它自己贴主列右沿 540。PPI 是唯一例外（`.inline`：单位紧跟
+    /// 输入框，左沿 138 + 46 + 8），由 `ExportSheetLayout335Tests` 单独量。
     func testUnitColumnIsTheSameOnEveryRowWithAUnit() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
 
-        let ppiUnit = try probe(.unit, "export.ppi", in: hosted.host)
         let opacityUnit = try probe(.unit, "export.watermark.opacity", in: hosted.host)
         let qualityUnit = try probe(.unit, "export.quality", in: hosted.host)
-        let ppiUnitX = rect(of: ppiUnit, in: hosted.host).minX
-        let opacityUnitX = rect(of: opacityUnit, in: hosted.host).minX
-        XCTAssertEqual(opacityUnitX, ppiUnitX, accuracy: 0.5)
-        XCTAssertEqual(rect(of: qualityUnit, in: hosted.host).minX, ppiUnitX, accuracy: 0.5,
-                       "288：质量现在也带 %，单位列必须同一条线")
+        let qualityUnitX = rect(of: qualityUnit, in: hosted.host).minX
+        XCTAssertEqual(rect(of: opacityUnit, in: hosted.host).minX, qualityUnitX, accuracy: 0.5,
+                       "两个 % 单位同一条左沿")
+        let qualityControl = try XCTUnwrap(controlRect("export.quality", in: hosted.host))
+        XCTAssertEqual(rect(of: qualityUnit, in: hosted.host).maxX,
+                       qualityControl.maxX, accuracy: 0.5, "335 · 单位贴主列右沿 540")
+
+        let ppiUnit = try probe(.unit, "export.ppi", in: hosted.host)
+        let ppiUnitRect = rect(of: ppiUnit, in: hosted.host)
+        let ppiControl = try XCTUnwrap(controlRect("export.ppi", in: hosted.host))
+        XCTAssertEqual(ppiUnitRect.minX,
+                       ppiControl.minX + ExportRowGrid.valueWidth + ExportRowGrid.readoutGap,
+                       accuracy: 0.5, "335 · PPI 单位紧跟输入框（138 + 46 + 8）")
 
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
         let percentUnit = try probe(.unit, "export.size.percent", in: percentHosted.host)
         XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).minX,
-                       ppiUnitX, accuracy: 0.5)
-        XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).minX,
-                       opacityUnitX, accuracy: 0.5)
+                       qualityUnitX, accuracy: 0.5)
+        let percentControl = try XCTUnwrap(controlRect("export.size.percent", in: percentHosted.host))
+        XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).maxX,
+                       percentControl.maxX, accuracy: 0.5)
     }
 
     /// The audit table's source: every numeric row's number / slider / unit rect.

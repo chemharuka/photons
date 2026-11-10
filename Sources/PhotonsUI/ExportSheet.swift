@@ -1211,7 +1211,8 @@ public struct ExportSheetView: View {
                         axID: "export.ppi", showsSlider: false,
                         labelToggle: ExportRowToggle(title: "PPI", isOn: ppiEnabledBinding,
                                                      axID: "export.ppi.enabled"),
-                        placeholder: model.preset.ppi == nil ? "不写入" : nil) { typed in
+                        placeholder: model.preset.ppi == nil ? "不写入" : nil,
+                        readoutPlacement: .inline) { typed in
             model.setPPI(Int(typed.rounded()))
         }
         // 322 —— 水印不透明度不再是常驻行：它是水印的三件事之一（文字 → 位置 → 不透明度），
@@ -1348,23 +1349,26 @@ public struct ExportSheetView: View {
             rowID: "export.location.directory",
             label: { rowLabel("存到") },
             control: {
-                // 322 —— 「更改…」从控件块里挪到读数位（面板右端那条带），路径于是拿到整个
-                // 控件列（286 pt），默认的「/Users/…/Pictures/Photons 导出」（225.9 pt）不再省中段。
-                Text(model.outputDirectory.path)
-                    .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.outputDirectory.path)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(ExportRowGridProbeHost(kind: .accessory,
-                                                       rowID: "export.location.directory.path"))
+                // 335 —— 按钮回到主列**左端**（138 起），文案去掉省略号（「更改…」→「更改」：
+                // 它开的是同一个目录面板，省略号在这里只占了 15 pt 的宽度）。路径拿剩下的宽度。
+                HStack(spacing: ExportRowGrid.readoutGap) {
+                    Button("更改") { model.onChooseDirectory?() }
+                        .controlSize(.small)
+                        .background(ExportRowGridProbeHost(kind: .button,
+                                                           rowID: "export.location.directory.change"))
+                    Text(model.outputDirectory.path)
+                        .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(model.outputDirectory.path)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ExportRowGridProbeHost(kind: .accessory,
+                                                           rowID: "export.location.directory.path"))
+                }
             },
             value: { EmptyView() },
-            unit: {
-                Button("更改…") { model.onChooseDirectory?() }
-                    .controlSize(.small)
-            },
+            unit: { EmptyView() },
             accessory: { EmptyView() })
     }
 
@@ -1448,14 +1452,11 @@ public struct ExportSheetView: View {
             ExportRowGridRow(
                 rowID: "export.metadata.xmp",
                 label: {
-                    Toggle(isOn: writeXMPBinding) {
-                        Text("写入 XMP")
-                            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .disabled(model.phase == .running || model.preset.metadataLevel != .all)
+                    // 335 —— 勾选标签也走墨迹对齐（`checkboxLabel` 内部把文字推到墨迹右沿 130）。
+                    checkboxLabel("写入 XMP", isOn: writeXMPBinding,
+                                  enabled: model.phase != .running
+                                      && model.preset.metadataLevel == .all,
+                                  axID: "export.metadata.xmp")
                 },
                 control: {
                     // 322 —— 说明允许两行：放不下就换行，不许省成「…」。
@@ -1475,14 +1476,10 @@ public struct ExportSheetView: View {
             ExportRowGridRow(
                 rowID: "export.metadata.location",
                 label: {
-                    Toggle(isOn: $model.preset.removeLocation) {
-                        Text("移除位置")
-                            .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .disabled(model.phase == .running || model.preset.metadataPolicy == .none)
+                    checkboxLabel("移除位置", isOn: $model.preset.removeLocation,
+                                  enabled: model.phase != .running
+                                      && model.preset.metadataPolicy != .none,
+                                  axID: "export.metadata.location")
                 },
                 control: {
                     Text("GPS 不写入导出（EXIF 与 XMP 两处）")
@@ -1568,15 +1565,10 @@ public struct ExportSheetView: View {
                     ExportRowGridRow(
                         rowID: "export.hdr.halfSize",
                         label: {
-                            Toggle(isOn: hdrHalfSizeBinding) {
-                                Text("半尺寸")
-                                    .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .toggleStyle(.checkbox)
-                            .controlSize(.small)
-                            .disabled(model.phase == .running)
-                            .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
+                            checkboxLabel("半尺寸", isOn: hdrHalfSizeBinding,
+                                          enabled: model.phase != .running,
+                                          axID: "export.hdr.halfSize",
+                                          help: "增益图按 1/2 边长写入（-H），SDR 基底不缩放")
                         },
                         control: {
                             // 322 —— 裁偶数边的说明有 377.9 pt（「半尺寸需要偶数像素：当前
@@ -1808,11 +1800,52 @@ public struct ExportSheetView: View {
         }
     }
 
+    /// 335 —— 标签对齐的是**墨迹**右沿（130），不是文本框右沿。
+    ///
+    /// 「PPI」里 `I` 的墨迹右边不贴 advance box 右边，把文本框对到 130 之后 `I` 右边还差一条缝，
+    /// 用户看到的就是「PPI 没右对齐」。`labelInkShift` 量出这条 bearing（汉字几乎为 0），
+    /// 再把文本框往右挪同样多 —— 负的 trailing padding 让超出列右沿的那几 pt 落到 8 pt 的列间距里。
     private func rowLabel(_ text: String) -> some View {
+        labelText(text, inkProbeID: text)
+            .padding(.trailing, -ExportRowGrid.labelInkShift(for: text))
+    }
+
+    /// 标签文字（标签列与勾选框共用）。`inkProbeID` 非空时挂一条 `.labelInk` 探针 ——
+    /// 它记的是**文本框**的 frame，墨迹右沿 = frame 右沿 − `labelInkInset(text)`。
+    /// 行修饰（「不扩大」）不挂探针：它不在标签列上。
+    private func labelText(_ text: String, inkProbeID: String?) -> some View {
+        Group {
+            if let inkProbeID {
+                baseLabelText(text)
+                    .background(ExportRowGridProbeHost(kind: .labelInk, rowID: inkProbeID,
+                                                       text: text))
+            } else {
+                baseLabelText(text)
+            }
+        }
+    }
+
+    private func baseLabelText(_ text: String) -> some View {
         Text(text)
             .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
+    }
+
+    /// 335 —— 标签列里的勾选框（「写入 XMP」「移除位置」「半尺寸」）：文字墨迹右沿 130。
+    ///
+    /// 勾选框没有点击框包装，`Toggle` 自己的右沿就是文字的 advance box 右沿，所以只需要 bearing
+    /// 那一项修正 —— 和纯文字标签同一条规则。
+    private func checkboxLabel(_ title: String, isOn: Binding<Bool>, enabled: Bool,
+                              axID: String, help: String? = nil) -> some View {
+        Toggle(isOn: isOn) {
+            labelText(title, inkProbeID: axID)
+        }
+        .toggleStyle(.checkbox)
+        .controlSize(.small)
+        .disabled(!enabled)
+        .help(help ?? title)
+        .padding(.trailing, -ExportRowGrid.labelInkShift(for: title, checkbox: true))
     }
 
     /// 勾选框：探测框就是**盒子那一端**（点击测试在 `minX + 7`），所以它从标签列右沿往左贴 ——
@@ -1820,24 +1853,35 @@ public struct ExportSheetView: View {
     ///
     /// 322 —— 框宽按**自己的文字**量（`ExportRowGrid.toggleBoxWidth`）。302 把它写死成 34，
     /// 「不扩大」「写入 XMP」「移除位置」「半尺寸」「PPI」全部比 34 宽，于是界面上是「不扩…」。
-    private func rowToggle(_ toggle: ExportRowToggle, enabled: Bool) -> some View {
+    ///
+    /// 335 —— 墨迹修正：勾选框的点击框右边有 `toggleTrailingSlack`（4）的余量，文字墨迹还要再让
+    /// 开自己的 bearing。两段合起来 `labelInkShift(checkbox: true)` 往右推，墨迹才落在 130 上。
+    /// 点击框因此伸到 134 左右 —— 仍在 8 pt 的列间距里，碰不到 138 的控件。
+    ///
+    /// `isLabel == false` 是行修饰（「不扩大」贴在控件块右沿），它不属于标签列，不做墨迹修正。
+    private func rowToggle(_ toggle: ExportRowToggle, enabled: Bool,
+                           isLabel: Bool = true) -> some View {
         Color.clear
             .frame(width: ExportRowGrid.toggleBoxWidth(for: toggle.title),
                    height: ExportRowGrid.rowHeight)
             .overlay(alignment: .leading) {
+                // 335 —— 勾选框在它的点击框里**右对齐**：这样文字的右沿就是点击框的右沿（可控、
+                // 可量），墨迹修正只剩 bearing 一项。322 的 4 pt 余量仍在框里（点击手感不变），
+                // 只是把文字推到框的右边。
                 Toggle(isOn: toggle.isOn) {
-                    Text(toggle.title)
-                        .font(.system(size: ExportRowGrid.Font.label, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    labelText(toggle.title, inkProbeID: isLabel ? toggle.axID : nil)
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
                 .disabled(!enabled)
                 .accessibilityIdentifier(toggle.axID)
                 .help(toggle.help ?? toggle.title)
+                .frame(width: ExportRowGrid.toggleBoxWidth(for: toggle.title),
+                       alignment: .trailing)
             }
             .background(ExportSliderRowProbeHost(kind: .toggle, rowID: toggle.axID))
+            .padding(.trailing, isLabel
+                     ? -ExportRowGrid.labelInkShift(for: toggle.title, checkbox: true) : 0)
     }
 
     private func color(for state: ExportRow.State) -> Color {
@@ -1882,9 +1926,12 @@ public struct ExportSheetView: View {
         }
     }
 
-    /// 288 —— 每个数值行都走面板的同一套栅格。滑杆 140 宽、连续（不传 `step:`，SwiftUI 就不画刻度）；
-    /// 质量 / 水印不透明度 / 长边百分比在写入路径上量化。滑杆贴控件块**右沿**，
-    /// 于是每种控件的右沿都在 388 —— 这是「同类型控件位置一致」的第二条线。
+    /// 288 —— 每个数值行都走面板的同一套栅格。滑杆连续（不传 `step:`，SwiftUI 就不画刻度）；
+    /// 质量 / 水印不透明度 / 长边百分比在写入路径上量化。
+    ///
+    /// 335 —— 滑杆不再贴「控件块右沿 424」：它从主列起点 138 起、吃掉读数留下的宽度，右沿落在
+    /// 百分数左边 8 pt 处。读数（值 46 + 单位）贴主列右沿 540；PPI 行是唯一例外（`.inline`）：
+    /// 输入框在 138、单位「像素/英寸」紧随其后，两者都在主列左端。
     private func exportSliderRow(
         label: String, value: Double, range: ClosedRange<Double>,
         format: String, decimals: Int, unit: String? = nil,
@@ -1894,10 +1941,12 @@ public struct ExportSheetView: View {
         labelToggle: ExportRowToggle? = nil,
         trailingToggle: ExportRowToggle? = nil,
         placeholder: String? = nil,
+        readoutPlacement: ExportReadoutPlacement = .trailing,
         write: @escaping (Double) -> Void
     ) -> some View {
         ExportRowGridRow(
             rowID: axID,
+            readout: readoutPlacement,
             label: {
                 if let labelToggle {
                     rowToggle(labelToggle, enabled: enabled)
@@ -1909,17 +1958,14 @@ public struct ExportSheetView: View {
                 if let picker {
                     picker
                 } else if showsSlider {
-                    HStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        Slider(value: Binding(get: { value }, set: write), in: range)
-                            .controlSize(.small)
-                            .frame(width: ExportRowGrid.sliderWidth)
-                            .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
-                            .disabled(!enabled)
-                    }
-                    .frame(maxWidth: .infinity)
+                    Slider(value: Binding(get: { value }, set: write), in: range)
+                        .controlSize(.small)
+                        .frame(minWidth: ExportRowGrid.sliderWidth, maxWidth: .infinity)
+                        .background(ExportSliderRowProbeHost(kind: .slider, rowID: axID))
+                        .disabled(!enabled)
                 } else {
-                    Color.clear
+                    // 335 —— 没有滑杆也没有下拉（PPI）：控件位是零宽，读数从主列起点 138 起排。
+                    EmptyView()
                 }
             },
             value: {
@@ -1935,14 +1981,14 @@ public struct ExportSheetView: View {
                         .lineLimit(1)
                         .background(ExportSliderRowProbeHost(kind: .unit, rowID: axID))
                 } else {
-                    Color.clear
+                    EmptyView()
                 }
             },
             accessory: {
                 if let trailingToggle {
-                    rowToggle(trailingToggle, enabled: enabled)
+                    rowToggle(trailingToggle, enabled: enabled, isLabel: false)
                 } else {
-                    Color.clear
+                    EmptyView()
                 }
             })
     }

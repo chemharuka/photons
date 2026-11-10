@@ -6,14 +6,14 @@ import SwiftUI
 
 /// 301 — 「美观」的可判定形式。
 ///
-/// 用户在 302 里要的是「同种类型控件的位置相对一致、排列均匀、重心稳」。这三件事不靠肉眼，落在
-/// 六条读数上：
+/// 用户在 302 里要的是「同种类型控件的位置相对一致、排列均匀、重心稳」。335 又把右侧的读数列
+/// 取消（主列直接长到面板右 padding），所以现在只剩两条列线，读数只是主列内部贴右沿的一段：
 ///
-///   1. 所有标签一条右沿（118）
-///   2. 所有控件一条左沿（138）—— 顺带一条右沿（388）
-///   3. 所有读数一条右沿（540 = 面板右 padding）
+///   1. 所有标签一条右沿（130）
+///   2. 所有控件一条左沿（138）与一条右沿（540）
+///   3. 带读数的行，读数右沿 540 = 面板右 padding
 ///   4. 行距只有两种：32（行与行）/ 48（节首行，32 + 16）—— 没有第三种
-///   5. 默认折叠状态下首屏 ≤ 10 个 band（7 个常驻决定 + 3 个折叠标题）
+///   5. 默认折叠状态下首屏 ≤ 10 个 band（6 个常驻决定 + 3 个折叠标题）
 ///   6. 摘要行与按钮同一条水平带（中心差 ≤ 1），左右 padding 相等
 ///
 /// 读回手段与 288 相同：`ExportRowGridProbe` 的透明背景 + hosted `NSHostingView`。
@@ -144,32 +144,41 @@ final class ExportSheetLayout301Tests: XCTestCase {
 
     // MARK: - 3. 一条读数右沿（= 面板右 padding）
 
+    /// 335 —— 读数不再是独立的一列：它只是主列内部贴右沿的一段。所以这里的门是
+    /// 「每个读数块的**右**沿 = 面板右 padding」，不是「同一列宽」；PPI 的读数是主列内左起
+    /// 的那一种（输入框 138、单位随后），由 `ExportSheetLayout335Tests` 单独量。
     func testAllReadoutsShareOneRightEdge() throws {
         let hosted = try host(model: model(), expanded: true)
         let sheet = frame(of: hosted.host, in: hosted.host)
         XCTAssertEqual(sheet.width, ExportRowGrid.panelWidth, accuracy: 0.5)
 
         let readouts = gridProbes(.readout, in: hosted.host)
-        XCTAssertGreaterThanOrEqual(readouts.count, 13, "每行都要有读数块")
+        XCTAssertGreaterThanOrEqual(readouts.count, 4, "带读数的行（质量 / 尺寸 / PPI / 不透明度）")
 
+        var trailing = 0
         for probe in readouts {
             let rect = frame(of: probe, in: hosted.host)
-            XCTAssertEqual(rect.maxX, ExportRowGrid.readoutRight, accuracy: 0.5,
-                           "301 · \(probe.rowID) 读数右沿 \(rect.maxX)")
+            XCTAssertLessThanOrEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding + 0.5,
+                                     "335 · \(probe.rowID) 读数越过面板右 padding")
+            guard probe.rowID != "export.ppi" else { continue }
+            trailing += 1
+            XCTAssertEqual(rect.maxX, ExportRowGrid.contentRight, accuracy: 0.5,
+                           "335 · \(probe.rowID) 读数右沿 \(rect.maxX)")
             XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding, accuracy: 0.5,
-                           "301 · \(probe.rowID) 读数右沿必须等于面板右 padding")
-            XCTAssertEqual(rect.width, ExportRowGrid.readoutWidth, accuracy: 0.5,
-                           "301 · \(probe.rowID) 读数块宽 \(rect.width)")
+                           "335 · \(probe.rowID) 读数右沿必须等于面板右 padding")
         }
+        XCTAssertGreaterThanOrEqual(trailing, 3, "至少三行（质量 / 尺寸 / 不透明度）读数贴 540")
 
-        // 读数块里的数值框与单位也各是一条线（288 的列对齐思想，块内继续成立）。
-        let values = gridProbes(.value, in: hosted.host).map { frame(of: $0, in: hosted.host) }
-        XCTAssertGreaterThanOrEqual(values.count, 13)
-        for rect in values {
-            XCTAssertEqual(rect.minX, ExportRowGrid.readoutLeft, accuracy: 0.5)
+        // 读数里的单位也各自贴右沿（335：单位不再占固定列，`%` 自己就是那条右沿）。
+        let units = gridProbes(.unit, in: hosted.host).filter { $0.rowID != "export.ppi" }
+        XCTAssertGreaterThanOrEqual(units.count, 2)
+        for probe in units {
+            XCTAssertEqual(frame(of: probe, in: hosted.host).maxX,
+                           ExportRowGrid.contentRight, accuracy: 0.5,
+                           "335 · \(probe.rowID) 的单位右沿")
         }
-        print(String(format: "301 readouts · %d 行 · 右沿 %.1f · 面板右 padding %.1f",
-                     readouts.count, frame(of: readouts[0], in: hosted.host).maxX,
+        print(String(format: "335 readouts · %d 块 · %d 块贴右沿 %.1f · 面板右 padding %.1f",
+                     readouts.count, trailing, ExportRowGrid.contentRight,
                      sheet.maxX - ExportRowGrid.horizontalPadding))
     }
 
