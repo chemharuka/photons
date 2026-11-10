@@ -405,11 +405,14 @@ final class GuideLines337Tests: XCTestCase {
         XCTAssertEqual(tool.guideLineFailure, .nearParallel)
         XCTAssertEqual(tool.guideLineStatusText, "两条线几乎平行，没有信息", "337 ⑥ 必须给提示")
 
-        // (c) Esc: the lines go, nothing is written, no row.
+        // (c) Esc: the gesture stops, nothing is written, no row. **361 §2.2** flipped the other half
+        // of this: since the lines are document data, Esc keeps the ones that were kept — the single
+        // accepted line of (a) is still there, which is 「Esc 退出引导线模式，线保留」.
         _ = tool.setGuideLinesArmed(true)
+        let keptBeforeEscape = tool.guideLines.count
         XCTAssertTrue(tool.cancelGuideLines(), "337 ⑥ Esc 收掉工具")
         XCTAssertFalse(tool.isGuideLinesArmed)
-        XCTAssertEqual(tool.guideLines.count, 0)
+        XCTAssertEqual(tool.guideLines.count, keptBeforeEscape, "361 ⑥ Esc 不清线")
         XCTAssertEqual(session.history.snapshots.count, rows, "337 ⑥ Esc 不写历史")
         print("337 ⑥ 退化: 1 条 → notEnoughLines；0.1° → nearParallel（提示「两条线几乎平行，没有信息」）；"
               + "Esc → 行数 \(session.history.snapshots.count)（画前 \(rows)）· 夹角 "

@@ -193,6 +193,11 @@ enum EditParameters {
         // missing here is a slider that writes nothing (`FieldCoverageTests` says so by name).
         t.field("perspectiveVertical") { areEqual($0.perspectiveVertical, $1.perspectiveVertical) }
         t.field("perspectiveHorizontal") { areEqual($0.perspectiveHorizontal, $1.perspectiveHorizontal) }
+        // 361 — 354 put the guide lines in the document, but this table did not learn about them, and
+        // `applyEdit` drops every change it cannot see: 「清除引导线」 wrote nothing (and ⌘Z could not
+        // bring a line back). They stay out of the render **key** material on purpose
+        // (`GeometryGroup.guideLines` says so) — a comparison here is about the document, not pixels.
+        t.field("guideLines") { $0.guideLines == $1.guideLines }
         return t
     }()
 

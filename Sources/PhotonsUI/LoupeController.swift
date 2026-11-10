@@ -4537,6 +4537,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// called.
     var cropOverlayLayoutForTesting: CropToolLayout? { cropOverlay.layout }
 
+    // MARK: - 361 — what the overlay is actually stroking, and where it sits
+
+    /// The segments the overlay is **drawing** — points, in the overlay's own space. Read straight off
+    /// the view (like `cropOverlayLayoutForTesting`), so an acceptance that says 「画完可见」 measures
+    /// the drawing and not a re-derivation of it.
+    public var cropOverlayGuideLines: [CropToolSegment] { cropOverlay.guideLines }
+
+    /// The camera `syncGuideLines` last projected with — `cropMapping()` at that instant. Recorded so
+    /// the acceptance can compare the drawn segments against the very map that produced them (and so
+    /// 「变化之后必定重投影」 is a number, not a reading of the code).
+    public private(set) var guideLineSyncMapping: LoupeMapping?
+
+    /// The camera the *next* sync would use, for a test that wants to express a gesture in **source
+    /// pixels** and press at the right view point. Nothing in the app reads it.
+    public var guideLineMapping: LoupeMapping? { cropMapping() }
+
+    /// 361 — **the occlusion audit.** The overlay view itself, so a test can print its sibling index
+    /// among the canvas' layers, its frame, `isHidden`, `alphaValue` and `wantsLayer` — the four
+    /// answers to 「线画了但被挡住了 / 被裁掉了」. `private` stays `private` for every other reader.
+    public var cropOverlayViewForAudit: NSView { cropOverlay }
+
+    /// **361 reverse gate ③** — `true` skips the device-pixel → point conversion in `syncGuideLines`
+    /// (354's hand-off). Only a test turns it on.
+    var guideLinesSkipPointScale = false
+
     /// 197 — the document the **frame job** would render at this instant, read out of `makeJob`
     /// itself: the queue gets exactly this edit, so a test cannot pass on a re-derivation of it.
     var frameJobEditForTesting: EditModel? { makeJob(kind: .scheduled)?.edit }
@@ -4754,6 +4779,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// overlay is about to be drawn with; the overlay only ever receives view points it can stroke.
     /// `nil` mapping (no photo yet) draws no line: a view point without a projection would be the
     /// cached coordinate this task removed.
+    ///
+    /// 361 — **the projection is in device pixels and the overlay strokes in points.** `cropMapping()`'s
+    /// viewport is `viewportPixels`, and `guideLineSegments` is documented in device pixels, while the
+    /// overlay is an AppKit view whose `frame` is `container.bounds` in points — the same divisor
+    /// `cropTool.layout`'s `pointScale` applies to the frame (`cropToolLayout`) and `layoutCropBar`
+    /// applies to the bar. Without it every line lands at 2× on a Retina canvas, outside the overlay's
+    /// own bounds, and NSView clips to bounds: 「引导线没有显示出来」 with the data present all along.
+    /// That is also why the fix is here and not in the projection (354's `P → R → view` is untouched).
     private func syncGuideLines() {
         // **One projection per sync** — and none at all when there is nothing to project, so a zoom
         // or a pan on a document without guide lines costs exactly the calls it always did (333's
@@ -4761,12 +4794,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if cropTool.guideLines.isEmpty && cropTool.rejectedGuideLine == nil {
             cropOverlay.guideLines = []
             cropOverlay.rejectedGuideLine = nil
+            guideLineSyncMapping = nil
         } else if let mapping = cropMapping() {
-            cropOverlay.guideLines = cropTool.guideLineSegments(mapping: mapping)
+            // **361 reverse gate ③** — `true` hands the device-pixel walk straight to the overlay
+            // (354's shape, and the bug behind 「跑到画面最下方、出画布」). Shipping is `false`.
+            let scale = guideLinesSkipPointScale ? 1 : (backingScale > 0 ? backingScale : 1)
+            guideLineSyncMapping = mapping
+            cropOverlay.guideLines = cropTool.guideLineSegments(mapping: mapping).map {
+                CropToolSegment(a: CGPoint(x: $0.a.x / scale, y: $0.a.y / scale),
+                                b: CGPoint(x: $0.b.x / scale, y: $0.b.y / scale))
+            }
             if let rejected = cropTool.rejectedGuideLine {
                 let p = cropTool.guideLineProjection(mapping: mapping)
-                cropOverlay.rejectedGuideLine = CropToolSegment(a: p.screenPoint(rejected.a),
-                                                                b: p.screenPoint(rejected.b))
+                let a = p.screenPoint(rejected.a), b = p.screenPoint(rejected.b)
+                cropOverlay.rejectedGuideLine = CropToolSegment(a: CGPoint(x: a.x / scale, y: a.y / scale),
+                                                                b: CGPoint(x: b.x / scale, y: b.y / scale))
             } else {
                 cropOverlay.rejectedGuideLine = nil
             }
@@ -4775,6 +4817,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // cached coordinate this task removed, so draw nothing.
             cropOverlay.guideLines = []
             cropOverlay.rejectedGuideLine = nil
+            guideLineSyncMapping = nil
         }
         cropOverlay.guideLineStroke = cropTool.guideLineStroke
         cropOverlay.guideLineStrokeAlpha = cropTool.guideLineStrokeAlpha
