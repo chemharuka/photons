@@ -4851,6 +4851,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // here — the one place the overlay is built — so there is no window in which a wrong frame
         // can reach the screen (the ask's preferred fix: 「同步种好…在第一次 present 之前」).
         if cropTool.reseedIfPhotoMoved() { cropBar.sync() }
+        // 341 — **the document's keystone, before the frame is built.** A reset (双击「垂直透视」 /
+        // 滑杆归零 / ⌘Z / 预设) writes the document and leaves the draft's copy at the value the
+        // session was seeded with; every reader now asks the document (`livePerspective`), and this
+        // keeps the copy itself honest so the bar, the readout and 应用 cannot print a keystone the
+        // document no longer has. Same place and same shape as 202 ④'s re-seed above: the one turn
+        // the overlay is rebuilt, synchronously, before anything is laid out.
+        if cropTool.adoptDocumentKeystone() { cropBar.sync() }
         // ② (2026-10-27) — mid-animation the frame is a rect of the *picture on the canvas*, not of the
         // camera: project it with the bridge's own mapping and carry it by that frame's own similarity.
         // No clamp and no bar sync here: the draft is already lawful (it was clamped when the stop

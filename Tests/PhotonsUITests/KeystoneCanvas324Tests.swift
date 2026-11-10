@@ -577,10 +577,20 @@ final class KeystoneCanvas324Tests: XCTestCase {
         let controller = CropToolController(session: session, defaults: defaults)
         XCTAssertTrue(controller.begin())
         let vertical = 30.0, horizontal = -15.0, degrees = 9.0
+        // 341 — **the keystone is the document's.** The 变换 card's two sliders write
+        // `session.edit.geometry` (never the draft), and `livePerspective` now says so out loud: a
+        // keystone the *draft* carries and the document does not is a state the app cannot reach. The
+        // draft's own fields are still written here because this test constructs its draft directly
+        // (the app does it through `begin()`), and the refresh that follows is the loupe's own turn.
+        session.applyEdit { model in
+            model.geometry.perspectiveVertical = vertical
+            model.geometry.perspectiveHorizontal = horizontal
+        }
         controller.draft = CropToolController.Draft(crop: .full, straighten: degrees,
                                                     lock: .original,
                                                     perspectiveVertical: vertical,
                                                     perspectiveHorizontal: horizontal)
+        controller.adoptDocumentKeystone()
         XCTAssertEqual(controller.sourceSize, Self.source)
         XCTAssertFalse(controller.cropStaysInsidePixels)
         XCTAssertTrue(controller.setCropStaysInsidePixels(true))
