@@ -1768,14 +1768,18 @@ public struct ExportSheetView: View {
             .frame(height: ExportRowGrid.buttonHeight)
             .background(ExportRowGridProbeHost(kind: .buttons, rowID: "export.footer.buttons"))
         }
-        .frame(height: ExportRowGrid.buttonHeight)
+        // 323b — 页脚按钮（`controlSize(.large)` 的系统高度略高于 `buttonHeight`）曾贴到上面那条
+        // 分隔线上：内容与分隔线只差 10 pt，圆角与阴影压住了 1 px 的线。按钮尺寸不动，改成
+        // 内容上下各留出余量（`minHeight` 而非固定高度，避免被裁），页脚因此长高 12 pt。
+        .frame(minHeight: ExportRowGrid.buttonHeight)
+        .padding(.vertical, 6)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(.separator)
                 .frame(height: 1)
         }
         .background(ExportLayoutProbeHost(kind: .footer))
-        .padding(.top, 10)
+        .padding(.top, 12)
     }
 
     @ViewBuilder
