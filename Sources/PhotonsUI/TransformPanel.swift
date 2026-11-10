@@ -1167,11 +1167,13 @@ struct CropApplyRow: View {
     ///
     /// `.large` rather than `.regular`: the bordered bezel at `.regular` is ~22 pt tall, under the
     /// 26 pt floor, so the size class itself has to carry the height and the `minSize` frame only
-    /// guarantees it. 72 = 34 (the old `.mini` width) + 2 × 10 of label padding + 18 of slack.
-    static let minSize = CGSize(width: 72, height: 26)
-    static let controlSize: ControlSize = .large
-    static let spacing: CGFloat = 10
-    static let labelInset: CGFloat = 10
+    /// guarantees it. 60 = 34 (the old `.mini` width) + 2 × 8 of label padding + 10 of slack.
+    /// 339 (user): `.large` 在右栏里显得过大、不协调 —— 退一格到 `.regular`，宽度/高度也随之收小，
+    /// 但仍是原 `.mini`（34×13）的近两倍，不至于又变回针尖大小。
+    static let minSize = CGSize(width: 60, height: 22)
+    static let controlSize: ControlSize = .regular
+    static let spacing: CGFloat = 8
+    static let labelInset: CGFloat = 8
 
     var body: some View {
         // 336: 取消 left, 应用 right — the primary verb sits at the inspector's bottom-right corner,
@@ -1192,7 +1194,8 @@ struct CropApplyRow: View {
                 Text("应用")
                     .padding(.horizontal, Self.labelInset)
             }
-            .buttonStyle(.bordered)
+            // 341 (user): 应用是主操作 —— 用强调色（蓝），取消保持普通 bordered。
+            .buttonStyle(.borderedProminent)
             .controlSize(Self.controlSize)
             .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
             .background(DetailRowEnabledProbe(title: Self.applyProbe))
