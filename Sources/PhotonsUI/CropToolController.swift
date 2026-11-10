@@ -830,6 +830,12 @@ public final class CropToolController {
     /// in the app writes it.
     var foldsToNearestAxis = true
 
+    /// 328b §2.6 — the other reverse gate. `true` is the shipped rule: the line's angle is measured
+    /// **on the screen**, which is what the user drew on. The test flips it to 328's source-space
+    /// reading and watches the keystone acceptance go red (screen residual 1.69° for a 20° line on a
+    /// `(+30, −15)` picture). Nothing in the app writes it.
+    var measuresAngleOnScreen = true
+
     /// The canvas half: the loupe assigns this to push the stroke at the overlay **without** the
     /// frame's layout pass (`clampToView` must not run mid-stroke — §2's 「画线期间不得移动裁切框」).
     var onStraightenStrokeChange: (() -> Void)?
@@ -896,7 +902,8 @@ public final class CropToolController {
         guard let draw = CropDrawStraighten.draw(from: stroke.a, to: stroke.b,
                                                  mapping: mapping,
                                                  pointScale: pointScale,
-                                                 nearestAxis: foldsToNearestAxis) else {
+                                                 nearestAxis: foldsToNearestAxis,
+                                                 angleOnScreen: measuresAngleOnScreen) else {
             // §2 — 误触: nothing applied, nothing said, counted for the report.
             tooShortStraightenCount += 1
             straightenStroke = nil
