@@ -2045,7 +2045,17 @@ public final class ExportSheetController: NSObject {
                               backing: .buffered,
                               defer: false)
         window.title = "导出 \(model.selectionCount) 张照片"
+        // 321 —— 面板尺寸是**应用**的决定，不是 SwiftUI 的 ideal 尺寸。
+        //
+        // 这里以前只给了 contentRect，紧跟着的 `window.contentViewController = hosting` 让 AppKit
+        // 把窗口收到 hosting 的 `preferredContentSize` 上。赋值那一刻 SwiftUI 还没布局，滚动区
+        // （`form`）的 ideal 高度是 0，于是窗口只剩标题 + 页脚那么高（560×110），`form` 分到 0 pt，
+        // 7 个常驻行全被裁在可视区外 —— 用户看到的就是「只有模板下拉，没有具体选项」。
+        // 所以两步：hosting 不再驱动窗口尺寸，然后按 560×640 把窗口撑回来，滚动区才有高度可分。
+        hosting.sizingOptions = []
         window.contentViewController = hosting
+        window.setContentSize(NSSize(width: ExportRowGrid.panelWidth,
+                                     height: ExportRowGrid.contentMaxHeight))
         window.isReleasedWhenClosed = false
         parent.beginSheet(window)
         sheetWindow = window
