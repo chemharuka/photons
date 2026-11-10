@@ -35,7 +35,12 @@ import Foundation
 //  · 色彩分级 (`EditModel.colorGrading`, S3.8) **is** carried now (`ColorGradingPatch`, this file) and
 //    is its own section. Until 081 it was not copied at all; a paste of 全部 left the destination's
 //    grade alone. That gap is closed, and a preset carries the same nine numbers through `Preset`.
-//  · `decoderVersion` is still not a section: it is a per-file decoder fact, not a develop setting.
+//  · `decoderVersion` **is** carried as of 319, and it is the one leaf that forces a **development**:
+//    it is a decoder fact rather than a develop slider, which is exactly why it was missing for so
+//    long (「复制开发卡，粘贴后解码器版本没变」). It rides as a child of 开发 (`.decoderVersion`), it is
+//    a field of the snapshot itself (`decoderVersion: String?`) rather than of a patch, and a paste
+//    carrying it re-decodes — the card's other five leaves stay render-only. `Int?` would have been
+//    wrong on the wire: the document stores Apple's own spelling (`"8"`, `"9"`, `"9.dng"`).
 
 /// Which fields belong to which group. Used for reporting what a clipboard payload carries.
 public enum EditSnapshotGroup: String, CaseIterable, Sendable, Hashable {
@@ -122,10 +127,13 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
 
     /// Does a paste of this section have to **develop again** (a new buffer), or only re-render?
     ///
-    /// Since 143 nothing here requires a development: the white balance is an S1 gain computed from
-    /// the decoded buffer, and the decoder is always at as-shot. The property stays (the copy sheet
-    /// asks it) because a future decode-side section would need exactly one place to say so.
+    /// Since 143 nothing at the *card* level requires a development: the white balance is an S1 gain
+    /// computed from the decoded buffer, and the decoder is always at as-shot. The property stays
+    /// because it is the one place a decode-side card would say so — and since 319 one leaf of 开发
+    /// **does**: `.decoderVersion`, which is why the answer is asked per **child** as well
+    /// (`EditSnapshot.requiresDecode`).
     public var requiresDecode: Bool { false }
+
 
     /// The card's title — **the inspector card's own string**, so the sheet's rows and the panel's
     /// headers cannot drift apart (`CopySheetCardTests` holds them to `InspectorView`'s titles).
@@ -185,6 +193,11 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     case hslHue, hslSaturation, hslLuminance
     case gradeShadows, gradeMidtones, gradeHighlights
     case sharpening, sharpeningRadius, noiseLuminance, noiseColor, lensCorrections
+    /// 319 — 解码器版本. The **one** leaf of the clipboard that is a *decode* input: pasting it is a
+    /// new `DecodeInputs`, a new `DecodeCacheKey` and a new buffer, not a re-render. It lives on 开发
+    /// because that is the card the panel draws the popup on, and because "which decoder" is part of
+    /// 「开发」in the user's own words.
+    case decoderVersion
     case caRed, caBlue
     case curveWhite, curveRed, curveGreen, curveBlue
     /// 164: 纹理 / 清晰度 / 去噪 / 去彩噪 belong to the new 细节 card.
@@ -209,8 +222,10 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .blackAndWhiteSwitch, .blackAndWhiteMix: return .blackAndWhite
         case .hslHue, .hslSaturation, .hslLuminance: return .hsl
         case .gradeShadows, .gradeMidtones, .gradeHighlights: return .colorGrading
-        case .sharpening, .sharpeningRadius, .noiseLuminance, .noiseColor, .lensCorrections:
+        case .sharpening, .sharpeningRadius, .noiseLuminance, .noiseColor, .lensCorrections,
+             .decoderVersion:
             return .detail
+
         case .caRed, .caBlue, .vignette: return .correction
         case .curveWhite, .curveRed, .curveGreen, .curveBlue: return .curve
         case .texture, .clarity, .nonBayerLuminance, .nonBayerColor: return .detailFX
@@ -249,6 +264,8 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .noiseLuminance: return "降噪"
         case .noiseColor: return "色彩降噪"
         case .lensCorrections: return "镜头校正"
+        case .decoderVersion: return "解码器版本"
+
         case .caRed: return "色差 R"
         case .caBlue: return "色差 B"
         case .curveWhite: return "白色"
@@ -273,6 +290,14 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .quarterTurns: return "旋转"
         }
     }
+
+    /// Does carrying **this** leaf force a development rather than a re-render?
+    ///
+    /// True for `.decoderVersion` and nothing else (319). It is the one leaf of the clipboard whose
+    /// value names *which decoder produced the pixels*: a paste of it cannot be answered from the
+    /// resident buffer at all — the buffer in the cache was made by the other model. Every other leaf,
+    /// `白平衡` included since 143/194, is an S1-or-later number over pixels that already exist.
+    public var requiresDecode: Bool { self == .decoderVersion }
 }
 
 /// The checked rows of 「选择要复制的设置」.
@@ -823,6 +848,17 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public var optics: OpticsPatch?
     public var effects: EffectsPatch?
     public var masks: MasksPatch?
+    /// 319 — 解码器版本 (`EditModel.decoderVersion`, Apple's own spelling: `"8"` / `"9"` / `"9.dng"`).
+    ///
+    /// Not a field of any patch, because no patch owns it: it is a **decoder** fact. It is also the
+    /// only leaf in this type that forces a development on paste — see `requiresDecode`. `nil` means
+    /// "the destination keeps its own decoder", which is what every pre-319 payload means.
+    ///
+    /// `String?` and not `Int?`: the panel's popup and the decoder's read-back both speak the spelling
+    /// Apple offers (`InspectorView.decoderVersionLabel` strips the `.dng` for display), and two
+    /// spellings can name one model. Normalising to an `Int` here would silently turn `"9.dng"` into
+    /// `"9"` and lose the round trip.
+    public var decoderVersion: String?
 
     public init() {
         self.schemaVersion = EditSnapshot.currentSchemaVersion
@@ -934,6 +970,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.detail.noiseColor, 0) { detail.noiseColor = edit.detail.noiseColor }
         if edit.detail.lensCorrections { detail.lensCorrections = true }
         s.detail = detail.isEmpty ? nil : detail
+        // 319 — 解码器版本. `nil` is the document's default (「跟随 Apple」), so only an explicit model
+        // travels; and this is the one line in `capture` that makes 开发's copy able to move a decoder
+        // at all. Before it, 「复制开发卡」 was five render-side leaves and a v9 request stayed behind.
+        if let version = edit.decoderVersion { s.decoderVersion = version }
 
         // 156: 校正 — the two lateral-CA ratios. 0 is the neutral ratio, so only a real correction
         // travels (「只带非默认字段」); the document stores α, not the panel's −100…+100 position.
@@ -1003,7 +1043,15 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// How many masks the payload carries. 0 = a paste leaves the destination's list alone.
     public var maskCount: Int { masks?.masks.count ?? 0 }
 
-    public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 }
+    /// Does the payload name a decoder model? Split out because it is the one leaf that is not a
+    /// slider: `fieldCount` (the "1 slider = 1 field" arithmetic) does not count it, exactly as it
+    /// does not count masks, so the 95-leaf full-document denominator keeps its meaning.
+    public var carriesDecoderVersion: Bool { decoderVersion != nil }
+
+    /// Empty means "a paste changes nothing". A copy of 开发 narrowed to 解码器版本 alone is **not**
+    /// empty: it moves the one thing that decides which buffer everything else is read through.
+    public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 && decoderVersion == nil }
+
 
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
     /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
@@ -1061,6 +1109,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         if colorGrading != nil { out.insert(.colorGrading) }
         if detail != nil { out.insert(.detail) }
+        // 319: the decoder model IS 开发's card — a payload carrying only the version must report
+        // 开发, or the sheet would show a copy that names no card at all.
+        if decoderVersion != nil { out.insert(.detail) }
         if calibration != nil { out.insert(.calibration) }
         if optics != nil { out.insert(.correction) }
         if let e = effects {
@@ -1082,11 +1133,19 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         return out
     }
 
-    /// Would pasting this payload have to develop again? True only when it carries a white balance:
-    /// the Kelvin/tint pair is assigned inside `CIRAWFilter` (`DecodeInputs.whiteBalance`), so the
+    /// Would pasting this payload have to **develop again**? True when it carries a white balance or a
+    /// decoder version: the Kelvin/tint pair is assigned inside `CIRAWFilter`
+    /// (`DecodeInputs.whiteBalance`) and the version names which decoder ran, so in both cases the
     /// buffer itself is a different picture. Every other field is a GPU-stage change — and `detail`
     /// is stored, not rendered, so a paste of it moves no pixels and no buffer.
-    public var requiresDecode: Bool { sections.contains(where: \.requiresDecode) }
+    ///
+    /// Since 319 the answer is **per leaf**, not per card: 开发 is five render-side leaves *plus*
+    /// 解码器版本, and only a payload that really carries the version re-develops. 「只勾锐化」 must not
+    /// cost a 60 MP v9 development (4.9 s cold).
+    public var requiresDecode: Bool {
+        carriesDecoderVersion || sections.contains(where: \.requiresDecode)
+    }
+
 
     /// The payload narrowed to `sections` — one row per card, and the leaves of that card only.
     ///
@@ -1212,6 +1271,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if on(.lensCorrections) { p.lensCorrections = d.lensCorrections }
             out.detail = p.isEmpty ? nil : p
         }
+        // 319: the decoder model is a leaf of 开发 like any other, so a copy of 开发 narrowed to
+        // 锐化 alone carries no version — and a copy narrowed to 解码器版本 alone carries nothing else.
+        if sections.contains(.detail), on(.decoderVersion) { out.decoderVersion = decoderVersion }
 
         // 179: 校准 is one card and seven numbers, so checking it copies all seven — there is no
         // child row to narrow (a hue without its saturation is a different look, not a finer copy).
@@ -1381,6 +1443,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.lensCorrections { out.detail.lensCorrections = v }
         }
 
+        // 319 — the decoder model. Written last of the document-shaping fields because it is the one
+        // that changes *which buffer* every other leaf is read through.
+        if let v = decoderVersion { out.decoderVersion = v }
+
         if let p = optics {
             if let v = p.caRed { out.optics.caRed = v }
             if let v = p.caBlue { out.optics.caBlue = v }
@@ -1453,6 +1519,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         self.effects = c.val("effects", EffectsPatch?.none)
         // P1-5: absent in every v1 payload, and absent means "the destination keeps its own masks".
         self.masks = c.val("masks", MasksPatch?.none)
+        // 319: absent in every payload written before 开发 could carry the decoder model — absent
+        // means "keep the destination's decoder", which is exactly what those copies did.
+        self.decoderVersion = c.val("decoderVersion", String?.none)
+
     }
 
     // MARK: tolerant comparison

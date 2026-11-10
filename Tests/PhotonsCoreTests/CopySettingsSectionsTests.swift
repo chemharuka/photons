@@ -119,7 +119,14 @@ final class CopySettingsSectionsTests: XCTestCase {
         b.light.midtones = -12
         let merged = payload.applied(to: b)
         XCTAssertEqual(merged.light.midtones, 40, "粘贴写上中间调")
-        XCTAssertEqual(changedKeys(b, merged), [], "除了中间调，别的字段一个也没动")
+        // 085 的这条断言写反了（319 顺手修，**语义没动**：`applied` 与 `changedFields` 一个字都
+        // 没改）。`changedKeys` 是 b 与 merged 的**差异**，而 b 的中间调本来是 −12、merged 是 40 ——
+        // 差异集天生就是 ["light.midtones"]；原来要空集，等于要求这次粘贴「什么都没变」，而那与
+        // 上一行「粘贴写上中间调」互相矛盾。要证明的是「除了中间调没有别的」，所以断言精确集合。
+        XCTAssertEqual(changedKeys(b, merged), ["light.midtones"],
+                       "只动中间调这一叶：其余字段一个也没变")
+        XCTAssertEqual(changedKeys(b, merged).subtracting(["light.midtones"]), [],
+                       "反过来说一遍：差异里除了中间调，一个键都不许有")
         XCTAssertEqual(merged.light.exposure, b.light.exposure, "曝光不动")
         XCTAssertEqual(merged.light.contrast, b.light.contrast, "对比不动")
         XCTAssertEqual(merged.light.temperature, b.light.temperature, "白平衡不动")

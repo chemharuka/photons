@@ -1,7 +1,8 @@
 import AppKit
 import PhotonsCore
 
-/// 编辑 ▸ 复制设置… / 粘贴设置（选择…） — the card-level checklist of 081.
+/// 编辑 ▸ 复制设置… / 粘贴设置（选择…） — the card-level checklist of 081, drawn like Lightroom's
+/// **Copy Settings** since 319.
 ///
 /// One view, two purposes (`copy` / `paste`): the rows are the **inspector's cards**, in the
 /// inspector's order (`InspectorView` renders `Section.allCases`; `EditSnapshotSection.panelOrder`
@@ -21,13 +22,30 @@ import PhotonsCore
 ///   · 校正 is a row now (156 §3): the panel has carried the card since 096, but the clipboard's
 ///     section list did not, so copy/paste silently could not move 色差 R / 色差 B.
 ///
-/// What did not change: `showsChildren` (default `false`) still decides whether each card's
-/// **parameters** are drawn under it, and the answer is still `CopySettingsSelection`, so checking a
-/// card and checking one of its leaves mean the same thing they meant in 081.
+/// 319 (the user's own words: 「仿照 lightroom 去设计，即需要更加细分，而不是只按照卡片来」) makes the
+/// **parameters the subject**, not an option:
+///
+///   · `showsChildren` is `true`. Every card is followed by its own parameter rows, indented 18 pt and
+///     drawn at `.small` — Lightroom's own shape, where 「Light」 is a heading with 曝光/对比/高光…
+///     under it.
+///   · each card's checkbox is **three-state** (`allowsMixedState`): all of its parameters on = on,
+///     none = off, some = mixed. Clicking a mixed card checks it whole (the same `set(_:)` the model
+///     has always had), so the row can never claim a state the payload disagrees with.
+///   · each card has a **disclosure triangle** that hides just its parameter rows, and the top of the
+///     sheet has 展开全部 / 收起全部. Collapsing is *presentation only*: it changes `rows`, never
+///     `selection` — hiding a row must not uncheck it.
+///   · 全选 / 全不选 and the preset popup stay where they were (081 §1's footer).
 enum CopySettingsSheet {
 
-    /// Draw each card's parameter rows under it. **A constant, not a comment** (081 §2).
-    static let showsChildren = false
+    /// Draw each card's parameter rows under it. **A constant, not a comment** (081 §2), and since 319
+    /// it is `true`: the ticket's first sentence is that card-level-only is the bug.
+    static let showsChildren = true
+
+    /// 319 §2.3: the parameter rows are indented 18 pt under the card's own name, and drawn at
+    /// `.small` — the two numbers the ticket names, in one place.
+    static let childIndent: CGFloat = 18
+    /// The disclosure triangle's width. The card's checkbox starts right of it, at 0 + this + 2.
+    static let disclosureWidth: CGFloat = 13
 
     // MARK: 156 — the three-column grid
 
@@ -82,7 +100,7 @@ final class CopySettingsAccessoryView: NSView {
                 // 2026-10-30（用户）：这行说明太长，改成一句结论。
                 return "不包含默认值"
             case .paste:
-                return "勾选要粘贴的卡片。目标照片里没被点名的卡片一个字段都不会动。"
+                return "勾选要粘贴的卡片或单个参数。目标照片里没被点名的卡片一个字段都不会动。"
             }
         }
     }
@@ -113,13 +131,20 @@ final class CopySettingsAccessoryView: NSView {
     /// Whether the parameter rows are drawn — see `CopySettingsSheet.showsChildren`.
     let showsChildren: Bool
 
+    /// The cards whose parameter rows are **hidden by the disclosure triangle**. Presentation only:
+    /// `selection` is untouched, so a collapsed card still pastes everything it had checked.
+    private(set) var collapsedCards: Set<EditSnapshotSection> = []
+
     // Exposed for the tests: they drive the real controls, not a parallel model.
     private(set) var rows: [Row] = []
     private(set) var checkboxes: [EditSnapshotSection: NSButton] = [:]
     private(set) var childCheckboxes: [EditSnapshotChild: NSButton] = [:]
+    private(set) var disclosureButtons: [EditSnapshotSection: NSButton] = [:]
     private(set) var presetPopUp: NSPopUpButton!
     private(set) var selectAllButton: NSButton!
     private(set) var selectNoneButton: NSButton!
+    private(set) var expandAllButton: NSButton!
+    private(set) var collapseAllButton: NSButton!
     private(set) var statusLabel: NSTextField!
     private(set) var confirmButton: NSButton!
     private(set) var savePresetButton: NSButton?
@@ -129,6 +154,11 @@ final class CopySettingsAccessoryView: NSView {
     /// coordinates, which is what `CopySheetLayoutTests` measures (column membership, reading order).
     private(set) var rowBoxes: [NSView] = []
     private let grid = CopySettingsRowGrid()
+    private var gridHeightConstraint: NSLayoutConstraint!
+
+    /// Rows torn down by a rebuild. Held until the next runloop turn so a **click** on a disclosure
+    /// triangle cannot deallocate the button that is still dispatching its own action.
+    private var retiredRows: [NSView] = []
 
     /// Called by the panel: `.some(outcome)` for confirm/save, `nil` for cancel.
     var onFinish: ((Outcome?) -> Void)?
@@ -144,14 +174,15 @@ final class CopySettingsAccessoryView: NSView {
     }
 
     /// The rows a sheet with this switch would draw — pure, so the count in a test is the count the
-    /// layout uses (081 §2's 「行数 13 + 全部子项数」 is this function's output).
-    static func rows(showsChildren: Bool) -> [Row] {
+    /// layout uses (081 §2's 「行数 15 + 全部子项数」 is this function's output). `collapsed` is the
+    /// disclosure state: a collapsed card contributes its own row and none of its parameters.
+    static func rows(showsChildren: Bool,
+                     collapsed: Set<EditSnapshotSection> = []) -> [Row] {
         var out: [Row] = []
         for section in EditSnapshotSection.panelOrder {
             out.append(.card(section))
-            if showsChildren {
-                out.append(contentsOf: section.children.map { .child($0, card: section) })
-            }
+            guard showsChildren, !collapsed.contains(section) else { continue }
+            out.append(contentsOf: section.children.map { .child($0, card: section) })
         }
         return out
     }
@@ -205,41 +236,25 @@ final class CopySettingsAccessoryView: NSView {
         info.widthAnchor.constraint(equalToConstant: CopySettingsSheet.gridWidth).isActive = true
         root.addArrangedSubview(info)
 
-        // The rows: cards and (optionally) their parameters, in the inspector's own order.
-        rows = Self.rows(showsChildren: showsChildren)
-        for (index, row) in rows.enumerated() {
-            switch row {
-            case .card(let section):
-                let box = NSButton(checkboxWithTitle: section.title,
-                                   target: self, action: #selector(toggledCard(_:)))
-                box.tag = index
-                box.state = selection.contains(section) ? .on : .off
-                box.isEnabled = section.isCopyable
-                if let help = section.help { box.toolTip = help }
-                checkboxes[section] = box
-                rowBoxes.append(contain(box, indent: 0))
-            case .child(let child, _):
-                let box = NSButton(checkboxWithTitle: child.title,
-                                   target: self, action: #selector(toggledChild(_:)))
-                box.tag = index
-                box.state = selection.contains(child) ? .on : .off
-                box.controlSize = .small
-                box.toolTip = "\(child.title)：只复制这一个参数（\(child.section.title) 卡）"
-                childCheckboxes[child] = box
-                rowBoxes.append(contain(box, indent: 18))
-            }
+        // 319 §2.2: 展开全部 / 收起全部, above the checklist (they are about the list's shape, not about
+        // what gets pasted — that is the footer's business).
+        if showsChildren {
+            let disclosureRow = NSStackView(views: [expandAllControl(), collapseAllControl()])
+            disclosureRow.orientation = .horizontal
+            disclosureRow.spacing = 6
+            root.addArrangedSubview(disclosureRow)
         }
 
         grid.translatesAutoresizingMaskIntoConstraints = false
-        grid.rowViews = rowBoxes
-        for row in rowBoxes { grid.addSubview(row) }
         grid.columnCount = CopySettingsSheet.columnCount
         grid.columnSpacing = CopySettingsSheet.columnSpacing
         grid.rowHeight = CopySettingsSheet.rowHeight
         root.addArrangedSubview(grid)
+        gridHeightConstraint = grid.heightAnchor.constraint(
+            equalToConstant: CopySettingsSheet.gridHeight(for: 1))
         NSLayoutConstraint.activate([
             grid.widthAnchor.constraint(equalToConstant: CopySettingsSheet.gridWidth),
-            grid.heightAnchor.constraint(equalToConstant: CopySettingsSheet.gridHeight(for: rows.count)),
+            gridHeightConstraint,
         ])
 
         root.addArrangedSubview(separator())
@@ -256,6 +271,111 @@ final class CopySettingsAccessoryView: NSView {
         tools.spacing = 6
         root.addArrangedSubview(tools)
         root.addArrangedSubview(buttonRow())
+
+        rebuildRows()
+    }
+
+    /// Rebuild the grid from `rows(showsChildren:collapsed:)`.
+    ///
+    /// Called on construction and whenever the disclosure state changes. The controls are **not**
+    /// reused across rebuilds: `rows` is the authority on what is drawn, and a checkbox holding a stale
+    /// `tag` would act on the wrong row (`tag` is an index into `rows`).
+    private func rebuildRows() {
+        for view in rowBoxes { view.removeFromSuperview() }
+        if !rowBoxes.isEmpty {
+            retiredRows.append(contentsOf: rowBoxes)
+            DispatchQueue.main.async { [weak self] in self?.retiredRows.removeAll() }
+        }
+        rowBoxes = []
+        checkboxes = [:]
+        childCheckboxes = [:]
+        disclosureButtons = [:]
+
+        rows = Self.rows(showsChildren: showsChildren, collapsed: collapsedCards)
+        for (index, row) in rows.enumerated() {
+            switch row {
+            case .card(let section):
+                rowBoxes.append(cardRow(section, index: index))
+            case .child(let child, _):
+                rowBoxes.append(childRow(child, index: index))
+            }
+        }
+
+        grid.rowViews = rowBoxes
+        for row in rowBoxes { grid.addSubview(row) }
+        gridHeightConstraint?.constant = CopySettingsSheet.gridHeight(for: rows.count)
+        grid.needsLayout = true
+    }
+
+    /// A card row: disclosure triangle, then the card's (three-state) checkbox.
+    private func cardRow(_ section: EditSnapshotSection, index: Int) -> NSView {
+        let box = NSButton(checkboxWithTitle: section.title,
+                           target: self, action: #selector(toggledCard(_:)))
+        box.tag = index
+        box.allowsMixedState = true
+        box.state = cardState(for: section)
+        box.isEnabled = section.isCopyable
+        if let help = section.help { box.toolTip = help }
+        checkboxes[section] = box
+
+        let holder = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(box)
+
+        var constraints: [NSLayoutConstraint] = [
+            box.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+            box.trailingAnchor.constraint(lessThanOrEqualTo: holder.trailingAnchor),
+        ]
+        if showsChildren {
+            let triangle = disclosureButton(for: section, index: index)
+            holder.addSubview(triangle)
+            disclosureButtons[section] = triangle
+            constraints += [
+                triangle.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
+                triangle.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+                triangle.widthAnchor.constraint(equalToConstant: CopySettingsSheet.disclosureWidth),
+                box.leadingAnchor.constraint(equalTo: triangle.trailingAnchor, constant: 2),
+            ]
+        } else {
+            constraints.append(box.leadingAnchor.constraint(equalTo: holder.leadingAnchor))
+        }
+        NSLayoutConstraint.activate(constraints)
+        return holder
+    }
+
+    private func disclosureButton(for section: EditSnapshotSection, index: Int) -> NSButton {
+        let triangle = NSButton(title: "", target: self, action: #selector(toggledDisclosure(_:)))
+        triangle.bezelStyle = .disclosure
+        triangle.setButtonType(.onOff)
+        triangle.title = ""
+        triangle.tag = index
+        triangle.translatesAutoresizingMaskIntoConstraints = false
+        // On = expanded (triangle pointing down), off = collapsed. Not a checkbox: it is the list's
+        // shape, and it never touches `selection`.
+        triangle.state = collapsedCards.contains(section) ? .off : .on
+        triangle.toolTip = collapsedCards.contains(section)
+            ? "展开「\(section.title)」的参数"
+            : "收起「\(section.title)」的参数"
+        return triangle
+    }
+
+    /// A parameter row: indent 18, `.small` font (§2.3), tooltip saying exactly what one row copies.
+    private func childRow(_ child: EditSnapshotChild, index: Int) -> NSView {
+        let box = NSButton(checkboxWithTitle: child.title,
+                           target: self, action: #selector(toggledChild(_:)))
+        box.tag = index
+        box.state = selection.contains(child) ? .on : .off
+        box.controlSize = .small
+        box.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        box.toolTip = "只复制这一个参数（\(child.section.title) 卡）"
+        childCheckboxes[child] = box
+
+        // The indent is measured from the card's **checkbox**, which itself starts right of the
+        // disclosure triangle — so the parameter rows line up under the card's own words.
+        let indent = showsChildren
+            ? CopySettingsSheet.disclosureWidth + 2 + CopySettingsSheet.childIndent
+            : CopySettingsSheet.childIndent
+        return contain(box, indent: indent)
     }
 
     private func contain(_ box: NSButton, indent: CGFloat) -> NSView {
@@ -291,6 +411,22 @@ final class CopySettingsAccessoryView: NSView {
         selectNoneButton = NSButton(title: "全不选", target: self, action: #selector(chooseNone(_:)))
         selectNoneButton.bezelStyle = .rounded
         return selectNoneButton
+    }
+
+    private func expandAllControl() -> NSButton {
+        expandAllButton = NSButton(title: "展开全部", target: self,
+                                   action: #selector(expandAll(_:)))
+        expandAllButton.bezelStyle = .rounded
+        expandAllButton.controlSize = .small
+        return expandAllButton
+    }
+
+    private func collapseAllControl() -> NSButton {
+        collapseAllButton = NSButton(title: "收起全部", target: self,
+                                     action: #selector(collapseAll(_:)))
+        collapseAllButton.bezelStyle = .rounded
+        collapseAllButton.controlSize = .small
+        return collapseAllButton
     }
 
     private func buttonRow() -> NSStackView {
@@ -336,13 +472,37 @@ final class CopySettingsAccessoryView: NSView {
 
     @objc private func toggledCard(_ sender: NSButton) {
         guard rows.indices.contains(sender.tag), case .card(let section) = rows[sender.tag] else { return }
-        selection.set(section, sender.state == .on)
+        // The **model** decides, not the control's state. AppKit has already flipped the button (and a
+        // mixed button flips to `.on`), and the tests drive the same action through `click(_:)`; reading
+        // `cardState` keeps one rule for both: on → off, off/mixed → on. A mixed card clicked by the
+        // user means 「这一张我全要」 — the alternative (mixed → off) would throw away parameters the user
+        // checked one by one, which is the one thing a tri-state parent must not do.
+        let wantOn = cardState(for: section) != .on
+        selection.set(section, wantOn)
         refreshControls()
     }
 
     @objc private func toggledChild(_ sender: NSButton) {
         guard rows.indices.contains(sender.tag), case .child(let child, _) = rows[sender.tag] else { return }
-        selection.set(child, sender.state == .on)
+        // Same rule, for the same reason: the selection is the authority.
+        selection.set(child, !selection.contains(child))
+        refreshControls()
+    }
+
+    @objc private func toggledDisclosure(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag), case .card(let section) = rows[sender.tag] else { return }
+        setCollapsed(collapsedCards.contains(section) ? false : true, for: section)
+    }
+
+    @objc private func expandAll(_ sender: Any?) {
+        collapsedCards.removeAll()
+        rebuildRows()
+        refreshControls()
+    }
+
+    @objc private func collapseAll(_ sender: Any?) {
+        collapsedCards = Set(EditSnapshotSection.panelOrder)
+        rebuildRows()
         refreshControls()
     }
 
@@ -375,15 +535,40 @@ final class CopySettingsAccessoryView: NSView {
         onFinish?(nil)
     }
 
+    /// Collapse / expand one card's parameter rows. Presentation only.
+    func setCollapsed(_ collapsed: Bool, for section: EditSnapshotSection) {
+        if collapsed { collapsedCards.insert(section) } else { collapsedCards.remove(section) }
+        rebuildRows()
+        refreshControls()
+    }
+
+    /// The state a card's checkbox should show: every parameter of the card on (`on`), none (`off`), or
+    /// some (`mixed`). Cards with no parameter rows at all — 蒙版 — are plain on/off.
+    func cardState(for section: EditSnapshotSection) -> NSButton.StateValue {
+        let children = section.children
+        guard !children.isEmpty else {
+            return selection.sections.contains(section) ? .on : .off
+        }
+        let on = children.filter { selection.contains($0) }.count
+        if on == 0 { return .off }
+        return on == children.count ? .on : .mixed
+    }
+
     /// Push the model into the controls — after any change, so the popup reads 自定义 the moment a
     /// checkbox makes the set one no preset names (a popup that keeps saying 基本 while the boxes
     /// disagree is the classic two-sources-of-truth bug).
     func refreshControls() {
         for (section, box) in checkboxes {
-            box.state = selection.contains(section) ? .on : .off
+            box.state = cardState(for: section)
         }
         for (child, box) in childCheckboxes {
             box.state = selection.contains(child) ? .on : .off
+        }
+        for (section, triangle) in disclosureButtons {
+            triangle.state = collapsedCards.contains(section) ? .off : .on
+            triangle.toolTip = collapsedCards.contains(section)
+                ? "展开「\(section.title)」的参数"
+                : "收起「\(section.title)」的参数"
         }
         if let preset = selection.matchingPreset,
            let index = Self.popUpPresets.firstIndex(where: { $0 == preset }) {
@@ -395,18 +580,22 @@ final class CopySettingsAccessoryView: NSView {
         statusLabel.stringValue = selection.summary
     }
 
-    /// Programmatic equivalent of clicking a card's checkbox — used by the tests.
+    /// Programmatic equivalent of clicking a card's checkbox — used by the tests. Follows the same
+    /// rule the control does (the selection is the authority): on → off, off / mixed → on.
     func click(_ section: EditSnapshotSection) {
         guard let box = checkboxes[section] else { return }
-        box.state = box.state == .on ? .off : .on
         toggledCard(box)
     }
 
     /// Programmatic equivalent of clicking a parameter's checkbox.
     func click(_ child: EditSnapshotChild) {
         guard let box = childCheckboxes[child] else { return }
-        box.state = box.state == .on ? .off : .on
         toggledChild(box)
+    }
+
+    /// Programmatic equivalent of clicking a card's disclosure triangle.
+    func clickDisclosure(_ section: EditSnapshotSection) {
+        setCollapsed(!collapsedCards.contains(section), for: section)
     }
 
     // MARK: presenting
@@ -508,7 +697,7 @@ final class CopySettingsPanel: NSPanel {
 /// A plain `NSView` with manual frames rather than nested stacks: the column-major mapping (`i →
 /// (col: i / n, row: i % n)`) is one line here and is exactly what the layout test measures. `n` is
 /// `ceil(count / 3)`, so a short last column leaves its bottom empty instead of stretching rows.
-private final class CopySettingsRowGrid: NSView {
+final class CopySettingsRowGrid: NSView {
 
     var rowViews: [NSView] = []
     var columnCount = 3
