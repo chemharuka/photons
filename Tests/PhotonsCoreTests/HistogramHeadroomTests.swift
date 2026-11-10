@@ -60,9 +60,20 @@ final class HistogramHeadroomTests: XCTestCase {
     private func measure(_ graph: RenderGraph, canvas: ImageSize? = nil,
                          longEdge: Int = Histogram.frameSampleLongEdge)
         throws -> (histogram: Histogram, texture: MTLTexture, picture: ImageRect) {
-        let result = try graph.render(.neutral, options: RenderOptions(
+        // Two of this file's numbers are *not* about 锐化 or about the picture's ceiling:
+        //   · 314 turned 锐化's resting amount on, and an unsharp mask at the four blocks' edges
+        //     moves ~4 % of the samples one bin over (measured 4096 → 3904 at code 128). The subject
+        //     is which bin a block lands in, so the fixture is rendered with 锐化 explicitly at 0.
+        //   · 320 put the picture's ceiling at +2.3 EV (4.92), which would clip the +5 EV block to
+        //     +2.3 and take it out of the tail's last bin — that is the *picture's* ceiling, a
+        //     different knob with its own file (`HighlightCeilingTests`). This one is about the
+        //     **screen's** headroom, so the picture's ceiling is held out of the way at 1e6.
+        var doc = EditModel.neutral
+        doc.sharpen = SharpenGroup(amount: 0)
+        let result = try graph.render(doc, options: RenderOptions(
             canvas: canvas, scale: 1,
-            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: ceiling),
+            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: ceiling,
+                                    highlightCeiling: 1e6),
             useCache: false, wantsPixels: false,
             collectHistogram: true, histogramSampleLongEdge: longEdge))
         let texture = try XCTUnwrap(result.output, "a pixels-free render must hand back its texture")

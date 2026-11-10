@@ -218,9 +218,11 @@ final class EffectsTests: XCTestCase {
                                          edit: untouched,
                                          display: DisplayOptions(headroom: 1))
         XCTAssertNil(links.grain, "没有颗粒就没有 S3.7 链接 —— 不是「链接了但乘 0」")
-        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .toneMap, .color,
-                                        .vignette, .display])
-        XCTAssertEqual(links.pipeline.count, 7, "M1 的七段，一段不多")
+        // 314: 锐化's resting amount is 50, so a resting document visits S3.10 as well — the seven
+        // M1 stages plus the sharpen pass, and no grain (the subject of this file).
+        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .vignette, .toneMap,
+                                        .color, .sharpen, .display])
+        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S3.10")
 
         let (_, trace) = try renderWithTrace(graph, untouched)
         XCTAssertFalse(trace.executed.contains(.grain), "中性帧不许编码 S3.7")
@@ -348,10 +350,17 @@ final class EffectsTests: XCTestCase {
         // (whose Float16 readback error is ~1e-3, larger than the 1e-4 being asserted).
         let w = 1501, h = 1001
         let graph = try makeGraph(flat(width: w, height: h))
-        let neutral = try render(graph, .neutral)
+        // 329 — 锐化 at 0: this test compares the **vignette's** gain at four equal-pixel-radius
+        // probes to 1e-4, and S3.10 (resting 50 since 314) is a lattice pass on a 0.5-px grid — on
+        // this odd-sized canvas its 2 × 2 cells are not symmetric about the centre, which alone is a
+        // 1e-3 asymmetry in the gain (measured 0.90729 vs 0.90836). The contour's symmetry is the
+        // claim; the sharpener's half-pixel phase is not.
+        var flatDoc = EditModel.neutral
+        flatDoc.sharpen = SharpenGroup(amount: 0)
+        let neutral = try render(graph, flatDoc)
         XCTAssertGreaterThan(abs(w - h), 100, "这条测试需要一个明确的非正方形帧")
 
-        var edit = EditModel.neutral
+        var edit = flatDoc
         edit.effects.vignetteAmount = -50
         edit.effects.vignetteMidpoint = 50
         edit.effects.vignetteFeather = 50

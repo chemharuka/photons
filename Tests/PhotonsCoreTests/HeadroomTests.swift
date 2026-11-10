@@ -30,7 +30,12 @@ final class HeadroomTests: XCTestCase {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         let image = syntheticImage()
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "headroom-test"))
-        let result = try graph.render(.neutral, options: RenderOptions(
+        // 314: the resting document sharpens (锐化 50), and an unsharp mask moves the very columns
+        // this test reads (the 1.0 step at column 16 rings to 0.9927). The subject here is the S4
+        // clamp, so the document is rendered with 锐化 explicitly at 0.
+        var doc = EditModel.neutral
+        doc.sharpen = SharpenGroup(amount: 0)
+        let result = try graph.render(doc, options: RenderOptions(
             canvas: nil, scale: 1, display: DisplayOptions(headroom: headroom),
             useCache: false, wantsPixels: true))
         return try XCTUnwrap(result.display)

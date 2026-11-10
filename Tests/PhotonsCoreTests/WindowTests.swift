@@ -187,33 +187,9 @@ final class WindowTests: XCTestCase {
         XCTAssertEqual(implicit.geometry, explicit.geometry)
         XCTAssertEqual(implicit.display, explicit.display)
 
-        let expected: [(String, String, String)] = [
-            ("geometry", "852f5668846d56f8bdb097213c2f25560fced26ae7ae1d263688276ceaf4a6f8",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=5"),
-            ("sceneLinear", "ce2f19ae8903be3ecaa68f4a530b48d62f189dc211dc2871a67ad7d5af2af16b",
-             "852f5668846d56f8bdb097213c2f25560fced26ae7ae1d263688276ceaf4a6f8|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
-            ("curve", "ccbbedd7754d98b40dd0aa2274f77c1381de98f1724baf6050b5669fcfdd378c",
-             "ce2f19ae8903be3ecaa68f4a530b48d62f189dc211dc2871a67ad7d5af2af16b|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
-            // 159: the contrast link is seeded by the tone map and feeds colour; alg=3.
-            // 228 换算子后重钉（alg=2→3）
-            ("toneMap", "adfd15ead7a524d68bdf87f4a9d792ff04b9272246974eb9b16b3f707077d10d",
-             "ccbbedd7754d98b40dd0aa2274f77c1381de98f1724baf6050b5669fcfdd378c|hi=-30.00000;sh=15.00000;alg=7"),
-            // 228 换算子后重钉（alg=2→3）
-            ("contrast", "bab6c75ad3d3bf76667ae15943eca98b5bc3494342cced7b2ae749bfb1fe76e3",
-             "adfd15ead7a524d68bdf87f4a9d792ff04b9272246974eb9b16b3f707077d10d|contrast|con=20.00000;alg=3"),
-            // 228 换算子后重钉（alg=2→3）
-            ("color", "9767d47c95c407aa69373a6685959f8e6701d9745ad914ef9c7b6b84e0e4f035",
-             "bab6c75ad3d3bf76667ae15943eca98b5bc3494342cced7b2ae749bfb1fe76e3|vib=15.00000;sat=-10.00000;alg=1"),
-            // 228 换算子后重钉（alg=2→3）
-            ("hsl", "f861eccbc32a780d5f913b7ed148cc8e0afad4181b74c0508b916a752f4d6ffe",
-             "9767d47c95c407aa69373a6685959f8e6701d9745ad914ef9c7b6b84e0e4f035|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            // 228 换算子后重钉（alg=2→3）
-            ("vignette", "9f97af1fe8f9bacf4e58b07e2097ccc58b42d02923d8418018f5501770e4bf85",
-             "f861eccbc32a780d5f913b7ed148cc8e0afad4181b74c0508b916a752f4d6ffe|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            // 228 换算子后重钉（alg=2→3）
-            ("display", "2359192db907ba5ace6b5cd5fe9d2e49f6ff7542eb5c233a7f00d0212da176fc",
-             "9f97af1fe8f9bacf4e58b07e2097ccc58b42d02923d8418018f5501770e4bf85|sRGB;bits=8;headroom=1.000|1500x1000"),
-        ]
+        // 329 — one composition, shared with `MaskTests` (`M1KeyVector`), so the two pins cannot
+        // disagree; the tokens are read from the constants instead of being typed here.
+        let expected = M1KeyVector.stages
 
         let actual: [String: String] = [
             "geometry": explicit.geometry, "sceneLinear": explicit.sceneLinear,
@@ -229,11 +205,13 @@ final class WindowTests: XCTestCase {
             "hsl": keys.hsl ?? "",
             "vignette": keys.vignette, "display": keys.display,
         ]
-        for (name, digest, canonical) in expected {
+        for (name, canonical) in expected {
             XCTAssertEqual(actual[name], canonical, "\(name): canonical text moved with outputWindow == nil")
-            XCTAssertEqual(sha256(canonical), digest, "\(name): the pinned digest is not SHA-256 of the text")
-            XCTAssertEqual(keyByStage[name], digest, "\(name): the graph's key differs from M1")
+            XCTAssertEqual(keyByStage[name], M1KeyVector.sha256(canonical),
+                           "\(name): the graph's key differs from M1")
         }
+        XCTAssertEqual(M1KeyVector.vectorDigest, M1KeyVector.pinnedDigest,
+                       "the M1 vector moved with outputWindow == nil")
         XCTAssertNil(explicit.maskAtlas)
         XCTAssertNil(explicit.localApply)
     }
@@ -398,9 +376,34 @@ final class WindowTests: XCTestCase {
         let window = ImageRect(x: 41, y: 23, width: 120, height: 90)
         let whole = try render(graph, edit, window: nil)
         let part = try render(graph, edit, window: window)
+
+        // 314/329 — **two claims, told apart.** S3.10 (锐化) became unconditional in 314, and it is a
+        // *neighbourhood* pass whose plane, block lattice and limiter window are anchored to the
+        // texture it is handed: in a 1:1 window that texture is the window, not the frame
+        // (`encodeSharpen` reads `plan.canvas`, `RenderGraph.swift:4835`; the aperture limit is the
+        // one `RenderOptions.outputWindow` states, `RenderGraph.swift:118-122`). So:
+        //   · with 锐化 at 0 the contract this test exists for holds **exactly** — a window is the
+        //     whole frame cut, to the byte, everywhere including the border;
+        //   · with the resting 50 the difference is S3.10's, is bounded by its own halo, and is
+        //     measured rather than assumed. A displaced picture (a wrong projection) would break
+        //     both halves, which is why the first one is kept strict.
+        var flat = edit
+        flat.sharpen = SharpenGroup(amount: 0)
+        let flatWhole = try render(graph, flat, window: nil)
+        let flatPart = try render(graph, flat, window: window)
+        let flatErr = pixelError(whole: flatWhole, part: flatPart, x: window.x, y: window.y)
+        print(String(format: "WINDOW vs WHOLE FRAME (flips, %@): 锐化 0 mean %.6f max %.6f",
+                     frame.keyString, flatErr.mean, flatErr.max))
+        XCTAssertEqual(flatErr.max, 0,
+                       "with 锐化 at 0 a window must be the whole frame cut, to the byte")
+
         let err = pixelError(whole: whole, part: part, x: window.x, y: window.y)
-        print(String(format: "WINDOW vs WHOLE FRAME (flips, %@): mean %.6f  max %.6f", frame.keyString, err.mean, err.max))
-        XCTAssertLessThan(err.mean, 0.001)
+        print(String(format: "WINDOW vs WHOLE FRAME (flips, %@): 锐化 50 mean %.6f max %.6f",
+                     frame.keyString, err.mean, err.max))
+        XCTAssertLessThan(err.mean, 0.005,
+                          "S3.10's window lattice may move a unit-of-last-place, not a tone")
+        XCTAssertLessThan(err.max, 0.25,
+                          "the difference is an S3.10 halo, not a displaced picture (max \(err.max))")
     }
 
     /// A window with a canvas that matches it exactly is the same pixels as no canvas at all: the

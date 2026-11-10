@@ -377,12 +377,16 @@ final class SharpenGoldenImpactTests: XCTestCase {
             print("314 ·   默认 == 金值 ? \(sharp.sha256() == golden.pixelSHA256) "
                   + "· 显式0 == 金值 ? \(flat.sha256() == golden.pixelSHA256)")
 
-            // The recorded golden is the pre-314 identity frame: the explicit-0 document must still
-            // reproduce it byte for byte (that is also §3.4's reference, at 0.000|Δ|).
-            XCTAssertEqual(flat.sha256(), golden.pixelSHA256,
-                           "\(name): explicit 0 is no longer the recorded frame")
-            XCTAssertNotEqual(sharp.sha256(), golden.pixelSHA256,
-                              "\(name): the default 50 changed nothing — the golden would be current")
+            // 329 — the recorded goldens are now the **default-50** frames: 0a6e3f9 re-recorded the
+            // three `render-edit-*` files for 314, so this test's old model ("the golden is the
+            // pre-314 identity frame; explicit 0 reproduces it") is the one thing that did not
+            // follow. The two halves are swapped rather than dropped, and both still discriminate:
+            // the sharpened document must be the recorded frame, and the explicit-0 document must
+            // *not* be (a default that silently stopped applying would turn the second one green).
+            XCTAssertEqual(sharp.sha256(), golden.pixelSHA256,
+                           "\(name): the default 50 no longer reproduces the recorded frame")
+            XCTAssertNotEqual(flat.sha256(), golden.pixelSHA256,
+                              "\(name): explicit 0 is the recorded frame — the default changed nothing")
             XCTAssertLessThan((sumDC / n) / 255, 0.005,
                               "\(name): the mean low-frequency block moved "
                               + "\((sumDC / n) / 255 * 100) % — not a high-frequency change")

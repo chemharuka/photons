@@ -692,6 +692,30 @@ public enum RenderKeyChain {
             dehaze = link
             toneMapSeed = link
         }
+        // 116/329 — **the vignette runs before S2, so its material has to reach S2's seed.**
+        //
+        // 116 moved the vignette into the linear chain (`RenderStage.order`: … curve → dehaze →
+        // **vignette** → toneMap …), but this chain kept building the `vignette` link at its pre-116
+        // place — after `detailFX`, i.e. *below* S2's seed. Nothing downstream of S2 named the 暗角
+        // parameters, and since 314 turned 锐化's resting amount on (50), the last stage that owns a
+        // generic cache entry is S3.10: the composite resume in `RenderGraph.render` (081) compared a
+        // key with no `vig=` in it and handed back the **previous frame**. Measured on this lane
+        // before this block: `EditModel.neutral` then the same document at `vignetteAmount = -80` on
+        // one graph → both frames `sha 1ad62e37…` (`s3-vignette` skipped as a hit); with
+        // `useCache: false` the same pair is `1ad62e37…` / `a8660abe…`. `RenderTests
+        // .testVignetteDarkensTheCornersNotTheCentre` is the assertion that caught it.
+        //
+        // The token is appended **only when the vignette is not the identity**
+        // (`vignetteAmount == 0` — the kernel's own `identity` predicate), so every neutral document
+        // keeps its chain byte for byte (§3.2 discipline) and every pinned key stays put; the
+        // `vignette` link itself keeps its old spelling and its old place, so S3c's own entry and the
+        // display seed do not move.
+        if edit.effects.vignetteAmount != 0 {
+            toneMapSeed = KeyBuilder(KeyBuilder.digest(of: toneMapSeed))
+                .add("vignette")
+                .add(mat(.vignette))
+                .canonical
+        }
         // 323 — **the picture's ceiling is key material for S2, not only for S4.** `display.keyString`
         // reaches the chain in the *display* link, and 320 stopped there; but the clamp that reads
         // `highlightCeiling` runs at the end of S2 (`s2_tone_map.metal`, both branches) and in the

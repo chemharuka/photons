@@ -171,8 +171,14 @@ final class BeforeAfterTests: XCTestCase {
         // to be a real one, and why this test pins it rather than leaving it to chance.
         var plain = doc
         plain.geometry = .identity
+        // 314: `EditModel.neutral` carries 锐化 50, so the resting document is **not** "the decode"
+        // any more — S3.10 is an unsharp mask. What "clearing the parameters" means for this
+        // comparison is the neutral document *with 锐化 at 0*; the sharpened frame is a different
+        // picture on purpose (314's whole point) and `SharpenGoldenImpactTests` owns it.
+        var plainNeutral = EditModel.neutral
+        plainNeutral.sharpen = SharpenGroup(amount: 0)
         let originalOfPlain = try render(graph, plain, options(source: .decoded, canvas: Self.viewport))
-        let neutralOfPlain = try render(graph, .neutral, options(canvas: Self.viewport))
+        let neutralOfPlain = try render(graph, plainNeutral, options(canvas: Self.viewport))
         let plainDelta = maxCodeDelta(originalOfPlain, neutralOfPlain)
         print("geometry-free document: decode vs neutral maxΔ=\(String(format: "%.3f", plainDelta.delta)) codes")
         XCTAssertLessThanOrEqual(plainDelta.delta, 1,
@@ -399,9 +405,12 @@ final class BeforeAfterTests: XCTestCase {
         if let texture = edited.output { graph.recycle(output: texture) }
         // `allCases` 是「每个文档都会跑的阶段」，条件阶段不在里面；这份 fixture 带 contrast = 35，
         // 098 之后它多跑一个 `.contrast`。所以比的是**这个文档自己的 pipeline**，不是 allCases。
+        // 314: the fixture is a resting document, and the resting document now visits S3.10
+        // (`hasSharpen`), so the constant says so instead of the assertion hand-listing eight stages.
         let expected = RenderStage.pipeline(hasMasks: false, hasLocalColor: false, hasHSL: false,
                                             hasGrain: false, hasBW: false, hasGrade: false,
-                                            hasDetailFX: false, hasHeal: false, hasContrast: true)
+                                            hasDetailFX: false, hasHeal: false, hasContrast: true,
+                                            hasSharpen: true)
         XCTAssertEqual(edited.trace.executed, expected)
         XCTAssertTrue(edited.trace.executed.contains(.contrast), "098: 有对比度的文档必须跑 S1.8")
     }
