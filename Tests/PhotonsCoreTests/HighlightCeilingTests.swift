@@ -44,6 +44,23 @@ final class HighlightCeilingTests: XCTestCase {
     private let defaultLinear = HighlightCeiling.defaultLinear       // 4.924577653378805
     private let fourEV = HighlightCeiling.linear(ev: 4)              // 16
 
+    /// 323b — 本类会 `HighlightCeiling.setEV(…)`，那是**全局偏好**（`UserDefaults`）。之前没有
+    /// 保存/恢复，同一个进程里排在后面的用例（`HistogramOverWhiteReadoutTests` 的「画面里超过屏幕
+    /// 上限的通道」、以及任何渲染）会读到别的用例留下的上限值 —— 表现是「有时红有时绿」。
+    private var savedPref: Any?
+
+    override func setUp() {
+        super.setUp()
+        savedPref = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
+        UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+    }
+
+    override func tearDown() {
+        if let savedPref { UserDefaults.standard.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
+        else { UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey) }
+        super.tearDown()
+    }
+
     // MARK: - fixtures
 
     private func graph(_ image: LinearImage, _ id: String) throws -> RenderGraph {
