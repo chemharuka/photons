@@ -137,7 +137,7 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
     case inconsistent
     /// The fit is rank-deficient: the new line repeats what the others already said.
     case degenerate
-    /// The answer exists but is outside the slider's ±100.
+    /// The answer exists but is outside the slider's own `PerspectiveMap.limit` (347: ±200).
     case outOfRange
 
     /// What the card says. Short enough for one row (the row is 22 pt high).
@@ -148,7 +148,7 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
         case .nearParallel: return "两条线几乎平行，没有信息"
         case .inconsistent: return "这些线互相矛盾，未应用"
         case .degenerate: return "新线与已有线重复，未应用"
-        case .outOfRange: return "需要的透视超出 ±100"
+        case .outOfRange: return "需要的透视超出 ±\(Int(PerspectiveMap.limit))"
         }
     }
 }

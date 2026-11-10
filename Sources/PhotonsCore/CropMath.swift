@@ -280,6 +280,12 @@ extension AspectLock: Codable {
 /// 3° acceptance card rectifies to 0.16° instead of 0.00° for the same reason (the card tapers
 /// *linearly*, a mirrored keystone is projective — see `testFiftyRectifiesTheThreeDegreeCard`).
 ///
+/// **347 — the travel is ±200, the unit is still 100.** The two numbers were the same constant until
+/// a document needed more than 6° of correction; splitting them is what makes the widening safe:
+/// `limit` (200) is the clamp and the slider's track, `strengthUnit` (100) is the divisor the warp
+/// is scaled by. So 100 is today's 0.21 to the last bit, 200 is 0.42 (**12.39°** of convergence, and
+/// `w ≥ 1 − 0.42/2 = 0.79` — the quad stays convex), and no existing document moves.
+///
 /// ## The canvas
 ///
 /// The warped picture is a convex quadrilateral; the canvas is the **largest axis-aligned rectangle
@@ -288,12 +294,24 @@ extension AspectLock: Codable {
 /// in closed form (see `inscribedRect`), never by search.
 public struct PerspectiveMap: Sendable, Equatable {
 
-    /// The slider's range, and the one place it is clamped.
-    public static let limit = 100.0
-    /// `v` at full travel: 6° of convergence on a square frame (`2·tan 6°`).
+    /// The slider's range, and the one place a document value is clamped. **347** — ±200: the
+    /// travel the user asked for after ±100 ran out on real keystones. It is *only* the clamp and
+    /// the slider's track; the strength is scaled by `strengthUnit`, never by this number (see
+    /// `verticalStrength` for the trap).
+    public static let limit = 200.0
+    /// **347** — the unit the strength is divided by: **100**, hard-wired, no longer `limit`.
+    ///
+    /// The strength used to read `-vertical / PerspectiveMap.limit * tangentPerUnit`. Widening
+    /// `limit` to 200 under that formula would have **halved** the strength at slider 100 and
+    /// repainted every document in the library — a re-parametrisation, not a wider travel. Fixing
+    /// the denominator at 100 makes `|v| ≤ 100` bit-for-bit what it was and leaves 200 to mean
+    /// exactly twice today's warp (0.42). `PerspectiveRange347Tests` pins both halves.
+    public static let strengthUnit = 100.0
+    /// `v` at 100 units of travel: 6° of convergence on a square frame (`2·tan 6°`). At the new end
+    /// of the travel, 200 units is `0.42`, i.e. 12.39° of convergence.
     public static let tangentPerUnit = 0.21
 
-    public var vertical: Double      // clamped −100…100
+    public var vertical: Double      // clamped −200…200 (347; was ±100)
     public var horizontal: Double
 
     public init(vertical: Double, horizontal: Double) {
@@ -301,7 +319,7 @@ public struct PerspectiveMap: Sendable, Equatable {
         self.horizontal = PerspectiveMap.clamp(horizontal)
     }
 
-    /// A value read from a document, made legal: finite and inside ±100.
+    /// A value read from a document, made legal: finite and inside ±`limit` (347: ±200).
     static func clamp(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max(value, -limit), limit)
@@ -316,8 +334,12 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// The slider's strength as a **tangent**, `v = −slider/100 · 0.21`: **negative** at a positive
     /// slider, because the far end has to grow and `w = 1 − v·Y` has to *shrink* there. This is also
     /// the coefficient the matrix carries, unchanged — see the type's doc, §The strength.
-    public var verticalStrength: Double { -vertical / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
-    public var horizontalStrength: Double { -horizontal / PerspectiveMap.limit * PerspectiveMap.tangentPerUnit }
+    ///
+    /// 347 — the denominator is `strengthUnit` (**100**), not `limit` (**200**). The two were the
+    /// same number until the travel widened; tying the warp's scale to the clamp is the trap the
+    /// type doc calls out (`PerspectiveRange347Tests`' ① and ③ are that pin).
+    public var verticalStrength: Double { -vertical / PerspectiveMap.strengthUnit * PerspectiveMap.tangentPerUnit }
+    public var horizontalStrength: Double { -horizontal / PerspectiveMap.strengthUnit * PerspectiveMap.tangentPerUnit }
 
     /// The far edge's magnification relative to the frame: `1/(1 − s/2)` at a positive slider, i.e.
     /// `1.117` at `+100`, with the near edge at `1/(1 + s/2)` = `0.905` — the knob moves both ends now
