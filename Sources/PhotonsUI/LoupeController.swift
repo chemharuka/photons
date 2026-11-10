@@ -3973,6 +3973,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// — and the answer cannot drift from the shipped path.
     public func gestureOwner(atViewPoint point: CGPoint, clickCount: Int = 1) -> LoupeCanvasGesture {
         if isCropToolActive {
+            // 354 — a double-click **on a guide line** is 「删除这一条」, not 「双击框内 = 应用」. The
+            // line is drawn over the picture, so it is the innermost thing under the hand; every
+            // other point keeps 337's rule.
+            if clickCount >= 2, let mapping = cropMapping(),
+               cropTool.guideLineHit(atViewPoint: CGPoint(x: Double(point.x) * backingScale,
+                                                          y: Double(point.y) * backingScale),
+                                     mapping: mapping) != nil {
+                return .cropTool
+            }
             return LoupeCanvasGesture.crop(clickCount: clickCount, hit: cropHit(atViewPoint: point))
         }
         if isShapeCreateArmed { return .maskCreate }
@@ -4552,9 +4561,29 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func beginCropDrag(atViewPoint point: CGPoint, rotate: Bool = false,
                               viewport: ImageSize? = nil,
-                              backingScale scaleOverride: Double? = nil) -> Bool {
+                              backingScale scaleOverride: Double? = nil,
+                              clickCount: Int = 1) -> Bool {
         guard cropTool.isActive, let framing = framing(viewport: viewport) else { return false }
         let scale = scaleOverride ?? backingScale
+        // 354 — the lines come **first**: they are drawn on top of the picture, and with the tool
+        // armed 337's rule was 「按哪儿都开始新线」, which made an existing line impossible to grab.
+        // A press on a line is now 「move it」 (body) / 「move this end」 (endpoint), and a
+        // double-click on it is 「删除这一条」 — every press that misses a line falls through to the
+        // two stroke branches below, unchanged.
+        let devicePoint = CGPoint(x: Double(point.x) * scale, y: Double(point.y) * scale)
+        let guideMapping = framing.mapping(of: viewState)
+        if !cropTool.isDrawStraightenArmed {
+            if clickCount >= 2 {
+                if cropTool.deleteGuideLine(atViewPoint: devicePoint, mapping: guideMapping) {
+                    syncGuideLines()
+                    refreshCropTool()
+                    return true
+                }
+            } else if cropTool.beginGuideLineDrag(atViewPoint: devicePoint, mapping: guideMapping) {
+                syncGuideLines()
+                return true
+            }
+        }
         // 328 — armed with 画线拉直, a press on **any** point starts a line: no grip is taken, no
         // frame is drawn, and `⌘` is not a rotation (the whole canvas is the straighten tool while
         // the button is on, exactly like Lightroom's 拉直工具). The mapping is not needed until the
@@ -4597,6 +4626,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             syncGuideLines()
             return
         }
+        // 354 — a hand on a guide line: screen point → source pixel → stored. No solve, no write:
+        // one drag is one history row, and it is written on the release.
+        if cropTool.isDraggingGuideLine {
+            guard let framing = framing(viewport: viewport) else { return }
+            let scale = scaleOverride ?? backingScale
+            cropTool.continueGuideLineDrag(atViewPoint: CGPoint(x: Double(point.x) * scale,
+                                                                y: Double(point.y) * scale),
+                                           mapping: framing.mapping(of: viewState))
+            syncGuideLines()
+            return
+        }
         guard cropTool.isActive, cropTool.isDragging, let framing = framing(viewport: viewport) else {
             return
         }
@@ -4635,6 +4675,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             refreshCropTool()
             return
         }
+        // 354 — the release of a guide-line **edit** (body or endpoint): re-solve once, one row.
+        if cropTool.isDraggingGuideLine {
+            if let framing = framing() {
+                _ = cropTool.endGuideLineDrag(mapping: framing.mapping(of: viewState))
+            } else {
+                _ = cropTool.cancelGuideLineDrag()
+            }
+            syncGuideLines()
+            refreshCropTool()
+            return
+        }
         let angle = cropTool.draft.straighten
         let committed = session?.edit.geometry.straightenDegrees ?? angle
         cropTool.endDrag()
@@ -4646,6 +4697,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// Escape mid-drag.
     public func cancelCropDrag() {
+        // 354 — a hand on a guide line: Esc puts the endpoints back where the drag found them.
+        if cropTool.cancelGuideLineDrag() {
+            syncGuideLines()
+            refreshCropTool()
+            return
+        }
         if cropTool.isDrawingStraighten || cropTool.isDrawStraightenArmed {
             cropTool.cancelDrawStraighten()
             syncStraightenStroke()
@@ -4692,13 +4749,35 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// 337 — the accepted lines (dim), the live stroke (white) and the withdrawn one (red).
+    ///
+    /// 354 — the accepted lines are **re-projected here, from source pixels**, with the camera the
+    /// overlay is about to be drawn with; the overlay only ever receives view points it can stroke.
+    /// `nil` mapping (no photo yet) draws no line: a view point without a projection would be the
+    /// cached coordinate this task removed.
     private func syncGuideLines() {
-        cropOverlay.guideLines = cropTool.acceptedGuideLineSegments
+        // **One projection per sync** — and none at all when there is nothing to project, so a zoom
+        // or a pan on a document without guide lines costs exactly the calls it always did (333's
+        // `framingCalls == 1` per wheel event is an assertion about that budget).
+        if cropTool.guideLines.isEmpty && cropTool.rejectedGuideLine == nil {
+            cropOverlay.guideLines = []
+            cropOverlay.rejectedGuideLine = nil
+        } else if let mapping = cropMapping() {
+            cropOverlay.guideLines = cropTool.guideLineSegments(mapping: mapping)
+            if let rejected = cropTool.rejectedGuideLine {
+                let p = cropTool.guideLineProjection(mapping: mapping)
+                cropOverlay.rejectedGuideLine = CropToolSegment(a: p.screenPoint(rejected.a),
+                                                                b: p.screenPoint(rejected.b))
+            } else {
+                cropOverlay.rejectedGuideLine = nil
+            }
+        } else {
+            // No projection at all (no photo yet): a view point without a mapping would be the
+            // cached coordinate this task removed, so draw nothing.
+            cropOverlay.guideLines = []
+            cropOverlay.rejectedGuideLine = nil
+        }
         cropOverlay.guideLineStroke = cropTool.guideLineStroke
         cropOverlay.guideLineStrokeAlpha = cropTool.guideLineStrokeAlpha
-        cropOverlay.rejectedGuideLine = cropTool.rejectedGuideLine.map {
-            CropToolSegment(a: $0.start, b: $0.end)
-        }
         cropOverlay.rejectedGuideLineAlpha = cropTool.rejectedGuideLineAlpha
     }
 
@@ -4998,6 +5077,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     private func setCropOverlayLayout(_ layout: CropToolLayout?) {
         cropOverlay.layout = layout
+        // 354 — the lines ride the **same** projection as the frame they sit under: every zoom, pan,
+        // fit and bridge frame that rebuilds the layout rebuilds them too, from source pixels. This
+        // is the line the user reported missing (「尺寸缩放后引导线还保持不变」): the overlay used to
+        // be handed a view point captured at draw time and never saw a new camera.
+        syncGuideLines()
         let rect = layout.map { l -> CGRect in
             let xs = l.corners.map(\.x), ys = l.corners.map(\.y)
             guard let minX = xs.min(), let maxX = xs.max(),
