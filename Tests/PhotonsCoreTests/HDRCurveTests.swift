@@ -605,21 +605,16 @@ final class HDRCurveTests: XCTestCase {
     /// steepest end the product accepts. `2` is a guard against a hand-written document (40 in the
     /// uniform would render at 40), not a picture decision.
     ///
-    /// 派单 137: the bound is **symmetric** (`[-2, 2]`), because a curve may descend as a whole. The
-    /// floor is `−tailSlopeLimit`, not a second literal, so the two ends cannot drift apart.
-    ///
     /// The kernel's clamp is **parsed**, not grepped for a comment: an edit that puts `1.0` back turns
     /// this red even if the header is rewritten to match — the discipline
     /// `testAxisIsHalfSDRHalfHDRAndTheKernelHeaderAgrees` established for the axis numbers.
     func testTheTailSlopeCeilingIsTwoOnBothSides() throws {
         XCTAssertEqual(HDRCurve.tailSlopeLimit, 2, "079 A5: 末段斜率上限 1 → 2")
-        XCTAssertEqual(HDRCurve.tailSlopeFloor, -2, "137: 下界按绝对值对称（反相曲线不再被压成天花板）")
+        XCTAssertEqual(HDRCurve.tailSlopeFloor, 0, "下界不变：反转仍被压成零斜率的天花板")
 
-        // The clamp: [-2, 2], both ends inclusive, everything between passing through untouched.
+        // The clamp: [0, 2], both ends inclusive, everything between passing through untouched.
         func clampTail(_ s: Double) -> Double { HDRCurve.clampTailSlope(s) }
-        XCTAssertEqual(clampTail(-3), -2, "负斜率超过幅度 → −2")
-        XCTAssertEqual(clampTail(-2), -2)
-        XCTAssertEqual(clampTail(-1), -1, "反相曲线的末段斜率原样通过")
+        XCTAssertEqual(clampTail(-3), 0, "负斜率 → 0")
         XCTAssertEqual(clampTail(0), 0)
         XCTAssertEqual(clampTail(1), 1, "恰恰 1 原样通过（旧上限的最边缘）")
         XCTAssertEqual(clampTail(1.5), 1.5, "1 与 2 之间原样通过 —— 这就是本单放开的区间")
@@ -627,15 +622,13 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(clampTail(7.5), 2, "上界 2：手改文档的荒唐值被挡住")
         let wide: Float = 3.25
         XCTAssertEqual(HDRCurve.clampTailSlope(wide), 2, "Float 与 Double 两条入口同一个夹取")
-        let low: Float = -3.25
-        XCTAssertEqual(HDRCurve.clampTailSlope(low), -2, "Float 下界同样是 −tailSlopeLimit")
 
         // …and the kernel: **both** sites — the W gain's own continuation and `hdr_channel`'s. Missing
         // one of the two is exactly the bug this test exists to catch (the W branch is the luminance
         // curve, i.e. the one a user's "steeper end" is usually drawn on).
         let url = Self.repoRoot.appendingPathComponent("Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal")
         let source = try String(contentsOf: url, encoding: .utf8)
-        let re = try NSRegularExpression(pattern: "clamp\\((?:slope|p\\.c\\.x), (-?[0-9.]+), (-?[0-9.]+)\\)")
+        let re = try NSRegularExpression(pattern: "clamp\\((?:slope|p\\.c\\.x), ([0-9.]+), ([0-9.]+)\\)")
         let matches = re.matches(in: source, range: NSRange(source.startIndex..., in: source))
         XCTAssertEqual(matches.count, 2,
                        "末段斜率在 kernel 里有两处夹取（W 的增益 + hdr_channel），改成 \(matches.count) 处就是漏改或有第三处")
@@ -766,63 +759,60 @@ final class HDRCurveTests: XCTestCase {
               + " · legacy doc (tail 0.6) frame sha \(legacyFrame.sha256())")
     }
 
-    // MARK: - 派单 137: the curve may descend as a whole
+    // MARK: - 357: 137 reverted — a descending curve folds to the identity
 
-    /// An inverted curve is a film-negative tool, not an error: R/G/B may all descend, W stays the
-    /// identity (a gain can never be negative), and the frame's display tones swap.
+    /// A descending point list is **not** a shape this engine builds. 137 let it invert the picture
+    /// (film negative); 357 withdrew that, so `buildOne` sorts, de-dupes, sees a step **down** and
+    /// takes the historical fold fallback: the table is the identity — W included, because the
+    /// "W is never inverted" substitution of 137 has nothing left to guard — and the frame keeps the
+    /// bytes a document with **no curve** renders.
     ///
-    /// The points are the card's `(0,1) → (1,0)`: over the SDR half that is `v = 0.5 − u`, i.e.
-    /// **display code `e → 1 − e`**. The frame is built from the linear lights whose display values
-    /// are 0.1 and 0.9, so the inverted frame must read 0.9 and 0.1.
-    func testInvertedCurveSwapsSDRTonesAndKeepsWIdentity() throws {
-        let low = Float(HDRCurveAxis.srgbDecode(0.1))
-        let high = Float(HDRCurveAxis.srgbDecode(0.9))
-        let graph = try makeGraph(bands([low, high]), identity: "hdr-curve-invert")
-
-        let inverted = [CurvePoint(0, 1), CurvePoint(1, 0)]
-        var edit = EditModel.neutral
-        edit.curve = CurveGroup(white: inverted, red: inverted, green: inverted, blue: inverted)
-
-        let tables = CurveLUT.build(edit.curve)
-        let n = CurveLUT.size
-        XCTAssertTrue(CurveLUT.isIdentityTable(tables[0..<n]),
-                      "137: an inverted W is the identity — a negative gain must never reach the kernel")
-
-        let frame = try render(graph, edit)
-        let out = bandValues(frame, count: 2)
-        print(String(format: "137 inverted SDR · left %.4f right %.4f (want 0.9 / 0.1)",
-                     Double(out[0]), Double(out[1])))
-        XCTAssertEqual(out[0], 0.9, accuracy: 0.02, "left (0.1) must come back near 0.9")
-        XCTAssertEqual(out[1], 0.1, accuracy: 0.02, "right (0.9) must come back near 0.1")
-        XCTAssertTrue(frame.rgba.allSatisfy { $0.isFinite && $0 >= 0 },
-                      "an inverted frame must not contain NaN or negative pixels")
-
-        // The explicit reference: R/G/B tables set to `1 − x` and W the identity. Compare the CPU
-        // operator (the kernel's arithmetic in Double) code by code.
-        let ref = (0..<n).map { 1 - Float($0) / Float(n - 1) }
+    /// The nail is two-sided: the table is the identity table **bit for bit** (not "close to"), and
+    /// the frame's digest equals the no-curve frame's digest, so no pixel and no fp16 step can hide
+    /// a partial inversion. `Tests/PhotonsCoreTests/CurveInvertTests.swift` (137's own suite) is
+    /// gone; this is the replacement that pins the opposite direction.
+    func testADescendingCurveFoldsToIdentity() throws {
+        // The card's `(0,2) → (2,0)`: the exact shape 137 accepted (a `v = 1 − u` negative). Every
+        // adjacent pair descends after the sort, so there is no non-decreasing reading of it.
+        let descending = [CurvePoint(0, 2), CurvePoint(1, 1), CurvePoint(2, 0)]
         let identity = CurveLUT.identityTable()
-        var reference = [Float](repeating: 0, count: 4 * n)
-        for i in 0..<n { reference[i] = identity[i] }
-        for t in 1..<4 { for i in 0..<n { reference[t * n + i] = ref[i] } }
-        // A group whose tables *are* that reference: engine-coordinate endpoints (0,1) → (1,0).
-        let engineDescending = [CurvePoint(u: 0, v: 1), CurvePoint(u: 1, v: 0)]
-        let descending = CurveGroup(white: engineDescending, red: engineDescending,
-                                    green: engineDescending, blue: engineDescending)
-        let built = CurveLUT.build(descending)
-        var worstCodes = 0.0
-        for rgb in [(0.01, 0.01, 0.01), (0.1, 0.1, 0.1), (0.3, 0.2, 0.1),
-                    (0.9, 0.9, 0.9), (0.5, 0.7, 0.2)] {
-            let a = HDRCurve.pixel(rgb, tables: built)
-            let b = HDRCurve.pixel(rgb, tables: reference)
-            for (x, y) in [(a.0, b.0), (a.1, b.1), (a.2, b.2)] {
-                XCTAssertTrue(x.isFinite && x >= 0, "inverted curve produced \(x)")
-                let codes = abs(encodeD(x) - encodeD(y)) * 255
-                worstCodes = max(worstCodes, codes)
-            }
+        let n = CurveLUT.size
+
+        XCTAssertEqual(table(descending), identity, "下降点列必须落到 identity 兜底")
+        // Up-then-down has always been the same fallback (137 turned it into a *named* error; there
+        // is no error to name now — the document is simply not a curve this engine builds).
+        let mixed = [CurvePoint(0, 0), CurvePoint(1, 2), CurvePoint(2, 1)]
+        XCTAssertEqual(table(mixed), identity, "先升后降同样是 identity 兜底")
+
+        let group = CurveGroup(white: descending, red: descending,
+                               green: descending, blue: descending)
+        let tables = CurveLUT.build(group)
+        XCTAssertEqual(tables.count, CurveLUT.tableCount * n)
+        for t in 0..<CurveLUT.tableCount {
+            let slice = Array(tables[(t * n)..<((t + 1) * n)])
+            XCTAssertEqual(slice, identity, "第 \(t) 张表（0 = W）不是 identity")
+            XCTAssertTrue(CurveLUT.isIdentityTable(tables[(t * n)..<((t + 1) * n)]),
+                          "第 \(t) 张表没有带上 identity 位 —— kernel 会走算术分支而不是拷贝")
         }
-        print(String(format: "137 reference 1−x · worst %.3f 8-bit codes", worstCodes))
-        XCTAssertLessThanOrEqual(worstCodes, 1.0,
-                                 "the inverted table must match the explicit 1−x reference to one code")
+        // The tail-slope estimate of the identity table is 1 up to Float rounding
+        // (`(lut[N−1] − lut[N−2])·(N−1)` in Float is 0.99999994, not 1 — 080's estimate, not a defect).
+        for s in CurveLUT.slopes(tables) {
+            XCTAssertEqual(s, 1, accuracy: 1e-5, "identity 表的末段斜率必须是 1")
+        }
+
+        // …and the picture: byte-for-byte the no-curve frame.
+        let levels: [Float] = [0.02, 0.05, 0.18, 0.5, 1, 2, 4, 16]
+        let graph = try makeGraph(bands(levels), identity: "curve-descending-357")
+        let plainFrame = try render(graph, EditModel.neutral, headroom: 4096)
+        var folded = EditModel.neutral
+        folded.curve = group
+        let foldedFrame = try render(graph, folded, headroom: 4096)
+
+        print("357 descending→identity · no-curve sha \(plainFrame.sha256())"
+              + " · descending sha \(foldedFrame.sha256())")
+        XCTAssertEqual(foldedFrame.sha256(), plainFrame.sha256(),
+                       "下降点列必须与「无曲线」逐字节相同")
+        XCTAssertEqual(foldedFrame.rgba, plainFrame.rgba, "……逐像素也相同")
     }
 
     // MARK: - ⑧ sub-black passes through
