@@ -1418,16 +1418,25 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// (`0 → 0`), the second half blends in a black-point **level** move so the black end can really
     /// be moved — pushed down it reaches 0, pulled up it floats off the floor.
     ///
-    ///     t = blacks/100,  a = |t|,  m = smoothstep(0.5, 1, a)
-    ///     EV:    v *= exp2(3 · t · (1 − ½m) · wb)      wb = the 7 EV toe (full below −11.2 EV, 0 at −4.2)
-    ///     level: v  = toe(v + 0.005 · t · m · wl)      wl = a 2.5 EV window, −6.9 … −4.4 EV, C¹ clip at 0
+    ///     t = blacks/100,  a = |t|,  m = smoothstep(0.2, 1, a)          (level enters at 20)
+    ///     EV:    v *= exp2(3 · t · wb)                  wb = the 7 EV toe (full below −11.2, 0 at −4.2)
+    ///     level: v  = toe(v + 0.006 · t · m · wl)       wl = a 5 EV window, −6 … −1 EV, C¹ clip at 0
+    ///     342:   v  = toe(v + 0.006·t·m·wl − 0.060·a·m₅·wl₂)   m₅ = smoothstep(0.5, 1, a)
+    ///           wl₂ = 1 − smoothstep(0.020, 0.135, luma)      → the crush only (`t < 0`), and exactly
+    ///           0 for `a ≤ 0.5`, i.e. the whole first half of the travel is byte-identical to 073C
     ///
     /// Why the second half exists: a pure multiplier cannot move the black *point* (`0 → 0` for every
     /// gain), so `blacks = −100` used to leave the darkest pixels at 1/8 of their value — never at 0 —
     /// and `blacks = +100` could never float the black off the floor. The owner's brief (2026-10-27)
     /// was 「滑块开始为加减 EV，后面逐步变为修改电平」, which is exactly this blend. `m` is 0 for the
-    /// whole first half, so `|blacks| ≤ 50` is 073B's arithmetic bit for bit (and `RenderGraph` even
-    /// picks 073B's entry point there — see `blacksEVToLevelSplit`).
+    /// first fifth of the travel, so `|blacks| ≤ 20` is 073B's arithmetic bit for bit (and `RenderGraph`
+    /// even picks 073B's entry point there — see `blacksLevelEntry`).
+    ///
+    /// 342 (2026-11-10) widened the crush: 「现在 −100 大概只能让亮度 32/255 的变成 0，扩大到 −100 能让
+    /// 亮度 64/255 变为 0」. One coefficient cannot be two black points, so the second half carries a
+    /// **second** level (`B_LEV_CRUSH`, `tone_shape.metal`) that only exists above `|blacks| = 50`;
+    /// `blacks = −100` now reaches code 64 (measured 48.3 → 0) and leaves code 96 at 84.9/255.
+    /// `+` is untouched — it still lifts the black point by 0.006 (code 17.9) and no further.
     ///
     /// It used to be an affine level (`blk = −blacks/100·0.15`), which moved every pixel, including
     /// 50 % grey — that is not what the control is for. `+` still lifts the shadows.

@@ -157,9 +157,9 @@ final class LocalWhiteBalanceTests: XCTestCase {
                        + ";con=5.00000;hi=6.00000;sh=7.00000;wh=8.00000;bl=9.00000"
                        + ";hue=10.00000;sat=11.00000",
                        "the mask's document key must not gain a token for a derived gain")
-        XCTAssertEqual(StageAlgorithmVersion.localApply, 4,
+        XCTAssertEqual(StageAlgorithmVersion.localApply, 5,
                        "S1.6's pixels changed for the same parameters (159: contrast left S1.6 for S2.5)")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 4)
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 5)
         // And the gain is derived, not stored: decoding a document that carries only the WB pair
         // reproduces the same three numbers.
         let json = Data(#"{"amount":100,"temperature":30,"tint":12}"#.utf8)
