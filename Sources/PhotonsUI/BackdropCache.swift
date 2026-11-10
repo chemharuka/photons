@@ -122,18 +122,31 @@ public final class BackdropCache {
         /// source — kept the old top after 「最高亮度」 moved: the key did not move, so nothing was
         /// regenerated and `measureFrameHistogram` on it returned the ceiling it was made at.
         public let ceiling: Double
+        /// 344 — the document's **geometry**, spelled (`EditModel.geometryFingerprint`), or `""` for
+        /// a pre-183 geometry.
+        ///
+        /// Why it is a component of its own rather than "the digest already covers it": the digest is
+        /// a 64-bit hash of the whole document, so it moves for any edit *and says nothing*. The low
+        /// picture's failure mode was not "the digest is blind" but "a key that cannot name the
+        /// keystone is a key nobody can check", and a spelled token makes the two dimensions that
+        /// matter (`pvy`/`phx`, `cs=1`) visible in the string. It is appended only when non-empty, so
+        /// a keystone-free, source-spaced document keeps its pre-344 key byte for byte (验收 ②).
+        public let geometry: String
 
         public init(photo: String, develop: String, digest: String,
-                    ceiling: Double = HighlightCeiling.defaultLinear) {
+                    ceiling: Double = HighlightCeiling.defaultLinear,
+                    geometry: String = "") {
             self.photo = photo
             self.develop = develop
             self.digest = digest
             self.ceiling = ceiling
+            self.geometry = geometry
         }
 
         /// The whole document in one string; what "has it moved?" compares.
         public var identity: String {
             "\(photo)|\(develop)|\(digest)|\(String(format: "ceil=%.4f", ceiling))"
+                + (geometry.isEmpty ? "" : "|geo=\(geometry)")
         }
     }
 
@@ -162,6 +175,18 @@ public final class BackdropCache {
     public private(set) var generationCount = 0
     /// The last generation's own cost, in milliseconds, measured around `graph.render` on the queue.
     public private(set) var lastGenerationMilliseconds: Double = 0
+    /// 344 — the **scale** the last generation was rendered at.
+    ///
+    /// A receipt, not a knob: the whole picture is the one render in this class whose scale is not a
+    /// rung (`BackdropScale.renderScale`), so "is the low picture the same picture as the canvas" is a
+    /// question about two grids. The acceptance builds its reference render at *this* number instead
+    /// of re-deriving it, and a mismatch of the two scales is then a visible max|Δ| rather than a
+    /// silently different photograph.
+    public private(set) var lastScale: Double = 0
+    /// 344 — the **rung** (`FrameSnapshot.scale`) the last generation rendered from. The reference
+    /// render of 验收 ① has to develop the same buffer, or the two pictures are two resamplings of
+    /// the same photograph and max|Δ| measures the resampling instead of the edit.
+    public private(set) var lastRungScale: Float = 0
     /// Why the last attempt produced nothing (`nil` after a success).
     public private(set) var lastError: String?
 
@@ -223,7 +248,8 @@ public final class BackdropCache {
     /// longer names the document) — the controller then drops the texture instead of drawing it.
     @discardableResult
     func finish(_ texture: MTLTexture, key: Key, content: ImageRect, histogram: Histogram?,
-                milliseconds: Double, serial: Int) -> Bool {
+                milliseconds: Double, serial: Int, scale: Double = 0,
+                rungScale: Float = 0) -> Bool {
         guard serial == self.serial, inFlightSerial == serial, inFlight == key else {
             if inFlight == key { inFlight = nil }
             return false
@@ -236,6 +262,8 @@ public final class BackdropCache {
         self.histogram = histogram
         generationCount += 1
         lastGenerationMilliseconds = milliseconds
+        if scale > 0 { lastScale = scale }
+        if rungScale > 0 { lastRungScale = rungScale }
         lastError = nil
         return true
     }

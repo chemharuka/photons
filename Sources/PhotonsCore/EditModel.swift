@@ -1343,6 +1343,40 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal)
     }
 
+    /// 344 — the geometry half of the **whole-picture** (low-resolution full frame) cache key,
+    /// spelled rather than hashed so a cache directory (or a test's report line) explains itself:
+    /// `crop=…;rot=…;flip=…;q=…;pvy=…;phx=…;cs=1`.
+    ///
+    /// Empty for every document whose geometry is the pre-183 one — a source-spaced crop with no
+    /// 90° turn and no keystone — which is what makes the whole-picture key of such a document
+    /// **byte-identical** to the pre-344 one (`BackdropCache.Key.identity` appends nothing).
+    ///
+    /// Written only when the keystone or the crop's space is non-neutral — the two dimensions the
+    /// low-resolution whole picture used to miss — and then it spells *all six* geometry knobs, so
+    /// the keystoned case is greppable instead of being one more opaque digest.
+    public var geometryFingerprint: String {
+        guard perspectiveVertical != 0 || perspectiveHorizontal != 0 || cropSpace != .source else {
+            return ""
+        }
+        return spelledGeometry
+    }
+
+    /// The six dimensions, in the order the key material spells them (`;q`/`;pvy`/`;phx`/`;cs` only
+    /// when non-neutral, the `asp`/`car` discipline).
+    var spelledGeometry: String {
+        var s = "crop=\(crop.keyString);rot=\(k(straightenDegrees))"
+            + ";flip=\(flipHorizontal ? 1 : 0)\(flipVertical ? 1 : 0)"
+        if quarterTurns != 0 { s += ";q=\(quarterTurns)" }
+        if perspectiveVertical != 0 {
+            s += ";pvy=\(Int((perspectiveVertical * 10).rounded()))"
+        }
+        if perspectiveHorizontal != 0 {
+            s += ";phx=\(Int((perspectiveHorizontal * 10).rounded()))"
+        }
+        if let token = cropSpace.keyToken { s += ";\(token)" }
+        return s
+    }
+
     /// The rect the renderer feeds to S0: the stored crop, re-shaped by `aspectLock` when the lock
     /// names a ratio (the lock wins over a rect that disagrees with it), then clamped.
     ///
@@ -3112,4 +3146,18 @@ extension KeyedDecodingContainer where K == AnyCodingKey {
         }
         return fallback
     }
+}
+
+// MARK: - 344 · the geometry half of a whole-picture key
+
+public extension EditModel {
+    /// The document's geometry as one spelled string, or `""` for the pre-183 geometry.
+    ///
+    /// The low-resolution **whole picture** (`LowResFullFrame`) is cached by document, and the two
+    /// dimensions it used to be blind to are exactly the ones that are not in the picture's own
+    /// `renderCrop` — the **keystone** and the crop's **space**. `GeometryGroup.geometryFingerprint`
+    /// appends them (and, when it appends anything, spells the rest of the geometry too), so the
+    /// key can name what the pixels were rendered through. A keystone-free document answers `""`
+    /// and its key stays byte-identical to the pre-344 one.
+    var geometryFingerprint: String { geometry.geometryFingerprint }
 }

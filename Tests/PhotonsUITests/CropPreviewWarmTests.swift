@@ -97,9 +97,14 @@ final class CropPreviewWarmTests: XCTestCase {
         let commitMs = (CACurrentMediaTime() - commitStarted) * 1000
         // The fix, read synchronously: the commit itself asked for the new key (the observer's
         // 250 ms window cannot have fired yet — it would only be the second ask, and deduped).
-        XCTAssertEqual(provider.stats.warmRequests, 1,
-                       "the commit did not warm the new key (warmRequests"
-                       + " \(provider.stats.warmRequests))")
+        // 344 — the counter is **per key**: opening a photo now warms its own document too (the cold
+        // stand-in), so a session has legitimately one warm per document. What 311 pins is "the commit
+        // asks for its new key exactly once", and that is what is asserted here.
+        let newKeyForCommit = ThumbKey.hdJPEG(contentHash: asset.contentHash, document: session.edit)
+        XCTAssertEqual(provider.stats.warmRequestsByDigest[newKeyForCommit.digest], 1,
+                       "the commit did not warm the new key exactly once (per-key requests"
+                       + " \(provider.stats.warmRequestsByDigest[newKeyForCommit.digest] ?? 0),"
+                       + " total \(provider.stats.warmRequests))")
 
         // 5 — the first turn of the main queue after the commit. The warm rides the service's worker
         // queue, so this must be an empty hop, not a decode.
@@ -156,8 +161,10 @@ final class CropPreviewWarmTests: XCTestCase {
                                  + " \(String(format: "%.2f", baselineTickMs)) ms)")
         // The observer's delayed door asked for the same key and was covered by the key set: still
         // one request, one render.
-        XCTAssertEqual(provider.stats.warmRequests, 1,
-                       "the observer's delayed warm was a second request, not a dedupe")
+        XCTAssertEqual(provider.stats.warmRequestsByDigest[newKey.digest], 1,
+                       "the observer's delayed warm was a second request for the same key, not a dedupe"
+                       + " (per-key \(provider.stats.warmRequestsByDigest[newKey.digest] ?? 0),"
+                       + " total \(provider.stats.warmRequests))")
         XCTAssertGreaterThanOrEqual(provider.stats.warmCoalesced, 1,
                                     "the observer's door never reached the key set")
         XCTAssertEqual(provider.generationCounts[newKey.digest], 1,
