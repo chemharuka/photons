@@ -251,7 +251,8 @@ final class ExportSheetLayout301Tests: XCTestCase {
         print("302 first screen · \(rows.count) 行 + \(headers.count) 个折叠标题 = \(bands) band")
         print("302 first screen rows · " + rows.map(\.rowID).joined(separator: ", "))
 
-        XCTAssertEqual(rows.count, 7, "首屏是 7 个常驻决定")
+        // 322 —— 水印不透明度从常驻行挪进水印段：7 → 6。
+        XCTAssertEqual(rows.count, 6, "首屏是 6 个常驻决定")
         XCTAssertEqual(headers.count, 3, "三个折叠段都在首屏（收起）")
         XCTAssertLessThanOrEqual(bands, 10, "首屏 band 数 \(bands) 超过 10")
 

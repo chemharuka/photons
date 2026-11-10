@@ -1015,8 +1015,8 @@ public final class ExportSheetModel {
 // MARK: - view
 
 /// 302 —— 折叠状态。键 `photons.export.section.<title>`，默认**收起**：
-/// 一屏是 7 个常驻决定 + 3 个折叠标题 = 10 个 band（`ExportSheetLayout301Tests` 的
-/// `testTheFirstScreenShowsAtMostTenRows` 量的就是这 10 个）。
+/// 一屏是 6 个常驻决定 + 3 个折叠标题 = 9 个 band（`ExportSheetLayout301Tests` 的
+/// `testTheFirstScreenShowsAtMostTenRows` 量的就是这 9 个；322 之前是 7 + 3 = 10）。
 ///
 /// 注入式（`read` / `write` 两个闭包）是为了让 hosted 测试能拿一份内存实现把三段都展开、
 /// 读回完整的 20 行栅格，而不去动真实的 `UserDefaults`。
@@ -1167,7 +1167,7 @@ public struct ExportSheetView: View {
     private var form: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
-                // 7 个常驻行是同一个节奏：pitch 32（24 高 + 8 缝）。
+                // 6 个常驻行是同一个节奏：pitch 32（24 高 + 8 缝）。
                 VStack(alignment: .leading, spacing: ExportRowGrid.rowSpacing) {
                     residentRows
                 }
@@ -1184,8 +1184,10 @@ public struct ExportSheetView: View {
         .background(ExportLayoutProbeHost(kind: .form))
     }
 
-    /// 7 个常驻决定，顺序固定。HDR 关时多一行 SDR 色调映射（它是 HDR 关时的核心决定，
+    /// 6 个常驻决定，顺序固定。HDR 关时多一行 SDR 色调映射（它是 HDR 关时的核心决定，
     /// 不能藏进折叠段，否则 168 的「色调映射行跟着 HDR 走」就无法在视图里成立）。
+    ///
+    /// 322 —— 322 之前这里是 7 行：水印不透明度曾经常驻，现在它是水印段里的第三行。
     @ViewBuilder
     private var residentRows: some View {
         formatRow
@@ -1212,14 +1214,8 @@ public struct ExportSheetView: View {
                         placeholder: model.preset.ppi == nil ? "不写入" : nil) { typed in
             model.setPPI(Int(typed.rounded()))
         }
-        exportSliderRow(label: "水印不透明度", value: model.preset.watermarkOpacity,
-                        range: 0 ... 100, format: "%.0f", decimals: 0,
-                        unit: "%", enabled: model.phase != .running,
-                        axID: "export.watermark.opacity") { typed in
-            // 288 —— 滑杆连续，5 % 的量化在写入路径上。
-            let quantized = (typed / 5).rounded() * 5
-            model.preset.watermarkOpacity = min(100, max(0, quantized))
-        }
+        // 322 —— 水印不透明度不再是常驻行：它是水印的三件事之一（文字 → 位置 → 不透明度），
+        // 现在整个在水印折叠段里。常驻行因此 7 → 6。
         directoryRow
         namingRow
     }
@@ -1334,7 +1330,14 @@ public struct ExportSheetView: View {
                     .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                    // 322 —— 它排在模式选择后面，`HStack` 先压它：模式选择拿 150 之后只剩 41 pt，
+                    // 像素量一长（「11.2 MP」量出来 47.6）就成「11.2 M…」。它不参与压缩：
+                    // 拿自己的理想宽，剩下的给模式选择与空白。
+                    .fixedSize(horizontal: true, vertical: false)
                     .accessibilityIdentifier("export.size.megapixels")
+                    // 322 —— 它是「尺寸」行的次级读数：自己的探针，量的是布局真分给它的宽度。
+                    .background(ExportRowGridProbeHost(kind: .accessory,
+                                                       rowID: "export.size.megapixels"))
             }
             Spacer(minLength: 0)
         }
@@ -1345,19 +1348,23 @@ public struct ExportSheetView: View {
             rowID: "export.location.directory",
             label: { rowLabel("存到") },
             control: {
-                HStack(spacing: 6) {
-                    Text(model.outputDirectory.path)
-                        .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("更改…") { model.onChooseDirectory?() }
-                        .controlSize(.small)
-                }
+                // 322 —— 「更改…」从控件块里挪到读数位（面板右端那条带），路径于是拿到整个
+                // 控件列（286 pt），默认的「/Users/…/Pictures/Photons 导出」（225.9 pt）不再省中段。
+                Text(model.outputDirectory.path)
+                    .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(model.outputDirectory.path)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(ExportRowGridProbeHost(kind: .accessory,
+                                                       rowID: "export.location.directory.path"))
             },
             value: { EmptyView() },
-            unit: { EmptyView() },
+            unit: {
+                Button("更改…") { model.onChooseDirectory?() }
+                    .controlSize(.small)
+            },
             accessory: { EmptyView() })
     }
 
@@ -1451,12 +1458,16 @@ public struct ExportSheetView: View {
                     .disabled(model.phase == .running || model.preset.metadataLevel != .all)
                 },
                 control: {
+                    // 322 —— 说明允许两行：放不下就换行，不许省成「…」。
                     Text(model.preset.metadataLevel == .all
                          ? "完整 develop 设置"
                          : "由上面的档位决定，不能再单独开关")
                         .font(.system(size: ExportRowGrid.Font.hint))
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                        // 322 —— 宽度先钉在控件列上，`Text` 才知道该换行（不钉它按 ideal 排成
+                        // 一行，然后被 frame 硬切，连「…」都没有）。
+                        .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
+                        .lineLimit(2)
                 },
                 value: { EmptyView() },
                 unit: { EmptyView() },
@@ -1477,7 +1488,8 @@ public struct ExportSheetView: View {
                     Text("GPS 不写入导出（EXIF 与 XMP 两处）")
                         .font(.system(size: ExportRowGrid.Font.hint))
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                        .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
+                        .lineLimit(2)
                 },
                 value: { EmptyView() },
                 unit: { EmptyView() },
@@ -1567,18 +1579,21 @@ public struct ExportSheetView: View {
                             .help("增益图按 1/2 边长写入（-H），SDR 基底不缩放")
                         },
                         control: {
+                            // 322 —— 裁偶数边的说明有 377.9 pt（「半尺寸需要偶数像素：当前
+                            // 4096×2731，将裁到 …」），一行装不下：两行，行高按内容长。
                             if let hint = model.halfSizeCropHint {
                                 Text(hint)
                                     .font(.system(size: ExportRowGrid.Font.hint))
                                     .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                    .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
+                                    .lineLimit(2)
                                     .help(hint)
                             } else {
                                 Text("增益图小一半；SDR 基底不缩放")
                                     .font(.system(size: ExportRowGrid.Font.hint))
                                     .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
+                                    .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
+                                    .lineLimit(2)
                             }
                         },
                         value: { EmptyView() },
@@ -1660,6 +1675,15 @@ public struct ExportSheetView: View {
                 value: { EmptyView() },
                 unit: { EmptyView() },
                 accessory: { EmptyView() })
+            // 322 —— 水印的三件事在一段里，顺序：文字 → 位置 → 不透明度。
+            exportSliderRow(label: "水印不透明度", value: model.preset.watermarkOpacity,
+                            range: 0 ... 100, format: "%.0f", decimals: 0,
+                            unit: "%", enabled: model.phase != .running,
+                            axID: "export.watermark.opacity") { typed in
+                // 288 —— 滑杆连续，5 % 的量化在写入路径上。
+                let quantized = (typed / 5).rounded() * 5
+                model.preset.watermarkOpacity = min(100, max(0, quantized))
+            }
         }
     }
 
@@ -1787,11 +1811,15 @@ public struct ExportSheetView: View {
             .lineLimit(1)
     }
 
-    /// 勾选框：探测框就是**盒子那一端**（点击测试在 `minX + 7`），所以它宽 34、
-    /// 从标签列右沿往左贴 —— 勾选框是行修饰，位置固定，不跟标签文字的长短跑。
+    /// 勾选框：探测框就是**盒子那一端**（点击测试在 `minX + 7`），所以它从标签列右沿往左贴 ——
+    /// 勾选框是行修饰，位置固定，不跟标签文字的长短跑。
+    ///
+    /// 322 —— 框宽按**自己的文字**量（`ExportRowGrid.toggleBoxWidth`）。302 把它写死成 34，
+    /// 「不扩大」「写入 XMP」「移除位置」「半尺寸」「PPI」全部比 34 宽，于是界面上是「不扩…」。
     private func rowToggle(_ toggle: ExportRowToggle, enabled: Bool) -> some View {
         Color.clear
-            .frame(width: 34, height: ExportRowGrid.rowHeight)
+            .frame(width: ExportRowGrid.toggleBoxWidth(for: toggle.title),
+                   height: ExportRowGrid.rowHeight)
             .overlay(alignment: .leading) {
                 Toggle(isOn: toggle.isOn) {
                     Text(toggle.title)
