@@ -579,8 +579,9 @@ final class GuideLines361VisibilityTests: XCTestCase {
             var groupWorst = 0.0
             for line in lines {
                 for end in [line.a, line.b] {
-                    let doc = geometry.documentPoint(normalizedX: Double(end.x) / Double(Self.size.width),
-                                                     Double(end.y) / Double(Self.size.height))
+                    // 364 — the one canvas-pixel entry (origin folded in once, inside it).
+                    let doc = geometry.documentPointInCanvas(normalizedX: Double(end.x) / Double(Self.size.width),
+                                                            Double(end.y) / Double(Self.size.height))
                     let reference = try XCTUnwrap(m.documentView(doc), "相机必须有 documentView")
                     let ours = p.screenPoint(end)
                     groupWorst = max(groupWorst, hypot(Double(ours.x - reference.x),
