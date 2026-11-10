@@ -395,16 +395,33 @@ public final class CropToolController {
         return geometry
     }
 
-    /// The draft's knobs, brought onto the document's — the refresh's half of the 327 rule above, so
-    /// the bar's readout and the red frame print the keystone that is on screen. Returns whether the
-    /// draft moved (a knob changed), never whether the document did.
+    /// The draft's keystone **and the space its rect is measured in**, brought onto the document's —
+    /// the one writer of those two copies.
+    ///
+    /// 327 — the 变换 card's two sliders write the **document**, so the draft's copy (taken at
+    /// `begin()`) is only ever a mirror. 341 — that mirror used to be `livePerspective`'s *fallback*
+    /// whenever the document had no keystone, which is exactly the state a reset leaves behind: the
+    /// document said 0, the draft still said 40, and every reader kept answering 40. The document is
+    /// the authority now (`livePerspective` / `liveCropSpace`); this keeps the copy itself in step, so
+    /// the draft the bar, the readout and 应用 see is the *same* 0 — and the `.source` space that comes
+    /// back with a keystone-free document — instead of the picture before the reset.
+    ///
+    /// Every document write reaches it through the overlay's one rebuild point
+    /// (`LoupeController.syncCropOverlay`) and every clamp refresh (`clampToView`), so the slider, the
+    /// double-click, ⌘Z and a preset all land here without a per-entry hook. Returns whether the draft
+    /// moved (a reset did), never whether the document did.
+    ///
+    /// Internal so the 341 acceptance can drive the same turn the loupe does.
     @discardableResult
-    private func adoptLivePerspective() -> Bool {
-        guard isActive, let live = livePerspective else { return false }
-        guard draft.perspectiveVertical != live.vertical
-                || draft.perspectiveHorizontal != live.horizontal else { return false }
-        draft.perspectiveVertical = live.vertical
-        draft.perspectiveHorizontal = live.horizontal
+    func adoptDocumentKeystone() -> Bool {
+        guard isActive else { return false }
+        let live = livePerspective
+        var next = draft
+        next.perspectiveVertical = live?.vertical ?? 0
+        next.perspectiveHorizontal = live?.horizontal ?? 0
+        next.cropSpace = liveCropSpace
+        guard next != draft else { return false }
+        draft = next                     // one write: one `publishDraft`, no half-synced turn
         return true
     }
 
@@ -520,9 +537,11 @@ public final class CropToolController {
         let angle = CropTool.clampStraighten(degrees ?? draft.straighten)
         // 246 §2.3 — the picture is a **quadrilateral** once a keystone is on; the predicate reads
         // `CropGeometry`'s one definition of it, never an AABB.
-        // The live document is the source of the keystone while the tool is open — the 变换 card can
-        // move the knobs during a crop session, and the overlay must follow what is on screen.
-        let perspective = session?.edit.geometry.perspective ?? draft.perspective
+        // 341 — **the live document's** keystone, through the one accessor: asking
+        // `session…perspective ?? draft.perspective` here was the second copy of the bug below (a
+        // reset document's `nil` fell back to the 40 the draft still carried, so a frame that only
+        // the keystone put outside stayed red after the reset).
+        let perspective = livePerspective
         // 330 — a canvas-spaced frame's export canvas **is** the rect, so 「出照片」 is its four
         // document corners against the photo **quad** (the same region the 勾选 clamp uses).
         if liveCropSpace == .canvas {
@@ -626,10 +645,10 @@ public final class CropToolController {
             session.cropToolDraft = nil
             return
         }
-        var geometry = draft.geometry(flipsOf: session.edit.geometry)
-        geometry.crop = effectiveCrop(source: sourceSize)
-            .clamped(allowsOutsideSource: true).normalizedRect
-        session.cropToolDraft = (id, geometry)
+        // 341 — the geometry 应用 would write, through the same one owner: the old two lines built
+        // the value from `draft.geometry(…)` and only replaced the crop, so the row kept printing the
+        // keystone the *draft* was seeded with after the document's had been reset to 0.
+        session.cropToolDraft = (id, committedGeometry(for: session.edit.geometry))
     }
 
     // MARK: the mode
@@ -1410,7 +1429,7 @@ public final class CropToolController {
         guard isActive, clampsFrameToView else { return false }
         // 327 — the 变换 card may have moved the knobs since the last refresh; the draft follows the
         // document before any geometry is asked of it.
-        adoptLivePerspective()
+        adoptDocumentKeystone()
         let src = source ?? sourceSize
         let before = draft.crop.clamped(allowsOutsideSource: true)
 
@@ -1479,20 +1498,30 @@ public final class CropToolController {
         return clamped
     }
 
-    /// 324 — the document's keystone as the crop session must see it: the **live** document wins (the
-    /// 变换 card can move the knobs while a draft is open), and the draft's own copy is the fallback
-    /// for a controller without a session. `nil` for every un-keystoned document, so every pre-324
-    /// branch below is the branch it was.
-    private var livePerspective: PerspectiveMap? {
-        if let live = session?.edit.geometry.perspective, live.hasWarp { return live }
+    /// 324 — the document's keystone as the crop session must see it.
+    ///
+    /// **341 — the document is the authority, always.** A keystone is never a *temporary* draft edit:
+    /// both sliders in 变换 write the document (`TransformPanel` → `session.applyEdit`), so the draft
+    /// has no keystone of its own to prefer. The old shape asked the document first but fell back to
+    /// `draft.perspective` whenever the document answered `nil` — i.e. **0**, which is exactly what
+    /// 双击「垂直透视」 writes. A reset document was therefore read as the 40 the draft still carried,
+    /// and the red-frame predicate, both clamps, the inscription and the overlay kept answering 40
+    /// while the picture was already back at 0. `nil` here *is* the answer for an un-keystoned
+    /// document. The draft's copy survives only for a controller with no session at all.
+    ///
+    /// Internal (not public) so the 341 acceptance can print it beside the document and the draft.
+    var livePerspective: PerspectiveMap? {
+        if let document = session?.edit.geometry { return document.perspective }
         return draft.perspective
     }
 
     /// 330 — the space the draft's rect is measured in. **A keystoned document is always read on its
     /// canvas** (that is the migration `CropGeometry.init` applies, so the two answers cannot differ);
-    /// without a keystone the stored marker is the answer, and every pre-330 document answers
-    /// `.source` — the branch it always took.
-    private var liveCropSpace: CropSpace {
+    /// without a keystone the document's stored marker is the answer — the document's, never the
+    /// draft's copy (341: a draft seeded while the document was keystoned keeps `.canvas` in its copy
+    /// after the reset, and reading it would put a keystone-free document's frame in a space it no
+    /// longer has). Every pre-330 document answers `.source` — the branch it always took.
+    var liveCropSpace: CropSpace {
         if livePerspective?.hasWarp == true { return .canvas }
         if let live = session?.edit.geometry { return live.cropSpace }
         return draft.cropSpace
@@ -1508,8 +1537,12 @@ public final class CropToolController {
         group.perspectiveVertical = perspective?.vertical ?? 0
         group.perspectiveHorizontal = perspective?.horizontal ?? 0
         // 330 — the draft's rect lives in the space the session draws it in: the canvas for a
-        // keystoned document, the photograph otherwise.
-        group.cropSpace = perspective?.hasWarp == true ? .canvas : draft.cropSpace
+        // keystoned document, the photograph otherwise. 341 — the **session's** answer, not the
+        // draft's copy: a draft seeded while the document was keystoned keeps `.canvas` after the
+        // keystone is reset, and a frame that is canvas-spaced on a keystone-free document is a frame
+        // in a space the document no longer has (it is what made the reset document's numbers differ
+        // from a new one's).
+        group.cropSpace = liveCropSpace
         return CropGeometry(geometry: group, source: source)
     }
 
