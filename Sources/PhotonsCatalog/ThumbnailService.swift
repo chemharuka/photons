@@ -292,6 +292,11 @@ public final class ThumbnailService: @unchecked Sendable {
         public var waitSamples = 0
         public var totalWaitMilliseconds = 0.0
         public var maxWaitMilliseconds = 0.0
+        /// 351 — every job's cache write, in milliseconds (bounded to the most recent 1024).
+        ///
+        /// `lastWriteMilliseconds` answers "what did the last warm cost"; the five-way breakdown of
+        /// a first screen needs the *distribution*, and an average cannot tell p95 from a mean.
+        public var writeTimes: [Double] = []
         /// 311 — the cache write (temp file + rename + prune) of the last job, and its average.
         /// The third leg of a warm, next to the producer's render and encode.
         public var lastWriteMilliseconds = 0.0
@@ -811,6 +816,8 @@ public final class ThumbnailService: @unchecked Sendable {
             counters.lastWriteMilliseconds = writeMs
             counters.totalWriteMilliseconds += writeMs
             counters.writeSamples += 1
+            counters.writeTimes.append(writeMs)
+            if counters.writeTimes.count > 1024 { counters.writeTimes.removeFirst(counters.writeTimes.count - 1024) }
             lock.unlock()
         } catch {
             finish(job, origin: .failed, data: nil, payload: nil, error: error.localizedDescription)
