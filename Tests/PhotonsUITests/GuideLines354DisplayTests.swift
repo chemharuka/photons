@@ -105,7 +105,7 @@ final class GuideLines354DisplayTests: XCTestCase {
                                                             perspectiveHorizontal: perspective?.horizontal ?? 0,
                                                             cropSpace: .source),
                                     source: source)
-        let doc = geometry.documentPoint(normalizedX: Double(p.x) / Double(source.width),
+        let doc = geometry.documentPointInCanvas(normalizedX: Double(p.x) / Double(source.width),
                                         Double(p.y) / Double(source.height))
         let view = try XCTUnwrap(mapping.documentView(doc),
                                  "the mapping has no camera to ask — §A needs a FrameTransform")

@@ -2152,7 +2152,7 @@ public final class CropToolController {
     var clampsPixelsInViewSpace = false
 
     /// Gate ② — the pointer read through the **frame** space (`framePoint`, no `P`) while the overlay
-    /// keeps drawing through the canvas' (`documentPoint` + `photoQuadExtent`). One map for the eye and
+    /// keeps drawing through the canvas' (`documentPointInCanvas` + `photoQuadExtent`). One map for the eye and
     /// another for the hand: a constant offset plus a projective gain error.
     var dragMapsThroughFramePoint = false
 
@@ -2704,7 +2704,7 @@ public final class CropToolController {
             return NormalizedPoint(document.x / e.width, document.y / e.height)
         }
         // **327 — the inverse of the keystone projection.** View → the document canvas' pixels →
-        // `photoNormalized` (the exact inverse of `CropGeometry.documentPoint`, P → R undone in one
+        // `photoNormalized` (the exact inverse of `CropGeometry.documentPointInCanvas`, P → R undone in one
         // place). Without this branch a drag on a keystoned picture read the *un-warped* frame and the
         // grip under the hand moved a different edge.
         if let perspective, perspective.hasWarp,
