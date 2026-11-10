@@ -40,7 +40,7 @@ final class QuarterTurnUITests: XCTestCase {
     private func hostedCard() throws -> (editor: EditorWindowController, inspector: NSView, window: NSWindow) {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         editor.rootView.inspectorWorkspaces.select(.transform)
         CropUITestSupport.pump(0.2)
         editor.rootView.layoutSubtreeIfNeeded()

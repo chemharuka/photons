@@ -61,7 +61,7 @@ final class HistogramCadenceTests: XCTestCase {
         let controller = LoupeController(session: CatalogSession())
         controller.autoRenderEnabled = autoRender
         controller.collectsHistogram = true
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = controller.view
         controller.canvasView.frame = window.contentLayoutRect

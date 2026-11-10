@@ -20,7 +20,7 @@ final class ThumbnailDisplaySize223Tests: XCTestCase {
     }
 
     private func makeWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1400, height: 900))

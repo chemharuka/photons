@@ -394,7 +394,7 @@ final class ColdStartLoupeTests: XCTestCase {
         // thumbnail, because there is no anchor).
         editor.session.mode = .loupe
         editor.rootView.showModule(for: .loupe)
-        window.orderFront(nil)
+        TestWindows.show(window)
         window.contentView?.layoutSubtreeIfNeeded()
 
         try editor.openLibrary(at: library.package)
@@ -410,7 +410,7 @@ final class ColdStartLoupeTests: XCTestCase {
                                   "the library has no thumbnail cache")
         for asset in library.assets { try seedPreview(asset, cache: cache) }
 
-        editor.window?.orderFront(nil)
+        TestWindows.show(editor.window)
         editor.window?.contentView?.layoutSubtreeIfNeeded()
         editor.rootView.needsLayout = true
         editor.rootView.layoutSubtreeIfNeeded()

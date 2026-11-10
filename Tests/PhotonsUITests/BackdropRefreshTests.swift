@@ -63,12 +63,12 @@ final class BackdropRefreshTests: XCTestCase {
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = loupe.view
         loupe.canvasView.frame = window.contentLayoutRect
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         pump(0.05)
         loupe.frameSource = LoupeController.FrameSource(url: url, identity: identity,

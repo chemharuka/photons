@@ -296,10 +296,10 @@ final class NumberFieldTypingTests: XCTestCase {
     private func makeWindow() -> NSWindow {
         // A window needs an app; a test bundle has none until one is asked for.
         NSApplication.shared.setActivationPolicy(.accessory)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 60),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 240, height: 60),
                               styleMask: [.titled], backing: .buffered, defer: false)
         Self.windows.append(window)
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         return window
     }
 

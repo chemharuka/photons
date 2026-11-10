@@ -106,7 +106,7 @@ final class TransformMenuTests: XCTestCase {
         print("F · no photo: 裁切=\(empty.validateMenuItem(crop))")
 
         let editor = try CropUITestSupport.makeEditor(in: workDir)
-        editor.window?.orderFront(nil)
+        TestWindows.show(editor.window)
         defer { editor.window?.orderOut(nil) }
         let item = try XCTUnwrap(find("裁切", in: MainMenu.build()))
         XCTAssertTrue(editor.validateMenuItem(item), "有照片时 ⌘R 是活的")

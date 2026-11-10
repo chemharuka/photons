@@ -202,7 +202,7 @@ final class BlackLevelCardTests: XCTestCase {
     func testAutoIconSitsAboveTheValueRightAlignedAndWithoutChrome() throws {
         let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: 2400)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: true)
         window.contentView = host
         defer { window.contentView = nil }

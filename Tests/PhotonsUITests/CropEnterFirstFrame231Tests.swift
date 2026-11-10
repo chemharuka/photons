@@ -47,10 +47,10 @@ final class CropEnterFirstFrame231Tests: XCTestCase {
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
 
-        let window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 320, height: 200),
+        let window = TestWindows.make(contentRect: NSRect(x: 200, y: 200, width: 320, height: 200),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = loupe.view
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)
 

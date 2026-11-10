@@ -485,7 +485,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
                                           decode: nil, shouldInterpolate: false,
                                           intent: .defaultIntent))
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
@@ -494,7 +494,7 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         view.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
         host.addSubview(view)
         view.image = image
-        window.orderFront(nil)
+        TestWindows.show(window)
         view.layoutSubtreeIfNeeded()
         for _ in 0..<10 {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))

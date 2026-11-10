@@ -37,10 +37,10 @@ final class CropToggleAccentTests: XCTestCase {
         let size = NSSize(width: 64, height: CropChip.height)
         let host = NSHostingView(rootView: CropChip(title: "水平", on: on, help: "") {})
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height + 8),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height + 8),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
-        window.orderFront(nil)
+        TestWindows.show(window)
         self.window = window
         host.layoutSubtreeIfNeeded()
         host.display()

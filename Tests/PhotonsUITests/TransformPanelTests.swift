@@ -79,7 +79,7 @@ final class TransformPanelTests: XCTestCase {
     func testEnteringTransformProvidesTheCropFrameAndTheCardHeaderHasNoButton() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         let root = editor.rootView!
         let loupe = root.loupeController
@@ -208,7 +208,7 @@ final class TransformPanelTests: XCTestCase {
     func testTypingAnAngleIntoTheRowReachesTheDocument() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         defer { window.orderOut(nil) }
         let session = editor.session
         let loupe = editor.rootView.loupeController
@@ -568,7 +568,7 @@ final class TransformPanelTests: XCTestCase {
         let host = NSHostingView(rootView: InspectorView(session: session, loupe: loupe,
                                                          workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: width, height: height)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

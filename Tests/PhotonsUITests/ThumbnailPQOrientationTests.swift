@@ -61,7 +61,7 @@ final class ThumbnailPQOrientationTests: XCTestCase {
 
     @MainActor
     private func withWindow(_ body: (NSWindow) throws -> Void) throws {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500))

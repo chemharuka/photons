@@ -454,7 +454,7 @@ final class PhotoSwitchFlashTests: XCTestCase {
         where index < seeded.count && seeded[index] {
             try seedPreview(asset, cache: cache)
         }
-        editor.window?.orderFront(nil)
+        TestWindows.show(editor.window)
         editor.window?.contentView?.layoutSubtreeIfNeeded()
         editor.rootView.needsLayout = true
         editor.rootView.layoutSubtreeIfNeeded()

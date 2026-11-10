@@ -97,10 +97,10 @@ final class WindowResizeStressTests: XCTestCase {
     }
 
     private func makeWindow(_ size: CGSize) -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+        let window = TestWindows.make(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         return window
     }
 

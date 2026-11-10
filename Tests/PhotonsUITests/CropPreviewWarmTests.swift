@@ -791,7 +791,7 @@ final class CropPreviewWarmTests: XCTestCase {
         let editor = EditorWindowController(size: NSSize(width: 1200, height: 800))
         windows.append(editor.window!)
         try editor.openLibrary(at: package)
-        editor.window?.orderFront(nil)
+        TestWindows.show(editor.window)
         editor.rootView.loupeController.autoRenderEnabled = false
         editor.rootView.loupeController.collectsHistogram = false
         editor.window?.contentView?.layoutSubtreeIfNeeded()

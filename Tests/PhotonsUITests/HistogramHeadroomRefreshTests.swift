@@ -78,7 +78,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
     }
 
     private func makeWindow(_ card: HistogramCardView) -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: cardWidth,
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: cardWidth,
                                                   height: HistogramCardView.contentHeight + 40),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.contentView = card
@@ -351,7 +351,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         let source = FixedHeadroomSource(headroom: 1.695)
         let card = makeCard(source: source)
         let window = makeWindow(card)
-        window.orderFront(nil)
+        TestWindows.show(window)
         pump(0.05)
         print("可见性：window.isVisible \(window.isVisible) · isKeyWindow \(window.isKeyWindow) · "
               + "NSApp.isActive \(NSApp.isActive) · shouldPoll \(card.shouldPollHeadroom)")
@@ -404,7 +404,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         let frozenOrderedOut = card.headroomPollCount
         pump(1.0)
         XCTAssertEqual(card.headroomPollCount, frozenOrderedOut)
-        window.orderFront(nil)
+        TestWindows.show(window)
         render(card)                                  // a draw re-arms the poll (see `draw`)
         pump(0.05)
         XCTAssertTrue(card.isPollingHeadroom)
@@ -420,7 +420,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         let source = FixedHeadroomSource(headroom: 1.695)
         let card = makeCard(source: source)
         let window = makeWindow(card)
-        window.orderFront(nil)
+        TestWindows.show(window)
         pump(0.05)
         render(card)                             // a draw is also what arms the poll
         XCTAssertTrue(card.isPollingHeadroom)
@@ -446,7 +446,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         let card = makeCard(source: source)
         card.headroomPollingEnabled = false            // the timer, removed
         let window = makeWindow(card)
-        window.orderFront(nil)
+        TestWindows.show(window)
         pump(0.05)
         XCTAssertFalse(card.isPollingHeadroom, "反证的前提：定时器确实不在")
         render(card)
@@ -470,7 +470,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
         let source = FixedHeadroomSource(headroom: 1.695)
         let card = makeCard(source: source)
         let window = makeWindow(card)
-        window.orderFront(nil)
+        TestWindows.show(window)
         window.makeKey()
         pump(0.05)
         render(card)

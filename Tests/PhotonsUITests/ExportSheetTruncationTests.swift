@@ -174,10 +174,10 @@ final class ExportSheetTruncationTests: XCTestCase {
                       ExportSheetView.afterSection] {
             UserDefaults.standard.set(true, forKey: "photons.export.section.\(title)")
         }
-        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
+        let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        parent.makeKeyAndOrderFront(nil)
+        TestWindows.show(parent, key: true)
         windows.append(parent)
 
         let session = CatalogSession(remembersRecentLibrary: false)
@@ -411,10 +411,10 @@ final class ExportSheetTruncationTests: XCTestCase {
                       ExportSheetView.afterSection] {
             UserDefaults.standard.removeObject(forKey: "photons.export.section.\(title)")
         }
-        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
+        let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        parent.makeKeyAndOrderFront(nil)
+        TestWindows.show(parent, key: true)
         windows.append(parent)
         let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false))
         controller.present(in: parent)

@@ -585,10 +585,10 @@ final class MaskSliderRowTests: XCTestCase {
         NSApplication.shared.setActivationPolicy(.accessory)
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         windows.append(window)
         host.layoutSubtreeIfNeeded()
         pump(0.15)

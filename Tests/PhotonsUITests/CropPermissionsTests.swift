@@ -43,7 +43,7 @@ final class CropPermissionsTests: XCTestCase {
     func testADragOnTheInspectorWritesNothingWhileTheFrameKeepsItsDrag() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         let root = editor.rootView!
         let session = editor.session
@@ -147,7 +147,7 @@ final class CropPermissionsTests: XCTestCase {
     func testTheFrameDragItselfMovesTheDraft() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         let root = editor.rootView!
         let loupe = root.loupeController
@@ -182,7 +182,7 @@ final class CropPermissionsTests: XCTestCase {
     func testTheZoomPillStaysUsableInCropMode() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         let root = editor.rootView!
         let loupe = root.loupeController
@@ -227,7 +227,7 @@ final class CropPermissionsTests: XCTestCase {
     func testNoGripHitRectTouchesTheInspectorRect() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         let root = editor.rootView!
         let loupe = root.loupeController

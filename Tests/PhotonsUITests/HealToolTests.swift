@@ -227,10 +227,10 @@ final class HealToolTests: XCTestCase {
         _ = NSApplication.shared
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: true)
         window.contentView = host
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         host.layoutSubtreeIfNeeded()
@@ -248,7 +248,7 @@ final class HealToolTests: XCTestCase {
     /// A real left click at the covered view's centre. The probe's `hitTest` is nil, so the event
     /// lands on the SwiftUI button it sits behind.
     private static func click(_ target: NSView, in window: NSWindow) {
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         let point = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)
         for (type, pressure) in [(NSEvent.EventType.leftMouseDown, Float(1)),
                                  (NSEvent.EventType.leftMouseUp, Float(0))] {

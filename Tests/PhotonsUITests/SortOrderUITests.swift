@@ -219,7 +219,7 @@ final class SortOrderUITests: XCTestCase {
     }
 
     private func makeHarness(_ library: Library, store: MemoryStore) throws -> Harness {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 884),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 884),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1400, height: 884))

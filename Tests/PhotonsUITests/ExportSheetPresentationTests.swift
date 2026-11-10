@@ -60,10 +60,10 @@ final class ExportSheetPresentationTests: XCTestCase {
                                                      window: NSWindow,
                                                      content: NSView) {
         NSApplication.shared.setActivationPolicy(.accessory)
-        let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760),
+        let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        parent.makeKeyAndOrderFront(nil)
+        TestWindows.show(parent, key: true)
         windows.append(parent)
 
         let session = CatalogSession(remembersRecentLibrary: false)

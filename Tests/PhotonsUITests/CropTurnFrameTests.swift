@@ -75,12 +75,12 @@ final class CropTurnFrameTests: XCTestCase {
         loupe.collectsHistogram = false
         loupe.hashesFrames = true
         loupe.reducesMotion = false
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = loupe.view
         loupe.canvasView.frame = window.contentLayoutRect
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         pump(0.05)
 

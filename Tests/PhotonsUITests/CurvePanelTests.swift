@@ -1084,7 +1084,7 @@ final class CurvePanelTests: XCTestCase {
     private static func fittingSize<V: View>(_ view: V, width: CGFloat) -> CGSize {
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0, width: width, height: 100)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: true)
         window.contentView = host
         windows.append(window)

@@ -253,7 +253,7 @@ final class CalibrationCardTests: XCTestCase {
         let state = InspectorWorkspaceState(workspace)
         let host = NSHostingView(rootView: InspectorView(session: CatalogSession(), workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: Self.panelHeight)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

@@ -62,10 +62,10 @@ final class CropOverlayFollowTests: XCTestCase {
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 220, y: 220), size: canvas),
+        let window = TestWindows.make(contentRect: NSRect(origin: NSPoint(x: 220, y: 220), size: canvas),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = loupe.view
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         windows.append(window)
         CropUITestSupport.pump(0.05)
@@ -348,7 +348,7 @@ final class CropOverlayFollowTests: XCTestCase {
         editor.rootView.loupeController.collectsHistogram = false
         let window = try XCTUnwrap(editor.window)
         window.setContentSize(size)
-        window.orderFront(nil)
+        TestWindows.show(window)
         window.contentView?.layoutSubtreeIfNeeded()
         editor.rootView.needsLayout = true
         editor.rootView.layoutSubtreeIfNeeded()
