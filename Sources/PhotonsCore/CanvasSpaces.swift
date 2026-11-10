@@ -41,6 +41,11 @@ public extension CropGeometry {
     var frameSize: ImageSize {
         // 246: the frame and the canvas are the same thing once the keystone is folded in — the
         // canvas is the AABB of the warped-and-turned picture, so there is no separate inset.
+        //
+        // 330: a canvas-spaced crop's frame is the window on the document canvas, which is exactly
+        // what `canvas` was built from in `init` (`CropMath.canvasCrop`), so it answers that — with no
+        // keystone too, where a canvas-spaced crop is still a window on the (rotation-only) canvas.
+        if cropIsCanvasSpaced { return canvas }
         if let perspective, perspective.hasWarp { return canvas }
         return CropMath.frameSize(crop, in: source,
                                   allowsOutsideSource: true,
@@ -64,6 +69,9 @@ public extension CropGeometry {
         let f = frameExtentPixels
         // 246: a keystoned frame's AABB already contains P and R; rotating it again would be the
         // double-turn 183's canvas arithmetic used to make.
+        // 330: a canvas-spaced frame is a window of the *already turned* canvas, so the same rule
+        // applies — its extent is its own.
+        if cropIsCanvasSpaced { return f }
         if perspective?.hasWarp == true { return f }
         guard hasAngle else { return f }
         return Self.rotatedExtent(width: f.width, height: f.height, degrees: rotationDegrees)
@@ -237,6 +245,10 @@ public extension CropGeometry {
     /// one `documentPoint` map. It is the same served region the renderer fills with `000000`
     /// (a superset of the AABB in the crop's axes, never a second box).
     var documentCanvasCropRect: CropRect {
+        // 330 — a canvas-spaced crop's legal area, expressed in the crop's **own** coordinates, is the
+        // canvas itself: `[0,1]²`. (Before 330 the rect was walked back to photo coordinates, which is
+        // what the two branches below do.)
+        if cropIsCanvasSpaced { return .full }
         if hasKeystoneQuad {
             let e = photoQuadExtent
             let back = [DocumentPoint(0, 0), DocumentPoint(e.width, 0),

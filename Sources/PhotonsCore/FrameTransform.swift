@@ -28,7 +28,12 @@ public struct FrameTransform: Sendable, Equatable {
     /// `CropGeometry.source`). Normalized crop rects are measured in this grid.
     public let source: ImageSize
     /// The crop, resolved (aspect lock already folded in by the caller).
+    ///
+    /// 330 — in the document's **own** space: a keystoned document's crop is converted to the canvas
+    /// rectangle on the way in (`CropGeometry.init`), which is the rect every walk below measures.
     public let crop: CropRect
+    /// 330 — which space `crop` (as handed in) was measured in.
+    public let cropSpace: CropSpace
     /// The quarter turn, kept so a consumer can name the document's orientation. It is **not**
     /// applied again here: `source` is already the turned frame.
     public let quarterTurns: Int
@@ -121,6 +126,7 @@ public struct FrameTransform: Sendable, Equatable {
                 flipHorizontal: Bool = false,
                 flipVertical: Bool = false,
                 perspective: PerspectiveMap? = nil,
+                cropSpace: CropSpace = .source,
                 decodeScale: Double = 1,
                 contentScale: Double = 1,
                 viewport: ImageSize?,
@@ -135,7 +141,7 @@ public struct FrameTransform: Sendable, Equatable {
         let z = Self.validScale(zoom)
         let crop = crop.clamped(allowsOutsideSource: true)
         self.source = source
-        self.crop = crop
+        self.cropSpace = cropSpace
         self.quarterTurns = ((quarterTurns % 4) + 4) % 4
         self.straightenDegrees = straightenDegrees.isFinite ? straightenDegrees : 0
         self.perspective = perspective.flatMap { $0.hasWarp ? $0 : nil }
@@ -157,7 +163,8 @@ public struct FrameTransform: Sendable, Equatable {
                                   aspectLock: .original,
                                   quarterTurns: 0,
                                   perspectiveVertical: perspective?.vertical ?? 0,
-                                  perspectiveHorizontal: perspective?.horizontal ?? 0)
+                                  perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                  cropSpace: cropSpace)
         group.crop = crop.normalizedRect
         // **The full-resolution S3.** The rung moves no geometry (231): the loupe's hit test, the
         // overlay and the crop tool all speak the file's own pixel grid, and `decodeScale` only
@@ -165,18 +172,41 @@ public struct FrameTransform: Sendable, Equatable {
         // by passing it as `source` with `decodeScale == 1`. Building S3 on `decoded` here made the
         // canvas' `ceil` and its inset drift by up to half a decoded pixel (× the zoom).
         let cg = CropGeometry(geometry: group, source: source)
+        // 330 — the rect every walk below measures: the document's own space. For a keystoned
+        // document `cg.crop` is the canvas rectangle (the source-space input was migrated on the way
+        // in), which is what `cropOrigin` and the `.document` frame quad need.
+        self.crop = cg.crop
         self.geometry = cg
         self.canvasS3 = cg.canvas(canvasRole)
         let frame = cg.frameSize
-        self.cropOrigin = Point(crop.left * Double(source.width),
-                                crop.top * Double(source.height))
+        self.cropOrigin = Point(cg.crop.left * Double(source.width),
+                                cg.crop.top * Double(source.height))
 
         // S1 full px → decoded px, split per axis so a `round` on either dimension cannot leak in.
         let sx = Double(decoded.width) / Double(max(source.width, 1))
         let sy = Double(decoded.height) / Double(max(source.height, 1))
         let toDecoded = Matrix3(rows: [[sx, 0, 0], [0, sy, 0], [0, 0, 1]])
         let photoToCanvas: Matrix3
-        if let perspective = self.perspective {
+        if cropSpace == .canvas {
+            // 330 — the canvas **is** the document canvas: the crop is a window on it for `.export`
+            // and the whole box for `.document`. Both come from `CropMath.documentCanvas`, i.e. the
+            // export's own `P → R` 3×3 — a canvas-spaced crop never warps a rect of its own.
+            let document = CropMath.documentCanvas(source: decoded,
+                                                   straightenDegrees: self.straightenDegrees,
+                                                   perspective: self.perspective)
+            let pc = canvasRole == .document
+                ? document
+                : CropMath.canvasCrop(document: document, crop: cg.crop)
+            let fromPhoto = Matrix3(rows: [[1 / Double(max(decoded.width, 1)), 0, 0],
+                                           [0, 1 / Double(max(decoded.height, 1)), 0],
+                                           [0, 0, 1]])
+            let toCanvas = Matrix3(rows: [[Double(cg.canvas(canvasRole).width), 0, 0],
+                                          [0, Double(cg.canvas(canvasRole).height), 0],
+                                          [0, 0, 1]])
+            let flip = Self.cropFlipMatrix(crop: cg.crop, decoded: decoded,
+                                           flipH: flipHorizontal, flipV: flipVertical)
+            photoToCanvas = toCanvas * Self.matrix(pc.forward) * flip * fromPhoto * toDecoded
+        } else if let perspective = self.perspective {
             // 246's composed map is already the one definition of photo-normalized → canvas-normalized.
             let pc = CropMath.perspectiveCanvas(crop: crop, in: decoded,
                                                 straightenDegrees: self.straightenDegrees,
@@ -246,6 +276,15 @@ public struct FrameTransform: Sendable, Equatable {
                        (Double(cg.canvas.width), Double(cg.canvas.height)),
                        (0.0, Double(cg.canvas.height))].map { Point($0.0, $0.1) }
         case .document:
+            if cropSpace == .canvas {
+                // 330 — the frame is a rectangle of the document canvas, so its quad in S3 is that
+                // rectangle in canvas pixels: axis-aligned, which is the whole point of the space.
+                let e = cg.photoQuadExtent
+                corners = [(cg.crop.left, cg.crop.top), (cg.crop.right, cg.crop.top),
+                           (cg.crop.right, cg.crop.bottom), (cg.crop.left, cg.crop.bottom)]
+                    .map { Point($0.0 * e.width, $0.1 * e.height) }
+                break
+            }
             corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner -> Point in
                 Self.apply(photoToCanvas,
                            Point((crop.left + corner.0 * crop.width) * Double(source.width),

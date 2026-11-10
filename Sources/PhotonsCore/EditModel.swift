@@ -897,6 +897,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             if geometry.perspectiveHorizontal != 0 {
                 s += ";phx=\(Int((geometry.perspectiveHorizontal * 10).rounded()))"
             }
+            // 330: the crop's space. Appended **only for the canvas**, so every pre-330 document (and
+            // every keystone-free one, where the two spaces are the same picture) keeps the geometry
+            // material — and therefore the whole chain — byte for byte.
+            if let token = geometry.cropSpace.keyToken { s += ";\(token)" }
             // 029: lateral CA. Appended **only when non-zero**, exactly like `asp`, so every document
             // that has never touched the CA sliders keeps the pre-029 geometry material byte for
             // byte — the seven pinned keys and every recorded golden depend on that.
@@ -1117,6 +1121,15 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     public var perspectiveVertical: Double
     public var perspectiveHorizontal: Double
 
+    /// 330 — **which space `crop` is measured in.** `.source` (0) is every document written before
+    /// 330 and keeps that meaning byte for byte; `.canvas` (1) says the rect is a rectangle of the
+    /// **document canvas** (324's `photoCanvas`, i.e. the photograph after `P → R`), which is what
+    /// makes the crop frame stay a rectangle on screen under a keystone.
+    ///
+    /// Written only when it is `.canvas` (the `quarterTurns`/`perspectiveVertical` discipline), so a
+    /// keystone-free document — where the two spaces are the same picture — re-encodes byte for byte.
+    public var cropSpace: CropSpace
+
     public static let identity = GeometryGroup(crop: .full, rotationDegrees: 0,
                                                flipHorizontal: false, flipVertical: false,
                                                aspectLock: .original, quarterTurns: 0)
@@ -1128,7 +1141,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                 aspectLock: AspectLock = .original,
                 quarterTurns: Int = 0,
                 perspectiveVertical: Double = 0,
-                perspectiveHorizontal: Double = 0) {
+                perspectiveHorizontal: Double = 0,
+                cropSpace: CropSpace = .source) {
         self.crop = crop
         self.rotationDegrees = rotationDegrees
         self.flipHorizontal = flipHorizontal
@@ -1137,6 +1151,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
         self.perspectiveVertical = perspectiveVertical
         self.perspectiveHorizontal = perspectiveHorizontal
+        self.cropSpace = cropSpace
     }
 
     /// `n % 4` into `0…3` — the one place a turn count is made legal.
@@ -1163,6 +1178,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         // 183: absent on every document written before this task, which reads as 0 (= no warp).
         v.perspectiveVertical = c.val("perspectiveVertical", v.perspectiveVertical)
         v.perspectiveHorizontal = c.val("perspectiveHorizontal", v.perspectiveHorizontal)
+        // 330: absent on every document written before this task, which reads as `.source` (= the
+        // crop is a rectangle of the photograph, the pre-330 meaning). The *conversion* of such a
+        // rect to a canvas rect needs the image's pixel size, so it is not done here — see
+        // `migrateCropToCanvasSpace(source:)`.
+        v.cropSpace = c.val("cropSpace", v.cropSpace)
         self = v
     }
 
@@ -1190,6 +1210,12 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         }
         if perspectiveHorizontal != 0 {
             try c.encode(perspectiveHorizontal, forKey: AnyCodingKey("perspectiveHorizontal"))
+        }
+        // 330: the crop's space, **only when it is the canvas** — the `quarterTurns`/`pvy` discipline.
+        // A `.source` document (every document written before 330, and every keystone-free one — the
+        // two spaces are the same picture there) keeps its bytes exactly.
+        if cropSpace != .source {
+            try c.encode(cropSpace, forKey: AnyCodingKey("cropSpace"))
         }
     }
 
@@ -1310,6 +1336,32 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// `renderCrop` in the stored `NormalizedRect` form.
     public func renderCropRect(source: ImageSize) -> NormalizedRect {
         renderCrop(source: source).normalizedRect
+    }
+
+    /// **330 — the crop's space, made explicit.** A document written before 330 measures its crop on
+    /// the photograph; with a keystone that rect's image on screen is a quadrilateral, which is the
+    /// bug the user reported. This converts it to the **equivalent rectangle of the document canvas**
+    /// — the AABB of its image under `P → R`, i.e. exactly the box the pre-330 renderer exported — and
+    /// sets `cropSpace = .canvas`.
+    ///
+    /// Called where the document meets its pixels (the only place the source size is known), never at
+    /// decode: the conversion is a function of the image's aspect ratio. A **keystone-free** document
+    /// is not touched at all — there the two spaces are the same picture, so its bytes stay identical
+    /// (验收 ④).
+    ///
+    /// Returns `true` when anything moved.
+    @discardableResult
+    public mutating func migrateCropToCanvasSpace(source: ImageSize) -> Bool {
+        guard cropSpace == .source,
+              let perspective, perspective.hasWarp else { return false }
+        let geometry = CropGeometry(geometry: self, source: source)
+        // `renderCrop` (the aspect lock's own answer) is read off the **stored** group, and
+        // `canvasRect(fromSource:)` walks `documentPoint`, which never reads `cropSpace` — so the
+        // conversion cannot accidentally be an identity on an already-migrated view.
+        let converted = geometry.canvasRect(fromSource: renderCrop(source: source))
+        crop = converted.normalizedRect
+        cropSpace = .canvas
+        return true
     }
 
     public var isIdentity: Bool {

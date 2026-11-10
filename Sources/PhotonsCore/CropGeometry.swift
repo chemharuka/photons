@@ -90,6 +90,11 @@ public struct CropGeometry: Sendable, Equatable {
     /// 183 — the keystone, kept here so every consumer that asks this type for a pixel size gets the
     /// same answer (`frameSize` below). `nil` for every document that never touched the two knobs.
     public let perspective: PerspectiveMap?
+    /// 330 — the space `crop` is measured in. A keystoned document is **always** read on its canvas
+    /// (see `init`), which is what keeps every reader of this type consistent; the stored document
+    /// keeps its own marker (`GeometryGroup.cropSpace`) and is migrated once, where the source size
+    /// is known.
+    public let cropSpace: CropSpace
 
     /// Aliases for the three things the spec names: matrix, crop rect, effective canvas.
     public var rotationMatrix: RotationMatrix { rotation }
@@ -98,25 +103,46 @@ public struct CropGeometry: Sendable, Equatable {
 
     public init(geometry: GeometryGroup, source: ImageSize) {
         let oriented = geometry.orientedSource(source)
-        let crop = geometry.renderCrop(source: source)
+        let perspective = geometry.perspective
         self.rotationDegrees = geometry.straightenDegrees
         self.rotation = RotationMatrix(degrees: geometry.straightenDegrees)
-        self.crop = crop
         self.source = oriented
-        // 301 (方案 A): the canvas is the **rotated crop frame itself** — its own `W × H`, at every
-        // angle. `CropMath.canvasSize` therefore returns `frameSize` (the AABB rule 162 introduced is
-        // gone); a right angle is the same answer it always was. The keystone keeps its quadrilateral
-        // canvas inside `canvasSize`.
-        self.canvas = CropMath.canvasSize(crop: crop, in: source,
-                                          straightenDegrees: geometry.straightenDegrees,
-                                          quarterTurns: geometry.quarterTurns,
-                                          allowsOutsideSource: true,
-                                          perspective: geometry.perspective)
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(geometry.quarterTurns)
         self.flipHorizontal = geometry.flipHorizontal
         self.flipVertical = geometry.flipVertical
         self.aspectLock = geometry.aspectLock
-        self.perspective = geometry.perspective
+        self.perspective = perspective
+        // 330 — the crop's space decides the walk, and **only** the space decides it: a `.source`
+        // document keeps the pre-330 arithmetic bit for bit (that is what the 246/324 goldens and
+        // `KeystoneCanvas324Tests` are written against), and a `.canvas` document is a rectangle of
+        // the document canvas. The two are converted **once**, where the source size is known —
+        // `GeometryGroup.migrateCropToCanvasSpace(source:)` (the catalogue's load path) and
+        // `CropToolController.begin()` (a keystoned document entering the crop tool) — never
+        // implicitly here, or a caller could not express the old semantics at all.
+        self.cropSpace = geometry.cropSpace
+        self.crop = geometry.cropSpace == .canvas
+            ? geometry.cropRect.clamped(allowsOutsideSource: true)
+            : geometry.renderCrop(source: source)
+        // 301 (方案 A): the canvas is the **rotated crop frame itself** — its own `W × H`, at every
+        // angle. `CropMath.canvasSize` therefore returns `frameSize` (the AABB rule 162 introduced is
+        // gone); a right angle is the same answer it always was. The keystone keeps its quadrilateral
+        // canvas inside `canvasSize`.
+        //
+        // 330 — for a canvas-spaced crop the canvas is the **window** cut out of the document canvas,
+        // i.e. `CropMath.canvasCrop(document:crop:).size`: the same one `exportPerspectiveCanvas`
+        // hands the renderer, so the readout, the overlay and the file agree.
+        if cropSpace == .canvas {
+            let document = CropMath.documentCanvas(source: oriented,
+                                                   straightenDegrees: geometry.straightenDegrees,
+                                                   perspective: perspective)
+            self.canvas = CropMath.canvasCrop(document: document, crop: self.crop).size
+        } else {
+            self.canvas = CropMath.canvasSize(crop: crop, in: source,
+                                              straightenDegrees: geometry.straightenDegrees,
+                                              quarterTurns: geometry.quarterTurns,
+                                              allowsOutsideSource: true,
+                                              perspective: perspective)
+        }
     }
 
     /// The picture rotation's own cosine/sine — what the renderer needs for a canvas→source walk.

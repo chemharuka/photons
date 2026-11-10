@@ -261,6 +261,7 @@ public enum CropTool {
                               showsGrid: Bool = true,
                               carry: CropCarry = .identity,
                               quadRotationDegrees: Double = 0,
+                              cropSpace: CropSpace = .source,
                               exceedsPicture: Bool = false) -> CropToolLayout {
         let scale = pointScale > 0 ? pointScale : 1
         let c = crop.clamped(allowsOutsideSource: true)
@@ -295,10 +296,35 @@ public enum CropTool {
                                         aspectLock: .original,
                                         quarterTurns: 0,
                                         perspectiveVertical: map.vertical,
-                                        perspectiveHorizontal: map.horizontal),
+                                        perspectiveHorizontal: map.horizontal,
+                                        cropSpace: cropSpace),
                 source: source)
         }
+        // **330 — a canvas-spaced frame is drawn as a rectangle of the document canvas.**
+        //
+        // The four edges are the rect scaled by the canvas' extent, in document pixels, and the only
+        // map applied is the camera (`LoupeMapping.documentView`) — which is a similarity, so the
+        // frame comes out axis-aligned whatever the keystone did to the picture *inside* it. That is
+        // exactly the user's sentence: 被透视的是框里的画面，不是框。
+        let canvasGeometry: CropGeometry? = cropSpace == .canvas
+            ? CropGeometry(
+                geometry: GeometryGroup(crop: c.normalizedRect,
+                                        rotationDegrees: CropTool.clampStraighten(quadRotationDegrees),
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: keystone?.vertical ?? 0,
+                                        perspectiveHorizontal: keystone?.horizontal ?? 0,
+                                        cropSpace: .canvas),
+                source: source)
+            : nil
         func view(_ u: Double, _ v: Double) -> CGPoint {
+            if let canvasGeometry {
+                let e = canvasGeometry.photoQuadExtent
+                let p = DocumentPoint(u * e.width, v * e.height)
+                if let drawn = mapping.documentView(p) {
+                    return CGPoint(x: carry.applyX(drawn.x) / scale, y: carry.applyY(drawn.y) / scale)
+                }
+            }
             if let keystoneGeometry {
                 let p = keystoneGeometry.documentPoint(normalizedX: u, v)
                 if let drawn = mapping.documentView(p) {
@@ -369,8 +395,15 @@ public enum CropTool {
                                      source: ImageSize,
                                      degrees: Double = 0,
                                      perspective: PerspectiveMap? = nil,
+                                     cropSpace: CropSpace = .source,
                                      tolerance: Double = 0,
                                      shrinkTicks: UnsafeMutablePointer<Int>? = nil) -> CropRect {
+        // 330 — a **canvas-spaced** rect is already measured in the document canvas' own
+        // coordinates, so 「不出画布」 is the rectangle `[0,1]²`: two slabs, no quad, no keystone
+        // branch. The frame is a rectangle of the canvas by definition, which is the whole point.
+        if cropSpace == .canvas {
+            return clampInsideUnitSquare(rect, shrinkTicks: shrinkTicks)
+        }
         // 324 — with a keystone the canvas is the AABB of the photo **quad**, and the frame is a
         // rectangle of the crop's axes, so 「不出 AABB」 is four corner half-planes, not two slabs.
         // One geometry, one quad (`CropGeometry.photoQuad()`); no second AABB is derived here.
@@ -420,6 +453,33 @@ public enum CropTool {
             .clamped(allowsOutsideSource: true)
     }
 
+
+    /// **330 — the canvas-space stop.** `rect` (canvas-normalized) inside `[0,1]²`: shrink about the
+    /// centre only if it is genuinely larger than the canvas, then slide the least amount. Identical
+    /// law to the pre-keystone branch above, in the crop's own (canvas) coordinates — no quad, no
+    /// mapping, and **only a translation** while a drag is running (`shrinkTicks` counts the escape
+    /// hatch, which is what makes 「拖动不改尺寸」 measurable).
+    static func clampInsideUnitSquare(_ rect: CropRect,
+                                      shrinkTicks: UnsafeMutablePointer<Int>?) -> CropRect {
+        let legal = CropRect.full
+        var result = rect.clamped(allowsOutsideSource: true)
+        if result.width > legal.width || result.height > legal.height {
+            let shrink = min(1, legal.width / max(result.width, 1e-9),
+                             legal.height / max(result.height, 1e-9))
+            let width = result.width * shrink, height = result.height * shrink
+            result = CropRect(left: result.centerX - width / 2, top: result.centerY - height / 2,
+                              right: result.centerX + width / 2, bottom: result.centerY + height / 2)
+            shrinkTicks?.pointee &+= 1
+        }
+        var du = 0.0, dv = 0.0
+        if result.left < legal.left { du = legal.left - result.left }
+        else if result.right > legal.right { du = legal.right - result.right }
+        if result.top < legal.top { dv = legal.top - result.top }
+        else if result.bottom > legal.bottom { dv = legal.bottom - result.bottom }
+        return CropRect(left: result.left + du, top: result.top + dv,
+                        right: result.right + du, bottom: result.bottom + dv)
+            .clamped(allowsOutsideSource: true)
+    }
 
     /// **324 — the keystoned stop.** 「框可以进 000000，不能出 AABB」 with the canvas being the AABB of
     /// the photo **quad**: the frame's four document corners (`documentQuad(of:)`) must stay inside

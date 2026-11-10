@@ -122,13 +122,15 @@ final class KeystoneCanvas324Tests: XCTestCase {
 
     private func geometry(vertical: Double, horizontal: Double, degrees: Double,
                           crop: CropRect = .full,
+                          cropSpace: CropSpace = .source,
                           source: ImageSize = KeystoneCanvas324Tests.source) -> CropGeometry {
         let group = GeometryGroup(crop: crop.normalizedRect,
                                   rotationDegrees: degrees,
                                   aspectLock: .original,
                                   quarterTurns: 0,
                                   perspectiveVertical: vertical,
-                                  perspectiveHorizontal: horizontal)
+                                  perspectiveHorizontal: horizontal,
+                                  cropSpace: cropSpace)
         return CropGeometry(geometry: group, source: source)
     }
 
@@ -588,7 +590,18 @@ final class KeystoneCanvas324Tests: XCTestCase {
         let photo = photoCorners(vertical: vertical, horizontal: horizontal, degrees: degrees,
                                  source: Self.source)
         let quad = photo.corners.map { CGPoint(x: $0.x - photo.minX, y: $0.y - photo.minY) }
-        let mine = geometry(vertical: vertical, horizontal: horizontal, degrees: degrees)
+        // **330 — the space changed, the law did not.** A keystoned document's crop is a rectangle of
+        // the **document canvas** now (`cropSpace = .canvas`), so the draft the controller inscribed
+        // is measured on the canvas and the inscription it must equal is the canvas-space one. The
+        // pre-330 source-space answer is printed beside it, so a reader can see the change is the
+        // space and not the clamp: both are "the largest frame of this shape inside the photo quad".
+        let mine = geometry(vertical: vertical, horizontal: horizontal, degrees: degrees,
+                            cropSpace: .canvas)
+        let legacy = geometry(vertical: vertical, horizontal: horizontal, degrees: degrees)
+        print(String(format: "324 ④b · 330 空间 · 画布 %.6f×%.6f · 源空间 %.6f×%.6f",
+                     inscribed.width, inscribed.height,
+                     legacy.inscribedInPhotoQuad(.full).width,
+                     legacy.inscribedInPhotoQuad(.full).height))
         XCTAssertEqual(inscribed, mine.inscribedInPhotoQuad(.full),
                        "the controller's inscription is not the one `inscribedInPhotoQuad` names")
 

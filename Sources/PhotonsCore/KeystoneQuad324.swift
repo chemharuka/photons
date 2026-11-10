@@ -59,10 +59,15 @@ public extension CropGeometry {
     func photoQuad() -> [DocumentPoint] {
         guard hasKeystoneQuad else {
             let e = photoExtent
-            let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
-            let ox = (w - e.width) / 2, oy = (h - e.height) / 2
-            return [DocumentPoint(ox, oy), DocumentPoint(ox + e.width, oy),
-                    DocumentPoint(ox + e.width, oy + e.height), DocumentPoint(ox, oy + e.height)]
+            // 330 — **document-canvas pixels, origin at the AABB's top-left**, which is what this
+            // function's own contract says and what the keystone branch below already does. The
+            // pre-330 spelling returned the box at `((w − e)/2, (h − e)/2)` — photograph coordinates,
+            // not document ones — and nothing noticed because the only caller
+            // (`translatedInsidePhotoQuad`) ran for keystoned documents only. 330's canvas-spaced
+            // clamp runs it for every keystoned *and* straightened document, where the two frames
+            // differ by exactly that offset (9°: (−55, −89) px, measured as an 85 px overhang).
+            return [DocumentPoint(0, 0), DocumentPoint(e.width, 0),
+                    DocumentPoint(e.width, e.height), DocumentPoint(0, e.height)]
         }
         let o = documentOrigin
         return warpedTurnedPhotoCorners.map { DocumentPoint($0.x - o.x, $0.y - o.y) }
@@ -92,9 +97,21 @@ public extension CropGeometry {
 
     /// `documentQuad(of:)` with the document origin handed in — the clamp translates a rect dozens of
     /// times and the origin is a property of the document, not of the rect.
+    ///
+    /// **330** — the rect's own space decides the walk. A `.source` crop is a rectangle of the
+    /// *photograph*, so its image under `P → R` is a quadrilateral (324). A `.canvas` crop is a
+    /// rectangle of the **document canvas** already, so its four corners are the rect scaled by the
+    /// canvas' extent — axis-aligned by construction, which is the whole point of the space: the
+    /// frame is a rectangle on screen, the picture inside it is what got warped.
     internal func documentQuad(of crop: CropRect,
                                origin: (x: Double, y: Double)) -> [DocumentPoint] {
         let c = crop.clamped(allowsOutsideSource: true)
+        if cropIsCanvasSpaced, !CropGeometry.pre330SourceSpace {
+            let e = photoQuadExtent
+            let w = max(e.width, 1e-9), h = max(e.height, 1e-9)
+            return [(c.left, c.top), (c.right, c.top), (c.right, c.bottom), (c.left, c.bottom)]
+                .map { DocumentPoint($0.0 * w, $0.1 * h) }
+        }
         return [(c.left, c.top), (c.right, c.top), (c.right, c.bottom), (c.left, c.bottom)]
             .map { documentPoint(normalizedX: $0.0, $0.1, origin: origin) }
     }
@@ -240,6 +257,35 @@ public extension CropGeometry {
     /// Without a keystone this is 307's inscription, `clampedToRotatedFrame(keepsInside: true)`.
     func inscribedInPhotoQuad(_ crop: CropRect) -> CropRect {
         let c = crop.clamped(allowsOutsideSource: true)
+        // 330 — a canvas-spaced frame's export canvas **is** the rect, so 「放不下」 is the four
+        // corners against the photo quad, in canvas pixels. Same bisection, one predicate.
+        if cropIsCanvasSpaced {
+            let region = DocumentRegion(photoQuad())
+            let e = photoQuadExtent
+            let w = max(e.width, 1e-9), h = max(e.height, 1e-9)
+            func scaled(_ sigma: Double) -> CropRect {
+                let rw = c.width * sigma, rh = c.height * sigma
+                let left = c.centerX - rw / 2, top = c.centerY - rh / 2
+                return CropRect(left: left, top: top, right: left + rw, bottom: top + rh)
+            }
+            func fits(_ sigma: Double) -> Bool {
+                let r = scaled(sigma)
+                // Two canvas pixels of slack for the same reason as the source-space branch: the
+                // exported grid is a whole-pixel `ceil` and S0 samples at pixel **centres**.
+                let margin = 2.0
+                return [(r.left, r.top), (r.right, r.top),
+                        (r.right, r.bottom), (r.left, r.bottom)].allSatisfy { corner in
+                    region.inset(DocumentPoint(corner.0 * w, corner.1 * h)) >= margin
+                }
+            }
+            if fits(1) { return c }
+            var lo = 0.0, hi = 1.0
+            for _ in 0..<80 {
+                let mid = (lo + hi) / 2
+                if fits(mid) { lo = mid } else { hi = mid }
+            }
+            return scaled(lo)
+        }
         guard hasKeystoneQuad, let perspective else {
             return CropMath.clampedToRotatedFrame(c, in: source, degrees: rotationDegrees,
                                                   keepsInsideRotatedFrame: true)

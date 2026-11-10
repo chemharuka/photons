@@ -393,6 +393,17 @@ public struct EditHistory: Sendable, Equatable, Codable {
         }
     }
 
+    /// 330 — migrate every snapshot's crop from photo space to the document canvas.
+    ///
+    /// Same reasoning as 249's heal migration, one space over: an undo to a pre-330 snapshot would
+    /// otherwise bring back a rect that the rest of the document no longer measures that way. A
+    /// keystone-free snapshot is untouched (the two spaces are the same picture there).
+    public mutating func migrateCropToCanvasSpace(sourceSize: ImageSize) {
+        for i in snapshots.indices {
+            snapshots[i].edit.migrateCropToCanvasSpace(sourceSize: sourceSize)
+        }
+    }
+
     // MARK: tool sessions (077)
 
     /// Open a tool session: from here until `endSession` / `cancelSession`, `commit` records nothing.

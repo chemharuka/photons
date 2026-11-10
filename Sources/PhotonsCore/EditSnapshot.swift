@@ -509,6 +509,11 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     /// geometry card) and stay `nil` when 0, exactly like `rotationDegrees`.
     public var perspectiveVertical: Double?
     public var perspectiveHorizontal: Double?
+    /// 330 — the space the four crop edges were measured in. `nil` (absent) means the pre-330 answer,
+    /// `.source`; carried only when it is `.canvas`, so a keystone-free clipboard re-encodes byte for
+    /// byte. A pasted rect is interpreted in the space it was copied in — the receiving document then
+    /// reads it through `CropGeometry`, which is where the migration lives.
+    public var cropSpace: CropSpace?
 
     public init() {}
 
@@ -516,7 +521,8 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
         [cropX != nil, cropY != nil, cropWidth != nil, cropHeight != nil,
          rotationDegrees != nil, flipHorizontal != nil, flipVertical != nil,
          aspectLock != nil, quarterTurns != nil,
-         perspectiveVertical != nil, perspectiveHorizontal != nil].filter { $0 }.count
+         perspectiveVertical != nil, perspectiveHorizontal != nil,
+         cropSpace != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
@@ -897,6 +903,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             geometry.perspectiveHorizontal = edit.geometry.perspectiveHorizontal
         }
         if edit.geometry.aspectLock != .original { geometry.aspectLock = edit.geometry.aspectLock }
+        // 330 — the crop's space travels with the crop. Carried only for `.canvas`, so a keystone-free
+        // clipboard keeps its pre-330 bytes (`nil` = `.source`).
+        if edit.geometry.cropSpace != .source { geometry.cropSpace = edit.geometry.cropSpace }
         s.geometry = geometry.isEmpty ? nil : geometry
 
         var light = LightPatch()
@@ -1379,6 +1388,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.cropY { out.geometry.crop.y = v }
             if let v = p.cropWidth { out.geometry.crop.width = v }
             if let v = p.cropHeight { out.geometry.crop.height = v }
+            // 330 — the edges are read in the space they were copied in. A keystone-free source and a
+            // keystone-free target are the same picture, so this is a no-op on every pre-330 payload.
+            if carriesCrop, let space = p.cropSpace { out.geometry.cropSpace = space }
             if let v = p.rotationDegrees { out.geometry.rotationDegrees = v }
             if let v = p.perspectiveVertical { out.geometry.perspectiveVertical = v }
             if let v = p.perspectiveHorizontal { out.geometry.perspectiveHorizontal = v }
