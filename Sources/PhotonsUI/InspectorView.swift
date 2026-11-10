@@ -143,8 +143,17 @@ public struct InspectorView: View {
         /// the panel's own order says the same), while 裁切 belongs to a workspace of its own and is
         /// therefore invisible in 调整 either way.
         case crop
-        /// 087: 变换 — the 变换 workspace's second card (转动 / 旋转 / 镜像), after 裁切.
-        /// 093: the card title is 「变换」; `CropSection.angle` keeps its `angle` rawValue.
+        /// 334: 校正 — the 变换 workspace's **second** card (拉直 / 画线拉直 / 垂直透视 / 水平透视).
+        ///
+        /// Not `.correction`: that case is the 调整 workspace's lens card (色差 + 暗角), a different
+        /// parameter group with its own `PanelCardSpec`. 334 split the geometry repairs out of 裁切
+        /// and they needed a card of their own; both cards are titled 校正 because they answer the
+        /// same question in different domains (lens vs geometry), and they never share a workspace.
+        case transformCorrection
+        /// 087: 变换 — the 变换 workspace's third card (转动 / 旋转 / 镜像), after 裁切.
+        /// 093: `CropSection.angle` keeps its `angle` rawValue.
+        /// 334: the card is titled 「变换」 (it is the rotation/mirror card); the 校正 card took the
+        /// 「校正」 name it used to borrow.
         case angle
         case masks
         /// 派单 077: 历史记录 — the edit timeline (one row per committed state). The last card, and the
@@ -172,7 +181,9 @@ public struct InspectorView: View {
             case .curve: return "曲线"
             case .effects: return "效果"
             case .crop: return "裁切"
-            case .angle: return "旋转"
+            /// 334: the 变换 workspace's 校正 card (geometry), not the 调整 workspace's lens 校正.
+            case .transformCorrection: return "校正"
+            case .angle: return "变换"
             case .masks: return "蒙版"
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
@@ -422,12 +433,15 @@ public struct InspectorView: View {
         case .effects:
             effectsCard
         case .crop:
-            // 2026-10-27 / 086: 变换工作区的第一张卡 —— 宽高比 / 角度 / 旋转 / 镜像，底部九宫格 +
-            // 应用取消；进入工作区即进入裁切模式，卡头没有按钮。卡本身在 `TransformPanel.swift`
-            // （同一套行样式，`sliderRow` 一字未改）。
+            // 334: 变换工作区的第一张卡 —— **只有宽高比**（四个比例按钮并排常显 + 原始/自由 +
+            // 自定义比例字段），然后是「不出像素」、「九宫格」，最底一行 取消 / 应用。
+            // 拉直 / 透视 / 画线拉直搬到了下一张卡（校正）。
             cropTransformCard
+        case .transformCorrection:
+            // 334: 第二张卡 —— 校正：拉直（滑杆）→ 画线拉直（水平仪图标）→ 垂直透视 → 水平透视。
+            correctionTransformCard
         case .angle:
-            // 087: 变换工作区的第二张卡 —— 转动 / 旋转 / 镜像，放在裁切卡之后。
+            // 087/334: 第三张卡 —— 变换：左转 / 右转 90° + 水平 / 垂直镜像。
             angleTransformCard
         case .masks:
             // 221: two cards, one under the other — 蒙版 (what exists / what is selected) and 修复

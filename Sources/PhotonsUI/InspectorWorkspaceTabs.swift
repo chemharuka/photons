@@ -92,9 +92,10 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
                     .detailFX, .effects]
         case .transform:
             // 2026-10-27 — 裁切. The user's ask: 「点开变换窗口，**第一个卡片是裁切**」. 087 added the
-            // 角度 card right after it (转动 / 旋转 / 镜像), and both are `Section`s like every other
+            // 变换 card right after it (转动 / 旋转 / 镜像), and both are `Section`s like every other
             // card, so the order still comes from `Section.allCases`.
-            return [.crop, .angle]
+            // 334: 裁切 → 校正 → 变换 (the user: 「现在有三个卡片：裁切，校正，变换」).
+            return [.crop, .transformCorrection, .angle]
         case .colour:
             // 076: HSL — the eight bands. 2026-10-28 (P0 色彩分级): 色彩分级 joined it. 140: 点颜色
             // sits between HSL and 色彩分级, the pipeline's own `.hsl, .pointColour, .grade` order.

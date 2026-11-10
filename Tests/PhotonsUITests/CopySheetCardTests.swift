@@ -186,15 +186,17 @@ final class CopySheetCardTests: XCTestCase {
                        "对话框里属于调整工作区的行序必须跟着检查器的卡序：\(cardTitles) vs \(adjust)")
         XCTAssertTrue(cardTitles.contains("校正"), "156: 校正 卡必须在复制表里：\(cardTitles)")
         XCTAssertTrue(cardTitles.contains("细节"), "164: 细节 卡必须在复制表里：\(cardTitles)")
-        // 087: 角度 card's fields (转动 / 旋转 / 镜像) live in `EditSnapshotSection.crop`, so the
-        // copy sheet has no separate 角度 row even though the inspector draws a second card.
+        // 087/334: the transform cards' fields (裁切 / 拉直 / 透视 / 旋转 / 镜像) live in
+        // `EditSnapshotSection.crop`, so the copy sheet has no separate 裁切/校正/变换 row even though
+        // the inspector draws three cards.
         // 140: 点颜色 is not carried yet (its fields have no snapshot section); that is a different
         // ticket. Every other card of every workspace must be present.
         XCTAssertEqual(Set(cardRows.map(\.title)),
                        Set([adjust, InspectorView.cardTitles(in: .colour),
                             InspectorView.cardTitles(in: .transform),
                             InspectorView.cardTitles(in: .masks)].flatMap { $0 })
-                           .subtracting(["旋转", "点颜色"]))
+                           // 334: 变换工作区的第三张卡改名为「变换」（原「旋转」），裁切/校正都有复制行.
+                           .subtracting(["变换", "点颜色"]))
         // 319: 子项默认展开，所以「默认」的这张表就是 15 卡 + 每个参数一行（§2.1）。
         XCTAssertEqual(view.rows.count, 15 + EditSnapshotChild.allCases.count,
                        "319：默认画 15 张卡和它们的全部参数")

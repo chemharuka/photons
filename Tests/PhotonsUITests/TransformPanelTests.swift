@@ -43,11 +43,13 @@ final class TransformPanelTests: XCTestCase {
     // MARK: - 1. 一张表：变换的卡片清单，第一张是裁切
 
     func testTheTransformWorkspaceShowsTheCropCardFirst() throws {
-        XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop, .angle],
-                       "变换工作区认领裁切 + 角度两张卡（唯一一张「工作区 → 卡片」表）")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"],
-                       "卡片清单的第一张必须是裁切，第二张是变换卡（093 改名）")
-        XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue), ["crop", "angle"])
+        // 334 (user): 「现在有三个卡片：裁切，校正，变换」.
+        XCTAssertEqual(InspectorWorkspace.transform.cards, [.crop, .transformCorrection, .angle],
+                       "变换工作区认领裁切 / 校正 / 变换三张卡（唯一一张「工作区 → 卡片」表）")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "校正", "变换"],
+                       "三张卡，顺序就是用户的：裁切 → 校正 → 变换")
+        XCTAssertEqual(InspectorView.sections(in: .transform).map(\.rawValue),
+                       ["crop", "transformCorrection", "angle"])
         // 调整工作区不受影响：裁切是它自己的工作区的卡片。
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("裁切"))
         XCTAssertFalse(InspectorView.cardTitles(in: .adjust).contains("变换"))
@@ -58,18 +60,21 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
-        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "旋转"])
+        XCTAssertEqual(panel.cards.cardTitles, ["裁切", "校正", "变换"])
         let card = try XCTUnwrap(panel.row(CropCardID.card), "裁切卡自己没有 frame")
-        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "角度卡自己没有 frame")
-        print(String(format: "CARD · 变换第一张 = %@ · frame (%.1f, %.1f, %.1f×%.1f)",
-                     panel.cards.cardTitles.first ?? "-",
+        let correctionCard = try XCTUnwrap(panel.row(CropCardID.correctionCard), "校正卡自己没有 frame")
+        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "变换卡自己没有 frame")
+        print(String(format: "CARD · 变换三张 = %@ · frame (%.1f, %.1f, %.1f×%.1f)",
+                     panel.cards.cardTitles.joined(separator: " / "),
                      card.minX, card.minY, card.width, card.height))
         XCTAssertGreaterThan(card.width, 200, "卡片比面板还窄")
-        XCTAssertGreaterThan(card.height, 100, "裁切卡（宽高比 / 角度 / 透视 + 底部行）不该只有 \(card.height) pt")
-        XCTAssertGreaterThan(angleCard.height, 60, "旋转卡（旋转 / 镜像）不该只有 \(angleCard.height) pt")
-        XCTAssertGreaterThan(angleCard.minY, card.maxY, "角度卡必须在裁切卡之后")
+        XCTAssertGreaterThan(card.height, 100, "裁切卡（宽高比 + 自定义 + 不出像素 + 九宫格 + 应用/取消）不该只有 \(card.height) pt")
+        XCTAssertGreaterThan(correctionCard.height, 100, "校正卡（拉直 / 画线 / 两条透视）不该只有 \(correctionCard.height) pt")
+        XCTAssertGreaterThan(angleCard.height, 60, "变换卡（旋转 / 镜像）不该只有 \(angleCard.height) pt")
+        XCTAssertGreaterThan(correctionCard.minY, card.maxY, "校正卡必须在裁切卡之后")
+        XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY, "变换卡必须在最后")
         // 卡在滚动内容里、在直方图下方 —— 它是一张普通的卡。
         XCTAssertLessThan(panel.histogramPlot.maxY, card.minY)
     }
@@ -150,56 +155,99 @@ final class TransformPanelTests: XCTestCase {
         print("⌘R · in → \(loupe.isCropToolActive) → out · menu rows \(transform.items.map(\.title))")
     }
 
-    // MARK: - 3. 比例：六个预设 + 自定义 5:4
+    // MARK: - 3. 比例：四个常显按钮 + 原始 / 自由 + 自定义输入（334）
 
-    func testTheSixPresetsAndACustomRatioReachTheDocument() throws {
-        XCTAssertEqual(CropAspectRow.items, CropAspectPreset.allCases, "比例行就是那张预设表")
-        XCTAssertEqual(CropAspectRow.items.map(\.displayName), ["原始", "1:1", "4:3", "3:2", "16:9", "自由"])
+    func testTheFourRatioButtonsTheTwoExitsAndACustomRatioReachTheDocument() throws {
+        // 334 (user): 「常见比例的按钮(1:1 4:3 16:9 2:3)都放出来，不要做成点击切换的模式」.
+        XCTAssertEqual(RatioButton.allCases.map(\.title), ["1:1", "4:3", "16:9", "2:3"])
+        XCTAssertEqual(RatioButton.allCases.map(\.identifier),
+                       ["inspector.crop.ratio.1x1", "inspector.crop.ratio.4x3",
+                        "inspector.crop.ratio.16x9", "inspector.crop.ratio.2x3"])
+        // 2:3 没有 `AspectLock` 命名分支：它是显式的 custom(2/3)，和键入的那一条同一个锁.
+        XCTAssertEqual(RatioButton.allCases.map(\.lock),
+                       [.square, .fourThree, .sixteenNine, .custom(2.0 / 3.0)])
 
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer { editor.window?.orderOut(nil) }
         let session = editor.session
         let loupe = editor.rootView.loupeController
-        XCTAssertTrue(loupe.beginCropTool())
-        pump(0.1)
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        pump(0.2)
+        let inspector = editor.rootView.inspectorHost
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertTrue(loupe.isCropToolActive, "082: 切到「变换」= 进入裁切")
 
-        // 六个预设逐个点：每一个都把草稿的比例锁设成它自己（文档不动）。
+        // 四个按钮各点一次：草稿的锁就是它自己（文档不动）.
         var codes: [String] = []
-        for preset in CropAspectRow.items {
-            loupe.cropTool.setAspect(preset)
+        for button in RatioButton.allCases {
+            let view = try XCTUnwrap(Self.button(RatioPresetButton.self, id: button.identifier,
+                                                 in: inspector),
+                                     "334: 比例按钮「\(button.title)」不在树上（\(button.identifier)）")
+            view.performClick(nil)
+            pump(0.05)
+            inspector.layoutSubtreeIfNeeded()
+            XCTAssertEqual(loupe.cropTool.draft.lock, button.lock,
+                           "334: 点「\(button.title)」必须把草稿锁设成 \(button.lock.code)")
             codes.append(loupe.cropTool.draft.lock.code)
-            XCTAssertEqual(CropAspectRow.title(for: loupe.cropTool), preset.displayName)
         }
-        print("ASPECT presets · \(zip(CropAspectRow.items, codes).map { "\($0.0.displayName)→\($0.1)" })")
-        XCTAssertEqual(Set(codes).count, 6, "六个预设不能有两个落到同一个锁上")
+        XCTAssertEqual(Set(codes).count, 4, "334: 四个比例不能有两个落到同一个锁上")
+        print("ASPECT buttons · \(zip(RatioButton.allCases, codes).map { "\($0.0.title)→\($0.1)" })")
         XCTAssertEqual(session.edit.geometry.aspectLock, .original, "比例是草稿的事，应用前不碰文档")
+        XCTAssertNil(CropRatioPanels.shared.prompt, "104/334：比例不再有居中面板")
 
-        // 104: 自定义不再弹框 —— 输入走卡里内联字段的同一条提交路径（解析 + setCustomRatio）。
-        XCTAssertNil(CropRatioPanels.shared.prompt, "104：比例行不再有居中面板")
-        XCTAssertTrue(CropRatioPanels.shared.commit("5:4", to: loupe.cropTool), "5:4 必须被接受")
+        // 原始 / 自由：两道解掉约束的门.
+        let original = try XCTUnwrap(Self.button(RatioPresetButton.self, id: CropAspectRow.originalID,
+                                                 in: inspector))
+        original.performClick(nil)
+        pump(0.05)
+        XCTAssertEqual(loupe.cropTool.aspectPreset(), .original, "334: 「原始」= 传感器比例")
+        let free = try XCTUnwrap(Self.button(RatioPresetButton.self, id: CropAspectRow.freeID,
+                                             in: inspector))
+        free.performClick(nil)
+        pump(0.05)
+        XCTAssertTrue(loupe.cropTool.isAspectFree, "334: 「自由」= 取消约束")
+
+        // 自定义输入：`5:4` → custom(1.25)，卡片里那个常显字段就是入口.
+        let field = try XCTUnwrap(Self.button(CustomRatioField.self, id: CropAspectRow.customID,
+                                              in: inspector),
+                                  "334: 自定义比例字段不在树上")
+        field.stringValue = "5:4"
+        field.commitForTesting()
         pump(0.1)
-        if case .custom(let ratio) = loupe.cropTool.draft.lock {
-            XCTAssertEqual(ratio, 5.0 / 4.0, accuracy: 1e-9, "输入 5:4 应该锁成 1.25")
-        } else {
-            XCTFail("自定义比例没有进草稿的锁：\(loupe.cropTool.draft.lock)")
+        guard case .custom(let ratio) = loupe.cropTool.draft.lock else {
+            return XCTFail("334: 5:4 没有写进草稿的锁（\(loupe.cropTool.draft.lock)）")
         }
-        XCTAssertEqual(CropAspectRow.title(for: loupe.cropTool), "5:4",
-                       "比例 chip 要说出它现在是一个自定义比例（W:H）")
+        XCTAssertEqual(ratio, 5.0 / 4.0, accuracy: 1e-9, "334: 5:4 = custom(1.25)")
 
-        // 应用：那一个锁原样进文档。
+        // 小数也收：`1.85`.
+        field.stringValue = "1.85"
+        field.commitForTesting()
+        pump(0.1)
+        XCTAssertEqual(loupe.cropTool.draft.lock, .custom(1.85), "334: 1.85 必须被接受")
+
+        // 应用：那一个锁原样进文档.
         XCTAssertTrue(loupe.applyCropTool())
         pump(0.1)
-        XCTAssertEqual(session.edit.geometry.aspectLock, .custom(5.0 / 4.0),
-                       "文档里存的不是 custom(5,4)：\(session.edit.geometry.aspectLock.code)")
-        print("ASPECT custom · 5:4 → draft \(loupe.cropTool.draft.lock.code) → document "
-              + "\(session.edit.geometry.aspectLock.code) · history \(session.history.count)")
+        XCTAssertEqual(session.edit.geometry.aspectLock, .custom(1.85),
+                       "文档里存的不是 custom(1.85)：\(session.edit.geometry.aspectLock.code)")
 
-        // 非法输入：一声响，什么都没写。
+        // 非法输入：一声响，什么都没写.
         XCTAssertTrue(loupe.beginCropTool())
         pump(0.1)
         let lockBefore = loupe.cropTool.draft.lock
+        // 应用把工作区送回了「调整」；再进一次变换，卡片才在树上.
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        pump(0.2)
+        editor.rootView.inspectorHost.layoutSubtreeIfNeeded()
+        let badField = try XCTUnwrap(Self.button(CustomRatioField.self, id: CropAspectRow.customID,
+                                                 in: editor.rootView.inspectorHost))
+        badField.stringValue = "abc"
+        badField.commitForTesting()
+        pump(0.1)
+        XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "334: 被拒的输入不许改比例")
         XCTAssertFalse(CropRatioPanels.shared.commit("0:0", to: loupe.cropTool), "0:0 必须被拒绝")
-        XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "被拒的输入不许改比例")
+        XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "334: 被拒的输入不许改比例")
+        print("ASPECT custom · 5:4 / 1.85 → document \(session.edit.geometry.aspectLock.code)")
         loupe.cancelCropTool()
     }
 
@@ -284,9 +332,10 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
         try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(CropApplyRow.applyProbe) != nil }
-        let keys = ["宽高比", "角度", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
+        // 334: 拉直行搬到了校正卡，裁切卡上剩下的开关是 宽高比 / 九宫格 / 应用 / 取消.
+        let keys = ["宽高比", "九宫格", CropApplyRow.applyProbe, CropApplyRow.cancelProbe]
         for key in keys {
             _ = try waitFor(panel) { _ in DetailRowEnabledLog.shared.value(key) != nil }
         }
@@ -300,9 +349,9 @@ final class TransformPanelTests: XCTestCase {
         }.joined(separator: " · "))
     }
 
-    // MARK: - 4. 宽高比：标题 · 选单 · ⇄ 同一行
+    // MARK: - 4. 四个比例按钮：244 pt 下同排、等宽、不截断（334）
 
-    func testTheAspectTitlePickerAndSwapShareOneLineAt244Points() throws {
+    func testTheFourRatioButtonsShareOneRowAt244PointsAndNoneIsTruncated() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
@@ -310,12 +359,12 @@ final class TransformPanelTests: XCTestCase {
         _ = loupe.view
         XCTAssertTrue(loupe.beginCropTool())
 
+        // 300 pt 是工作区允许的最窄面板：卡内容 244 pt.
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
-        // 086: the second 「裁切」 is now 「宽高比」; the card title itself is untouched.
         XCTAssertEqual(CropSection.crop.title, "宽高比")
         XCTAssertEqual(InspectorView.Section.crop.title, "裁切", "卡片名仍是「裁切」")
         XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
@@ -324,33 +373,58 @@ final class TransformPanelTests: XCTestCase {
         let card = try XCTUnwrap(panel.row(CropCardID.card))
         let contentWidth = card.width - 2 * WorkspaceLayout.cardInsetH
         XCTAssertGreaterThanOrEqual(contentWidth, 244 - 0.5, "244 pt 内容宽是这张卡的验收宽度")
-        let title = try XCTUnwrap(panel.row(CropCardID.section(.crop)),
-                                  "「宽高比」小标题没有画出来")
-        let menu = try XCTUnwrap(panel.row(CropAspectRow.menuProbeID), "比例选单没有画出来")
-        let swap = try XCTUnwrap(panel.row(CropAspectRow.swapProbeID), "⇄ 交换没有画出来")
+        let title = try XCTUnwrap(panel.row(CropCardID.section(.crop)), "「宽高比」小标题没有画出来")
 
-        for (name, rect) in [("选单", menu), ("⇄", swap)] {
-            XCTAssertLessThanOrEqual(abs(rect.midY - title.midY), 1,
-                                     "086: 「\(name)」必须和「宽高比」同一行（Δy \(rect.midY - title.midY)）")
-            XCTAssertGreaterThan(rect.minX, title.minX, "086: 「\(name)」在标题右侧")
+        var frames: [(String, CGRect)] = []
+        for button in RatioButton.allCases {
+            let view = try XCTUnwrap(panel.view(RatioPresetButton.self, identifier: button.identifier),
+                                     "334: 比例按钮「\(button.title)」没有画出来")
+            let rect = view.convert(view.bounds, to: panel.host)
+            frames.append((button.title, rect))
+            // 不截断：NSButton 的 cell 按裁剪而不是省略号断行，文本也真的放得下.
+            XCTAssertEqual(view.cell?.lineBreakMode, .byClipping,
+                           "334: 「\(button.title)」不许出现省略号")
+            XCTAssertGreaterThanOrEqual(rect.width, CropAspectRow.minimumButtonWidth - 0.5,
+                                        "334: 「\(button.title)」只有 \(rect.width) pt 宽（< 40）")
+        }
+        print("334 §3 · 四个比例 " + frames.map {
+            String(format: "%@ (%.1f, %.1f, %.1f×%.1f)", $0.0, $0.1.minX, $0.1.minY,
+                   $0.1.width, $0.1.height)
+        }.joined(separator: " · "))
+
+        // 同一行：midY 差 ≤ 0.5 pt；都在卡片里；都在「宽高比」小标题下面.
+        let mids = frames.map(\.1.midY)
+        XCTAssertLessThanOrEqual((mids.max() ?? 0) - (mids.min() ?? 0), 0.5,
+                                 "334: 四个按钮必须同一行（midY \(mids)）")
+        for (name, rect) in frames {
+            XCTAssertGreaterThan(rect.minX, title.minX - 1, "334: 「\(name)」在小标题右侧")
             XCTAssertGreaterThanOrEqual(rect.minX, card.minX + WorkspaceLayout.cardInsetH - 0.5)
             XCTAssertLessThanOrEqual(rect.maxX, card.maxX - WorkspaceLayout.cardInsetH + 0.5,
-                                     "086: 「\(name)」出了卡片右边")
+                                     "334: 「\(name)」出了卡片右边")
+            XCTAssertGreaterThan(rect.minY, title.maxY, "334: 「\(name)」要在小标题下面")
         }
-        XCTAssertGreaterThanOrEqual(swap.width, CropAspectRow.swapHitSize - 0.5,
-                                    "086: ⇄ 的命中区至少 18 pt 宽（实测 \(swap.width)）")
-        XCTAssertGreaterThanOrEqual(swap.height, CropAspectRow.swapHitSize - 0.5,
-                                    "086: ⇄ 的命中区至少 18 pt 高（实测 \(swap.height)）")
 
-        let source = try String(contentsOf: Self.source("TransformPanel.swift"), encoding: .utf8)
-        XCTAssertFalse(source.contains("Text(\"比例\")"), "086: 这一行不再出现「比例」这个词")
-        print(String(format: "ASPECT ROW · title %@ · menu %@ · swap %@ · content %.1f pt",
-                     NSStringFromRect(title), NSStringFromRect(menu), NSStringFromRect(swap), contentWidth))
+        // 点 16:9 → 草稿的锁就是 16:9.
+        let sixteenNine = try XCTUnwrap(frames.first { $0.0 == "16:9" }?.1)
+        let button = try XCTUnwrap(panel.view(RatioPresetButton.self,
+                                              identifier: RatioButton.sixteenNine.identifier))
+        button.performClick(nil)
+        _ = try waitFor(panel) { _ in loupe.cropTool.draft.lock == .sixteenNine }
+        print("334 §3 · 点 16:9 → draft.lock \(loupe.cropTool.draft.lock.code)"
+              + " · 按钮 \(NSStringFromRect(sixteenNine))")
+        XCTAssertEqual(loupe.cropTool.draft.lock, .sixteenNine,
+                       "334: 点 16:9 之后 aspectLock 必须是 16:9")
+
+        // 自定义比例那一行就在它们下面（图标 `ruler`，不是画线拉直的水平仪）.
+        XCTAssertEqual(CropAspectRow.customSymbol, "ruler")
+        let customRow = try XCTUnwrap(panel.row(CropAspectRow.customProbeID), "自定义比例行没有画出来")
+        XCTAssertGreaterThan(customRow.minY, frames.map(\.1.maxY).max() ?? 0,
+                             "334: 自定义比例在四个按钮下面")
     }
 
-    // MARK: - 5. 九宫格 / 应用 / 取消 = 卡片最后一行
+    // MARK: - 5. 应用 / 取消 = 卡片最底一行（334：九宫格自己一行）
 
-    func testTheGridApplyCancelRowIsTheCardsLastRowAndApplyCancelAreRightAligned() throws {
+    func testApplyAndCancelAreTheCropCardsLowestRow() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
@@ -361,40 +435,39 @@ final class TransformPanelTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        try waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         let card = try XCTUnwrap(panel.row(CropCardID.card))
-        let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard))
-        XCTAssertGreaterThan(angleCard.minY, card.maxY, "087: 角度卡在裁切卡之后")
+        let correctionCard = try XCTUnwrap(panel.row(CropCardID.correctionCard))
+        XCTAssertGreaterThan(correctionCard.minY, card.maxY, "334: 校正卡在裁切卡之后")
+        let stays = try XCTUnwrap(panel.row(CropCardID.staysInsidePixels), "「不出像素」没有画出来")
         let grid = try XCTUnwrap(panel.row(CropCardID.grid), "九宫格没有画出来")
         let apply = try XCTUnwrap(panel.row(CropCardID.apply), "应用 / 取消没有画出来")
-        XCTAssertLessThanOrEqual(abs(grid.midY - apply.midY), 1,
-                                 "086: 九宫格与应用/取消必须同一行（Δy \(grid.midY - apply.midY)）")
-        XCTAssertGreaterThan(apply.minX, grid.maxX, "086: 应用/取消在九宫格右边")
-        XCTAssertLessThanOrEqual(abs(apply.maxX - (card.maxX - WorkspaceLayout.cardInsetH)), 1,
-                                 "086: 应用/取消右对齐到卡片内容右边")
 
-        // Nothing is drawn below the bottom row. The bottom row's own probes (grid + the apply/cancel
-        // chips) are measured against each other above, so they are excluded here — including them made
-        // this assertion compare the row with itself. 317 added a third probe to that row
-        // (「不出像素」, left of 九宫格) and it belongs in the same exclusion for the same reason.
+        // 用户（334）：「keep 不出像素 checkbox…这个卡片中保留九宫格，应用和取消放在最底下」.
+        XCTAssertGreaterThan(stays.minY, try XCTUnwrap(panel.row(CropAspectRow.customProbeID)).maxY,
+                             "334: 「不出像素」在宽高比/自定义之下")
+        XCTAssertGreaterThan(grid.minY, stays.maxY, "334: 九宫格在「不出像素」之下（自己一行）")
+        XCTAssertGreaterThan(apply.minY, grid.maxY, "334: 应用/取消在九宫格之下")
+        // 最底下：裁切卡里没有比应用/取消更低的行.
         let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply, CropCardID.staysInsidePixels]
         let rows = panel.probes
-            .filter { $0.rowID != CropCardID.card && $0.rowID != CropCardID.angleCard }
+            .filter { $0.rowID != CropCardID.card && $0.rowID != CropCardID.correctionCard
+                      && $0.rowID != CropCardID.angleCard }
             .filter { !bottomIDs.contains($0.rowID) }
             .map { ($0.rowID, $0.convert($0.bounds, to: panel.host)) }
-            // 087: only the crop card — the angle card legitimately sits below this one.
             .filter { $0.1.minY >= card.minY - 1 && $0.1.maxY <= card.maxY + 1 }
-        let bottomTop = min(grid.minY, apply.minY)
-        let below = rows.filter { $0.1.minY > bottomTop + 0.5 }
-        XCTAssertTrue(below.isEmpty,
-                      "086: 底部行之下还有控件（\(below.map(\.0))）")
-        let bottomMax = max(grid.maxY, apply.maxY)
-        let lowestOther = rows.map(\.1.maxY).max() ?? 0
-        XCTAssertLessThanOrEqual(lowestOther, bottomMax + 1,
-                                 "086: 最后一行就是九宫格/应用/取消（其它内容最低 \(lowestOther) vs 底部行 \(bottomMax)）")
-        print(String(format: "BOTTOM ROW · grid %@ · apply %@ · card %@",
-                     NSStringFromRect(grid), NSStringFromRect(apply), NSStringFromRect(card)))
+        let below = rows.filter { $0.1.minY > apply.minY + 0.5 }
+        XCTAssertTrue(below.isEmpty, "334: 应用/取消之下还有控件（\(below.map(\.0))）")
+        XCTAssertLessThanOrEqual(rows.map(\.1.maxY).max() ?? 0, apply.maxY + 1,
+                                 "334: 最后一行就是应用/取消")
+
+        // 应用 / 取消 右对齐到卡片内容右边（086 的排法不变）.
+        XCTAssertLessThanOrEqual(abs(apply.maxX - (card.maxX - WorkspaceLayout.cardInsetH)), 1,
+                                 "086: 应用/取消右对齐到卡片内容右边")
+        print(String(format: "BOTTOM · stays %@ · grid %@ · apply %@ · card %@",
+                     NSStringFromRect(stays), NSStringFromRect(grid),
+                     NSStringFromRect(apply), NSStringFromRect(card)))
     }
 
     // MARK: - 6. 三个宽度：每行都不重叠、不出卡片
@@ -413,23 +486,31 @@ final class TransformPanelTests: XCTestCase {
             let panel = try host(width: width, session: session, loupe: loupe)
             defer { panel.window.contentView = nil }
             panel.state.select(.transform)
-            try waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+            try waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
             let card = try XCTUnwrap(panel.row(CropCardID.card), "\(width) pt：没有卡片 frame")
-            let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "\(width) pt：没有角度卡 frame")
-            // 214: the two cards own two row sets. The crop card is 宽高比 / 角度 / 透视 + 底部行; the
-            // rotation card is 旋转 / 镜像.
+            let correctionCard = try XCTUnwrap(panel.row(CropCardID.correctionCard),
+                                               "\(width) pt：没有校正卡 frame")
+            let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "\(width) pt：没有变换卡 frame")
+            // 334: three cards, three row sets — 裁切 (宽高比 / 不出像素 / 九宫格 / 应用),
+            // 校正 (拉直 / 画线拉直 / 两条透视), 变换 (旋转 / 镜像).
             let cardRows: [(String, CGRect, CGRect)] = [
                 (CropCardID.aspect, card),
-                (CropCardID.angle, card),
-                (CropCardID.perspectiveVertical, card),
+                (CropCardID.staysInsidePixels, card),
+                (CropCardID.grid, card),
                 (CropCardID.apply, card),
-                (CropCardID.turn, angleCard),
-                (CropCardID.mirror, angleCard),
             ].compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
-            XCTAssertEqual(cardRows.count, 6, "\(width) pt：六行里少了（\(cardRows.map(\.0))）")
-            XCTAssertGreaterThan(angleCard.minY, card.maxY,
-                                 "\(width) pt：角度卡必须在裁切卡之后")
+            + CorrectionCardRow.allCases.compactMap { row in
+                panel.row(row.probeID).map { (row.probeID, $0, correctionCard) }
+            }
+            + [(CropCardID.turn, angleCard), (CropCardID.mirror, angleCard)]
+                .compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
+            XCTAssertEqual(cardRows.count, 10,
+                           "\(width) pt：十行里少了（\(cardRows.map(\.0))）")
+            XCTAssertGreaterThan(correctionCard.minY, card.maxY,
+                                 "\(width) pt：校正卡必须在裁切卡之后")
+            XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY,
+                                 "\(width) pt：变换卡必须在最后")
 
             // 每行都在自己的卡片里，而且有宽度。
             for (id, frame, owner) in cardRows {
@@ -440,7 +521,7 @@ final class TransformPanelTests: XCTestCase {
                                          "\(width) pt：\(id) 出了卡片右边（\(frame.maxX) vs \(owner.maxX)）")
             }
             // 不重叠：同一张卡内按 y 排好之后，上面那一行的底不能压到下面那一行的顶。
-            for owner in [card, angleCard] {
+            for owner in [card, correctionCard, angleCard] {
                 let ordered = cardRows.filter { $0.2 == owner }.sorted { $0.1.minY < $1.1.minY }
                 for (a, b) in zip(ordered, ordered.dropFirst()) {
                     XCTAssertLessThanOrEqual(a.1.maxY, b.1.minY + 0.5,
@@ -551,6 +632,21 @@ final class TransformPanelTests: XCTestCase {
             probes.first { $0.rowID == id }.map { $0.convert($0.bounds, to: host) }
         }
 
+        /// The one AppKit leaf with this accessibility id (ratio buttons, the custom field, …).
+        func view<T: NSView>(_ type: T.Type, identifier: String) -> T? {
+            views(ofType: type).first { $0.accessibilityIdentifier() == identifier }
+        }
+
+        func views<T: NSView>(ofType: T.Type) -> [T] {
+            var found: [T] = []
+            func walk(_ root: NSView) {
+                if let match = root as? T { found.append(match) }
+                for sub in root.subviews { walk(sub) }
+            }
+            walk(host)
+            return found
+        }
+
         static func views(of className: String, in root: NSView) -> [NSView] {
             var found: [NSView] = []
             if String(describing: type(of: root)) == className { found.append(root) }
@@ -623,6 +719,17 @@ final class TransformPanelTests: XCTestCase {
         var found: [NSButton] = []
         func walk(_ view: NSView) {
             if let button = view as? NSButton { found.append(button) }
+            for sub in view.subviews { walk(sub) }
+        }
+        walk(root)
+        return found
+    }
+
+    /// The one leaf of `type` with this identifier, anywhere under `root`.
+    private static func button<T: NSView>(_ type: T.Type, id: String, in root: NSView) -> T? {
+        var found: T?
+        func walk(_ view: NSView) {
+            if let match = view as? T, match.accessibilityIdentifier() == id { found = match }
             for sub in view.subviews { walk(sub) }
         }
         walk(root)
