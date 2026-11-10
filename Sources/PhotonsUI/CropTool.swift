@@ -340,8 +340,16 @@ public enum CropTool {
                                      mapping: LoupeMapping,
                                      source: ImageSize,
                                      degrees: Double = 0,
+                                     perspective: PerspectiveMap? = nil,
                                      tolerance: Double = 0,
                                      shrinkTicks: UnsafeMutablePointer<Int>? = nil) -> CropRect {
+        // 324 — with a keystone the canvas is the AABB of the photo **quad**, and the frame is a
+        // rectangle of the crop's axes, so 「不出 AABB」 is four corner half-planes, not two slabs.
+        // One geometry, one quad (`CropGeometry.photoQuad()`); no second AABB is derived here.
+        if let perspective, perspective.hasWarp {
+            return clampToKeystoneCanvas(rect, source: source, degrees: degrees,
+                                          perspective: perspective, shrinkTicks: shrinkTicks)
+        }
         let c = rect.clamped(allowsOutsideSource: true)
         // 2026-11-02 — the **document canvas**, not `[0,1]²`. `documentCanvasCropRect` degenerates to
         // `[0,1]²` at every right angle, so nothing that used to be legal became illegal and every
@@ -384,6 +392,47 @@ public enum CropTool {
             .clamped(allowsOutsideSource: true)
     }
 
+
+    /// **324 — the keystoned stop.** 「框可以进 000000，不能出 AABB」 with the canvas being the AABB of
+    /// the photo **quad**: the frame's four document corners (`documentQuad(of:)`) must stay inside
+    /// that box, and the move is a **translation** — the size is whatever the drag made it (310).
+    ///
+    /// The only resize is the escape hatch the rectangle path has always had: a frame that no
+    /// translation can hold (a rect larger than the canvas) is scaled about its centre until it
+    /// fits, and the branch is counted (`shrinkTicks`) because 「拖动不改尺寸」 is exactly 「this line
+    /// never fires while the user moves a frame」.
+    private static func clampToKeystoneCanvas(_ rect: CropRect,
+                                              source: ImageSize,
+                                              degrees: Double,
+                                              perspective: PerspectiveMap,
+                                              shrinkTicks: UnsafeMutablePointer<Int>?) -> CropRect {
+        let geometry = CropGeometry(
+            geometry: GeometryGroup(crop: .full,
+                                    rotationDegrees: CropTool.clampStraighten(degrees),
+                                    aspectLock: .original,
+                                    quarterTurns: 0,
+                                    perspectiveVertical: perspective.vertical,
+                                    perspectiveHorizontal: perspective.horizontal),
+            source: source)
+        var candidate = rect.clamped(allowsOutsideSource: true)
+        if let placed = geometry.translatedInsidePhotoCanvas(candidate) {
+            return placed
+        }
+        // Genuinely larger than the canvas: shrink uniformly about the centre, then place it.
+        let extent = geometry.photoQuadExtent
+        let quad = geometry.documentQuad(of: candidate)
+        let xs = quad.map(\.x), ys = quad.map(\.y)
+        let quadW = max((xs.max() ?? 0) - (xs.min() ?? 0), 1e-9)
+        let quadH = max((ys.max() ?? 0) - (ys.min() ?? 0), 1e-9)
+        let shrink = min(1, extent.width / quadW, extent.height / quadH)
+        let width = candidate.width * shrink, height = candidate.height * shrink
+        candidate = CropRect(left: candidate.centerX - width / 2,
+                             top: candidate.centerY - height / 2,
+                             right: candidate.centerX + width / 2,
+                             bottom: candidate.centerY + height / 2)
+        shrinkTicks?.pointee &+= 1
+        return geometry.translatedInsidePhotoCanvas(candidate) ?? candidate
+    }
 
     // MARK: hit test
 

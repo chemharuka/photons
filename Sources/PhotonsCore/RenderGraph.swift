@@ -1926,8 +1926,12 @@ public final class RenderGraph {
         case .export:
             expandedCanvas = nil
         case .document:
-            let documentExtent = CropGeometry.rotatedExtent(of: orientedSource,
-                                                             degrees: edit.geometry.straightenDegrees)
+            // 324 — the box is the AABB of the **photograph's quad** after P → R (`photoQuad()`),
+            // read from `CropGeometry` so the renderer, the loupe and the crop clamp cannot describe
+            // two different canvases. A keyed keystone makes the quad non-rectangular, and the
+            // old `rotatedExtent(source)` was the turned *rectangle* — bigger in one axis, smaller in
+            // the other, and the corners it left out were photograph.
+            let documentExtent = CropGeometry(geometry: edit.geometry, source: sourceSize).photoQuadExtent
             // `cropPixels` is the frame at 1:1; the box can never be smaller than the frame it holds.
             expandedCanvas = ImageSize(width: max(CropGeometry.canvasPixels(documentExtent.width),
                                                   cropPixels.width),

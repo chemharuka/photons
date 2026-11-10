@@ -202,13 +202,19 @@ final class PerspectiveTests: XCTestCase {
 
     /// The geometry material at 0/0 is the **pre-183 text**, character for character: the two tokens
     /// are appended only when the knobs are off centre, exactly like `asp`/`car`/`q`.
+    ///
+    /// The generation token is read from `StageAlgorithmVersion.geometry`, not spelled `alg=3`: the
+    /// point of the assertion is 「只有世代号变了」, and a literal freezes that to one past generation
+    /// (307 bumped geometry 4 → 5 and left this line reading `3`, which failed the *whole* filter for
+    /// a reason that had nothing to do with any document).
     func testZeroKnobsGrowNoKeyToken() {
+        let generation = StageAlgorithmVersion.geometry
         let neutral = EditModel.neutral
         let expected = "pv=\(EditModel.currentProcessVersion);crop=0.00000,0.00000,1.00000,1.00000"
             + ";rot=0.00000;flip=00"
         XCTAssertEqual(neutral.keyMaterial(.geometry, algorithmVersion: false), expected,
                        "a document at 0/0 must keep the pre-183 geometry material byte for byte")
-        XCTAssertEqual(neutral.keyMaterial(.geometry), expected + ";alg=3",
+        XCTAssertEqual(neutral.keyMaterial(.geometry), expected + ";alg=\(generation)",
                        "the only textual change is the mandated generation bump")
         XCTAssertFalse(neutral.keyMaterial(.geometry).contains("pvy"))
         XCTAssertFalse(neutral.keyMaterial(.geometry).contains("phx"))
@@ -219,7 +225,8 @@ final class PerspectiveTests: XCTestCase {
                       "a keystoned document must name its own numbers")
         keystoned.geometry.perspectiveVertical = 50.04
         XCTAssertEqual(keystoned.keyMaterial(.geometry),
-                       neutral.keyMaterial(.geometry, algorithmVersion: false) + ";pvy=500;alg=3",
+                       neutral.keyMaterial(.geometry, algorithmVersion: false)
+                           + ";pvy=500;alg=\(generation)",
                        "the token is tenths of a slider unit, so 50.04 and 50 share a position")
         keystoned.geometry.perspectiveVertical = 50.06
         XCTAssertTrue(keystoned.keyMaterial(.geometry).contains(";pvy=501"))

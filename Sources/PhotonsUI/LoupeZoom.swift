@@ -720,14 +720,31 @@ public struct LoupeFraming: Equatable, Sendable {
     /// 246: with a keystone this is the **P → R → AABB** of the whole picture, the same canvas the
     /// renderer allocates. Without one it is `rotatedExtent`, bit for bit.
     public var rotatedSourceExtent: (width: Double, height: Double) {
-        if let perspective {
-            let pc = CropMath.perspectiveCanvas(crop: .full, in: sourceSizeForPerspective,
-                                                straightenDegrees: straightenDegrees,
-                                                perspective: perspective)
-            return (pc.extent.width, pc.extent.height)
+        // 324 — one reader, not a second `perspectiveCanvas(crop: .full)` spelling: the box is the
+        // AABB of `photoQuad()`, the same function the renderer's baseline and the crop clamp read.
+        if let geometry = documentGeometry {
+            let e = geometry.photoQuadExtent
+            return (e.width, e.height)
         }
         return Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
                                   degrees: straightenDegrees)
+    }
+
+    /// 324 — this projection as a `CropGeometry`, for the document canvas' own question. `nil` for
+    /// every document without a keystone, so the pre-324 numbers are produced by the pre-324 lines.
+    ///
+    /// The source handed over is already the **turned** frame (`sourceWidth`/`sourceHeight` are
+    /// `orientedSource`), which is why the group's `quarterTurns` is 0 — the same convention
+    /// `FrameTransform` uses.
+    private var documentGeometry: CropGeometry? {
+        guard let perspective else { return nil }
+        let group = GeometryGroup(crop: .full,
+                                  rotationDegrees: straightenDegrees,
+                                  aspectLock: .original,
+                                  quarterTurns: 0,
+                                  perspectiveVertical: perspective.vertical,
+                                  perspectiveHorizontal: perspective.horizontal)
+        return CropGeometry(geometry: group, source: sourceSizeForPerspective)
     }
 
     /// The crop **in canvas pixels** — the extent the output has, and therefore the window 适应

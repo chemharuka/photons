@@ -503,11 +503,25 @@ public final class CropToolController {
         let src = sourceSize
         let angle = CropTool.clampStraighten(draft.straighten)
         let current = draft.crop.clamped(allowsOutsideSource: true)
-        guard !CropMath.pixelTranslationLimit(of: current, in: src, degrees: angle).isFeasible else {
-            return                          // 放得下：一毫米都不动
-        }
-        let inscribed = CropMath.clampedToRotatedFrame(current, in: src, degrees: angle,
+        let inscribed: CropRect
+        if let perspective = livePerspective, perspective.hasWarp {
+            // 324 — a keystoned frame is a quadrilateral, so "can this frame be kept at all?" is the
+            // export question (`frameSize == canvas`, 246): the frame's AABB must lie inside the
+            // photo quad, or the file gets black corners. The one-shot inscription is the largest
+            // rect of the frame's own shape whose canvas does.
+            guard CropMath.frameExceedsPicture(current, in: src, degrees: angle,
+                                               perspective: perspective) else {
+                return                          // 放得下：一毫米都不动
+            }
+            let geometry = draftCropGeometry(source: src, perspective: perspective)
+            inscribed = geometry.inscribedInPhotoQuad(current)
+        } else {
+            guard !CropMath.pixelTranslationLimit(of: current, in: src, degrees: angle).isFeasible else {
+                return                          // 放得下：一毫米都不动
+            }
+            inscribed = CropMath.clampedToRotatedFrame(current, in: src, degrees: angle,
                                                        keepsInsideRotatedFrame: true)
+        }
         guard inscribed != current else { return }
         draft.crop = inscribed
         if let session, session.isToolSessionActive {
@@ -526,6 +540,12 @@ public final class CropToolController {
     private func placedInsidePixels(_ rect: CropRect, source: ImageSize) -> CropRect {
         guard staysInsidePixelsStorage else { return rect }
         let angle = CropTool.clampStraighten(draft.straighten)
+        // 324 — a keystoned picture is a **quadrilateral**: the four half-planes are its edges, not a
+        // turned rectangle's. One reader (`CropGeometry.photoQuad()`), one translation.
+        if let perspective = livePerspective, perspective.hasWarp {
+            let geometry = draftCropGeometry(source: source, perspective: perspective)
+            return geometry.translatedInsidePhotoQuad(rect, tolerance: 1e-9) ?? rect
+        }
         return CropMath.translatedInsidePixels(rect, in: source, degrees: angle) ?? rect
     }
 
@@ -1192,9 +1212,31 @@ public final class CropToolController {
         var ticks = canvasShrinkTicks
         let clamped = CropTool.clampToCanvas(rect, mapping: mapping, source: source,
                                              degrees: CropTool.clampStraighten(draft.straighten),
+                                             perspective: livePerspective,
                                              shrinkTicks: &ticks)
         canvasShrinkTicks = ticks
         return clamped
+    }
+
+    /// 324 — the document's keystone as the crop session must see it: the **live** document wins (the
+    /// 变换 card can move the knobs while a draft is open), and the draft's own copy is the fallback
+    /// for a controller without a session. `nil` for every un-keystoned document, so every pre-324
+    /// branch below is the branch it was.
+    private var livePerspective: PerspectiveMap? {
+        if let live = session?.edit.geometry.perspective, live.hasWarp { return live }
+        return draft.perspective
+    }
+
+    /// 324 — the draft's geometry as the one `CropGeometry` (P → R), which is the owner of
+    /// `photoQuad()` / `documentQuad(of:)`. Nothing else in this file re-derives a corner.
+    private func draftCropGeometry(source: ImageSize,
+                                   perspective: PerspectiveMap?) -> CropGeometry {
+        let document = session?.edit.geometry ?? .identity
+        var group = draft.geometry(flipsOf: document)
+        group.crop = draft.crop.clamped(allowsOutsideSource: true).normalizedRect
+        group.perspectiveVertical = perspective?.vertical ?? 0
+        group.perspectiveHorizontal = perspective?.horizontal ?? 0
+        return CropGeometry(geometry: group, source: source)
     }
 
     /// The document canvas the frame is allowed to occupy, in normalized turned-frame coordinates —
@@ -1219,7 +1261,11 @@ public final class CropToolController {
         // 2026-11-01 — the rect now comes from `CropGeometry`, the one owner of the four spaces, so
         // the coverage readout below and the clamp cannot describe two different canvases (they did:
         // 190 measured this AABB while 224 clamped to `[0,1]²`).
-        let r = CropGeometry.documentCanvasCropRect(in: source, degrees: degrees)
+        //
+        // 324 — with a keystone the canvas is the AABB of the photo **quad**, so the rect is
+        // `CropGeometry.documentCanvasCropRect` (the keystone branch walks the quad back through the
+        // one map) rather than `documentCanvasCropRect(in:degrees:)`, which only knows a rectangle.
+        let r = draftCropGeometry(source: source, perspective: livePerspective).documentCanvasCropRect
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
         return CGRect(x: r.left * w, y: r.top * h, width: r.width * w, height: r.height * h)
     }

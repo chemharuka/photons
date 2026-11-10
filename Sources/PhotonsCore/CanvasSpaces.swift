@@ -199,6 +199,10 @@ public extension CropGeometry {
     /// narrower would forbid the full-frame crop a quarter turn obviously allows). The straighten
     /// itself is clamped to ±45°, so the branch is a contract statement, not a reachable document.
     var photoExtent: DSize {
+        // 324 — a keystoned picture is a **quadrilateral**: the box that holds every pixel of the
+        // photograph after P → R is the AABB of `photoQuad()`, and 307's turned-rectangle AABB is
+        // only its no-keystone case (where and only where the two are the same four numbers).
+        if hasKeystoneQuad { return photoQuadExtent }
         guard hasAngle else {
             return DSize(width: Double(max(source.width, 1)), height: Double(max(source.height, 1)))
         }
@@ -227,8 +231,22 @@ public extension CropGeometry {
 
     /// `documentCanvasRect` in normalized photo coordinates — what `CropRect.clamped`-style callers
     /// want, and `[0, 1]²` at every right angle (so the 224 rule survives verbatim at θ = 0).
+    ///
+    /// 324 — a keystoned document's canvas is the AABB of the photo **quad**, and the crop's own axes
+    /// are not its axes, so the rect is the AABB of the canvas' four corners walked back through the
+    /// one `documentPoint` map. It is the same served region the renderer fills with `000000`
+    /// (a superset of the AABB in the crop's axes, never a second box).
     var documentCanvasCropRect: CropRect {
-        Self.documentCanvasCropRect(in: source, degrees: rotationDegrees)
+        if hasKeystoneQuad {
+            let e = photoQuadExtent
+            let back = [DocumentPoint(0, 0), DocumentPoint(e.width, 0),
+                        DocumentPoint(e.width, e.height), DocumentPoint(0, e.height)]
+                .map { photoNormalized(documentX: $0.x, $0.y) }
+            let xs = back.map(\.x), ys = back.map(\.y)
+            return CropRect(left: xs.min() ?? 0, top: ys.min() ?? 0,
+                            right: xs.max() ?? 1, bottom: ys.max() ?? 1)
+        }
+        return Self.documentCanvasCropRect(in: source, degrees: rotationDegrees)
     }
 
     /// The same rect from the raw parameters — for the callers that hold a draft angle and a source
