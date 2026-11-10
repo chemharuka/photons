@@ -3,6 +3,7 @@ import CoreImage
 import CoreGraphics
 import ImageIO
 import Metal
+import QuartzCore
 
 /// The decoder-side white balance of one development: absolute Kelvin + tint, in exactly the two
 /// coordinates `CIRAWFilter` exposes for the job (`neutralTemperature` / `neutralTint`, header range
@@ -364,22 +365,131 @@ public final class RAWDecoder {
     private let colorSpace: CGColorSpace
     private let colorSpaceID: LinearColorSpace
 
+    /// 359 — **the reverse gate**: `PHOTONS_RAW_SINGLE_QUEUE=1` puts every `RAWDecoder` in the process
+    /// back on one `MTLCommandQueue` and one `CIContext`, i.e. the shape 351 measured at 1.42× for four
+    /// concurrent decodes and the shape this ticket exists to rule out. It is a *measurement* switch,
+    /// never a shipped mode: `RAWDecodeBenchTests.testFourWaySpeedup` asserts the 4-way ratio against
+    /// this environment, so turning the gate on has to turn that assertion red — otherwise the ratio
+    /// was never measuring the queue at all.
+    static let singleQueueGate = ProcessInfo.processInfo.environment["PHOTONS_RAW_SINGLE_QUEUE"] != nil
+
+    /// 359 — the same kind of switch for the **row flip**: `PHOTONS_RAW_CPU_FLIP=1` restores the
+    /// pre-359 behaviour (render bottom-up, then reverse the rows on the CPU), so one build can report
+    /// what the flip costs instead of comparing two checkouts on a machine that is busy with other
+    /// things. Pixels are identical either way — that is the point of the flip living in the graph.
+    static let cpuFlipGate = ProcessInfo.processInfo.environment["PHOTONS_RAW_CPU_FLIP"] != nil
+
+    private static let sharedLock = NSLock()
+    private static var shared: (device: MTLDevice, queue: MTLCommandQueue, context: CIContext)?
+
     public init(colorSpace: LinearColorSpace = .extendedLinearSRGB) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw DecodeError.noMetalDevice }
-        guard let queue = device.makeCommandQueue() else { throw DecodeError.noMetalDevice }
         guard let cs = colorSpace.cgColorSpace else { throw DecodeError.unavailableColorSpace(colorSpace.rawValue) }
         self.device = device
-        self.queue = queue
         self.colorSpace = cs
         self.colorSpaceID = colorSpace
-        self.ciContext = CIContext(mtlDevice: device, options: [
+
+        let options: [CIContextOption: Any] = [
             .workingColorSpace: cs,
             .outputColorSpace: cs,
             .cacheIntermediates: false,
-        ])
+        ]
+        if Self.singleQueueGate {
+            Self.sharedLock.lock()
+            defer { Self.sharedLock.unlock() }
+            if let existing = Self.shared {
+                self.queue = existing.queue
+                self.ciContext = existing.context
+                return
+            }
+            guard let queue = device.makeCommandQueue() else { throw DecodeError.noMetalDevice }
+            let context = CIContext(mtlDevice: device, options: options)
+            Self.shared = (device, queue, context)
+            self.queue = queue
+            self.ciContext = context
+            return
+        }
+
+        guard let queue = device.makeCommandQueue() else { throw DecodeError.noMetalDevice }
+        self.queue = queue
+        self.ciContext = CIContext(mtlDevice: device, options: options)
     }
 
     public var deviceName: String { device.name }
+
+    // MARK: - 359 phase instrumentation
+
+    /// Where one `decode` spent its wall clock, in ms. **Measurement only** — every field is a
+    /// `CACurrentMediaTime()` pair around a step that already existed, so recording one costs five
+    /// clock reads and changes nothing the decoder does.
+    ///
+    /// The split exists because 351's tail is a *single* 391 ms cell decode and the three candidate
+    /// causes (one `MTLCommandQueue`, a shared `CIContext`, a rebuilt `CIRAWFilter`) differ in
+    /// exactly one field: a queue serialisation shows up as `gpuWait` growing while `gpu` does not,
+    /// a filter rebuild as `filterCreate` + `prepare`, and a CPU-side lock as `prepare`/`outputImage`.
+    public struct DecodePhases: Sendable {
+        /// `CIRAWFilter(imageURL:)` — Apple parsing the container and standing up the pipeline.
+        public var filterCreate: Double = 0
+        /// Lens profile read (the file's own opcodes), decoder version, boost/gamut, white balance,
+        /// detail amounts — every property assignment up to (not including) `outputImage`.
+        public var prepare: Double = 0
+        /// `filter.outputImage` — where the demosaic actually runs, if it is not deferred to render.
+        public var outputImage: Double = 0
+        /// Texture allocation for the destination.
+        public var textureMake: Double = 0
+        /// `ciContext.render(_:to:commandBuffer:)` + `commit()` — CPU submission only.
+        public var submit: Double = 0
+        /// `waitUntilCompleted`.
+        public var gpuWait: Double = 0
+        /// `commandBuffer.gpuEndTime − gpuStartTime`, the GPU's own view of the same work.
+        public var gpu: Double = 0
+        /// `getBytes` from the destination texture.
+        public var readbackBytes: Double = 0
+        /// The row flip into `LinearImage` order.
+        public var rowFlip: Double = 0
+        /// `getBytes` + row flip, the two above together.
+        public var readback: Double = 0
+        /// Process CPU time (all threads, user+sys) burned inside `submit`. Compared against
+        /// `submit`'s wall clock it answers "is CI's render CPU-bound, and on one thread or many".
+        public var cpuSubmit: Double = 0
+        public var total: Double = 0
+        public var scale: Float = 0
+        /// The queue this decode rendered through, as `ObjectIdentifier`'s hash — a report can show
+        /// two decodes used two queues (or, before the fix, the same one).
+        public var queueID: Int = 0
+
+        public var summary: String {
+            String(format: "scale %.3f · filter %.1f · prepare %.1f · outputImage %.1f"
+                   + " · texture %.1f · submit %.1f (cpu %.1f) · gpuWait %.1f · gpu %.1f"
+                   + " · bytes %.1f · flip %.1f · total %.1f · queue %d",
+                   scale, filterCreate, prepare, outputImage, textureMake, submit, cpuSubmit,
+                   gpuWait, gpu, readbackBytes, rowFlip, total, queueID)
+        }
+    }
+
+    private let phaseLock = NSLock()
+    private var phaseStore = DecodePhases()
+
+    /// The phases of the most recent `decode` on this instance.
+    public var lastDecodePhases: DecodePhases {
+        phaseLock.lock(); defer { phaseLock.unlock() }
+        return phaseStore
+    }
+
+    private func record(_ phases: DecodePhases) {
+        phaseLock.lock(); phaseStore = phases; phaseLock.unlock()
+    }
+
+    /// An identity for this decoder's command queue, for the concurrency report.
+    public var queueIdentity: Int { ObjectIdentifier(queue).hashValue }
+
+    /// Process CPU time (user+sys, every thread) in ms. The difference between this and a wall
+    /// clock is the only honest way to say "this step is CPU-bound, and it is not one thread".
+    static func processCPUMilliseconds() -> Double {
+        var ts = timespec()
+        guard clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0 else { return 0 }
+        return (Double(ts.tv_sec) * 1e9 + Double(ts.tv_nsec)) / 1e6
+    }
 
     // MARK: - decode accounting
 
@@ -702,7 +812,13 @@ public final class RAWDecoder {
 
     private func decodeDetailed(_ url: URL, options: DecodeOptions,
                                 measurement: Bool) throws -> DecodeOutcome {
+        let tStart = CACurrentMediaTime()
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
+        var ph = DecodePhases()
+        ph.scale = options.scale
+        ph.queueID = queueIdentity
+        ph.filterCreate = (CACurrentMediaTime() - tStart) * 1000
+        var cursor = CACurrentMediaTime()
 
         // ── 097 / 103: whose lens correction runs ─────────────────────────────────────────────
         // `CIRAWFilter.isLensCorrectionEnabled` applies **plane 1 (green)** of a DNG's
@@ -825,9 +941,13 @@ public final class RAWDecoder {
         }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
+        ph.prepare = (CACurrentMediaTime() - cursor) * 1000
+        cursor = CACurrentMediaTime()
         let extent = output.extent.integral
         let w = Int(extent.width), h = Int(extent.height)
         guard w > 0, h > 0 else { throw DecodeError.badDimensions(extent.size) }
+        ph.outputImage = (CACurrentMediaTime() - cursor) * 1000
+        cursor = CACurrentMediaTime()
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
                                                            width: w, height: h, mipmapped: false)
@@ -836,14 +956,25 @@ public final class RAWDecoder {
         // texture + MTLBuffer copy once the cache format is settled.
         desc.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: desc) else { throw DecodeError.renderFailed }
+        ph.textureMake = (CACurrentMediaTime() - cursor) * 1000
+        cursor = CACurrentMediaTime()
 
         guard let cb = queue.makeCommandBuffer() else { throw DecodeError.renderFailed }
         Self.recordDecode(scale: options.scale)
-        ciContext.render(output, to: texture, commandBuffer: cb,
+        let cpuBefore = Self.processCPUMilliseconds()
+        let renderImage = Self.cpuFlipGate ? output
+            : Self.topDownPlacement(of: output, width: w, height: h)
+        ciContext.render(renderImage, to: texture, commandBuffer: cb,
                          bounds: CGRect(x: 0, y: 0, width: w, height: h),
                          colorSpace: colorSpace)
         cb.commit()
+        ph.cpuSubmit = Self.processCPUMilliseconds() - cpuBefore
+        ph.submit = (CACurrentMediaTime() - cursor) * 1000
+        cursor = CACurrentMediaTime()
         cb.waitUntilCompleted()
+        ph.gpuWait = (CACurrentMediaTime() - cursor) * 1000
+        ph.gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+        cursor = CACurrentMediaTime()
 
         // ── readback ────────────────────────────────────────────────────────────────────────
         // Straight into the `Float16` storage: an `rgba16Float` texture and `Float16` share a bit
@@ -858,17 +989,23 @@ public final class RAWDecoder {
                              from: MTLRegionMake2D(0, 0, w, h),
                              mipmapLevel: 0)
         }
+        ph.readbackBytes = (CACurrentMediaTime() - cursor) * 1000
+        cursor = CACurrentMediaTime()
         // ── row order ───────────────────────────────────────────────────────────────────────
-        // `CIContext.render(to: MTLTexture)` writes the picture **bottom-up** in Metal's memory
-        // order: a marker in the image's top-left row lands in the *last* row of the buffer
-        // (measured — local/probes/orient/readbackconvention.swift, and the same probe shows a
-        // 60 MP SL3 decode is the vertical mirror of the file's own embedded preview and of
-        // `CIContext.createCGImage`). `LinearImage`'s contract is row 0 = top, so the flip is
-        // undone here, once, instead of asking every consumer to remember it. Before this line
-        // every render of every file was up-down mirrored — which reads as "rotated 180°" the
-        // moment a picture contains signage (L1030433), and is why it looked file-specific.
-        Self.flipRows(&rgba, width: w, height: h)
-
+        // 359 — **the renderer writes the rows the right way up; we no longer permute them here.**
+        //
+        // `CIContext.render(to: MTLTexture)` writes the picture bottom-up in Metal's memory order
+        // (measured — local/probes/orient/readbackconvention.swift), so the texture used to be
+        // flipped by `flipRows` below: a 30 MB read+write pass on the CPU, 202–210 ms in the
+        // acceptance build for a 3.8 Mpx buffer and 33–65 ms even in release for a 60 MP one, on the
+        // critical path of every cell. `topDownPlacement` hands the renderer the same picture already
+        // turned over, so the flip is one transform in the (GPU) render graph and the bytes that come
+        // back are the ones `flipRows` produced — `RAWDecodeBenchTests` pins the digest, and
+        // `DecodeLadderTests.testRowFlipIsTheReferencePermutation` still pins `flipRows` itself.
+        //
+        // `LinearImage`'s contract is row 0 = top, and it is unchanged: the buffer below is already
+        // top-down when it is handed to the initialiser.
+        //
         // **`CIRAWFilter` already honours the container's EXIF orientation.** Measured on
         // `L1030409.dng` (tag 8, stored 9536×6344): the filter reports `orientation == 8` *and*
         // hands back an upright 6336×9520 image, so the buffer we just copied has row 0 at the top
@@ -877,12 +1014,39 @@ public final class RAWDecoder {
         // they render 90° wrong and landscape-shaped. So the buffer is `.up` by construction;
         // `sourceOrientation(of:)` stays for metadata and for the preview path, which *does* need
         // the transform (ImageIO's thumbnail is created with `WithTransform: false`).
+        if Self.cpuFlipGate { Self.flipRows(&rgba, width: w, height: h) }
         let image = LinearImage(width: w, height: h, rgba: rgba,
                                 colorSpace: colorSpaceID.rawValue, decoderVersion: effective,
                                 orientation: .up)
+        ph.rowFlip = (CACurrentMediaTime() - cursor) * 1000
+        ph.readback = ph.readbackBytes + ph.rowFlip
+        ph.total = (CACurrentMediaTime() - tStart) * 1000
+        record(ph)
         return DecodeOutcome(image: image, capabilities: capabilities, asShotWhiteBalance: asShot,
                              detailBaseline: detailBaseline, detailApplied: detailApplied,
                              lensProfile: lensProfile)
+    }
+
+    /// 359 — the picture placed so that a bottom-up texture render comes out **top-down**.
+    ///
+    /// `CIContext.render(to: MTLTexture)` writes row 0 of the image into the *last* texture row
+    /// (Core Image's origin is bottom-left, a texture's row 0 is its first), which is why this file
+    /// used to reverse the rows on the CPU afterwards. Turning the picture over before the render
+    /// puts the two conventions on top of each other, so the read-back is already in `LinearImage`
+    /// order.
+    ///
+    /// This is one transform node in the render graph, evaluated on the GPU with the rest of the
+    /// render — measured 0.1–0.3 ms added to `submit`, against the 202–210 ms CPU pass it replaces
+    /// (acceptance build, 2380×1584 half-float).
+    ///
+    /// Exactness: the transform maps pixel edges onto pixel edges (extent stays `(0, 0, w, h)`), so
+    /// every destination sample sits dead centre on a source sample and the resample degenerates to a
+    /// permutation — the digest of the decoded buffer is unchanged (`RAWDecodeBenchTests` compares it
+    /// against a 1-way decode of the same files).
+    static func topDownPlacement(of image: CIImage, width: Int, height: Int) -> CIImage {
+        let flipped = image.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1,
+                                                             tx: 0, ty: CGFloat(height)))
+        return flipped
     }
 
     /// Reverse the row order of a row-major RGBA buffer in place (vertical mirror of the *rows*).

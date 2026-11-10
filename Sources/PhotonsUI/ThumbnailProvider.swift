@@ -272,9 +272,12 @@ public final class ThumbnailProvider: @unchecked Sendable {
     private var runsPerContent: [String: Int] = [:]
     private var decoder: RAWDecoder?
     private var decoderUnavailable = false
-    /// 351 — the HD thumbnail producer's decoder pool (one command queue each) and its cursor.
+    /// 351 — the HD thumbnail producer's decoder pool: free decoders, plus the count in flight.
+    /// 359 — borrow/return instead of a round-robin cursor (see `borrowThumbnailDecoder`).
     private var thumbnailDecoders: [RAWDecoder] = []
-    private var decoderCursor: Int64 = 0
+    private let decoderPoolLock = NSLock()
+    private var decodersInFlight = 0
+    private var peakInFlight = 0
     /// 258 — decoded whole-picture stand-ins, keyed by the thumbnail key's digest. The grid's memory
     /// LRU holds display-sized **crops**, not the aspect-preserved picture the loupe's stand-in needs,
     /// so it cannot serve this path; without a small cache of its own every photo switch paid the
@@ -928,8 +931,11 @@ public final class ThumbnailProvider: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: source.path) else {
             throw ThumbProviderError.unreadable(source)
         }
-        // 351 — a decoder per worker, not the loupe's single queue (see `thumbnailDecoder`).
-        guard let decoder = thumbnailDecoder() else { throw ThumbProviderError.noRAWDecoder }
+        // 351 — a decoder per concurrent decode, not the loupe's single queue (see
+        // `borrowThumbnailDecoder`). 359 — borrowed for the length of this decode and returned, so a
+        // decoder is never shared by two decodes and the pool cannot grow past what is in flight.
+        guard let decoder = borrowThumbnailDecoder() else { throw ThumbProviderError.noRAWDecoder }
+        defer { returnThumbnailDecoder(decoder) }
 
         let longEdge = ThumbSpec.hdJPEG.longEdge
         // Decode no larger than needed for 1920 (a 60 MP RAW at 0.25 already covers it), and never
@@ -1118,38 +1124,61 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
     }
 
-    /// 351 — one decoder **per worker** for the HD thumbnail path.
+    /// 351 — one decoder **per concurrent decode** for the HD thumbnail path; 359 makes that exact.
     ///
     /// A `RAWDecoder` owns one `MTLCommandQueue` and one `CIContext`, and command buffers on one queue
     /// execute in order. Nine thumbnail workers sharing the loupe's decoder therefore did not run nine
     /// decodes at once: four concurrent decodes through one decoder measured **1212 ms** against
     /// 1718 ms sequential (1.42×), while the same four through four decoders measured **876 ms**
     /// (1.96×). The service's ceiling was never the problem — `activePeak` reaches 9 in the report —
-    /// the decode leg was. The pool is sized by that same ceiling and created lazily, so a library that
-    /// never generates an HD thumbnail pays nothing.
+    /// the decode leg was. The pool is created lazily, so a library that never generates an HD
+    /// thumbnail pays nothing.
+    ///
+    /// 359 — the pool used to be a **round-robin cursor over `maxConcurrency` slots**, so two workers
+    /// running at the same moment could be handed the *same* decoder (worker A takes slot 3, worker B
+    /// takes slot 3 again while A is still decoding), putting two decodes back on one queue — the very
+    /// shape 351 removed. It is now a **borrow/return pool**: a producer takes the decoder out of the
+    /// free list for the length of its decode and puts it back, so a decoder is never in two decodes at
+    /// once, and the number of live decoders is bounded by the number of decodes actually in flight
+    /// rather than by a guess about the service (or by how many threads a concurrent queue happened to
+    /// grow).
     ///
     /// `rawDecoder()` stays the single shared instance for the rare non-HD paths (a RAW with no
     /// embedded preview, the preview producer): those are one-off and must not allocate a pool.
-    private func thumbnailDecoder() -> RAWDecoder? {
-        let capacity = max(1, service.config.maxConcurrency)
-        lock.lock()
-        let index = Int(decoderCursor % Int64(capacity))
-        decoderCursor &+= 1
-        if index < thumbnailDecoders.count {
-            let existing = thumbnailDecoders[index]
-            lock.unlock()
-            return existing
+    private func borrowThumbnailDecoder() -> RAWDecoder? {
+        decoderPoolLock.lock()
+        if let pooled = thumbnailDecoders.popLast() {
+            decodersInFlight += 1
+            peakInFlight = max(peakInFlight, decodersInFlight)
+            decoderPoolLock.unlock()
+            return pooled
         }
-        if decoderUnavailable { lock.unlock(); return nil }
-        lock.unlock()
+        let unavailable = decoderUnavailable
+        decoderPoolLock.unlock()
+        if unavailable { return nil }
         guard let made = try? RAWDecoder() else {
-            lock.lock(); decoderUnavailable = true; lock.unlock()
+            decoderPoolLock.lock(); decoderUnavailable = true; decoderPoolLock.unlock()
             return nil
         }
-        lock.lock()
-        thumbnailDecoders.append(made)
-        lock.unlock()
+        decoderPoolLock.lock()
+        decodersInFlight += 1
+        peakInFlight = max(peakInFlight, decodersInFlight)
+        decoderPoolLock.unlock()
         return made
+    }
+
+    private func returnThumbnailDecoder(_ decoder: RAWDecoder) {
+        decoderPoolLock.lock()
+        thumbnailDecoders.append(decoder)
+        decodersInFlight -= 1
+        decoderPoolLock.unlock()
+    }
+
+    /// Live decoders and the peak number of decodes that ran at once — the two numbers that say
+    /// whether the pool is doing its job instead of growing.
+    public var decoderPoolStats: (live: Int, peakInFlight: Int) {
+        decoderPoolLock.lock(); defer { decoderPoolLock.unlock() }
+        return (thumbnailDecoders.count + decodersInFlight, peakInFlight)
     }
 
     // MARK: - stats
