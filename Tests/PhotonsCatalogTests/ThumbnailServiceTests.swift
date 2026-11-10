@@ -576,27 +576,146 @@ final class ThumbnailServiceTests: XCTestCase {
 
     // MARK: - ⑦ pause (§4 isInteracting)
 
-    func testPausedServiceRejectsInsteadOfQueueing() throws {
+    /// 326 — the bug this lane fixes, at the level it happens: a request that lands mid-interaction.
+    ///
+    /// Before: it was refused **and forgotten**, so nothing ever asked again — a visible cell that is
+    /// not re-`configure`d (the loupe has no cell at all) kept the previous document's preview
+    /// forever. Now the refusal is retained per key and replayed the moment the interaction ends, and
+    /// `rejectedWhilePaused` still moves, so the pause was not switched off to get there.
+    func testPausedServiceRefusesInTheMomentAndReplaysWhenTheInteractionEnds() throws {
         let cache = try makeCache()
         let producer = StubProducer()
         let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
         service.isPaused = true
 
         let tickets = service.request((0..<4).map { spec($0) }, priority: .onScreen)
-        XCTAssertEqual(service.pendingCount, 0)
+        XCTAssertEqual(service.pendingCount, 0, "no job while the user is dragging")
         waitIdle(service)
 
         XCTAssertEqual(producer.callCount, 0, "no job while the user is dragging")
-        let stats = service.stats()
+        var stats = service.stats()
         XCTAssertEqual(stats.rejectedWhilePaused, 4)
         XCTAssertEqual(stats.missCancelled, 0, "a refusal is not an outcome bucket")
         XCTAssertEqual(stats.requests, 0)
-        XCTAssertTrue(tickets.allSatisfy { $0.isCancelled })
+        XCTAssertEqual(service.heldCount, 4, "326 — the refusals were thrown away")
+        XCTAssertTrue(tickets.allSatisfy { $0.isHeld }, "326 — a held ticket is not a cancelled one")
 
         service.isPaused = false
-        _ = service.request(spec(0), priority: .onScreen)
         waitIdle(service)
-        XCTAssertEqual(producer.callCount, 1, "resuming works")
+
+        XCTAssertEqual(producer.callCount, 4, "326 — the refusals were not replayed on resume")
+        XCTAssertEqual(service.heldCount, 0)
+        XCTAssertTrue(tickets.allSatisfy { !$0.isHeld })
+        stats = service.stats()
+        XCTAssertEqual(stats.replayedAfterPause, 4)
+        XCTAssertEqual(stats.rejectedWhilePaused, 4, "the pause still refused them at the time")
+        XCTAssertEqual(stats.requests, 4, "each replay is an admission of its own")
+        for i in 0..<4 {
+            XCTAssertTrue(cache.exists(spec(i).key), "the replayed key \(i) was not written")
+        }
+    }
+
+    /// 326 — the fix for the 1920 preview specifically: a **warm** is not a request anybody is
+    /// waiting for, so a pause queues it instead of refusing it. Nothing runs until the interaction
+    /// ends (`producer.callCount == 0` while paused), and then it lands without a second ask.
+    func testABackgroundWarmIsQueuedWhilePausedAndRunsOnResume() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
+        let spec = ThumbRequestSpec(key: ThumbKey.preview(contentHash: contentHash(7), tier: .t256),
+                                    source: URL(fileURLWithPath: "/tmp/asset-7.CR3"),
+                                    isBackgroundWarm: true)
+
+        service.isPaused = true
+        let ticket = service.request(spec, priority: .prefetch)
+        XCTAssertFalse(ticket.isCancelled, "a warm is not refused")
+        XCTAssertEqual(service.pendingCount, 1, "a warm is queued while paused")
+        // Nothing may start while the interaction is on: give a worker the chance to (wrongly) pick
+        // the entry up. `waitUntilIdle` cannot be used here — it waits for a queue that is *meant*
+        // to be non-empty.
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(producer.callCount, 0, "the queue did not start a job while paused")
+        var stats = service.stats()
+        XCTAssertEqual(stats.rejectedWhilePaused, 0, "a warm is admitted, not refused")
+        XCTAssertEqual(stats.queuedWhilePaused, 1)
+        XCTAssertFalse(cache.exists(spec.key), "nothing was written during the interaction")
+
+        service.isPaused = false
+        waitIdle(service)
+        XCTAssertTrue(cache.exists(spec.key), "the queued warm did not run on resume")
+        XCTAssertEqual(producer.callCount, 1)
+        stats = service.stats()
+        XCTAssertEqual(stats.missGenerated, 1)
+    }
+
+    /// 326 — the owner leaving is the only thing that drops a held refusal: a recycled cell must not
+    /// be served a frame later, and must not leave work in the queue.
+    func testACancelledHeldRequestIsNotReplayed() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
+        service.isPaused = true
+
+        let keep = service.request(spec(10), priority: .onScreen)
+        let drop = service.request(spec(11), priority: .onScreen)
+        XCTAssertEqual(service.heldCount, 2)
+        drop.cancel()
+        XCTAssertTrue(drop.isCancelled)
+        XCTAssertEqual(service.heldCount, 1, "the cancelled refusal was not dropped")
+        XCTAssertTrue(keep.isHeld)
+
+        service.isPaused = false
+        waitIdle(service)
+        XCTAssertTrue(producer.callsContains(spec(10).key))
+        XCTAssertFalse(producer.callsContains(spec(11).key), "a cancelled refusal was replayed")
+        XCTAssertFalse(cache.exists(spec(11).key))
+    }
+
+    /// 326 — a refusal from a view that no longer exists is dropped on resume exactly as if it had
+    /// arrived after the generation bump; it is not a licence to render a stale visible set.
+    func testAStaleHeldRequestIsDroppedOnResume() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
+        let live = service.request(spec(12), priority: .onScreen)     // generation 0, admitted
+        service.isPaused = true
+        let held = service.request(spec(13), priority: .onScreen)     // generation 0, held
+        service.beginGeneration()                                     // the view that asked is gone
+        XCTAssertTrue(live.isHeld == false)
+        service.isPaused = false
+        waitIdle(service)
+        XCTAssertTrue(held.isCancelled, "a stale held request stayed live")
+        XCTAssertFalse(producer.callsContains(spec(13).key))
+        XCTAssertGreaterThanOrEqual(service.stats().droppedStaleGeneration, 1)
+    }
+
+    /// 326 — of several held documents of one photo, only the newest is replayed: a drag that asks
+    /// for twenty fingerprints must land one file, not twenty (311's rule, kept across the pause).
+    func testHeldHDDocumentsOfOnePhotoReplayOnlyTheNewest() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
+        service.isPaused = true
+
+        func hd(_ fingerprint: String) -> ThumbRequestSpec {
+            ThumbRequestSpec(key: ThumbKey(contentHash: contentHash(20), tier: .t2048,
+                                           pipeline: .graph, recipeDigest: "-",
+                                           spec: .hdJPEG, editFingerprint: fingerprint),
+                             source: URL(fileURLWithPath: "/tmp/asset-20.CR3"))
+        }
+        var tickets: [ThumbTicket] = []
+        for i in 0..<20 {
+            tickets.append(service.request(hd("fp\(i)"), priority: .prefetch))
+        }
+        XCTAssertEqual(service.heldCount, 20)
+        service.isPaused = false
+        waitIdle(service)
+
+        XCTAssertEqual(producer.callCount, 1,
+                       "the pause replayed \(producer.callCount) documents of one photo")
+        XCTAssertTrue(producer.callsContains(hd("fp19").key), "the newest document was not the one")
+        XCTAssertTrue(cache.exists(hd("fp19").key))
+        XCTAssertEqual(tickets.filter { $0.isCancelled }.count, 19)
     }
 
     // MARK: - ⑧ G path keys

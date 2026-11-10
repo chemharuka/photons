@@ -570,6 +570,12 @@ public final class ThumbnailProvider: @unchecked Sendable {
     ///
     /// Returns whether a request was handed to the service (a deduped call returns `false`) — the
     /// number the acceptance reads instead of guessing from timings.
+    ///
+    /// 326 — the request is marked `isBackgroundWarm`, because the commit that needs it happens
+    /// *during* the interaction (a slider drag, a crop frame being moved) and the service refuses
+    /// everything else while `isPaused`. A refusal here used to be final: in the loupe no cell ever
+    /// asks for this key, so the 1920 preview stayed on the document before the edit. As a warm it is
+    /// queued instead and starts when the drag ends.
     @discardableResult
     public func warmHDPreview(for asset: Asset, fileURL: URL?, document: EditModel) -> Bool {
         let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
@@ -598,7 +604,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
         // The callback is bookkeeping only: the bytes on disk are the whole product, so nothing is
         // decoded here and nothing enters the memory LRU.
         rememberDocument(document, for: key.digest)
-        let ticket = service.request(ThumbRequestSpec(key: key, source: fileURL), priority: .prefetch) {
+        let ticket = service.request(ThumbRequestSpec(key: key, source: fileURL,
+                                                      isBackgroundWarm: true),
+                                     priority: .prefetch) {
             [weak self] result in
             guard let self else { return }
             self.lock.lock()
