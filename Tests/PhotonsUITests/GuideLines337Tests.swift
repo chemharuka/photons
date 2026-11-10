@@ -452,9 +452,14 @@ final class GuideLines337Tests: XCTestCase {
     // MARK: - ⑩ a contradictory line is refused whole, a fifth is ignored
 
     /// Three lines that agree (2 竖 + 1 横) are applied; the fourth is the second horizontal line
-    /// turned by **6° the other way** — the user's own example. No `(v, h)` can put four residuals
-    /// inside 0.05°, so nothing is applied, the new line is withdrawn (red), and the reason is
-    /// `inconsistent`. §2b.2: 「不许只应用一半」.
+    /// turned by **40°** — far more than the ±100 travel can absorb (the least-squares floor over
+    /// the whole travel is 17.4°). Nothing is applied, the new line is withdrawn (red), and the
+    /// reason is `outOfRange`. §2b.2: 「不许只应用一半」.
+    ///
+    /// 348 changed this fixture: it used to be 6°. Under 348's **pair** residual a 6° disagreement
+    /// is not a disagreement at all — the two horizontals are only asked to be *parallel*, and `h`
+    /// reaches that exactly (measured: h = +20.66, worst pair 6e−4°). That is the user's own
+    /// complaint fixed, so the refusal this test is about has to be one the travel cannot reach.
     func testAContradictoryLineIsRefusedWholeAndAFifthLineIsIgnored() throws {
         let (session, tool) = try makeTool()
         XCTAssertTrue(tool.setGuideLinesArmed(true))
@@ -474,10 +479,10 @@ final class GuideLines337Tests: XCTestCase {
         let rows = session.history.snapshots.count
         XCTAssertNotEqual(accepted.0, 0, accuracy: 1e-9)
 
-        let contradictory = (turned(horizontal[1].0, by: 6), turned(horizontal[1].1, by: 6))
+        let contradictory = (turned(horizontal[1].0, by: 40), turned(horizontal[1].1, by: 40))
         XCTAssertNil(draw(tool, from: contradictory.0, to: contradictory.1),
                      "337 ⑩ 矛盾的线不许应用")
-        XCTAssertEqual(tool.guideLineFailure, .inconsistent, "337 ⑩ 原因必须是 inconsistent")
+        XCTAssertEqual(tool.guideLineFailure, .outOfRange, "337 ⑩ 原因必须是 outOfRange")
         XCTAssertNotNil(tool.rejectedGuideLine, "337 ⑩ 新线标红撤回")
         XCTAssertEqual(tool.guideLines.count, 3, "337 ⑩ 只撤新线，已经有效的那三条留着")
         XCTAssertEqual(session.edit.geometry.perspectiveVertical, accepted.0, accuracy: 1e-12,
@@ -643,16 +648,23 @@ final class GuideLines337Tests: XCTestCase {
     // MARK: - ⑫ reverse gate ②: a 1° tolerance must fail the 0.05° acceptance
 
     /// The tolerance is the fit's **acceptance** threshold (§2b.2), so widening it to 1° is what lets
-    /// a 1°-scale error through. The fixture is a pair plus a third line 0.4° off it — a set that
-    /// says nothing exact:
+    /// a 1°-scale error through. The fixture is three lines of one direction with the third 0.4° off
+    /// the second — a set whose least-squares floor is 0.400° and which therefore puts the tolerance
+    /// in charge:
     ///
-    ///   · 0.05° (shipped): every residual cannot come inside it → `inconsistent`, **nothing applied**;
-    ///   · 1° (gate): the same set is accepted, and the pair the user drew is left ~0.3° apart —
-    ///     three times too wide for acceptance ①, which is exactly the red the gate asks for.
+    ///   · 0.05° (shipped): no `(v,h)` brings every **pair** inside it → `inconsistent`, nothing
+    ///     applied;
+    ///   · 1° (gate): the same set is accepted, and the two lines the user drew stay 0.4° apart —
+    ///     eight times too wide for acceptance ①, which is the red the gate asks for.
     ///
     /// (On a *perfectly* consistent pair Gauss–Newton reaches 1e−4° whatever the tolerance says, so a
     /// gate built on that fixture would prove nothing: this one puts the tolerance in charge, which is
     /// the only place it can matter.)
+    ///
+    /// 348 moved this gate off the window and onto the pure fit: three lines on one axis is not a
+    /// gesture the card allows (2 per direction, §2b.1), so the set that has a least-squares floor
+    /// between 0.05° and 1° can only be built below the gesture. The tolerance is still the only
+    /// difference between the two fits, which is what the gate is about.
     func testWithAToleranceOfOneDegreeTheAcceptanceGoesRed() throws {
         var v = generator(.vertical, degrees: 8)
         var h = generator(.horizontal, degrees: 8, other: v)
@@ -660,45 +672,39 @@ final class GuideLines337Tests: XCTestCase {
             v = generator(.vertical, degrees: 8, other: h)
             h = generator(.horizontal, degrees: 8, other: v)
         }
-        let lines = pair(.vertical, vertical: v, horizontal: h)
-        let horizontals = pair(.horizontal, vertical: v, horizontal: h)
-        // The fourth line: the second horizontal turned by 0.4° about the frame's centre — 0.4° more
-        // than any `(v, h)` can absorb once the other three have their say.
-        let third = (turned(horizontals[1].0, by: 0.4), turned(horizontals[1].1, by: 0.4))
+        let pair = pair(.vertical, vertical: v, horizontal: h)
+        // The third line: the second vertical turned by 0.4° about the frame's centre. Two pair rows,
+        // one knob — 0.4° is what is left over, whatever `v` is chosen.
+        let third = (turned(pair[1].0, by: 0.4), turned(pair[1].1, by: 0.4))
+        let verticalPair = pair
+        let lines = [verticalPair[0], verticalPair[1], third].map {
+            GuideLine(start: $0.0, end: $0.1, sourceStart: $0.0, sourceEnd: $0.1,
+                      viewAngle: angle($0.0, $0.1),
+                      axis: GuideLinesSolve.axis(forFoldedAngle: angle($0.0, $0.1)))
+        }
 
-        // Shipped tolerance: the set is refused and nothing moves.
-        let (session, tool) = try makeTool()
-        XCTAssertTrue(tool.setGuideLinesArmed(true))
-        for (a, b) in lines { _ = draw(tool, from: a, to: b) }
-        _ = draw(tool, from: horizontals[0].0, to: horizontals[0].1)
-        let accepted = session.edit.geometry.perspectiveHorizontal
-        XCTAssertNil(draw(tool, from: third.0, to: third.1),
-                     "337 ⑫② 0.4° 的第四条线在 0.05° 容差下必须被拒")
-        XCTAssertEqual(tool.guideLineFailure, .inconsistent)
-        XCTAssertEqual(session.edit.geometry.perspectiveHorizontal, accepted, accuracy: 1e-12)
+        // Shipped tolerance: the set is refused and there is no answer to write.
+        let shipped = GuideLinesSolve.fit(lines: lines,
+                                          current: PerspectiveMap(vertical: 0, horizontal: 0),
+                                          source: source, straightenDegrees: 0)
+        XCTAssertNil(shipped.solution, "337 ⑫② 0.4° 的第三条线在 0.05° 容差下必须被拒")
+        XCTAssertEqual(shipped.failure, .inconsistent)
 
-        // The gate: 1° tolerance, same four lines.
-        let (session2, tool2) = try makeTool()
-        XCTAssertTrue(tool2.setGuideLinesArmed(true))
-        tool2.guideLineTolerance = 1.0
-        for (a, b) in lines { _ = draw(tool2, from: a, to: b) }
-        _ = draw(tool2, from: horizontals[0].0, to: horizontals[0].1)
-        XCTAssertNotNil(draw(tool2, from: third.0, to: third.1), "337 ⑫② 1° 容差下这一组被接受了")
-        let solution = try XCTUnwrap(tool2.guideLineSolution)
-        let map = PerspectiveMap(vertical: session2.edit.geometry.perspectiveVertical,
-                                 horizontal: session2.edit.geometry.perspectiveHorizontal)
-        let after = renderedConvergence(lines, perspective: map.hasWarp ? map : nil)
-        let afterHorizontal = renderedConvergence([horizontals[0], third],
-                                                  perspective: map.hasWarp ? map : nil)
-        print(String(format: "337 ⑫② 0.05°: 拒绝（inconsistent，h 仍 %+.3f）· 1°: 接受 v %+.3f h %+.3f，"
-                     + "最坏残差 %.4f° > 0.05° · 竖 %.4f° 横 %.4f°（要求 ≤0.05° → 红）",
-                     accepted, solution.vertical, solution.horizontal,
-                     solution.worstResidual, after, afterHorizontal))
+        // The gate: 1° tolerance, same three lines.
+        let gate = GuideLinesSolve.fit(lines: lines,
+                                       current: PerspectiveMap(vertical: 0, horizontal: 0),
+                                       source: source, straightenDegrees: 0, tolerance: 1.0)
+        let solution = try XCTUnwrap(gate.solution, "337 ⑫② 1° 容差下这一组被接受了")
+        let map = PerspectiveMap(vertical: solution.vertical, horizontal: solution.horizontal)
+        let after = renderedConvergence([pair[0], pair[1]], perspective: map.hasWarp ? map : nil)
+        print(String(format: "337 ⑫② 0.05°: 拒绝（inconsistent，最坏两两 %.4f°）· 1°: 接受 v %+.3f h %+.3f，"
+                     + "最坏两两 %.4f° > 0.05° · 竖对 %.4f°（要求 ≤0.05° → 红）",
+                     shipped.measuredWorstPairwise ?? .nan, solution.vertical, solution.horizontal,
+                     solution.worstResidual, after))
         XCTAssertLessThanOrEqual(solution.worstResidual, 1.0, "宽容差下这次解「成功」了")
         XCTAssertGreaterThan(solution.worstResidual, 0.05,
                              "337 ⑫② 1° 容差放过了 >0.05° 的残差 —— 验收「所有残差 ≤0.05°」必须红")
-        XCTAssertGreaterThan(max(after, afterHorizontal), 0.05,
-                             "337 ⑫② 应用后仍有一对线歪着 >0.05°")
+        XCTAssertGreaterThan(after, 0.05, "337 ⑫② 应用后仍有一对线歪着 >0.05°")
     }
 
 
