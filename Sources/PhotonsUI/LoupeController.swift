@@ -2835,18 +2835,24 @@ public final class LoupeController: NSViewController, HeadroomSource {
         canvasView.window?.invalidateCursorRects(for: canvasView)
     }
 
-    /// 253 — **the one exit for every canvas tool.**
+    /// 253 / ④ — **the one exit for every canvas tool.**
     ///
     /// The user's ask (2026-11-03): 「各种画笔/吸管在切换工作栏后就退出」. A workspace switch (or
     /// leaving the editor for 网格) calls this, so a tool the user can no longer see cannot keep the
     /// next canvas click: the white-balance / point-colour / mask eyedropper, the 修复 / 红眼 spot
-    /// tool, the mask brush or eraser, an armed 新建 gradient, and a control-point drag all return to
-    /// browse. Coming back does **not** re-arm anything — the exit is an exit, not a pause.
+    /// tool, the mask brush or eraser, a control-point drag and — when the canvas itself goes away —
+    /// an armed 新建 gradient all return to browse.
+    ///
+    /// `clearingArmedCreation` is the ④ boundary, not a switch of convenience. The armed 新建 is the
+    /// **panel's** state (which gradient the user just picked in 蒙版), and ④'s contract says a glance
+    /// at 色彩 must not cost re-choosing it: 「切工作区后武装的创建还在」. Leaving the editor for 网格
+    /// takes the canvas away entirely, so there the arm goes too (the default). Each caller says which
+    /// door it is instead of both inheriting one answer.
     ///
     /// View state only: no `commitEdit`, no snapshot, no history row. A stroke or handle drag that is
     /// in flight is thrown away exactly like Esc (`maskCanvas.cancel()` / `cancelHandleDrag()`), not
     /// committed on the way out.
-    public func disarmAllTools() {
+    public func disarmAllTools(clearingArmedCreation: Bool = true) {
         cancelEyedropper()
         // Drop a half-painted mask stroke instead of committing it: leaving is a cancellation.
         maskCanvas.cancel()
@@ -2856,7 +2862,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if let session {
             session.healTool = false
             session.maskTool = .off
-            session.pendingMaskShape = nil
+            if clearingArmedCreation { session.pendingMaskShape = nil }
         }
         // The brush / shape / eyedropper cursor all read these flags, so a plain arrow has to be
         // re-asked for even when the eyedropper was not the armed tool.
