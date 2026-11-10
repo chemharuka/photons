@@ -227,8 +227,14 @@ article td code { white-space: nowrap; }
 
 math { font-size: 1.02em; }
 math[display="block"] {
-  display: block; margin: 1rem 0; overflow-x: auto; overflow-y: hidden;
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 1.15rem auto;
   padding: .35rem 0;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 /* ── pager / footer ──────────────────────────────────────────────────── */
