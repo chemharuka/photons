@@ -926,10 +926,14 @@ public struct EditModel: Sendable, Equatable, Codable {
             // schema 11: 030's `blL`/`whL` tokens are gone with the fields they named. A document
             // written by an earlier build re-keys once (the level it named no longer renders) and
             // never again — `boff` below is the one remaining black-point token.
+            // 346: the kernel token is the **mapped** value (`blacksKernelValue`), not the slider number:
+            // new −30 renders old −50's pixels, so it must also answer old −50's cache entry, and the
+            // reverse must miss. `blacks == 0 → 0`, so a document that never touched the slider keeps
+            // every byte of this material.
             var m = "ev=\(k(light.exposure));temp=\(light.temperature.map { k($0) } ?? "shot")"
                 + ";tint=\(light.tint.map { k($0) } ?? "shot")"
                 + ";hlr=\(k(light.highlightRecovery))"
-                + ";wh=\(k(light.whites));bl=\(k(light.blacks))"
+                + ";wh=\(k(light.whites));bl=\(k(LightGroup.blacksKernelValue(light.blacks)))"
             // 071: appended **only when non-zero**, the `asp`/`car`/`blL` discipline. A document that
             // never used the trim keeps the S1 material of every document written before 071 byte for
             // byte — the pinned vectors in `WindowTests` / `MaskTests` and every recorded golden depend
@@ -1418,19 +1422,26 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// (`0 → 0`), the second half blends in a black-point **level** move so the black end can really
     /// be moved — pushed down it reaches 0, pulled up it floats off the floor.
     ///
-    ///     t = blacks/100,  a = |t|,  m = smoothstep(0.2, 1, a)          (level enters at 20)
+    ///     t = blacks/100,  a = |t|,  m = smoothstep(0.2, 1, a)     (level enters at |k| = 20, kernel units)
     ///     EV:    v *= exp2(3 · t · wb)                  wb = the 7 EV toe (full below −11.2, 0 at −4.2)
     ///     level: v  = toe(v + 0.006 · t · m · wl)       wl = a 5 EV window, −6 … −1 EV, C¹ clip at 0
     ///     342:   v  = toe(v + 0.006·t·m·wl − 0.060·a·m₅·wl₂)   m₅ = smoothstep(0.5, 1, a)
     ///           wl₂ = 1 − smoothstep(0.020, 0.135, luma)      → the crush only (`t < 0`), and exactly
     ///           0 for `a ≤ 0.5`, i.e. the whole first half of the travel is byte-identical to 073C
     ///
+    /// **346 — `blacks` is the *slider* number; the kernel reads `blacksKernelValue(blacks)`.** The
+    /// brief 「0–30 是调整 EV，30–100 这一段是调整电平」 moves the mechanism switch to slider ±30 by
+    /// stretching the first 30 units over the kernel's first 50 (`±30 → ±50`, so new −30 is byte-for-byte
+    /// old −50) and the last 70 over its last 50 (`±100 → ±100`). The formulas above and the kernel are
+    /// unchanged; every `a`/`t` in them is in kernel units.
+    ///
     /// Why the second half exists: a pure multiplier cannot move the black *point* (`0 → 0` for every
     /// gain), so `blacks = −100` used to leave the darkest pixels at 1/8 of their value — never at 0 —
     /// and `blacks = +100` could never float the black off the floor. The owner's brief (2026-10-27)
     /// was 「滑块开始为加减 EV，后面逐步变为修改电平」, which is exactly this blend. `m` is 0 for the
-    /// first fifth of the travel, so `|blacks| ≤ 20` is 073B's arithmetic bit for bit (and `RenderGraph`
-    /// even picks 073B's entry point there — see `blacksLevelEntry`).
+    /// first fifth of the *kernel* travel (`|k| ≤ 20`), so that slice is 073B's arithmetic bit for bit,
+    /// and since 346 the whole slider half `|blacks| < 30` (`|k| < 50`) runs 073B's entry point — see
+    /// `blacksLevelEntry`.
     ///
     /// 342 (2026-11-10) widened the crush: 「现在 −100 大概只能让亮度 32/255 的变成 0，扩大到 −100 能让
     /// 亮度 64/255 变为 0」. One coefficient cannot be two black points, so the second half carries a
@@ -1442,13 +1453,40 @@ public struct LightGroup: Sendable, Equatable, Codable {
     /// 50 % grey — that is not what the control is for. `+` still lifts the shadows.
     public var blacks: Double            // -100…100, default 0
 
-    /// 073C — where the travel switches mechanism, `|blacks| = 50`.
+    /// 346 — the **one** place a slider value becomes a kernel value.
     ///
-    /// Not a taste knob: it is the zero of the blend factor `m(a) = smoothstep(0.5, 1, a)`, so below it
-    /// the level term is *exactly* zero and the kernel's 073B instantiation is the correct one. Moving
-    /// this number without moving `m` would put a discontinuity in the middle of the slider; moving
-    /// both would change the first half of the travel, which is pinned to be bit-identical.
-    public static let blacksEVToLevelSplit: Double = 50
+    /// The owner's brief (2026-11-10): 「黑色的调整区域也修改一下，0-30是调整EV，30-100这一段是调整电平。
+    /// 也就是-30等于现在的-50,-100等于现在的-100」. The kernel (`tone_shape.metal`) did not move: its
+    /// travel is still `t = blacks/100` with the level's blend `m = smoothstep(0.2, 1, |t|)` and 342's
+    /// crush `m₅ = smoothstep(0.5, 1, |t|)`, so a **kernel** value of ±50 is exactly the old ±50 and
+    /// ±100 is exactly the old ±100. What changed is the number the slider prints and the number the
+    /// document stores: the first 30 units of the slider now span the kernel's first 50, the remaining
+    /// 70 span its remaining 50.
+    ///
+    ///     |x| ≤ 30 :  k = x · 5/3            (= x · 50/30)
+    ///     otherwise:  k = sign(x) · (50 + (|x| − 30) · 5/7)     (= 50 + (|x| − 30) · 50/70)
+    ///
+    /// The scale factors are written as `5/3` and `5/7` rather than `50/30` / `50/70` because those
+    /// two expressions are **exactly** 50 and 100 in binary floating point (`30·5/3 == 50`,
+    /// `70·5/7 == 50`), so `blacks = ±30` lands *on* the mechanism switch and `blacks = ±100` lands on
+    /// the kernel's own clamp instead of a hair outside it.
+    ///
+    /// `0 → 0`, so a document that never touched the slider still writes the same key bytes and takes
+    /// the same entry point. `±30 → ±50` and `±100 → ±100` are why the two named equivalences hold:
+    /// new `−30` renders the bytes of old `−50`, new `−100` the bytes of old `−100`.
+    public static func blacksKernelValue(_ blacks: Double) -> Double {
+        let magnitude = abs(blacks)
+        if magnitude <= 30 { return blacks * 5.0 / 3.0 }
+        let k = 50.0 + (magnitude - 30.0) * 5.0 / 7.0
+        return blacks < 0 ? -k : k
+    }
+
+    /// 346 — where the travel switches mechanism **in slider units**, `|blacks| = 30`.
+    ///
+    /// The mechanism switch is `RenderGraph.blacksLevelEntry` (`|k| = 50`, where 073C's level is at
+    /// full weight); this number is the same fact in slider units, through `blacksKernelValue`.
+    /// Moving this one without moving `blacksKernelValue` would make 「0–30 全是 EV」 false.
+    public static let blacksEVToLevelSplit: Double = 30
     /// Absolute white balance in Kelvin — **both halves of 194's two-stage gesture**.
     ///
     /// The settled value is written into `CIRAWFilter.neutralTemperature` by the next development

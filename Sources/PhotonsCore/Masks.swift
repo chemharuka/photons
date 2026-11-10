@@ -191,12 +191,17 @@ public struct LocalAdjustments: Sendable, Equatable, Codable {
     }
 
     /// `amount` + the ten pre-181 sliders — **and nothing else**: 181's `texture`/`sharpen` are S3.9's,
-    /// and a stage's key names only what that stage reads. They ride in `EditModel.localDetailMaterial`
-    /// (S3.9's own material) instead.
+    /// and a stage's key names only what that stage reads. They ride in
+    /// `EditModel.localDetailMaterial` (S3.9's own material) instead.
+    ///
+    /// 346: `bl` prints the **kernel** value (`LightGroup.blacksKernelValue`), the number S1.6 actually
+    /// receives — new −30 and old −50 are the same curve and therefore the same key. `blacks == 0`
+    /// still prints `0.00000`, so a mask that never touched the slider keeps every byte.
     public var keyString: String {
         "amt=\(k(amount));ev=\(k(exposure));temp=\(k(temperature));tint=\(k(tint))"
             + ";con=\(k(contrast));hi=\(k(highlights));sh=\(k(shadows))"
-            + ";wh=\(k(whites));bl=\(k(blacks));hue=\(k(hue));sat=\(k(saturation))"
+            + ";wh=\(k(whites));bl=\(k(LightGroup.blacksKernelValue(blacks)))"
+            + ";hue=\(k(hue));sat=\(k(saturation))"
     }
 }
 

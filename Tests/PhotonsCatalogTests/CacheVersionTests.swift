@@ -175,10 +175,10 @@ final class CacheVersionTests: XCTestCase {
         // the HDR range).
         XCTAssertEqual(StageAlgorithmVersion.toneMap, 7,
                        "306: normalized Gaussian bands (1.24/0.96/0.83 EV travel)")
-        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 9,
-                       "342: the crush side of the blacks level reaches code 64")
-        XCTAssertEqual(StageAlgorithmVersion.localApply, 5,
-                       "342: S1.6 calls the same `s1_end_points`, so a mask's blacks moved with it")
+        XCTAssertEqual(StageAlgorithmVersion.sceneLinear, 10,
+                       "346: the blacks slider maps 0…30 → 0…50 kernel units (new −30 is old −50)")
+        XCTAssertEqual(StageAlgorithmVersion.localApply, 6,
+                       "346: S1.6 receives the mapped blacks, so a mask at 30 runs the old 50")
         XCTAssertEqual(StageAlgorithmVersion.contrast, 3,
                        "159/228: contrast is the display-domain residual operator (S2.5)")
         XCTAssertEqual(StageAlgorithmVersion.maskAtlas, 6,
@@ -569,7 +569,7 @@ final class CacheVersionTests: XCTestCase {
                        edit.keyMaterial(.toneMap, algorithmVersion: false)
                            + StageAlgorithmVersion.token(.toneMap))
         XCTAssertTrue(edit.keyMaterial(.toneMap).hasSuffix(";alg=7"))
-        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=9"))
+        XCTAssertTrue(edit.keyMaterial(.sceneLinear).hasSuffix(";alg=10"))
         XCTAssertTrue(edit.keyMaterial(.geometry).hasSuffix(";alg=5"))
     }
 }

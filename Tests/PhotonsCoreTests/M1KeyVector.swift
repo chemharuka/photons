@@ -41,7 +41,7 @@ enum M1KeyVector {
         let geometry = "\(header)|pv=\(pv)"
             + ";crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=\(alg(.geometry))"
         let sceneLinear = "\(h(geometry))"
-            + "|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000"
+            + "|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-8.33333"
             + ";alg=\(alg(.sceneLinear))"
         // 030: the curve changed stage (`curve` before S2, `w=` instead of `rgb=`); 069: its axis is
         // the card's 0…2 and its points print six decimals.
