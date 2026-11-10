@@ -229,6 +229,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// camera. The render queue must not read `cropTool.isActive` itself (that is a main-actor
         /// view state); this is the render half of the same entry zoom.
         var fitScale: Double = 1
+        /// 307 — which canvas the frame is of, snapshotted on the main thread with the camera. Before
+        /// 333 the render queue asked `cropTool.canvasRole` itself, i.e. it read a live object the main
+        /// thread edits while a crop box is dragged (`Retired/Photons-2026-11-09-155612.ips`: the
+        /// over-release that killed the process on `photons.loupe.render`).
+        var canvasRole: CanvasRole = .export
+        /// 162 / 258 — the crop workspace half of `neverUpscalesContent`, snapshotted for the same
+        /// reason (`cropTool.isActive` is main-actor view state).
+        var cropIsActive: Bool = false
+        /// 333 — the session facts `makeFrame` stamps on the frame it returns, snapshotted with the
+        /// rest of the job so the render queue never touches `CatalogSession`.
+        var editRevision: Int = 0
+        var highlightWarning: Bool = false
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -318,31 +330,75 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// preview rung and the full rung evicted each other, so every visit to either paid ImageIO
     /// again. The ladder keys on (photo, scale) and keeps one photo resident.
     private let ladder = DecodeLadder()
-    /// The rung the last presented frame came from — what `framing()` measures and what an edit
-    /// frame reuses. `decoded` is the same buffer, kept because hit-testing must not need the queue.
-    private var decoded: LinearImage?
-    /// 202 ④ — **whose pixels `decoded` holds** (`makeFrame`'s base identity).
+
+    /// **333 — the frame state: which pixels the canvas has, whose they are, at what rung.**
     ///
-    /// A photo switch does not clear the resident buffer: it stays until the next photo's first frame
-    /// replaces it. `framing()` read it unconditionally, so between the switch and that frame the
-    /// projection was built from the *previous* photo's pixel grid while the crop draft and
-    /// `cropSourceSize` were the new photo's — the frame came out as a small patch in the corner
-    /// (「刚好是 1/4 面积的左上角」) until the frame job caught up. A buffer is only usable for the
-    /// photo it is a buffer of.
-    private var decodedIdentity: String?
-    /// 派单 105: which file `decoded` came from, so the automatic black level can ask the decoder for
-    /// a second, measurement-only development of the same pixels' source. Set next to `decoded`.
-    private var decodedURL: URL?
+    /// Five bare fields (`decoded / decodedIdentity / decodedURL / decodedScale / decodedCaps`) were
+    /// written by `makeFrame` on `photons.loupe.render` and read by the main thread — `framing()`,
+    /// `backdropPhotoKey`, `hasIngestedPlaceholderSource`, the droppers, the heal source — with no lock
+    /// between them. Three `.ips` (`Photons-2026-11-10-113046.ips` and two in `Retired/`) are the same
+    /// over-release: the main thread retained a `LinearImage` or a String the render queue had just
+    /// released, and the release that followed was `EXC_BAD_ACCESS` inside `framing(viewport:)`.
+    ///
+    /// One value behind one `NSLock`, the same shape as `CanvasSizeBox` / `FullPictureBox`. A store and
+    /// a read are each one lock around a struct copy: pointers and numbers only, never pixels (a
+    /// `LinearImage` is a `[Float16]` reference, so copying the struct is one retain). The lock never
+    /// allocates, never calls out and never reads `cropTool` / `session` / `viewState` — a caller takes
+    /// a snapshot **once** and works from it, so a frame landing mid-way cannot make one computation
+    /// read two different pictures.
+    struct FrameSnapshot {
+        /// The rung the last presented frame came from — what `framing()` measures and what an edit
+        /// frame reuses. `nil` before the first development of a photo lands.
+        var image: LinearImage?
+        /// 202 ④ — **whose pixels `image` holds** (`makeFrame`'s base identity).
+        ///
+        /// A photo switch does not clear the resident buffer: it stays until the next photo's first
+        /// frame replaces it. `framing()` used to read it unconditionally, so between the switch and
+        /// that frame the projection was built from the *previous* photo's pixel grid while the crop
+        /// draft and `cropSourceSize` were the new photo's — the frame came out as a small patch in the
+        /// corner (「刚好是 1/4 面积的左上角」) until the frame job caught up. A buffer is only usable
+        /// for the photo it is a buffer of.
+        var identity: String?
+        /// 派单 105: which file `image` came from, so the automatic black level can ask the decoder for
+        /// a second, measurement-only development of the same pixels' source. Stored with `image`.
+        var url: URL?
+        var scale: Double = 0.5
+        var capabilities: DecoderCapabilities?
+    }
+
+    private final class FrameSnapshotBox {
+        private let lock = NSLock()
+        private var value = FrameSnapshot()
+        func store(_ new: FrameSnapshot) { lock.lock(); value = new; lock.unlock() }
+        func current() -> FrameSnapshot { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    private let frameBox = FrameSnapshotBox()
+    /// One read of the frame state. Every reader keeps the value for its whole computation.
+    private var frameState: FrameSnapshot { frameBox.current() }
+
     /// Test seam (094): a synthetic buffer with the two classes of points (all-negative vs a single
     /// negative channel) is the only way to prove `autoBlackOffset()` end to end without a real RAW
     /// that happens to carry a −0.018 outlier. Production never sets this; same `...ForTesting`
     /// convention as the overlay layouts below.
     var decodedForTesting: LinearImage? {
-        get { decoded }
-        set { decoded = newValue }
+        get { frameState.image }
+        set {
+            var next = frameState
+            next.image = newValue
+            frameBox.store(next)
+        }
     }
-    private var decodedScale: Double = 0.5
-    private var decodedCaps: DecoderCapabilities?
+    /// 333 probe seam — the identity `makeFrame` stamps on the frame state, read on the main thread
+    /// (the probe must not read `session` from its own queue: that would be a second race).
+    var backdropPhotoKeyForTesting: String? { backdropPhotoKey }
+    /// 333 test seam — whose pixels the frame state holds (`202 ④`'s gate). The ③ equivalence suite
+    /// transcribes the pre-333 `framing()` and needs this value by name.
+    var decodedIdentityForTesting: String? { frameState.identity }
+    /// 333 probe seam — the other main-thread reader in the crash chain (`290`).
+    var hasIngestedPlaceholderSourceForProbe: Bool { hasIngestedPlaceholderSource }
+    /// 333 diagnostic counter — how many `framing()` calls one gesture costs. The crash chain
+    /// amplified itself by calling it **4–5×** per wheel event; the acceptance reads this number.
+    public private(set) var framingCalls = 0
     private var decodeMilliseconds: Double = 0
     private var generation = 0
     private weak var session: CatalogSession?
@@ -864,6 +920,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// name a pair this buffer does not carry (the release that is still developing, or the frame
         /// after a settle whose ladder rung replaced the as-shot one). The drag draws that buffer.
         let rungInputs: DecodeInputs
+        /// 333 — the same view + session facts `RenderJob` carries, for the same reason: this request
+        /// is performed on `photons.loupe.render` and must not read `cropTool` / `session` there.
+        let canvasRole: CanvasRole
+        let cropIsActive: Bool
+        let editRevision: Int
+        let highlightWarning: Bool
     }
 
     private var whiteBalancePreviewToken = 0
@@ -1010,7 +1072,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func makeWhiteBalancePreviewRequest(_ target: WhiteBalance,
                                                 viewport: ImageSize? = nil)
         -> WhiteBalancePreviewRequest? {
-        guard let url = decodedURL, let image = decoded, graph != nil else { return nil }
+        // 333 — one snapshot for the whole request: the buffer, the file it came from and the rung it
+        // was developed at travel together, so a frame landing mid-way cannot mix two of them.
+        let frame = frameState
+        guard let url = frame.url, let image = frame.image, graph != nil else { return nil }
         // The buffer must be the photo the document belongs to: after a switch the controller can
         // still hold the previous picture until the first frame of the new one lands, and rendering
         // that through the new document's pair would paint the wrong photo.
@@ -1031,8 +1096,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             target: target, token: 0, tickTime: CACurrentMediaTime(),
             edit: document,
             url: url, baseIdentity: graphPhoto ?? url.lastPathComponent,
-            viewport: camera, decodeScale: Float(decodedScale), state: viewState,
-            useCache: true, rungInputs: rungInputs)
+            viewport: camera, decodeScale: Float(frame.scale), state: viewState,
+            useCache: true, rungInputs: rungInputs,
+            canvasRole: cropTool.canvasRole, cropIsActive: cropTool.isActive,
+            editRevision: session?.editRevision ?? 0,
+            highlightWarning: session?.highlightWarning ?? false)
     }
 
     private func performWhiteBalancePreviewRender(_ request: WhiteBalancePreviewRequest) throws
@@ -1049,7 +1117,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
                              edit: edit, state: request.state, hashPixels: false,
                              resolve: .residentOnly, useCache: request.useCache,
                              measurement: false,
-                             rungInputs: request.rungInputs)
+                             rungInputs: request.rungInputs,
+                             canvasRole: request.canvasRole, cropIsActive: request.cropIsActive,
+                             editRevision: request.editRevision,
+                             highlightWarning: request.highlightWarning)
     }
 
     /// **The drag path.** One real render per tick, single-flight: a tick that arrives while one is
@@ -1264,8 +1335,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         compare.onChange = { [weak self] in self?.frameModeDidChange() }
 
         // 184: the heal source search reads the decoded, upright buffer. Installing the closure once
-        // (not per frame) keeps this out of the frame path; `decoded` is read when the user clicks.
-        session.healFrameProvider = { [weak self] in self?.decoded?.oriented() }
+        // (not per frame) keeps this out of the frame path; the box's `image` is read when the user
+        // clicks (333: a snapshot, not a bare field — the render queue writes it).
+        session.healFrameProvider = { [weak self] in self?.frameState.image?.oriented() }
 
         // 045 × 039: the histogram's whole-picture source **is** the backdrop cache — same render,
         // two purposes. `nil` when no backdrop for the current document exists, and always digest
@@ -1648,16 +1720,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// What the status strip shows: display class, headroom, and where the camera is — in percent,
     /// with the fit rung's real ratio (`适应 31%`), so the number moves with the window.
-    public var statusText: String { "\(displayHeadroom.displayText) · \(zoomLabel)" }
+    public var statusText: String { statusText(projection: framing()) }
+
+    /// 333 ④ — the same string for a projection the caller already has (`setViewState` runs this chain
+    /// once per camera change; it used to build the projection again at every hop).
+    private func statusText(projection: LoupeFraming?) -> String {
+        "\(displayHeadroom.displayText) · \(zoomLabel(projection: projection))"
+    }
 
     // MARK: camera state changes
 
     /// The camera for the current projection — the pure value the camera-changing commands ask for
     /// their target state, so `setViewState` stays the only place a change is applied.
-    private func camera() -> LoupeCamera? {
-        guard let framing = framing() else { return nil }
-        return LoupeCamera(viewport: LoupeViewport(framing: framing, state: viewState),
-                           backingScale: backingScale, cropLimit: cropZoomLimit())
+    private func camera() -> LoupeCamera? { camera(projection: framing()) }
+
+    /// 333 ④ — the same camera for a projection the caller **already has**.
+    ///
+    /// Every command that needs both (the wheel, the drag pan, the pinch, the menu stops, the status
+    /// strip) computes `framing()` once and passes it in. Before this a single wheel event built the
+    /// same projection four times — and each build retains the 480 MB decoded buffer while the render
+    /// queue is replacing it, which is the amplifier behind the `.ips` chain.
+    private func camera(projection: LoupeFraming?) -> LoupeCamera? {
+        guard let projection else { return nil }
+        return LoupeCamera(viewport: LoupeViewport(framing: projection, state: viewState),
+                           backingScale: backingScale,
+                           cropLimit: cropZoomLimit(projection: projection))
     }
 
     /// Z / space.
@@ -1677,13 +1764,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The anchored form, for callers that know the point (the double-click, the tests).
     public func zoomToActualSize(aroundView point: CGPoint?) {
-        guard let camera = camera() else { return }
+        let projection = framing()
+        guard let camera = camera(projection: projection) else { return }
         pinchZoom = nil
         // 082: 1:1 is a *stop* like any other — a crop session whose frame is smaller than the canvas
         // at 1:1 stops at the frame-inscribed level instead.
         let anchor = point ?? canvasCentrePoint()
         setViewState(camera.actualSize(aroundView: anchor),
-                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
+                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale),
+                     projection: projection)
     }
 
     /// Back to the whole frame — **whole and centred**, which is the one camera change with no anchor
@@ -1691,13 +1780,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// last centre is kept, so Z‑Z returns to where the user was.
     public func zoomToFit() {
         pinchZoom = nil
-        guard let camera = camera() else {
+        let projection = framing()
+        guard let camera = camera(projection: projection) else {
             var next = viewState
             next.mode = .fit
-            setViewState(next)
+            setViewState(next, projection: projection)
             return
         }
-        setViewState(camera.fitted())
+        setViewState(camera.fitted(), projection: projection)
     }
 
     // MARK: the zoom ladder (显示 ▸ 倍率)
@@ -1747,16 +1837,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     /// The fit ratio is printed to whole percent (it moves with the window; a tenth of a percent of a
     /// 0.31 viewport is noise), while the stops use `percentLabel`'s one-decimal rule for the thirds.
-    public var zoomLabel: String {
-        camera()?.label ?? viewState.zoomLabel
+    public var zoomLabel: String { zoomLabel(projection: framing()) }
+
+    private func zoomLabel(projection: LoupeFraming?) -> String {
+        camera(projection: projection)?.label ?? viewState.zoomLabel
     }
 
     /// The menu stop the camera is exactly on, or nil (fit) — what the View menu ticks.
     ///
     /// `1e-9`, not a fudge factor: the camera is only ever parked on a table value, so "on a stop" is
     /// an equality question about the table's own doubles.
-    public var currentZoomStop: Double? {
-        camera()?.currentStop
+    public var currentZoomStop: Double? { currentZoomStop(projection: framing()) }
+
+    private func currentZoomStop(projection: LoupeFraming?) -> Double? {
+        camera(projection: projection)?.currentStop
     }
 
     /// A menu stop (1 / 2 / 3 / 4): same **anchor**, new scale, one re-render.
@@ -1783,13 +1877,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// to rest between stops, so a value that is not in the table is floored onto the one below it
     /// before anything is set. For a caller that names a table value this is the identity.
     public func zoom(to stop: Double, aroundView point: CGPoint?) {
-        guard let camera = camera() else { return }
+        let projection = framing()
+        guard let camera = camera(projection: projection) else { return }
         pinchZoom = nil
         // 082: a crop session's ceiling is 「框恰好内接于画布」 — clamped **before** the anchor maths,
         // so the pixel under the cursor is kept for the zoom that actually lands.
         let anchor = point ?? canvasCentrePoint()
         setViewState(camera.zoomed(to: stop, aroundView: anchor),
-                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale))
+                     anchor: .pointer(viewPoint: anchor, backingScale: backingScale),
+                     projection: projection)
     }
 
     /// ⌘+ / ⌘=: the next stop up, or 4:1 from anything between. From `fit` it lands on 100 % — the
@@ -1839,10 +1935,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// (`LoupeCanvasView.isFlipped`) — so it is negated on the way in; without that a drag downwards
     /// moved the picture upwards, which is the bug the user reported.
     public func panImage(byPoints delta: CGSize) {
-        guard let camera = camera(), viewState.isActualSize else { return }
+        let projection = framing()
+        guard let camera = camera(projection: projection), viewState.isActualSize else { return }
         let next = camera.panned(byWindowPoints: delta)
         guard next != viewState else { return }
-        setViewState(next)
+        setViewState(next, projection: projection)
     }
 
     /// Wheel / two-finger scroll. A wheel notch reports ~1 point; a trackpad reports pixels, so the
@@ -1858,10 +1955,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// settings behave differently; normalising on the flag is what makes the result depend only on
     /// which way the fingers went.
     public func scrollPan(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, inverted: Bool) {
-        guard let camera = camera(), viewState.isActualSize else { return }
+        // 333 ④ — the whole event on **one** projection: the camera, the clamped state, the status
+        // strip, the zoom pill and the bridge all reuse this one value (was 4–5 builds per event).
+        let projection = framing()
+        guard let camera = camera(projection: projection), viewState.isActualSize else { return }
         let next = camera.scrolled(deltaX: deltaX, deltaY: deltaY, precise: precise, inverted: inverted)
         guard next != viewState else { return }
-        setViewState(next)
+        setViewState(next, projection: projection)
     }
 
     /// Trackpad pinch: a **continuous accumulator feeding a discrete ladder**.
@@ -1872,7 +1972,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the cursor stays where it is (`LoupeFraming.zooming`). Any command that names a rung outright
     /// (menu, ⌘=, ⌘−, Z, double-click) clears the accumulator: that is not a pinch continuing.
     public func magnify(by factor: CGFloat, at point: CGPoint) {
-        guard let camera = camera(), factor.isFinite, factor > 0 else { return }
+        let projection = framing()
+        guard let camera = camera(projection: projection), factor.isFinite, factor > 0 else { return }
         // The floor of the ladder is 25 %, and 25 % is where a pinch out stops: `fit` is a different
         // mode, entered by its own action, so a gesture cannot slide the camera into it by accident.
         //
@@ -1881,16 +1982,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let (next, accumulated) = camera.pinched(by: factor, aroundView: point,
                                                  accumulated: pinchZoom)
         pinchZoom = accumulated
-        setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale))
+        setViewState(next, anchor: .pointer(viewPoint: point, backingScale: backingScale),
+                     projection: projection)
     }
 
     private func setViewState(_ requested: LoupeViewState, anchor: LoupeZoomAnchor = .center,
-                              forceAnimation: Bool = false) {
+                              forceAnimation: Bool = false,
+                              projection: LoupeFraming? = nil) {
+        // 333 ④ — **one** projection for the whole change: the crop clamp, the status strip, the zoom
+        // pill, the scale comparison and the bridge all read this value. It is computed here only when
+        // the caller has none, so a wheel event cannot build the same projection four times.
+        let projection = projection ?? framing()
         // 082 — **the** one gate: every camera change (wheel, pinch, pill, ⌘=/⌘−, double-click, drag
         // pan, two-finger scroll, the crop entry's own `zoomToFit`) is written on the two lines below,
         // so a crop session's 「裁切框 ⊆ 画布」 is decided here and nowhere else. Outside 裁切 mode, and
         // for `.fit`, this is the identity — which is what makes the clamp belong to the tool only.
-        let next = clampedToCropCanvas(requested)
+        let next = clampedToCropCanvas(requested, projection: projection)
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
@@ -1901,7 +2008,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             source.state = next
             frameSource = source
         }
-        updateStatusChip()
+        updateStatusChip(projection: projection)
         // ① — the **one** place a camera change reaches the crop overlay.
         //
         // `viewState` is written here and nowhere else (that is the invariant `updateStatusChip`
@@ -1931,7 +2038,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // A pan is not a stop change — `zoom` is untouched — and it keeps its hard per-frame cut:
         // animating a drag would leave the picture behind the hand.
         var bridging = false
-        if let framing = framing(),
+        if let framing = projection,
            forceAnimation || movesScale(from: previous, to: next, framing: framing) {
             bridging = armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
         }
@@ -2676,6 +2783,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// picture (and this framing) keep the released angle while the crop quad turns on its own. The
     /// frame on screen, the crop box drawn on it and every hit test are still one geometry (task 035).
     public func framing(viewport: ImageSize? = nil) -> LoupeFraming? {
+        framingCalls += 1
         let size = viewport ?? viewportPixels
         // 088: the canvas always shows the **document** while 裁切 is on — a 转动 tick is a draft-only
         // write and must not re-render (or re-frame) the picture. The frame quad is what turns.
@@ -2687,11 +2795,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 307 — the projection's canvas follows the tool: 裁切 shows the **document** canvas (the turned
         // whole photograph's AABB), everything else the export canvas (the crop frame, 301).
         let role = cropTool.canvasRole
-        // 202 ④ — only a buffer of **this** photo may describe this photo's projection.
-        if let image = decoded, decodedIdentity == backdropPhotoKey {
+        // 202 ④ — only a buffer of **this** photo may describe this photo's projection. 333 — the
+        // buffer, its identity and its rung come from **one** snapshot: read as three fields, a frame
+        // landing between them could describe the new buffer at the old scale (or vice versa), and the
+        // main thread could retain a buffer whose last release the render queue had already done.
+        let frame = frameState
+        if let image = frame.image, frame.identity == backdropPhotoKey {
             return LoupeFraming(viewport: size,
                                 decoded: ImageSize(width: image.width, height: image.height),
-                                decodeScale: decodedScale,
+                                decodeScale: frame.scale,
                                 edit: edit,
                                 fitScale: currentCropWorkspaceFitScale,
                                 fitMargin: fitMarginOverride,
@@ -2958,7 +3070,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func sampleForWhiteBalance(atViewPoint point: CGPoint,
                                       viewport: ImageSize? = nil,
                                       backingScale scaleOverride: Double? = nil) -> DropperOutcome {
-        guard let image = decoded else { return .notReady }
+        let sample = frameState
+        guard let image = sample.image else { return .notReady }
         guard let framing = framing(viewport: viewport) else { return .notReady }
         let scale = scaleOverride ?? backingScale
         let mapping = framing.mapping(of: viewState)
@@ -2975,7 +3088,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         let source = mapping.sourcePoint(viewX: viewX, viewY: viewY)
         guard source.x.isFinite, source.y.isFinite else { return .outsideImage }
-        let ds = decodedScale > 0 ? decodedScale : 1
+        let ds = sample.scale > 0 ? sample.scale : 1
         let bx = Int((source.x * ds).rounded(.down))
         let by = Int((source.y * ds).rounded(.down))
         let (w, h) = image.uprightSize
@@ -3066,8 +3179,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// file, so the caller must still handle `WhiteBalanceNativeDropper.whiteBalance(at:) == nil`
     /// and fall back to `dropperProbe` + `WhiteBalanceDropperRefiner`.
     public func dropperNativeProbe(for sample: DropperSample) -> WhiteBalanceNativeDropper.Probe? {
-        guard let url = decodedURL, let image = decoded else { return nil }
-        let ds = decodedScale > 0 ? decodedScale : 1
+        let frame = frameState
+        guard let url = frame.url, let image = frame.image else { return nil }
+        let ds = frame.scale > 0 ? frame.scale : 1
         let height = Int((Double(image.uprightSize.height) / ds).rounded())
         guard height > 0 else { return nil }
         return WhiteBalanceNativeDropper.Probe(url: url,
@@ -3079,9 +3193,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Where the refinement loop should read: the file, the rung on screen, and the buffer pixel the
     /// click resolved to. `nil` when no buffer is resident (nothing to iterate against).
     public func dropperProbe(for sample: DropperSample) -> WhiteBalanceDropperRefiner.Probe? {
-        guard decodedURL != nil, decoded != nil else { return nil }
-        return WhiteBalanceDropperRefiner.Probe(url: decodedURL!,
-                                                scale: Float(decodedScale > 0 ? decodedScale : 1),
+        let frame = frameState
+        guard let url = frame.url, frame.image != nil else { return nil }
+        return WhiteBalanceDropperRefiner.Probe(url: url,
+                                                scale: Float(frame.scale > 0 ? frame.scale : 1),
                                                 x: sample.bufferX, y: sample.bufferY)
     }
 
@@ -3095,13 +3210,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The picture's mean colour, for the 自动 preset. The same grey-world input Lightroom's Auto WB
     /// uses, measured on the resident buffer so it costs a strided scan and no development.
     public func averageSceneRGB(stride: Int = 8) -> RGBSample? {
-        decoded?.meanRGB(stride: stride)
+        frameState.image?.meanRGB(stride: stride)
     }
 
     /// The as-shot pair the **resident buffer** was developed with. The white-balance solve is relative
     /// to it, and it has to come from the decode rather than from the asset row: it is a fact about the
     /// file that only `CIRAWFilter` knows.
-    public var asShotWhiteBalance: WhiteBalance? { decodedCaps?.asShotWhiteBalance }
+    public var asShotWhiteBalance: WhiteBalance? { frameState.capabilities?.asShotWhiteBalance }
 
     // MARK: painting (Q22)
 
@@ -4242,10 +4357,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 切换估计量的分支。干净解码之后最负的那颗就是电平该补的量，哪怕只有一颗。
     @discardableResult
     public func autoBlackOffset() -> Double? {
-        guard let session, session.mode == .loupe, let display = decoded else { return nil }
+        let frame = frameState
+        guard let session, session.mode == .loupe, let display = frame.image else { return nil }
 
         let measured: LinearImage
-        if let url = decodedURL, let image = try? measurementImage(url) {
+        if let url = frame.url, let image = try? measurementImage(url) {
             measured = image
         } else {
             print("AUTO BLACK · measurement decode failed, falling back")
@@ -4635,9 +4751,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// so the ceiling becomes the camera's own 400 % and `clampedToCropCanvas` keeps the frame reachable.
     ///
     /// `nil` when there is no frame to measure (the tool is off) or the projection is degenerate.
-    public func cropZoomLimit(viewport: ImageSize? = nil) -> Double? {
+    public func cropZoomLimit(viewport: ImageSize? = nil,
+                              projection: LoupeFraming? = nil) -> Double? {
         guard clampsCropCamera else { return nil }
-        guard let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return nil }
+        guard let frame = cropFrameRect(),
+              let framing = projection ?? framing(viewport: viewport) else { return nil }
         guard !cropFrameIsTurned else { return LoupeViewState.maximumZoom }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
@@ -4669,9 +4787,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// inscribed in the viewport by construction, so there is nothing to clamp). That is what makes
     /// 「退出裁切后缩放/平移恢复自由」 true without a second rule.
     public func clampedToCropCanvas(_ state: LoupeViewState,
-                                    viewport: ImageSize? = nil) -> LoupeViewState {
+                                    viewport: ImageSize? = nil,
+                                    projection: LoupeFraming? = nil) -> LoupeViewState {
         guard clampsCropCamera, cropTool.isActive, state.mode == .actual,
-              let frame = cropFrameRect(), let framing = framing(viewport: viewport) else { return state }
+              let frame = cropFrameRect(),
+              let framing = projection ?? framing(viewport: viewport) else { return state }
         let canvas = CGSize(width: Double(framing.viewport.width),
                             height: Double(framing.viewport.height))
         let limit = min(CropWorkspaceLayout.maxZoom(canvas: canvas, frame: frame),
@@ -5102,6 +5222,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let gen = generation
         // 派单 031: while a detail slider moves, ask the ladder for the preview rung only.
         let target = detailPreview ? DecodeLadder.previewScale : DecodeLadder.fullScale
+        // 333 — the crop tool's two view facts and the two session facts, taken **here**, on the main
+        // thread, so `renderFrame → makeFrame` only ever reads the job.
+        let role = cropTool.canvasRole
+        let cropActive = cropTool.isActive
+        let revision = session?.editRevision ?? 0
+        let warning = session?.highlightWarning ?? false
         if let source = frameSource {
             // 067/066: the canvas this job is for, published to the render queue so a job overtaken by
             // a resize is dropped instead of rendered.
@@ -5111,6 +5237,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 target: target, generation: gen, changedAt: changedAt)
             job.mode = frameMode
             job.fitScale = currentCropWorkspaceFitScale
+            job.canvasRole = role
+            job.cropIsActive = cropActive
+            job.editRevision = revision
+            job.highlightWarning = warning
             return job
         }
         guard let session, session.mode == .loupe,
@@ -5135,6 +5265,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // renders is the frame the user asked for even if `\` is pressed again while it is in flight.
         job.mode = frameMode
         job.fitScale = currentCropWorkspaceFitScale
+        job.canvasRole = role
+        job.cropIsActive = cropActive
+        job.editRevision = revision
+        job.highlightWarning = warning
         return job
     }
 
@@ -5214,7 +5348,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                       viewport: job.viewport, decodeScale: rung.scale,
                                       edit: job.edit, state: job.state, mode: job.mode,
                                       fitScale: job.fitScale,
-                                      hashPixels: hashesFrames, resolve: .residentOnly)
+                                      hashPixels: hashesFrames, resolve: .residentOnly,
+                                      // 333 — the render queue reads the job and nothing else.
+                                      canvasRole: job.canvasRole,
+                                      cropIsActive: job.cropIsActive,
+                                      editRevision: job.editRevision,
+                                      highlightWarning: job.highlightWarning)
             decodeMilliseconds = rung.milliseconds
             return frame
         } catch {
@@ -5642,7 +5781,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// dimensions are not the frame the user sees.
     private var hasIngestedPlaceholderSource: Bool {
         guard let asset = session?.anchorAsset else { return false }
-        if decoded != nil, decodedIdentity == backdropPhotoKey { return true }
+        if frameState.image != nil, frameState.identity == backdropPhotoKey { return true }
         return session?.ingestedSourceFrame?.assetID == asset.id
     }
 
@@ -6130,7 +6269,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // converts between them, so the ceiling is computed on the original and divided by the rung's
         // own crop — without this, a 0.5 rung of a 9520 px file asks for 2380 px (half of the preview
         // the user asked for) instead of 4096.
-        let rungScale = decodedScale.isFinite && decodedScale > 0 ? decodedScale : 1
+        let rungScale = frameState.scale.isFinite && frameState.scale > 0 ? frameState.scale : 1
         let originalLongEdge = Int((Double(max(source.width, source.height)) / rungScale).rounded())
         let scale = BackdropScale.renderScale(imageLongEdge: originalLongEdge,
                                               contentLongEdge: max(cropPixels.width, cropPixels.height))
@@ -6334,7 +6473,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
                       edit: edit ?? session?.edit ?? .neutral,
                       state: state ?? viewState, mode: mode,
                       fitScale: currentCropWorkspaceFitScale,
-                      hashPixels: hashPixels)
+                      hashPixels: hashPixels,
+                      // 333 — the synchronous path runs on the main thread, so it snapshots the live
+                      // tool here and hands the render path the same four values a `RenderJob` carries.
+                      canvasRole: cropTool.canvasRole, cropIsActive: cropTool.isActive,
+                      editRevision: session?.editRevision ?? 0,
+                      highlightWarning: session?.highlightWarning ?? false)
     }
 
     /// Same frame, without a catalog row — what the unit tests and a future import preview use.
@@ -6347,7 +6491,24 @@ public final class LoupeController: NSViewController, HeadroomSource {
                       viewport: viewport, decodeScale: decodeScale, edit: edit,
                       state: state, mode: mode,
                       fitScale: currentCropWorkspaceFitScale,
-                      hashPixels: hashPixels, useCache: useCache)
+                      hashPixels: hashPixels, useCache: useCache,
+                      canvasRole: cropTool.canvasRole, cropIsActive: cropTool.isActive,
+                      editRevision: session?.editRevision ?? 0,
+                      highlightWarning: session?.highlightWarning ?? false)
+    }
+
+    /// 333 probe seam — the same frame with the render-queue snapshot **supplied by the caller**, so a
+    /// second queue can exercise the shipped write path (`frameBox.store`) without reading main-thread
+    /// view state (`cropTool` / `session`). Everything else is the shipped code.
+    func makeFrame(url: URL, viewport: ImageSize, decodeScale: Float, edit: EditModel,
+                   state: LoupeViewState, canvasRole: CanvasRole, cropIsActive: Bool)
+        throws -> FrameResult {
+        try makeFrame(url: url, cacheIdentity: url.lastPathComponent,
+                      viewport: viewport, decodeScale: decodeScale, edit: edit,
+                      state: state, fitScale: currentCropWorkspaceFitScale,
+                      hashPixels: false, useCache: true,
+                      canvasRole: canvasRole, cropIsActive: cropIsActive,
+                      editRevision: 0, highlightWarning: false)
     }
 
     /// Whether a frame may develop the rung it wants.
@@ -6367,7 +6528,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            fitScale: Double = 1,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing,
                            useCache: Bool = true, measurement: Bool = true,
-                           rungInputs: DecodeInputs? = nil) throws -> FrameResult {
+                           rungInputs: DecodeInputs? = nil,
+                           // 333 — every caller on the render queue passes these from its job /
+                           // request snapshot; the synchronous callers pass the live tool's values
+                           // from the main thread. There is deliberately **no** default: a frame
+                           // rendered on the wrong canvas is the 307 bug with no error to see.
+                           canvasRole: CanvasRole,
+                           cropIsActive: Bool,
+                           editRevision: Int,
+                           highlightWarning: Bool) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
         // 194: the white balance is a **decode** input for the *settled* frame, so a 2850 K document
         // is its own development — and S1 is identity on that buffer because the decoder already
@@ -6412,11 +6581,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
             graphDecodeVersion = nil
             graphDetail = .identity
         }
-        decoded = image
-        decodedIdentity = baseIdentity
-        decodedURL = url
-        decodedScale = ds
-        decodedCaps = outcome.rung.capabilities
+        // 333 — **one** store, not five. The five facts about the frame leave the render queue as a
+        // single value: a reader can no longer see the new buffer beside the previous picture's
+        // identity, rung or capabilities (and no reader can retain a value this side is releasing).
+        let capabilities = outcome.rung.capabilities
+        frameBox.store(FrameSnapshot(image: image, identity: baseIdentity, url: url,
+                                     scale: ds, capabilities: capabilities))
         currentDecodeScale = decodeScale
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
@@ -6464,7 +6634,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                          fitScale: fitScale,
                                          fitMargin: fitMarginOverride,
                                          // 307 — the same canvas the overlay is projected through.
-                                         canvasRole: cropTool.canvasRole)
+                                         // 333: snapshotted by the caller, never read off `cropTool`
+                                         // here (this runs on `photons.loupe.render`).
+                                         canvasRole: canvasRole)
             // 176: the window indexes the **expanded canvas** (the rotated crop's bounding box), so it
             // carries the canvas origin `(canvas − frame)/2` — measured on this rung's grid, which is
             // why the decode scale goes with it.
@@ -6505,7 +6677,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // 258 — the reverse gate turns only the 适应 half off (`neverUpscalesFitContent`), so the
             // acceptance can show the 90 % assertion going red at 100 % without touching the crop
             // workspace's rule.
-            let neverUpscales = cropTool.isActive
+            let neverUpscales = cropIsActive
                 || (state.mode == .fit && neverUpscalesFitContent)
             let request = LoupeFrameRequest(
                 identity: cacheIdentity,
@@ -6523,7 +6695,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                         highlightCeiling: HighlightCeiling.current),
                 neverUpscalesContent: neverUpscales,
                 // 307 — one value for the pixels, the projection and the overlay.
-                canvasRole: cropTool.canvasRole)
+                canvasRole: canvasRole)
             var options = request.renderOptions()
             options.useCache = useCache
             options.collectHistogram = measure
@@ -6620,7 +6792,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let hash = hashPixels ? LoupeController.hash(texture) : nil
         // The clipping warning's input. Only read while the warning is on: it is a UI aid, and a
         // readback nobody looks at is a millisecond nobody asked for.
-        let clipped = (session?.highlightWarning ?? false)
+        let clipped = highlightWarning
             ? HighlightWarning.grid(of: texture) : nil
         // The pointer's readout rides a stride sample of the picture **before S4**, and the lattice it
         // is indexed with is the frame's picture rect. A compare frame's rect is the union of two
@@ -6637,8 +6809,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            outputWindow: drawing.outputWindow,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
                            renderMilliseconds: renderMs, usedCachedDecode: usedCache,
-                           capabilities: decodedCaps, primaries: primaries,
-                           editRevision: session?.editRevision ?? 0, edit: model,
+                           capabilities: capabilities, primaries: primaries,
+                           editRevision: editRevision, edit: model,
                            displayHash: hash,
                            zoom: shotForFrame.projected.zoom(of: state), headroom: ceiling,
                            window: shotForFrame.pixels,
@@ -7420,9 +7592,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 231 test seam — install a decoded rung (and the identity it belongs to) the way `makeFrame`
     /// leaves it, so `framing()` can describe a real file from a tiny synthetic buffer.
     func installDecodedRungForTesting(_ image: LinearImage, scale: Double) {
-        decoded = image
-        decodedScale = scale
-        decodedIdentity = backdropPhotoKey
+        installDecodedRungForTesting(image, scale: scale, identity: backdropPhotoKey)
+    }
+
+    /// 333 probe seam — the same write with the identity passed in, so a **second queue** can land a
+    /// rung without reading `session` (`backdropPhotoKey`) off the main thread. Exactly the fields
+    /// `makeFrame` writes at 6415–6419.
+    func installDecodedRungForTesting(_ image: LinearImage, scale: Double, identity: String?) {
+        var next = frameState
+        next.image = image
+        next.scale = scale
+        next.identity = identity
+        frameBox.store(next)
     }
 
     public var decodeSeconds: Double { decodeMilliseconds / 1000 }
@@ -8019,11 +8200,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: status strip
 
-    private func updateStatusChip() {
-        statusChip.text = statusText
+    private func updateStatusChip(projection: LoupeFraming? = nil) {
+        // 333 ④ — one projection for the chip **and** the pill: `statusText → zoomLabel → camera` and
+        // `syncZoomSlider → currentZoomStop → camera` used to build it twice more per camera change.
+        let projection = projection ?? framing()
+        statusChip.text = statusText(projection: projection)
         statusChip.tooltip = displayHeadroom.detailText
         layoutStatusChip()
-        syncZoomSlider()
+        syncZoomSlider(projection: projection)
     }
 
     private func layoutStatusChip() {
@@ -8047,13 +8231,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Every camera change already runs through `updateStatusChip()` (`setViewState` is the single
     /// writer of `viewState`), so ⌘=, ⌘−, the wheel, a pinch and ⌘0 all land here — the pill can
     /// never disagree with the canvas about where the camera is.
-    private func syncZoomSlider() {
+    private func syncZoomSlider(projection: LoupeFraming? = nil) {
+        let projection = projection ?? framing()
         // `currentZoomStop` is nil exactly in fit; the fit ratio is passed only so the thumb can be
         // *displayed* at its continuous position — it is never a snap target.
         //
         // 082: `zoom` is the camera's own number, so a crop session's frame-inscribed ceiling (which is
         // not a rung) prints as itself on the chip instead of the neighbouring stop's label.
-        zoomSlider.update(zoomStop: currentZoomStop, fitZoom: framing()?.fitZoom,
+        zoomSlider.update(zoomStop: currentZoomStop(projection: projection),
+                          fitZoom: projection?.fitZoom,
                           zoom: viewState.isActualSize ? viewState.zoom : nil)
     }
 
