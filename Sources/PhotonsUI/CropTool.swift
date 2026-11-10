@@ -79,6 +79,23 @@ public enum CropToolHandle: String, Sendable, Equatable, Hashable, CaseIterable 
     /// True for the nine grips that resize the frame (everything but `.inside` / `.outside`).
     public var isResizing: Bool { isCorner || isEdge }
 
+    /// **355 — which edges this grip moves**, for the per-tick 「不出像素」 press. `.inside` (a move)
+    /// and `.outside` (a new frame) have none: a move never resizes (310), and a new frame is already
+    /// bounded by the canvas it is drawn in.
+    public var draggedEdges: CropEdges? {
+        switch self {
+        case .topLeft: return [.top, .left]
+        case .topRight: return [.top, .right]
+        case .bottomRight: return [.bottom, .right]
+        case .bottomLeft: return [.bottom, .left]
+        case .top: return [.top]
+        case .right: return [.right]
+        case .bottom: return [.bottom]
+        case .left: return [.left]
+        case .inside, .outside: return nil
+        }
+    }
+
     /// Where the *opposite* side stays pinned while this grip is dragged.
     public var anchor: CropToolAnchor {
         switch self {
@@ -306,10 +323,20 @@ public enum CropTool {
         // map applied is the camera (`LoupeMapping.documentView`) — which is a similarity, so the
         // frame comes out axis-aligned whatever the keystone did to the picture *inside* it. That is
         // exactly the user's sentence: 被透视的是框里的画面，不是框。
+        //
+        // **355 — the extent is a *document* quantity, so it carries the framing's own angle too.**
+        // It used to be built from `quadRotationDegrees` alone, which is the draft-vs-document
+        // **delta** (088). On a 旋转 + 透视 document the delta is 0 while the picture is turned by the
+        // document's angle, so the frame was scaled by the AABB at 0° and the canvas it claimed to be
+        // a window on was not the canvas the renderer allocates (9° / +60: 6403×4016 vs 6578×4909 —
+        // the frame sat 2.7 % / 22 % off the picture, and every drag inherited the skew). The total is
+        // `framing angle + quad rotation`, the same total 088's own comment names.
+        let framingAngle = mapping.transform?.straightenDegrees ?? 0
+        let canvasTurn = CropTool.clampStraighten(framingAngle) + quadRotationDegrees
         let canvasGeometry: CropGeometry? = cropSpace == .canvas
             ? CropGeometry(
                 geometry: GeometryGroup(crop: c.normalizedRect,
-                                        rotationDegrees: CropTool.clampStraighten(quadRotationDegrees),
+                                        rotationDegrees: CropTool.clampStraighten(canvasTurn),
                                         aspectLock: .original,
                                         quarterTurns: 0,
                                         perspectiveVertical: keystone?.vertical ?? 0,
