@@ -1419,6 +1419,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         cropTool.onStraightenStrokeChange = { [weak self] in
             self?.syncStraightenStroke()
         }
+        // 337 — 引导线 travels the same way (the fit must never run through a layout pass), and its
+        // own overlay half carries the accepted lines, the live stroke and the red rejection.
+        cropTool.onGuideLineChange = { [weak self] in
+            self?.syncGuideLines()
+        }
         container.addSubview(statusChip)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
         // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).
@@ -4513,6 +4518,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             if started { syncStraightenStroke() }
             return started
         }
+        // 337 — armed with 引导线, a press starts a guide-line stroke on the same terms: no grip is
+        // taken, no frame is redrawn, and `⌘` is not a rotation.
+        if cropTool.isGuideLinesArmed {
+            let started = cropTool.beginGuideLine(atViewPoint: point)
+            if started { syncGuideLines() }
+            return started
+        }
         let started = cropTool.beginDrag(atViewPoint: point,
                                          mapping: framing.mapping(of: viewState),
                                          source: cropSourceSize, pointScale: scale,
@@ -4532,6 +4544,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if cropTool.isDrawingStraighten {
             cropTool.continueDrawStraighten(atViewPoint: point)
             syncStraightenStroke()
+            return
+        }
+        if cropTool.isDrawingGuideLine {
+            cropTool.continueGuideLine(atViewPoint: point)
+            syncGuideLines()
             return
         }
         guard cropTool.isActive, cropTool.isDragging, let framing = framing(viewport: viewport) else {
@@ -4559,6 +4576,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
             refreshCropTool()
             return
         }
+        // 337 — the release of a guide-line stroke: fit, and (only if every residual is inside
+        // 0.05°) one document write and one row. The line stays up for its 0.3 s flash.
+        if cropTool.isDrawingGuideLine {
+            if let framing = framing() {
+                _ = cropTool.endGuideLine(mapping: framing.mapping(of: viewState),
+                                          pointScale: backingScale)
+            } else {
+                cropTool.cancelGuideLines()
+            }
+            syncGuideLines()
+            refreshCropTool()
+            return
+        }
         let angle = cropTool.draft.straighten
         let committed = session?.edit.geometry.straightenDegrees ?? angle
         cropTool.endDrag()
@@ -4576,6 +4606,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
             refreshCropTool()
             return
         }
+        if cropTool.isDrawingGuideLine || cropTool.isGuideLinesArmed {
+            cropTool.cancelGuideLines()
+            syncGuideLines()
+            refreshCropTool()
+            return
+        }
         cropTool.cancelDrag()
         refreshCropTool()
     }
@@ -4585,6 +4621,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// key, so a second Escape is still the tool's own cancel.
     @discardableResult
     public func cancelStraightenDrawIfArmed() -> Bool {
+        // 337 — 引导线 answers the same Escape, and on the same terms: it drops the lines, never the
+        // 裁切 draft, and writes nothing.
+        if cropTool.isDrawingGuideLine || cropTool.isGuideLinesArmed
+            || cropTool.guideLineStroke != nil || !cropTool.guideLines.isEmpty {
+            cropTool.cancelGuideLines()
+            syncGuideLines()
+            refreshCropTool()
+            return true
+        }
         guard cropTool.isDrawingStraighten || cropTool.isDrawStraightenArmed
                 || cropTool.straightenStroke != nil else { return false }
         cropTool.cancelDrawStraighten()
@@ -4598,6 +4643,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func syncStraightenStroke() {
         cropOverlay.straightenStroke = cropTool.straightenStroke
         cropOverlay.straightenStrokeAlpha = cropTool.straightenStrokeAlpha
+    }
+
+    /// 337 — the accepted lines (dim), the live stroke (white) and the withdrawn one (red).
+    private func syncGuideLines() {
+        cropOverlay.guideLines = cropTool.acceptedGuideLineSegments
+        cropOverlay.guideLineStroke = cropTool.guideLineStroke
+        cropOverlay.guideLineStrokeAlpha = cropTool.guideLineStrokeAlpha
+        cropOverlay.rejectedGuideLine = cropTool.rejectedGuideLine.map {
+            CropToolSegment(a: $0.start, b: $0.end)
+        }
+        cropOverlay.rejectedGuideLineAlpha = cropTool.rejectedGuideLineAlpha
     }
 
     /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.

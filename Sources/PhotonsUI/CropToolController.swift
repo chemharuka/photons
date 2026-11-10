@@ -718,6 +718,7 @@ public final class CropToolController {
         // 328 — 画线拉直 is this session's view state: leaving the tool puts the crosshair away and
         // drops any line, whatever the door (↵ 应用 / 完成 / Esc).
         cancelDrawStraighten()
+        cancelGuideLines()
         switch outcome {
         case .confirm, .done:
             return confirmDraft()
@@ -773,6 +774,7 @@ public final class CropToolController {
     public func detach() {
         guard isActive else { return }
         cancelDrawStraighten()
+        cancelGuideLines()
         endDrag()
         isActive = false
         // 077: the session ends with zero rows (the draft is discarded, and any mid-session document
@@ -903,6 +905,48 @@ public final class CropToolController {
     /// The canvas half: the loupe assigns this to push the stroke at the overlay **without** the
     /// frame's layout pass (`clampToView` must not run mid-stroke — §2's 「画线期间不得移动裁切框」).
     var onStraightenStrokeChange: (() -> Void)?
+
+    // MARK: 337 — 引导线 (guide lines: two drawn lines → the keystone)
+
+    /// The card's 引导线 switch. View state like 328's, and mutually exclusive with it: both own the
+    /// canvas press, so arming one disarms the other.
+    public private(set) var isGuideLinesArmed = false
+    /// A guide-line stroke is in flight (mouse down … up).
+    public private(set) var isDrawingGuideLine = false
+    /// The stroke under the hand, in view points; `nil` between gestures.
+    public private(set) var guideLineStroke: CropToolSegment?
+    /// Its opacity, from `GuideLinesSolve.alpha(elapsed:)` — the 0.3 s flash after the release.
+    public private(set) var guideLineStrokeAlpha: Double = 1
+    /// The lines the current fit stands on, oldest first. At most 2 vertical + 2 horizontal.
+    public private(set) var guideLines: [GuideLine] = []
+    /// The accepted fit (the values the document holds), or `nil` before the first success.
+    public private(set) var guideLineSolution: GuideLineSolution?
+    /// Why the last gesture did **not** take — `nil` after a success.
+    public private(set) var guideLineFailure: GuideLineFailure?
+    /// The line the last gesture drew and threw away, drawn red for the same 0.3 s.
+    public private(set) var rejectedGuideLine: GuideLine?
+    public private(set) var rejectedGuideLineAlpha: Double = 1
+    /// Counters for the QA report: fits applied, strokes ignored (too short / over the ceiling).
+    public private(set) var guideLineApplyCount = 0
+    public private(set) var ignoredGuideLineCount = 0
+    public private(set) var tooShortGuideLineCount = 0
+
+    /// 337 §4 gate ① — `true` is the shipped rule: the stroke's endpoints are walked back through
+    /// the **current** composite inverse (`P⁻¹ · R⁻¹`, `LoupeMapping.sourcePoint`) before the fit, so
+    /// the fit is about the photograph's material lines. With it off the view points are used as if
+    /// they were source pixels — the screen angle, which double-applies the current keystone. Only
+    /// the acceptance writes it.
+    var guideLinesMapBackToSource = true
+
+    /// 337 §4 gate ② — the fit's acceptance tolerance, in degrees. `0.05` shipped; the gate widens
+    /// it to 1° to prove the ≤0.05° acceptance is what rejects the sloppier answer.
+    var guideLineTolerance = GuideLinesSolve.toleranceDegrees
+
+    /// The canvas half of 337: one assignment pushes the lines at the overlay without a layout pass,
+    /// exactly like `onStraightenStrokeChange` (「画线期间不得移动裁切框」).
+    var onGuideLineChange: (() -> Void)?
+
+    private var guideLineTimer: Timer?
 
     private var strokeTimer: Timer?
 
@@ -1035,6 +1079,272 @@ public final class CropToolController {
     private func stopStrokeTimer() {
         strokeTimer?.invalidate()
         strokeTimer = nil
+    }
+
+    // MARK: 337 — 引导线: the gesture
+
+    /// The card's 引导线 button: arm/disarm. Disarming is §2's 取消 — the lines and the draft stay
+    /// where they are, and nothing is written (a fit that already succeeded has already written, so
+    /// its ⌘Z row is untouched).
+    @discardableResult
+    public func toggleGuideLines() -> Bool {
+        setGuideLinesArmed(!isGuideLinesArmed)
+    }
+
+    @discardableResult
+    public func setGuideLinesArmed(_ armed: Bool) -> Bool {
+        guard isActive else {
+            isGuideLinesArmed = false
+            return false
+        }
+        guard armed != isGuideLinesArmed else { return false }
+        if armed {
+            // 337 — one canvas, one tool: 画线拉直 and 引导线 cannot both own the press.
+            _ = setDrawStraightenArmed(false)
+            isGuideLinesArmed = true
+            guideLineFailure = nil
+        } else {
+            cancelGuideLines()
+        }
+        onGuideLineChange?()
+        return true
+    }
+
+    /// Mouse-down while armed: start a stroke. The frame is **not** grabbed — `drag` stays `nil`,
+    /// `isDragging` stays `false`, and nothing in `draft.crop` is touched (§2's 画线期间不动裁切框).
+    @discardableResult
+    public func beginGuideLine(atViewPoint point: CGPoint) -> Bool {
+        guard isActive, isGuideLinesArmed else { return false }
+        stopGuideLineTimer()
+        guideLineStroke = CropToolSegment(a: point, b: point)
+        guideLineStrokeAlpha = 1
+        isDrawingGuideLine = true
+        rejectedGuideLine = nil
+        swallowedGestures += 1
+        onGuideLineChange?()
+        return true
+    }
+
+    /// One tick of the draw. **Only the stroke moves** — no `draft.crop` write, no `clampToView`, no
+    /// lock reshape, so 310's invariant is not re-established here, it is never asked.
+    public func continueGuideLine(atViewPoint point: CGPoint) {
+        guard isActive, isDrawingGuideLine, let stroke = guideLineStroke else { return }
+        guideLineStroke = CropToolSegment(a: stroke.a, b: point)
+        guideLineStrokeAlpha = 1
+        onGuideLineChange?()
+    }
+
+    /// Mouse-up: one line → the fit (§2b), and — only when the whole fit is accepted — one document
+    /// write and one history row.
+    ///
+    /// `nil` means the gesture changed nothing: a stroke shorter than 20 pt, a fifth line, a
+    /// degenerate pair, or a fit whose residuals cannot all come inside 0.05°. `guideLineFailure`
+    /// says which, and the previous valid values stay.
+    @discardableResult
+    public func endGuideLine(mapping: LoupeMapping,
+                             pointScale: Double = 1) -> GuideLineSolution? {
+        guard isActive, isDrawingGuideLine, let stroke = guideLineStroke else { return nil }
+        isDrawingGuideLine = false
+
+        let dx = Double(stroke.b.x - stroke.a.x), dy = Double(stroke.b.y - stroke.a.y)
+        let length = (dx * dx + dy * dy).squareRoot()
+        guard length.isFinite, length >= GuideLinesSolve.minimumLengthPoints else {
+            // §4.6 — a misfire is nothing: no line, no fit, no write.
+            tooShortGuideLineCount += 1
+            guideLineStroke = nil
+            guideLineStrokeAlpha = 1
+            onGuideLineChange?()
+            return nil
+        }
+
+        let scale = pointScale > 0 ? pointScale : 1
+        // §2.4 — the material points: the stroke's ends through the **current** composite inverse
+        // (`P_current⁻¹ · R⁻¹`, plus the crop window and the camera). The gate's `false` branch uses
+        // the view points as they are — the screen reading the acceptance shows going red.
+        let a: CGPoint, b: CGPoint
+        if guideLinesMapBackToSource {
+            let p = mapping.sourcePoint(viewX: Double(stroke.a.x) * scale,
+                                        viewY: Double(stroke.a.y) * scale)
+            let q = mapping.sourcePoint(viewX: Double(stroke.b.x) * scale,
+                                        viewY: Double(stroke.b.y) * scale)
+            a = CGPoint(x: p.x, y: p.y)
+            b = CGPoint(x: q.x, y: q.y)
+        } else {
+            a = stroke.a
+            b = stroke.b
+        }
+        guard a.x.isFinite, a.y.isFinite, b.x.isFinite, b.y.isFinite else {
+            guideLineStroke = nil
+            onGuideLineChange?()
+            return nil
+        }
+
+        let viewAngle = GuideLinesSolve.fold(GuideLinesSolve.degrees(dx: dx, dy: dy))
+        let line = GuideLine(start: stroke.a, end: stroke.b,
+                             sourceStart: a, sourceEnd: b,
+                             viewAngle: viewAngle,
+                             axis: GuideLinesSolve.axis(forFoldedAngle: viewAngle))
+
+        // §2b.1 — at most four lines, at most two per axis. The fifth is ignored **with a reason**,
+        // never silently: the previous fit (and its document values) stay.
+        let sameAxis = guideLines.filter { $0.axis == line.axis }.count
+        guard guideLines.count < GuideLinesSolve.maxLines,
+              sameAxis < GuideLinesSolve.maxLinesPerAxis else {
+            ignoredGuideLineCount += 1
+            guideLineFailure = .tooManyLines
+            guideLineStroke = nil
+            guideLineStrokeAlpha = 1
+            onGuideLineChange?()
+            return nil
+        }
+
+        let candidate = guideLines + [line]
+        // §2.2 — one line is kept but solves nothing: 「画 2 条后自动求解」. The line stays on the
+        // canvas (dim) so the user can see what the first stroke was.
+        guard candidate.count >= 2 else {
+            guideLines = candidate
+            guideLineSolution = nil
+            guideLineFailure = .notEnoughLines
+            guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
+            guideLineStrokeAlpha = 1
+            scheduleGuideLineFade()
+            onGuideLineChange?()
+            return nil
+        }
+        let fit = GuideLinesSolve.fit(lines: candidate,
+                                      current: documentPerspective,
+                                      source: sourceSize,
+                                      straightenDegrees: CropTool.clampStraighten(draft.straighten),
+                                      tolerance: guideLineTolerance)
+        guard let solution = fit.solution else {
+            // §2b.2 — all-or-nothing: the line is withdrawn (red for the same 0.3 s), the accepted
+            // set and the document keep their last valid state.
+            guideLineFailure = fit.failure
+            rejectedGuideLine = line
+            rejectedGuideLineAlpha = 1
+            guideLineStroke = nil
+            guideLineStrokeAlpha = 1
+            scheduleGuideLineFade()
+            onGuideLineChange?()
+            return nil
+        }
+
+        guideLines = candidate
+        guideLineSolution = solution
+        guideLineFailure = nil
+        rejectedGuideLine = nil
+        guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
+        guideLineStrokeAlpha = 1
+        guideLineApplyCount += 1
+        writeGuideLineSolution(solution)
+        scheduleGuideLineFade()
+        onGuideLineChange?()
+        return solution
+    }
+
+    /// §2 / §4.6 — Esc or the button again: drop the stroke and every line, write nothing.
+    /// The document keeps whatever an **earlier successful** fit wrote (that was its own row); this
+    /// only ends the gesture.
+    @discardableResult
+    public func cancelGuideLines() -> Bool {
+        let wasLive = isDrawingGuideLine || isGuideLinesArmed || guideLineStroke != nil
+            || !guideLines.isEmpty || rejectedGuideLine != nil
+        stopGuideLineTimer()
+        isDrawingGuideLine = false
+        isGuideLinesArmed = false
+        guideLineStroke = nil
+        guideLineStrokeAlpha = 1
+        guideLines = []
+        guideLineSolution = nil
+        rejectedGuideLine = nil
+        rejectedGuideLineAlpha = 1
+        if wasLive { onGuideLineChange?() }
+        return wasLive
+    }
+
+    /// §2.5 — the one write: both parameters into the document, **one** history row.
+    ///
+    /// The two fields are the sliders' own (`GeometryGroup.perspectiveVertical/Horizontal`), so the
+    /// card's readout follows by construction — there is no second copy to update. The row is closed
+    /// the way `commitStraighten` closes 转动's (end/reopen the crop session), because a guide-line
+    /// fit is one discrete gesture and must not fold into a drag that is still in flight.
+    private func writeGuideLineSolution(_ solution: GuideLineSolution) {
+        guard let session else { return }
+        let before = session.edit.geometry
+        session.applyEdit {
+            $0.geometry.perspectiveVertical = solution.vertical
+            $0.geometry.perspectiveHorizontal = solution.horizontal
+        }
+        guard session.edit.geometry != before else { return }
+        let inSession = session.isToolSessionActive
+        if inSession {
+            _ = session.endToolSession(label: "引导线")
+            session.beginToolSession("裁切", label: "裁切与旋转")
+        } else {
+            _ = session.commitEdit(label: "引导线", coalesce: false)
+        }
+        // The draft carries the document's keystone so the overlay, the red-frame predicate and
+        // 应用 all see the picture the fit just produced.
+        draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
+        draft.perspectiveHorizontal = session.edit.geometry.perspectiveHorizontal
+        // §2c — Lightroom's `Constrain Crop` equivalent, and the **existing** switch: with
+        // 「不出像素」 on (the default) the frame is inscribed once into the photo quad, so the
+        // export has no black pixel; with it off the frame may stay on the `000000` corners. No new
+        // toggle, no canvas change — the canvas is still the AABB (330).
+        inscribeIntoPixelsIfNeeded()
+        draftChanged()
+    }
+
+    /// The document's `(v, h)` — the fit's starting point (§2b.3 初值取当前) and the value an
+    /// unconstrained axis keeps.
+    private var documentPerspective: PerspectiveMap {
+        PerspectiveMap(vertical: session?.edit.geometry.perspectiveVertical ?? draft.perspectiveVertical,
+                       horizontal: session?.edit.geometry.perspectiveHorizontal ?? draft.perspectiveHorizontal)
+    }
+
+    /// §2.2 — the finished line stays at full opacity for 0.3 s, then fades; the rejected one does
+    /// the same in red.
+    private func scheduleGuideLineFade() {
+        stopGuideLineTimer()
+        let shownAt = Date()
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                let elapsed = Date().timeIntervalSince(shownAt)
+                self.guideLineStrokeAlpha = GuideLinesSolve.alpha(elapsed: elapsed)
+                self.rejectedGuideLineAlpha = GuideLinesSolve.alpha(elapsed: elapsed)
+                if self.guideLineStrokeAlpha <= 0 {
+                    timer.invalidate()
+                    self.guideLineTimer = nil
+                    self.guideLineStroke = nil
+                    self.rejectedGuideLine = nil
+                    self.guideLineStrokeAlpha = 1
+                    self.rejectedGuideLineAlpha = 1
+                }
+                self.onGuideLineChange?()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        guideLineTimer = timer
+    }
+
+    private func stopGuideLineTimer() {
+        guideLineTimer?.invalidate()
+        guideLineTimer = nil
+    }
+
+    /// The lines the overlay draws dimly: every accepted line of the current fit, in view points.
+    public var acceptedGuideLineSegments: [CropToolSegment] {
+        guideLines.map { CropToolSegment(a: $0.start, b: $0.end) }
+    }
+
+    /// The card's one-line status (§2.3's 「另一方向请再画两条」 included). `nil` prints nothing.
+    public var guideLineStatusText: String? {
+        if let failure = guideLineFailure { return failure.message }
+        guard let solution = guideLineSolution else { return nil }
+        var text = solution.summary
+        if GuideLinesSolve.isMixedDirection(guideLines) { text += " · 另一方向请再画两条" }
+        return text
     }
 
     /// The angle still to be shown on top of the document: `θ − θ₀`, in degrees. 0 at rest and right

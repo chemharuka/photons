@@ -49,6 +49,33 @@ final class CropToolOverlayView: NSView {
         didSet { if oldValue != straightenStrokeAlpha { needsDisplay = true } }
     }
 
+    /// 337 — the 引导线 lines, in view points: every line of the accepted fit (drawn dimly so the
+    /// user can see what the numbers are standing on), the stroke under the hand / its 0.3 s flash,
+    /// and the one the fit refused (red).
+    var guideLines: [CropToolSegment] = [] {
+        didSet { if oldValue != guideLines { needsDisplay = true } }
+    }
+
+    var guideLineStroke: CropToolSegment? {
+        didSet { if oldValue != guideLineStroke { needsDisplay = true } }
+    }
+
+    var guideLineStrokeAlpha: Double = 1 {
+        didSet { if oldValue != guideLineStrokeAlpha { needsDisplay = true } }
+    }
+
+    var rejectedGuideLine: CropToolSegment? {
+        didSet { if oldValue != rejectedGuideLine { needsDisplay = true } }
+    }
+
+    var rejectedGuideLineAlpha: Double = 1 {
+        didSet { if oldValue != rejectedGuideLineAlpha { needsDisplay = true } }
+    }
+
+    /// 337 — the accepted lines' standing opacity: dim enough that the picture still shows through,
+    /// bright enough to read against both a sky and a shadow.
+    static let appliedGuideLineAlpha: Double = 0.55
+
     /// §2's two numbers, re-exported so the acceptance can name what is drawn: 1.5 pt white,
     /// 1 px black shadow.
     static let straightenLineWidth = CropStraightenLinePainter.lineWidth
@@ -72,6 +99,18 @@ final class CropToolOverlayView: NSView {
         defer {
             if let stroke = straightenStroke {
                 CropStraightenLinePainter.draw(stroke, alpha: straightenStrokeAlpha)
+            }
+            // 337 — the accepted guide lines under the live stroke, the refused one in red: the same
+            // painter (1.5 pt white over 1 px black) so the two tools' strokes look like one tool.
+            for line in guideLines {
+                CropStraightenLinePainter.draw(line, alpha: Self.appliedGuideLineAlpha)
+            }
+            if let rejected = rejectedGuideLine {
+                CropStraightenLinePainter.draw(rejected, alpha: rejectedGuideLineAlpha,
+                                               colour: .systemRed)
+            }
+            if let stroke = guideLineStroke {
+                CropStraightenLinePainter.draw(stroke, alpha: guideLineStrokeAlpha)
             }
         }
         guard let layout, layout.corners.count == 4, bounds.width > 1, bounds.height > 1 else {

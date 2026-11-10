@@ -113,6 +113,7 @@ extension InspectorView {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
                 cropStraightenSection(tool)
                 cropDrawStraightenRow(tool)
+                cropGuideLinesRow(tool)
                 cropPerspectiveSection()
             }
         }
@@ -221,6 +222,37 @@ extension InspectorView {
             Spacer(minLength: 4)
         }
         .background(CropRowProbeHost(rowID: CorrectionCardRow.drawStraighten.probeID))
+    }
+
+    // MARK: 引导线（337）
+
+    /// 337 — 引导线：**自己一行**，紧贴「画线拉直」之下（用户：「校正包括旋转、透视、以及新做的
+    /// 引导线UI」；§2.1 把行放在这里，图标 `perspective` 与 `level`、`ruler` 三者互不相同）。
+    ///
+    /// 开关 + 名字 + 一行读数：读数就是 `guideLineStatusText` —— 解出来的 `(v,h)` 与最坏残差，
+    /// 或者这次为什么没生效（「这些线互相矛盾，未应用」「每个方向最多 2 条」…）。读数与按钮都有
+    /// 自己的探针，`GuideLines337Tests` 按行量的是这一行。
+    @ViewBuilder
+    private func cropGuideLinesRow(_ tool: CropToolController?) -> some View {
+        HStack(spacing: 6) {
+            CropGuideLinesToggle(on: tool?.isGuideLinesArmed ?? false,
+                                 enabled: tool?.isActive ?? false,
+                                 action: { _ = tool?.toggleGuideLines() })
+                .fixedSize()
+            Text(CorrectionCardRow.guideLines.title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            if let status = tool?.guideLineStatusText {
+                Text(status)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier(CorrectionCardRow.guideLines.statusID)
+            }
+        }
+        .background(CropRowProbeHost(rowID: CorrectionCardRow.guideLines.probeID))
     }
 
     // MARK: 透视
@@ -345,6 +377,10 @@ extension InspectorView {
 public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
     case straighten = "angle"
     case drawStraighten = "drawStraighten"
+    /// 337 — 「引导线」, directly under 画线拉直 and above the two keystone sliders. It is a *row*,
+    /// not a section: it changes the same two fields 透视 does, and the card's section list is
+    /// unchanged (`CropSection.perspective` still owns both sliders and the fit writes their values).
+    case guideLines = "guideLines"
     case perspectiveVertical = "perspective.vertical"
     case perspectiveHorizontal = "perspective.horizontal"
 
@@ -353,6 +389,7 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
         switch self {
         case .straighten: return "拉直"
         case .drawStraighten: return "画线拉直"
+        case .guideLines: return "引导线"
         case .perspectiveVertical: return "垂直透视"
         case .perspectiveHorizontal: return "水平透视"
         }
@@ -360,6 +397,9 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
 
     /// The `CropRowProbe` id the row's own frame is measured under.
     public var probeID: String { rawValue }
+
+    /// 337 — the row's status label (the fit's `(v,h)` and residual, or why it did not take).
+    public var statusID: String { "inspector.crop.\(rawValue).status" }
 }
 
 // MARK: - 082: the section names
@@ -1376,6 +1416,104 @@ struct CropDrawStraightenToggle: NSViewRepresentable {
     }
 
     func updateNSView(_ button: DrawStraightenButton, context: Context) {
+        context.coordinator.action = action
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.isEnabled = enabled
+        button.refresh(symbol: symbol, on: on)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
+// MARK: - 337 「引导线」
+
+/// 337 — the 校正 card's **引导线** switch: a `perspective` glyph (the same picture-plane idiom the
+/// keystone sliders' section uses), lit while the canvas is drawing guide lines.
+///
+/// It has to be distinguishable from its two neighbours at a glance, which is why the glyph is a
+/// third one (334: `level` for 画线拉直, `ruler` for the custom ratio): a bubble level says 「把这张
+/// 摆平」, a ruler says 「量一下」, and a converging trapezoid says 「把透视扳正」 — the thing this row
+/// is for. A real `NSButton` for the same reason 334's is: the acceptance reads the *drawn* image
+/// name back, and a SwiftUI `Image` has no `NSView` to ask.
+final class GuideLinesButton: NSButton {
+
+    static let size = NSSize(width: 22, height: 18)
+    static let cornerRadius: CGFloat = 5
+    /// The symbol the panel draws — the acceptance's one readback (`image name == perspective`).
+    static let symbol = "perspective"
+    static let label = "引导线"
+    static let help = "沿本该竖直/水平的边画两条线，松手后解出透视（2 竖 + 2 横，最多 4 条）；"
+        + "Esc 或再点一次取消"
+    static let identifierID = "inspector.crop.guideLines"
+
+    private(set) var symbolName: String = GuideLinesButton.symbol
+
+    init(symbol: String = GuideLinesButton.symbol) {
+        super.init(frame: NSRect(origin: .zero, size: Self.size))
+        symbolName = symbol
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.toggle)
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        toolTip = Self.help
+        wantsLayer = true
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.borderWidth = 1
+        setAccessibilityIdentifier(Self.identifierID)
+        target = self
+        action = #selector(fire)
+        refresh(symbol: symbol, on: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize { Self.size }
+    override var isFlipped: Bool { true }
+
+    @objc private func fire() { }
+
+    func refresh(symbol: String, on: Bool) {
+        symbolName = symbol
+        state = on ? .on : .off
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: Self.label)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        contentTintColor = on ? .white : .labelColor
+        layer?.backgroundColor = on
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.clear.cgColor
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(on ? 0 : 0.12).cgColor
+        setAccessibilityLabel(Self.label)
+        setAccessibilityValue(symbol)
+    }
+}
+
+struct CropGuideLinesToggle: NSViewRepresentable {
+
+    let on: Bool
+    var enabled: Bool = true
+    let action: () -> Void
+    /// Injectable only so a reverse gate can hand in another glyph; production always uses
+    /// `GuideLinesButton.symbol`.
+    var symbol: String = GuideLinesButton.symbol
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> GuideLinesButton {
+        let button = GuideLinesButton(symbol: symbol)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.isEnabled = enabled
+        button.refresh(symbol: symbol, on: on)
+        return button
+    }
+
+    func updateNSView(_ button: GuideLinesButton, context: Context) {
         context.coordinator.action = action
         button.target = context.coordinator
         button.action = #selector(Coordinator.fire)
