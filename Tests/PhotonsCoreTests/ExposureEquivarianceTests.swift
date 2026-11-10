@@ -95,13 +95,33 @@ final class ExposureEquivarianceTests: XCTestCase {
         return try XCTUnwrap(result.display)
     }
 
+    /// 318 / 314 — the document these laws are measured on: the shipped pipeline with the sharpening
+    /// stage **off**. Sharpen is a local, halo-clamped operator applied after exposure, so a document
+    /// carrying it cannot satisfy `render(E=k) == 2^k·render(0)` by construction — that is the
+    /// operator's boundary, not a bug in the stage under test. Same move as 2e6ab4a's
+    /// `CropUITestSupport.geometryOnly` for the geometry identities.
+    private static var algebraOnly: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return e
+    }
+
     private func edit(exposure: Double = 0, whites: Double = 0, contrast: Double = 0,
                       masks: [Mask] = []) -> EditModel {
-        var e = EditModel.neutral
+        var e = Self.algebraOnly
         e.light.exposure = exposure
         e.light.whites = whites
         e.light.contrast = contrast
         e.masks = masks
+        return e
+    }
+
+    /// The **shipped** document — 314's default sharpen 50 / 2.0 left in. Used only to *measure* the
+    /// boundary this file's laws stop at (printed, never asserted).
+    private static func shippedEdit(exposure: Double = 0, contrast: Double = 0) -> EditModel {
+        var e = EditModel.neutral
+        e.light.exposure = exposure
+        e.light.contrast = contrast
         return e
     }
 
@@ -226,6 +246,16 @@ final class ExposureEquivarianceTests: XCTestCase {
     /// 对 `2^k` 缩放不变），尾部 p95 ≤ 3.5 码、>8 码的像素 ≤ 1.7 %——尾部来自 guided filter 的 ε 与
     /// 黑位/白肩阈值在不同曝光下落在不同的 pow2 格子上，是**阈值翻转**，不是增益漂移。
     /// 判据：p50 ≤ 0.05、p95 ≤ 4、>8 码 ≤ 2 %。
+    ///
+    /// **314 / 318 — 这份文档必须关掉锐化。** 314 把锐化的默认值改成 50 / 2.0，而锐化是
+    /// 非线性、带 halo 截止的局部算子：它对 `2^k` 的整幅缩放不交换（暗部的 halo 阈值与亮部
+    /// 落在不同的 pow2 格子上），所以「默认文档」上的 `render(E=k, c) ?= 2^k·render(E=0, c)`
+    /// 本来就不该成立 —— 那是**算子代数**的边界，不是 contrast 域错了。同 2e6ab4a 给
+    /// `CropFullResCanvasTests` 换 `CropUITestSupport.geometryOnly` 一样，这里用 `algebraOnly`
+    /// （同一台管线，锐化 amount = 0）。默认 50 下的实测差值在同一个循环里
+    /// **打印不判**（见下），它是这条边界本身的证据：
+    /// 例如 `L1030433 contrast=+50 E+2` 的 p95 是 **4.980 码**（判据 4）、>8 码 **2.519 %**（判据 2 %），
+    /// max 816.80 码；关掉锐化后同一条目四个数全是 0.00。
     func testContrastCommutesWithExposureOnReferenceFrames() throws {
         var available = 0
         for (name, path) in Self.frames {
@@ -240,37 +270,58 @@ final class ExposureEquivarianceTests: XCTestCase {
                 for k in [-2.0, 1.0, 2.0] {
                     let exposed = try linearRender(graph, edit(exposure: k, contrast: c))
                     let gain = Float(pow(2.0, k))
-                    var residuals: [Double] = []
-                    var worst = 0.0
-                    for i in stride(from: 0, to: base.rgba.count, by: 4) {
-                        let b = Float(base.rgba[i])
-                        let expected = b * gain
-                        guard b > 1e-3, expected > 1e-3 else { continue }
-                        let d = Double(abs(Float(exposed.rgba[i]) - expected)) * 255
-                        residuals.append(d)
-                        worst = max(worst, d)
-                    }
-                    let p50 = percentile(residuals, 0.5)
-                    let p95 = percentile(residuals, 0.95)
-                    let p99 = percentile(residuals, 0.99)
-                    let share8 = Double(residuals.filter { $0 > 8 }.count) / Double(max(residuals.count, 1))
+                    let s = residualStats(base, exposed, gain: gain)
                     print(String(format: "COMMUTE · %@ contrast=%+.0f E%+.0f · |Y(E)−2^k·Y₀| "
                                  + "p50 %.3f / p95 %.3f / p99 %.3f / max %.2f codes · >8 codes %.3f%% · n %d",
-                                 name, c, k, p50, p95, p99, worst, share8 * 100, residuals.count))
-                    XCTAssertLessThanOrEqual(p50, 0.05,
+                                 name, c, k, s.p50, s.p95, s.p99, s.max, s.share8 * 100, s.n))
+                    XCTAssertLessThanOrEqual(s.p50, 0.05,
                                              "\(name) contrast=\(Int(c)) E=\(Int(k))："
                                              + "两档曝光的中位像素必须逐码相同")
-                    XCTAssertLessThanOrEqual(p95, 4.0,
+                    XCTAssertLessThanOrEqual(s.p95, 4.0,
                                              "\(name) contrast=\(Int(c)) E=\(Int(k))："
                                              + "95 % 的像素必须在四码以内（顺序已经确定：contrast 在 S2.5）")
-                    XCTAssertLessThanOrEqual(share8, 0.02,
+                    XCTAssertLessThanOrEqual(s.share8, 0.02,
                                              "\(name) contrast=\(Int(c)) E=\(Int(k))："
                                              + "超过 8 码的像素超过 2 % —— 尾部应当只有 ε / 黑位 / 白肩的"
                                              + "阈值翻转，不该是一个整体漂移")
+
+                    // 314 — the shipped document (default sharpen 50 / 2.0), measured and **not**
+                    // asserted: this is the size of the operator boundary the assertion above avoids.
+                    let shippedBase = try linearRender(graph, Self.shippedEdit(contrast: c))
+                    let shippedExposed = try linearRender(graph,
+                                                          Self.shippedEdit(exposure: k, contrast: c))
+                    let d = residualStats(shippedBase, shippedExposed, gain: gain)
+                    print(String(format: "COMMUTE · %@ contrast=%+.0f E%+.0f · 默认锐化 50/2.0（不判）· "
+                                 + "p50 %.3f / p95 %.3f / p99 %.3f / max %.2f codes · >8 codes %.3f%% · n %d",
+                                 name, c, k, d.p50, d.p95, d.p99, d.max, d.share8 * 100, d.n))
                 }
             }
         }
         if available == 0 { throw XCTSkip("需要三张参考原片") }
+    }
+
+    /// 318 — one contrast/exposure residual, in display codes, over the pixels the law applies to.
+    private struct ResidualStats {
+        let p50: Double, p95: Double, p99: Double, max: Double, share8: Double, n: Int
+    }
+
+    private func residualStats(_ base: DisplayImage, _ exposed: DisplayImage,
+                               gain: Float) -> ResidualStats {
+        var residuals: [Double] = []
+        var worst = 0.0
+        for i in stride(from: 0, to: base.rgba.count, by: 4) {
+            let b = Float(base.rgba[i])
+            let expected = b * gain
+            guard b > 1e-3, expected > 1e-3 else { continue }
+            let d = Double(abs(Float(exposed.rgba[i]) - expected)) * 255
+            residuals.append(d)
+            worst = max(worst, d)
+        }
+        return ResidualStats(p50: percentile(residuals, 0.5), p95: percentile(residuals, 0.95),
+                             p99: percentile(residuals, 0.99), max: worst,
+                             share8: Double(residuals.filter { $0 > 8 }.count)
+                                 / Double(max(residuals.count, 1)),
+                             n: residuals.count)
     }
 
     func testMaskPredicateCommutesWithExposureOnReferenceFrames() throws {

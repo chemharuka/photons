@@ -324,7 +324,11 @@ public struct InspectorView: View {
             // 253 — a workspace switch is a **tool exit**, not a pause: no eyedropper / spot tool /
             // brush may stay armed behind a card the user can no longer see. The same call also
             // restores the default cursor and throws away a half-painted stroke (no snapshot).
-            loupe?.disarmAllTools()
+            //
+            // ④ — but the armed 新建 gradient is the **panel's** state, not a gesture's: switching to
+            // 色彩 and back must find 线性渐变 still armed («切工作区后武装的创建还在»). Only the door
+            // that takes the canvas away (网格, `WorkspaceRootView.showModule`) clears that one.
+            loupe?.disarmAllTools(clearingArmedCreation: false)
             loupe?.setCropWorkspaceActive(workspace.showsCropCard)
         }
         .onChange(of: loupe?.isEyedropperArmed) { _, armed in
