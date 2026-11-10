@@ -83,7 +83,7 @@ final class CropPanelTests: XCTestCase {
         XCTAssertTrue(inside.isEmpty,
                       "087 §2: 角度卡里出现了应用 / 取消：\(inside.map { $0.accessibilityIdentifier() })")
         XCTAssertNotNil(Self.probe(CropCardID.apply, in: inspector),
-                        "裁切卡底部仍应有应用 / 取消")
+                        "336: 应用 / 取消 仍要在（面板的固定页脚里）")
         print("087 §2 · angle card has \(inside.count) apply/cancel controls")
     }
 

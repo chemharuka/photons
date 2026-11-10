@@ -316,6 +316,15 @@ public struct InspectorView: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            // 336 — 取消 / 应用: a **fixed footer**, a sibling of the `ScrollView` (not a row inside
+            // it), pinned to the inspector's bottom-right corner. Only the transform workspace has
+            // them, so leaving 变换 removes the footer with the crop draft.
+            if workspaces.selection.showsCropCard {
+                CropApplyFooter(onApply: { loupe?.completeCropTool() },
+                                onCancel: { loupe?.cancelCropTool() })
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
+            }
         }
         .padding(.top, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

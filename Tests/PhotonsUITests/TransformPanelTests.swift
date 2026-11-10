@@ -422,9 +422,12 @@ final class TransformPanelTests: XCTestCase {
                              "334: 自定义比例在四个按钮下面")
     }
 
-    // MARK: - 5. 应用 / 取消 = 卡片最底一行（334：九宫格自己一行）
+    // MARK: - 5. 应用 / 取消：面板的**固定页脚**，不再进裁切卡（336）
 
-    func testApplyAndCancelAreTheCropCardsLowestRow() throws {
+    /// 336 —— 334 那条「应用/取消是卡内最底一行」的断言，改成了「卡内没有 apply 行 + 页脚固定」：
+    /// 用户要的是「放在右侧栏的右下方，不随卡片滚动而变」，所以它必须离开滚动内容，留在面板的
+    /// 底部；尺寸与右下角的位置由 `ApplyFooter336Tests` 量。
+    func testApplyAndCancelSitInThePinnedFooterNotInTheCropCard() throws {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
@@ -442,32 +445,31 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertGreaterThan(correctionCard.minY, card.maxY, "334: 校正卡在裁切卡之后")
         let stays = try XCTUnwrap(panel.row(CropCardID.staysInsidePixels), "「不出像素」没有画出来")
         let grid = try XCTUnwrap(panel.row(CropCardID.grid), "九宫格没有画出来")
-        let apply = try XCTUnwrap(panel.row(CropCardID.apply), "应用 / 取消没有画出来")
-
-        // 用户（334）：「keep 不出像素 checkbox…这个卡片中保留九宫格，应用和取消放在最底下」.
         XCTAssertGreaterThan(stays.minY, try XCTUnwrap(panel.row(CropAspectRow.customProbeID)).maxY,
                              "334: 「不出像素」在宽高比/自定义之下")
-        XCTAssertGreaterThan(grid.minY, stays.maxY, "334: 九宫格在「不出像素」之下（自己一行）")
-        XCTAssertGreaterThan(apply.minY, grid.maxY, "334: 应用/取消在九宫格之下")
-        // 最底下：裁切卡里没有比应用/取消更低的行.
-        let bottomIDs: Set<String> = [CropCardID.grid, CropCardID.apply, CropCardID.staysInsidePixels]
-        let rows = panel.probes
-            .filter { $0.rowID != CropCardID.card && $0.rowID != CropCardID.correctionCard
-                      && $0.rowID != CropCardID.angleCard }
-            .filter { !bottomIDs.contains($0.rowID) }
-            .map { ($0.rowID, $0.convert($0.bounds, to: panel.host)) }
-            .filter { $0.1.minY >= card.minY - 1 && $0.1.maxY <= card.maxY + 1 }
-        let below = rows.filter { $0.1.minY > apply.minY + 0.5 }
-        XCTAssertTrue(below.isEmpty, "334: 应用/取消之下还有控件（\(below.map(\.0))）")
-        XCTAssertLessThanOrEqual(rows.map(\.1.maxY).max() ?? 0, apply.maxY + 1,
-                                 "334: 最后一行就是应用/取消")
+        XCTAssertGreaterThan(grid.minY, stays.maxY, "336: 九宫格在「不出像素」之下 —— 它现在是卡内最底一行")
 
-        // 应用 / 取消 右对齐到卡片内容右边（086 的排法不变）.
-        XCTAssertLessThanOrEqual(abs(apply.maxX - (card.maxX - WorkspaceLayout.cardInsetH)), 1,
-                                 "086: 应用/取消右对齐到卡片内容右边")
-        print(String(format: "BOTTOM · stays %@ · grid %@ · apply %@ · card %@",
-                     NSStringFromRect(stays), NSStringFromRect(grid),
-                     NSStringFromRect(apply), NSStringFromRect(card)))
+        // 卡内不再有应用/取消：行探针不在卡里，按钮探针也不在.
+        let cardRows = panel.probes.filter { $0.rowID != CropCardID.card }.filter {
+            card.insetBy(dx: -1, dy: -1).contains($0.convert($0.bounds, to: panel.host).origin)
+        }.map(\.rowID)
+        XCTAssertFalse(cardRows.contains(CropCardID.apply), "336: 裁切卡里还有 apply 行（\(cardRows)）")
+        XCTAssertFalse(cardRows.contains(CropApplyRow.applyButtonProbe), "336: 裁切卡里还有应用按钮")
+        XCTAssertFalse(cardRows.contains(CropApplyRow.cancelButtonProbe), "336: 裁切卡里还有取消按钮")
+
+        // 页脚固定：存在、在卡外、不在 `ScrollView` 的内容里、并且在面板的底边.
+        let row = try XCTUnwrap(panel.row(CropApplyRow.probeID), "应用 / 取消没有画出来")
+        let footer = try XCTUnwrap(panel.row(CropApplyFooter.probeID), "固定页脚没有画出来")
+        XCTAssertGreaterThan(footer.minY, card.maxY, "336: 页脚在卡片下方（卡外）")
+        XCTAssertNil(panel.probes.first { $0.rowID == CropApplyFooter.probeID }?.enclosingScrollView,
+                     "336: 页脚必须在 ScrollView 内容之外")
+        XCTAssertEqual(footer.maxY, panel.host.bounds.maxY, accuracy: 0.5,
+                       "336: 页脚容器贴面板底边")
+        XCTAssertEqual(panel.host.bounds.maxY - row.maxY, CropApplyFooter.bottomInset, accuracy: 0.5,
+                       "336: 页脚底 == 检查器底边 − 12")
+        print(String(format: "336 FOOTER · stays %@ · grid %@ · 行集合 %@ · footer %@ · row %@",
+                     NSStringFromRect(stays), NSStringFromRect(grid), "\(cardRows)",
+                     NSStringFromRect(footer), NSStringFromRect(row)))
     }
 
     // MARK: - 6. 三个宽度：每行都不重叠、不出卡片
@@ -492,21 +494,20 @@ final class TransformPanelTests: XCTestCase {
             let correctionCard = try XCTUnwrap(panel.row(CropCardID.correctionCard),
                                                "\(width) pt：没有校正卡 frame")
             let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard), "\(width) pt：没有变换卡 frame")
-            // 334: three cards, three row sets — 裁切 (宽高比 / 不出像素 / 九宫格 / 应用),
-            // 校正 (拉直 / 画线拉直 / 两条透视), 变换 (旋转 / 镜像).
+            // 334/336: three cards, three row sets — 裁切 (宽高比 / 不出像素 / 九宫格),
+            // 校正 (拉直 / 画线拉直 / 两条透视), 变换 (旋转 / 镜像). 应用/取消 是页脚，不在卡里.
             let cardRows: [(String, CGRect, CGRect)] = [
                 (CropCardID.aspect, card),
                 (CropCardID.staysInsidePixels, card),
                 (CropCardID.grid, card),
-                (CropCardID.apply, card),
             ].compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
             + CorrectionCardRow.allCases.compactMap { row in
                 panel.row(row.probeID).map { (row.probeID, $0, correctionCard) }
             }
             + [(CropCardID.turn, angleCard), (CropCardID.mirror, angleCard)]
                 .compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
-            XCTAssertEqual(cardRows.count, 10,
-                           "\(width) pt：十行里少了（\(cardRows.map(\.0))）")
+            XCTAssertEqual(cardRows.count, 9,
+                           "\(width) pt：九行里少了（\(cardRows.map(\.0))）")
             XCTAssertGreaterThan(correctionCard.minY, card.maxY,
                                  "\(width) pt：校正卡必须在裁切卡之后")
             XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY,

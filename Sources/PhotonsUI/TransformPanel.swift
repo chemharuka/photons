@@ -20,9 +20,13 @@ import SwiftUI
 // 于是这张工作区是**三张卡**，顺序就是用户说的那三张：
 //
 //     裁切   宽高比（1:1 · 4:3 · 16:9 · 2:3 四个按钮常显）· 原始 / 自由 · 自定义比例
-//            不出像素 · 九宫格 · **最底一行 取消 / 应用**
+//            不出像素 · 九宫格          （336：取消 / 应用 已移到面板的固定页脚）
 //     校正   拉直（滑杆 + 读数）· 画线拉直（水平仪 `level`）· 透视 垂直 · 透视 水平
 //     变换   左转 / 右转 90° · 镜像 水平 / 垂直
+//
+// 336 — 取消 / 应用 不在任何一张卡里：它们是变换工作区的**固定页脚**（`CropApplyFooter`），与
+// `ScrollView` 并列、贴在检查器右下角，滚卡片时不动。语义不变（应用 = 一次草稿 + 一条历史，
+// 取消 = 文档一个字节不动）。
 //
 // 每张卡声明的 section 就是它的全部内容（`TransformCardSpec`），卡名双击复位的是那张卡 section
 // 的字段并集 —— 三张卡互不越界。分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里
@@ -80,13 +84,9 @@ extension InspectorView {
                               })
                 cropStaysInsideRow(tool)
                 cropGridRow(tool)
-                // 086/334: 取消 / 应用 is the card's **last** row (the user: 「应用和取消放在最底下」),
-                // right-aligned to the content edge as it has been since 086.
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    CropApplyRow(onApply: { loupe?.completeCropTool() },
-                                 onCancel: { loupe?.cancelCropTool() })
-                }
+                // 336: 取消 / 应用 left this card — it is now the workspace's **fixed footer**
+                // (`CropApplyFooter`, a sibling of the `ScrollView`), so the pair no longer scrolls
+                // away with the cards. The card ends with 九宫格.
             }
         }
         // The card's own frame (「卡片清单第一张 = 裁切」 is measured on it) — behind the chrome, so the
@@ -1160,24 +1160,87 @@ struct CropApplyRow: View {
     /// The two keys `DetailRowEnabledLog` records them under (the panel's existing readback seam).
     static let applyProbe = "裁切.应用"
     static let cancelProbe = "裁切.取消"
+    /// 336: one probe per **button**, so the acceptance can size each one instead of the pair.
+    static let applyButtonProbe = "apply.button"
+    static let cancelButtonProbe = "cancel.button"
+    /// 336 — the two buttons' minimum size (user: 「做大一些」) and the pair's gap.
+    ///
+    /// `.large` rather than `.regular`: the bordered bezel at `.regular` is ~22 pt tall, under the
+    /// 26 pt floor, so the size class itself has to carry the height and the `minSize` frame only
+    /// guarantees it. 72 = 34 (the old `.mini` width) + 2 × 10 of label padding + 18 of slack.
+    static let minSize = CGSize(width: 72, height: 26)
+    static let controlSize: ControlSize = .large
+    static let spacing: CGFloat = 10
+    static let labelInset: CGFloat = 10
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button("应用", action: onApply)
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .background(DetailRowEnabledProbe(title: Self.applyProbe))
-                .help("应用裁切（一条历史，一次 ⌘Z）")
-                .accessibilityIdentifier(Self.applyID)
-            Button("取消", action: onCancel)
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .background(DetailRowEnabledProbe(title: Self.cancelProbe))
-                .help("放弃这次裁切，文档一个字节都不动")
-                .accessibilityIdentifier(Self.cancelID)
+        // 336: 取消 left, 应用 right — the primary verb sits at the inspector's bottom-right corner,
+        // which is also the order §3.2 measures (`应用`.maxX == content right − 16).
+        HStack(spacing: Self.spacing) {
+            Button(action: onCancel) {
+                Text("取消")
+                    .padding(.horizontal, Self.labelInset)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(Self.controlSize)
+            .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
+            .background(DetailRowEnabledProbe(title: Self.cancelProbe))
+            .background(CropRowProbeHost(rowID: Self.cancelButtonProbe))
+            .help("放弃这次裁切，文档一个字节都不动")
+            .accessibilityIdentifier(Self.cancelID)
+            Button(action: onApply) {
+                Text("应用")
+                    .padding(.horizontal, Self.labelInset)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(Self.controlSize)
+            .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
+            .background(DetailRowEnabledProbe(title: Self.applyProbe))
+            .background(CropRowProbeHost(rowID: Self.applyButtonProbe))
+            .help("应用裁切（一条历史，一次 ⌘Z）")
+            .accessibilityIdentifier(Self.applyID)
         }
         .background(CropRowProbeHost(rowID: Self.probeID))
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
+    }
+}
+
+/// 336 — the transform workspace's **fixed footer**: 取消 / 应用, a sibling of the `ScrollView` rather
+/// than a row of the 裁切 card, so the pair sits in the inspector's bottom-right corner and does not
+/// move when the cards scroll.
+///
+/// Geometry (all measured in the acceptance, not asserted here):
+///
+///   · `应用`.maxX  == 检查器内容右沿 − 16   — the column inset 12 + the footer's own 16;
+///   · row.maxY    == 检查器底边 − 12        — the footer's own bottom inset;
+///   · gap above   == 10                     — the panel column's own `VStack` rhythm.
+///
+/// Only the transform workspace shows it: `InspectorView.body` gates it on `showsCropCard`.
+struct CropApplyFooter: View {
+
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    /// The footer container's own probe (padding included): its bottom edge is the panel's bottom.
+    static let probeID = "footer"
+    /// The panel column's horizontal inset — the same 12 the cards and the pinned blocks are laid
+    /// out inside (`InspectorView`).
+    static let columnInset: CGFloat = 12
+    /// The footer's inner right inset, measured from that column's right edge.
+    static let trailingInset: CGFloat = 16
+    /// The footer's bottom inset — 「页脚底 = 底边 − 12」.
+    static let bottomInset: CGFloat = 12
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            CropApplyRow(onApply: onApply, onCancel: onCancel)
+        }
+        .padding(.leading, Self.columnInset)
+        .padding(.trailing, Self.columnInset + Self.trailingInset)
+        .padding(.bottom, Self.bottomInset)
+        .background(CropRowProbeHost(rowID: Self.probeID))
+        .accessibilityIdentifier("inspector.crop.footer")
     }
 }
 
