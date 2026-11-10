@@ -184,10 +184,15 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
 ///
 /// `rawValue`s are wire-stable: they are what the sheet's tags and a future persisted child set
 /// would be spelled with.
+///
+/// 325 — a child **is a panel row** (or a panel block) of the 调整 bar, and the enum no longer spells
+/// any of those rows' names: `PhotonsUI.CopyRowCoverage` pairs each child with the `PanelCardSpec`
+/// row(s) it copies and reads the label off them. `.highlightRecovery` is gone with the row it named
+/// — the Light card has had no 高光恢复 slider since 320 put 「最高亮度」 in its place.
 public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable {
     case temperature, tint
     case blackOffset
-    case exposure, contrast, highlights, midtones, shadows, whites, blacks, highlightRecovery
+    case exposure, contrast, highlights, midtones, shadows, whites, blacks
     case vibrance, saturation
     case blackAndWhiteSwitch, blackAndWhiteMix
     case hslHue, hslSaturation, hslLuminance
@@ -216,7 +221,7 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         switch self {
         case .temperature, .tint: return .whiteBalance
         case .blackOffset: return .blackLevel
-        case .exposure, .contrast, .highlights, .midtones, .shadows, .whites, .blacks, .highlightRecovery:
+        case .exposure, .contrast, .highlights, .midtones, .shadows, .whites, .blacks:
             return .light
         case .vibrance, .saturation: return .color
         case .blackAndWhiteSwitch, .blackAndWhiteMix: return .blackAndWhite
@@ -235,22 +240,17 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         }
     }
 
-    /// The row label — the inspector's own row name where the panel has one.
-    public var title: String {
+    /// The label for a child whose card has **no `PanelCardSpec` row table** — 白平衡 / 黑电平 /
+    /// 黑白 / HSL / 色彩分级 / 曲线 / 开发 / 裁切 draw their own bodies, so their words live beside
+    /// those bodies and have no table to be read back from. `nil` means this child *is* a row of a
+    /// spec card: its name comes from that row (`EditSnapshotChild.title`, `CopyRowCoverage`), and
+    /// this file spells no name for it — 325's whole point is that a second string here is what let
+    /// 「高光恢复」 and 「白 / 黑 / 自然饱和度」 drift away from the panel.
+    public var standaloneTitle: String? {
         switch self {
         case .temperature: return "色温"
         case .tint: return "色调"
         case .blackOffset: return "黑电平"
-        case .exposure: return "曝光"
-        case .contrast: return "对比"
-        case .highlights: return "高光"
-        case .midtones: return "中间调"
-        case .shadows: return "阴影"
-        case .whites: return "白"
-        case .blacks: return "黑"
-        case .highlightRecovery: return "高光恢复"
-        case .vibrance: return "自然饱和度"
-        case .saturation: return "饱和度"
         case .blackAndWhiteSwitch: return "开关"
         case .blackAndWhiteMix: return "混合"
         case .hslHue: return "色相"
@@ -266,28 +266,27 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
         case .lensCorrections: return "镜头校正"
         case .decoderVersion: return "解码器版本"
 
-        case .caRed: return "色差 R"
-        case .caBlue: return "色差 B"
         case .curveWhite: return "白色"
         case .curveRed: return "红"
         case .curveGreen: return "绿"
         case .curveBlue: return "蓝"
-        case .vignette: return "暗角"
-        case .grain: return "颗粒"
-        case .texture: return "纹理"
-        case .clarity: return "清晰度"
-        case .nonBayerLuminance: return "去噪"
-        case .nonBayerColor: return "去彩噪"
-        case .sharpenAmount: return "锐化数量"
-        case .sharpenRadius: return "锐化半径"
-        case .sharpenDetail: return "锐化细节"
-        case .sharpenMasking: return "锐化蒙版"
-        case .dehaze: return "去雾"
         case .crop: return "裁切"
         case .straighten: return "拉直"
         case .flips: return "翻转"
         case .aspectLock: return "比例"
         case .quarterTurns: return "旋转"
+
+        // 325: these are `PanelCardSpec` rows — 曝光/对比/高光/中间调/阴影/白色/黑色, 自然饱和/饱和,
+        // 色差 R/B, 暗角, 纹理/清晰度/去噪/去彩噪, 锐化四参, 去雾, 颗粒. Their names are the panel's,
+        // read out of the row table (`PhotonsUI/CopyRowCoverage.swift`); spelling them here again is
+        // the drift this ticket removes.
+        case .exposure, .contrast, .highlights, .midtones, .shadows, .whites, .blacks,
+             .vibrance, .saturation,
+             .caRed, .caBlue, .vignette,
+             .texture, .clarity, .nonBayerLuminance, .nonBayerColor,
+             .sharpenAmount, .sharpenRadius, .sharpenDetail, .sharpenMasking,
+             .grain, .dehaze:
+            return nil
         }
     }
 
@@ -540,6 +539,11 @@ public struct LightPatch: Sendable, Equatable, Codable {
     public var blacks: Double?
     public var temperature: Double?
     public var tint: Double?
+    /// 325 — **no child copies this leaf any more**: the panel's Light card has no 高光恢复 row (only
+    /// 最高亮度, which is a *preference* and not a document field), so the checklist cannot select it
+    /// and a new ⌘C never carries it. The field stays because a payload written before 325 does, and
+    /// `applied(to:)` still writes it: an old copy keeps pasting what it always pasted. Dropping the
+    /// key would silently change the meaning of every stored payload.
     public var highlightRecovery: Double?
     /// 081: 黑电平 — `LightGroup.blackOffset`, the additive linear trim (派单 071). It rides in this
     /// patch because it *is* a field of `LightGroup`, but it is its own **section** (`blackLevel`),
@@ -1205,7 +1209,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 if on(.shadows) { p.shadows = l.shadows }
                 if on(.whites) { p.whites = l.whites }
                 if on(.blacks) { p.blacks = l.blacks }
-                if on(.highlightRecovery) { p.highlightRecovery = l.highlightRecovery }
             }
             out.light = p.isEmpty ? nil : p
         }

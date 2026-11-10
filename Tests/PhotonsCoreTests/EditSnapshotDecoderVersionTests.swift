@@ -56,7 +56,8 @@ final class EditSnapshotDecoderVersionTests: XCTestCase {
         XCTAssertEqual(withVersion.detail?.sharpening, 30)
         XCTAssertEqual(withVersion.fieldCount, 2, "曝光 + 锐化；版本不计入 slider 算术")
         XCTAssertTrue(withVersion.carriesDecoderVersion)
-        XCTAssertEqual(EditSnapshotChild.decoderVersion.title, "解码器版本")
+        XCTAssertEqual(EditSnapshotChild.decoderVersion.standaloneTitle, "解码器版本",
+                       "开发 卡没有行表，所以它的名字写在字段旁边（325：spec 卡的行名一律从 `ToneRow` 取）")
         XCTAssertEqual(EditSnapshotChild.decoderVersion.section, .detail)
         XCTAssertTrue(EditSnapshotChild.decoderVersion.requiresDecode)
         XCTAssertFalse(EditSnapshotChild.sharpening.requiresDecode)

@@ -143,7 +143,8 @@ final class CopySheetLightroomTests: XCTestCase {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
         view.layoutSubtreeIfNeeded()
         let lightChildren = EditSnapshotSection.light.children
-        XCTAssertEqual(lightChildren.count, 8)
+        // 325: 7 — 高光恢复 was never a row of the Light card; the eighth child is gone.
+        XCTAssertEqual(lightChildren.count, 7)
 
         // on
         XCTAssertEqual(view.cardState(for: .light), .on, "全部参数在 → on")
