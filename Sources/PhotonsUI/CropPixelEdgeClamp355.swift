@@ -1,0 +1,142 @@
+import CoreGraphics
+import Foundation
+import PhotonsCore
+
+// MARK: - 355 · 「不出像素」的**每 tick 夹取**：只夹被拖的那条边，夹在文档空间
+//
+// 317 的 `placedInsidePixels` 只能**平移**（310：拖动不改尺寸），所以它挡不住「把框拖大」——
+// 框一旦比照片的四边形还大，任何平移都放不回去，`?? rect` 就把它原样留在外面。324 的内切
+// (`inscribedInPhotoQuad`) 是**绕中心整体缩小**，那是「勾选时 / 改角度后」的一次性动作，把它挪到
+// 每个 tick 就成了「夹一次、整框跳一下」。
+//
+// 这里补的是第三种：**只按被拖的那条边**。
+//
+// 前提只有一个，而且由 330 保证：透视文档的裁切框是**文档画布上的矩形**，所以在文档像素里它
+// 轴对齐。照片的四边形是凸的，于是每条边的合法位置是「四边形在该边扫过的那一段上的极值」：
+//
+//     右边允许的最大 x = min over y ∈ {rect.top, rect.bottom, 四边形顶点的 y} of quad.xMax(y)
+//     左边允许的最小 x = max over 同一串 y                of quad.xMin(y)
+//     下边允许的最大 y = min over x ∈ {rect.left, rect.right, 顶点 x} of quad.yMax(x)
+//     上边允许的最小 y = max over 同一串 x                of quad.yMin(x)
+//
+// 梯形左右边界对 y 单调，所以通常只要 top / bottom 两点；把**落在这一段里的四边形顶点**也加进去，
+// 是同一条单调规则的最小完备形式（顶点处斜率折一下，两点采样会漏掉那一段的极值）。
+//
+// 角点 = 两条边各夹一次，顺序固定 **先 x 后 y**（y 那一步看到的是已经夹过的 x）。固定顺序是为了
+// 幂等：同一个鼠标位置重复调用结果逐位不变，这是「夹取只收缩」的可测量形式。
+
+/// The four edges of the frame, as a set — which of them a gesture moves.
+public struct CropEdges: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+
+    public static let left = CropEdges(rawValue: 1 << 0)
+    public static let right = CropEdges(rawValue: 1 << 1)
+    public static let top = CropEdges(rawValue: 1 << 2)
+    public static let bottom = CropEdges(rawValue: 1 << 3)
+}
+
+public extension CropGeometry {
+
+    /// The photograph quad's `x` range on the horizontal line `y`, in document pixels.
+    ///
+    /// `nil` when the line misses the quad (then nothing can be pressed on that axis).
+    func photoQuadSpan(atY y: Double) -> (min: Double, max: Double)? {
+        let quad = photoQuad()
+        guard quad.count >= 3 else { return nil }
+        var xs: [Double] = []
+        for index in quad.indices {
+            let a = quad[index], b = quad[(index + 1) % quad.count]
+            // A vertex on the line counts once; a crossing counts once.
+            if abs(a.y - y) <= 1e-9 { xs.append(a.x); continue }
+            if (a.y - y) * (b.y - y) < 0 {
+                let t = (y - a.y) / (b.y - a.y)
+                xs.append(a.x + (b.x - a.x) * t)
+            }
+        }
+        guard let low = xs.min(), let high = xs.max(), high >= low else { return nil }
+        return (low, high)
+    }
+
+    /// The photograph quad's `y` range on the vertical line `x`.
+    func photoQuadSpan(atX x: Double) -> (min: Double, max: Double)? {
+        let quad = photoQuad()
+        guard quad.count >= 3 else { return nil }
+        var ys: [Double] = []
+        for index in quad.indices {
+            let a = quad[index], b = quad[(index + 1) % quad.count]
+            if abs(a.x - x) <= 1e-9 { ys.append(a.y); continue }
+            if (a.x - x) * (b.x - x) < 0 {
+                let t = (x - a.x) / (b.x - a.x)
+                ys.append(a.y + (b.y - a.y) * t)
+            }
+        }
+        guard let low = ys.min(), let high = ys.max(), high >= low else { return nil }
+        return (low, high)
+    }
+
+    /// `rect` (canvas-normalized) with **each of `edges` pressed inside the photograph's quad**, the
+    /// opposite edge and the other axis untouched. Only ever shrinks; idempotent (先 x 后 y).
+    ///
+    /// `minimumSpan` is the drag's own floor (in canvas-normalized units): a press may not leave a
+    /// degenerate frame, and it is applied *after* the legal limit — the legal limit wins, exactly
+    /// like `CropTool`'s own `min(point, right - span)` ordering.
+    func pressedToPhotoQuad(_ rect: CropRect, edges: CropEdges,
+                            minimumSpan: Double = 0.001) -> CropRect {
+        let c = rect.clamped(allowsOutsideSource: true)
+        guard !edges.isEmpty, c.width > 0, c.height > 0 else { return c }
+        let e = photoQuadExtent
+        let w = max(e.width, 1e-9), h = max(e.height, 1e-9)
+        var left = c.left * w, right = c.right * w
+        var top = c.top * h, bottom = c.bottom * h
+        let spanX = min(max(minimumSpan, 0), 1) * w
+        let spanY = min(max(minimumSpan, 0), 1) * h
+
+        // 1 — x. The band the frame covers in y decides which horizontal lines are asked.
+        if edges.contains(.right) || edges.contains(.left) {
+            var caps: [Double] = []
+            var floors: [Double] = []
+            for y in Self.scanLines(from: top, to: bottom, in: photoQuad().map(\.y)) {
+                guard let span = photoQuadSpan(atY: y) else { continue }
+                caps.append(span.max)
+                floors.append(span.min)
+            }
+            if edges.contains(.right), let cap = caps.min() { right = min(right, cap) }
+            if edges.contains(.left), let floor = floors.max() { left = max(left, floor) }
+            // The floor only ever *raises* `right` on a frame that is already thinner than the drag's
+            // minimum — and never past the legal cap, so the press still cannot grow the frame.
+            if right - left < spanX {
+                right = max(right, min(left + spanX, caps.min() ?? right))
+            }
+        }
+
+        // 2 — y, on the x the step above settled (固定顺序：先 x 后 y).
+        if edges.contains(.bottom) || edges.contains(.top) {
+            var caps: [Double] = []
+            var floors: [Double] = []
+            for x in Self.scanLines(from: left, to: right, in: photoQuad().map(\.x)) {
+                guard let span = photoQuadSpan(atX: x) else { continue }
+                caps.append(span.max)
+                floors.append(span.min)
+            }
+            if edges.contains(.bottom), let cap = caps.min() { bottom = min(bottom, cap) }
+            if edges.contains(.top), let floor = floors.max() { top = max(top, floor) }
+            if bottom - top < spanY {
+                bottom = max(bottom, min(top + spanY, caps.min() ?? bottom))
+            }
+        }
+
+        return CropRect(left: left / w, top: top / h, right: right / w, bottom: bottom / h)
+            .clamped(allowsOutsideSource: true)
+    }
+
+    /// The scan lines of the rule: the two ends of the span, plus every quad vertex strictly inside
+    /// it (the completeness note in the header).
+    private static func scanLines(from low: Double, to high: Double, in vertices: [Double]) -> [Double] {
+        var lines = [low, high]
+        for v in vertices where v > low + 1e-9 && v < high - 1e-9 {
+            lines.append(v)
+        }
+        return lines
+    }
+}
