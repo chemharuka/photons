@@ -42,10 +42,21 @@ public enum ThumbPriority: Int, Sendable, Comparable, CaseIterable {
 public struct ThumbRequestSpec: Sendable, Hashable {
     public let key: ThumbKey
     public let source: URL
+    /// 326 — a request whose pixels nobody is waiting for *right now*: the loupe's HD warm (311).
+    ///
+    /// The distinction is what the pause is for (§4 `isInteracting`). A cell's request is refused
+    /// while the user drags, because the frame being composited is the one that matters and a new
+    /// decode would compete with it. A warm is the opposite: it exists precisely so that the frame
+    /// *after* the interaction has something to show, so refusing it means nobody will ever ask
+    /// again (nobody else asks for that key in the loupe) and the preview stays on the document
+    /// before the last edit. A warm is therefore **enqueued but not started** while paused: the
+    /// queue entry waits, `pump()` on resume starts it, and no producer runs during the interaction.
+    public let isBackgroundWarm: Bool
 
-    public init(key: ThumbKey, source: URL) {
+    public init(key: ThumbKey, source: URL, isBackgroundWarm: Bool = false) {
         self.key = key
         self.source = source
+        self.isBackgroundWarm = isBackgroundWarm
     }
 }
 
@@ -130,6 +141,9 @@ public final class ThumbTicket: @unchecked Sendable {
     private weak var service: ThumbnailService?
     private let stateLock = NSLock()
     private var cancelled = false
+    /// 326 — refused at admission while paused, but retained in the service's replay set. Not
+    /// cancelled: the caller still gets its pixels, one interaction later.
+    private var held = false
 
     init(key: ThumbKey, priority: ThumbPriority, id: Int64, service: ThumbnailService) {
         self.key = key
@@ -143,13 +157,24 @@ public final class ThumbTicket: @unchecked Sendable {
         return cancelled
     }
 
+    /// 326 — `true` between the refusal and the replay: the request is waiting for the interaction to
+    /// end, not gone.
+    public var isHeld: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return held && !cancelled
+    }
+
     /// Idempotent. Safe from any thread.
     public func cancel() {
         service?.cancel([self])
     }
 
     func markCancelled() {
-        stateLock.lock(); cancelled = true; stateLock.unlock()
+        stateLock.lock(); cancelled = true; held = false; stateLock.unlock()
+    }
+
+    func markHeld(_ value: Bool) {
+        stateLock.lock(); held = value; stateLock.unlock()
     }
 
     func stillWanted() -> Bool { !isCancelled }
@@ -241,7 +266,19 @@ public final class ThumbnailService: @unchecked Sendable {
         /// Jobs cancelled after the producer had started (bytes dropped).
         public var cancelledInFlight = 0
         /// Requests refused because `isPaused` (§4 `isInteracting`).
+        ///
+        /// 326 — a refusal is also *retained*: the latest refused spec per key is replayed when the
+        /// interaction ends (`resumeHeld`), so the visible cell whose request landed mid-drag is
+        /// served without waiting for the next `configure`. This counter therefore counts "not
+        /// admitted at that moment", which is what the pause means; the replay is a separate
+        /// admission (and a separate `requests`).
         public var rejectedWhilePaused = 0
+        /// 326 — warms enqueued **instead of** refused while paused. They are ordinary queue entries:
+        /// nothing runs until `isPaused` goes false, and `pump()` then starts them. Zero producer runs
+        /// happen during the interaction, which is the whole point of the pause.
+        public var queuedWhilePaused = 0
+        /// 326 — refusals that were re-admitted on resume (the visible cells' second chance).
+        public var replayedAfterPause = 0
         /// Requests dropped because their generation was stale at enqueue time.
         public var droppedStaleGeneration = 0
         /// Requests dropped by `Config.queueDepthLimit`.
@@ -321,6 +358,33 @@ public final class ThumbnailService: @unchecked Sendable {
     private var pending: [Job] = []
     /// Pending *and* in-flight jobs, by key: this dictionary is the single-flight map.
     private var jobs: [ThumbKey: Job] = [:]
+
+    /// 326 — a request the pause refused, kept so it can be replayed the moment the interaction ends.
+    ///
+    /// One entry per key (the latest ask wins: an older closure for the same key would draw the same
+    /// pixels, and a cell that reconfigured has already replaced its own request).
+    private final class Held {
+        let spec: ThumbRequestSpec
+        let priority: ThumbPriority
+        let generation: Int
+        let completion: ((ThumbResult) -> Void)?
+        let ticket: ThumbTicket
+
+        init(spec: ThumbRequestSpec, priority: ThumbPriority, generation: Int,
+             completion: ((ThumbResult) -> Void)?, ticket: ThumbTicket) {
+            self.spec = spec
+            self.priority = priority
+            self.generation = generation
+            self.completion = completion
+            self.ticket = ticket
+        }
+    }
+
+    private var held: [ThumbKey: Held] = [:]
+    private var heldOrder: [ThumbKey] = []
+    /// Ceiling for the replay set: three panes of visible cells is tens of keys, and a cap is what
+    /// keeps a long drag from turning the set into a second queue.
+    static let heldLimit = 64
     /// Test-only witness of admission order (see `recordsAdmissionOrder`). Never used by the app.
     private var recordsAdmissions = false
     private var admissions: [ThumbKey] = []
@@ -345,13 +409,23 @@ public final class ThumbnailService: @unchecked Sendable {
     // MARK: knobs
 
     /// §4: no thumbnail job is posted while the user is dragging or zooming.
+    ///
+    /// 326 — what a pause does with a request depends on whether anybody is waiting for it:
+    /// * `.isBackgroundWarm` (the loupe's 311 warm) is **queued**, not refused: its whole purpose is
+    ///   the frame after the interaction, and in the loupe nothing else ever asks for that key;
+    /// * every other request is refused **and retained** — `resumeHeld` re-admits it the moment the
+    ///   interaction ends, so a visible cell whose ask landed mid-drag is served without waiting for
+    ///   the next `configure` (the user-visible half of this bug: the small previews stalled too).
+    /// `rejectedWhilePaused` still moves for the second kind, which is how the report proves the
+    /// pause was not simply switched off.
     public var isPaused: Bool {
         get { lock.lock(); defer { lock.unlock() }; return paused }
         set {
-            lock.lock(); paused = newValue
+            lock.lock()
+            paused = newValue
             let resume = !newValue
             lock.unlock()
-            if resume { pump() }
+            if resume { resumeHeld() }
         }
     }
 
@@ -430,10 +504,13 @@ public final class ThumbnailService: @unchecked Sendable {
             let ticket = ThumbTicket(key: spec.key, priority: priority, id: id, service: self)
             tickets.append(ticket)
 
-            if paused {
-                // §4 `isInteracting`: refused before it becomes a job, so it is not an outcome bucket.
+            if paused && !spec.isBackgroundWarm {
+                // §4 `isInteracting`: not admitted while the frame is being composited — but kept
+                // (326), so the visible cell is served when the interaction ends instead of waiting
+                // for its next `configure` (which, in the loupe, never comes).
                 counters.rejectedWhilePaused += 1
-                ticket.markCancelled()
+                holdLocked(spec, priority: priority, generation: gen, completion: completion,
+                           ticket: ticket)
                 continue
             }
             if gen < currentGeneration {
@@ -442,48 +519,138 @@ public final class ThumbnailService: @unchecked Sendable {
                 ticket.markCancelled()
                 continue
             }
-            counters.requests += 1
-
-            if let existing = jobs[spec.key] {
-                // Single flight: same key, same bytes, one producer call.
-                //
-                // Adoption: if every earlier subscriber left while this decode was already running,
-                // the job is *condemned* — it would finish, throw its bytes away and call nobody
-                // back. Joining it as-is is how a request turns into "pending forever": the caller
-                // waits for a callback that this job has already decided not to make (007 §root
-                // cause). A request that wants the bytes now un-condemns the job instead, so the
-                // render already paid for is written and delivered (§5 "让它跑完并写盘").
-                if existing.suppressWrite {
-                    existing.suppressWrite = false
-                    counters.missCancelled = max(0, counters.missCancelled - 1)
-                    counters.cancelledInFlight = max(0, counters.cancelledInFlight - 1)
-                }
-                existing.subscribers.append(Subscription(id: id, completion: completion))
-                if priority > existing.priority { existing.priority = priority }
-                counters.coalesced += 1
-                continue
+            // 326 — a warm that arrives mid-interaction is queued, not started: `pump()` below is
+            // gated on `!paused`, and the setter's `resumeHeld()` pumps when the drag ends.
+            if paused { counters.queuedWhilePaused += 1 }
+            if let job = admitLocked(spec, ticket: ticket, priority: priority, generation: gen,
+                                     completion: completion) {
+                toDispatch.append(job)
             }
-            if config.queueDepthLimit > 0 && pending.count >= config.queueDepthLimit {
-                counters.rejectedByDepth += 1
-                ticket.markCancelled()
-                continue
-            }
-
-            sequence += 1
-            let job = Job(key: spec.key, source: spec.source, sequence: sequence,
-                          generation: gen, priority: priority)
-            job.subscribers.append(Subscription(id: id, completion: completion))
-            pending.append(job)
-            jobs[spec.key] = job
-            counters.queued = pending.count
-            counters.queuedPeak = max(counters.queuedPeak, pending.count)
-            toDispatch.append(job)
         }
         let shouldDispatch = !toDispatch.isEmpty && !paused
         lock.unlock()
 
         if shouldDispatch { pump() }
         return tickets
+    }
+
+    /// The admission itself: single-flight join, depth cap, or a new job in `pending`.
+    /// Returns the job when the caller should dispatch it (the service may be paused: then the entry
+    /// simply waits for `pump()`).
+    private func admitLocked(_ spec: ThumbRequestSpec, ticket: ThumbTicket, priority: ThumbPriority,
+                             generation gen: Int,
+                             completion: ((ThumbResult) -> Void)?) -> Job? {
+        counters.requests += 1
+
+        if let existing = jobs[spec.key] {
+            // Single flight: same key, same bytes, one producer call.
+            //
+            // Adoption: if every earlier subscriber left while this decode was already running,
+            // the job is *condemned* — it would finish, throw its bytes away and call nobody
+            // back. Joining it as-is is how a request turns into "pending forever": the caller
+            // waits for a callback that this job has already decided not to make (007 §root
+            // cause). A request that wants the bytes now un-condemns the job instead, so the
+            // render already paid for is written and delivered (§5 "让它跑完并写盘").
+            if existing.suppressWrite {
+                existing.suppressWrite = false
+                counters.missCancelled = max(0, counters.missCancelled - 1)
+                counters.cancelledInFlight = max(0, counters.cancelledInFlight - 1)
+            }
+            existing.subscribers.append(Subscription(id: ticket.id, completion: completion))
+            if priority > existing.priority { existing.priority = priority }
+            counters.coalesced += 1
+            return nil
+        }
+        if config.queueDepthLimit > 0 && pending.count >= config.queueDepthLimit {
+            counters.rejectedByDepth += 1
+            ticket.markCancelled()
+            return nil
+        }
+
+        sequence += 1
+        let job = Job(key: spec.key, source: spec.source, sequence: sequence,
+                      generation: gen, priority: priority)
+        job.subscribers.append(Subscription(id: ticket.id, completion: completion))
+        pending.append(job)
+        jobs[spec.key] = job
+        counters.queued = pending.count
+        counters.queuedPeak = max(counters.queuedPeak, pending.count)
+        return job
+    }
+
+    // MARK: held refusals (326)
+
+    /// Refuse a request while paused **and keep it**: one entry per key, bounded by `heldLimit`.
+    /// The lock is held. An older entry for the same key is dropped (its caller is cancelled: it is
+    /// the same pixels and, for a cell, the reconfigure that asked again has replaced it).
+    private func holdLocked(_ spec: ThumbRequestSpec, priority: ThumbPriority, generation: Int,
+                            completion: ((ThumbResult) -> Void)?, ticket: ThumbTicket) {
+        if let existing = held[spec.key] {
+            existing.ticket.markCancelled()
+            heldOrder.removeAll { $0 == spec.key }
+        }
+        ticket.markHeld(true)
+        held[spec.key] = Held(spec: spec, priority: priority, generation: generation,
+                             completion: completion, ticket: ticket)
+        heldOrder.append(spec.key)
+        while heldOrder.count > ThumbnailService.heldLimit {
+            let evicted = heldOrder.removeFirst()
+            // Evicted by the cap, not served: the caller must not wait for a callback that the set
+            // no longer holds.
+            held.removeValue(forKey: evicted)?.ticket.markCancelled()
+        }
+    }
+
+    /// 326 — the interaction ended: give the refused requests their second chance **now**, so a
+    /// visible cell does not have to wait for the next `configure` to notice the document moved.
+    ///
+    /// Policy, in this order:
+    ///  * an owner that cancelled its ticket meanwhile (the cell was recycled) drops its entry;
+    ///  * a request whose generation is stale is dropped, exactly as if it had arrived after the sweep;
+    ///  * of several held **HD** keys for one photo, only the newest survives — the older ones are
+    ///    documents the user already moved past, and replaying them would write the very files 311's
+    ///    dedupe exists to prevent (a drag would land twenty);
+    ///  * everything else is admitted through the same door as a live request, so single-flight,
+    ///    priority, depth cap and the outcome counters behave identically.
+    private func resumeHeld() {
+        lock.lock()
+        let entries = heldOrder.compactMap { held[$0] }
+        held.removeAll()
+        heldOrder.removeAll()
+
+        // Newest held document per photo (the replay is for the document the user is looking at).
+        var newestHDDigest: [String: String] = [:]
+        for entry in entries where entry.spec.key.spec.isHDFamily {
+            newestHDDigest[entry.spec.key.contentHash] = entry.spec.key.digest
+        }
+
+        for entry in entries {
+            let key = entry.spec.key
+            entry.ticket.markHeld(false)
+            guard !entry.ticket.isCancelled else { continue }
+            if key.spec.isHDFamily, newestHDDigest[key.contentHash] != key.digest {
+                entry.ticket.markCancelled()
+                continue
+            }
+            if entry.generation < currentGeneration {
+                counters.droppedStaleGeneration += 1
+                entry.ticket.markCancelled()
+                continue
+            }
+            counters.replayedAfterPause += 1
+            _ = admitLocked(entry.spec, ticket: entry.ticket, priority: entry.priority,
+                            generation: entry.generation, completion: entry.completion)
+        }
+        lock.unlock()
+        // A **warm** queued during the pause sits in `pending` and was never dispatched (that is what
+        // the pause means), so the resume is what starts it — it may be the only entry there.
+        pump()
+    }
+
+    /// 326 — how many refusals are waiting for the interaction to end. Read by the acceptance.
+    public var heldCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return held.count
     }
 
     // MARK: cancel
@@ -494,6 +661,14 @@ public final class ThumbnailService: @unchecked Sendable {
         lock.lock()
         for ticket in tickets {
             ticket.markCancelled()
+            // 326 — a held refusal has no job yet: the owner leaving is the only thing that can drop
+            // it. Nothing is booked `missCancelled` (it was never admitted; `rejectedWhilePaused`
+            // already counts it).
+            if let entry = held[ticket.key], entry.ticket === ticket {
+                held.removeValue(forKey: ticket.key)
+                heldOrder.removeAll { $0 == ticket.key }
+                continue
+            }
             guard let job = jobs[ticket.key] else { continue }
             for sub in job.subscribers where sub.id == ticket.id { sub.cancelled = true }
             guard job.subscribers.allSatisfy({ $0.cancelled }) else { continue }
@@ -530,6 +705,10 @@ public final class ThumbnailService: @unchecked Sendable {
             counters.missCancelled += 1
         }
         pending.removeAll()
+        // 326 — refusals waiting for the interaction are also "the window went away".
+        for entry in held.values { entry.ticket.markCancelled() }
+        held.removeAll()
+        heldOrder.removeAll()
         jobs = jobs.filter { $0.value.started }
         counters.queued = 0
         lock.broadcast()
@@ -816,6 +995,9 @@ public struct ThumbServiceReport: Sendable, Codable {
     public var cancelledInFlight: Int
     public var failed: Int
     public var rejectedWhilePaused: Int
+    /// 326 — warms queued (not refused) while paused, and refusals replayed on resume.
+    public var queuedWhilePaused: Int
+    public var replayedAfterPause: Int
     public var droppedStaleGeneration: Int
     public var rejectedByDepth: Int
     public var queuedPeak: Int
@@ -837,6 +1019,8 @@ public struct ThumbServiceReport: Sendable, Codable {
         cancelledInFlight = s.cancelledInFlight
         failed = s.missFailed
         rejectedWhilePaused = s.rejectedWhilePaused
+        queuedWhilePaused = s.queuedWhilePaused
+        replayedAfterPause = s.replayedAfterPause
         droppedStaleGeneration = s.droppedStaleGeneration
         rejectedByDepth = s.rejectedByDepth
         queuedPeak = s.queuedPeak
