@@ -1276,14 +1276,39 @@ public final class CatalogSession {
         }
         guard let document = stack.current else { return }
         do {
-            lastSaveResult = try catalog.saveDevelop(document, history: stack, forAsset: id)
+            let result = try catalog.saveDevelop(document, history: stack, forAsset: id)
+            lastSaveResult = result
             lastPersistError = nil
+            // 363 — the row goes first: `persistCount` is the signal that wakes all three browsers,
+            // and a refresh that runs before the row is updated would derive the pre-edit key again.
+            adoptCommittedDocument(document, save: result)
             persistCount += 1
         } catch {
             // A failed write is reported, never swallowed: the document is still on screen and
             // still undoable, and the next commit retries.
             lastPersistError = "\(error)"
         }
+    }
+
+    /// 363 — **the store and the row must not disagree.** `develop_json` in memory is what the three
+    /// browsers derive a thumbnail key from for every photo that is not the loaded one, and what
+    /// `reload()`/`catalog.develop(forAsset:)` would serve. It used to be written only to the
+    /// database: the `Asset` in `assets` kept the **pre-edit** document until something re-read the
+    /// library, so the next refresh of that photo's cell rebuilt the *old* key — the reported
+    /// 「修改了 A，再修改 B，A 的预览又回退了」. Writing the committed document back into the row
+    /// makes the key a consequence of the save instead of of a reload nobody performed.
+    ///
+    /// The bytes are `Catalog.encode`, i.e. the same canonical JSON the store just wrote, so a later
+    /// decode yields the identical model (and therefore the identical `ThumbKey`).
+    private func adoptCommittedDocument(_ document: EditModel, save: DevelopSaveResult) {
+        guard let index = assets.firstIndex(where: { $0.id == save.assetId }) else { return }
+        guard let json = try? Catalog.encode(document) else { return }
+        guard assets[index].developJson != json
+                || assets[index].developVersion != save.developVersion else { return }
+        assets[index].developJson = json
+        assets[index].developVersion = save.developVersion
+        assets[index].editTime = save.editTime
+        assets[index].historyEnd = save.historySeq
     }
 
     /// `force` re-reads the stored document (after an external save or a develop-json change).
