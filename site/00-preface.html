@@ -22,13 +22,13 @@
   <aside class="sidebar">
     <p class="sidebar-title">目录</p>
     <ul class="chapter-list"><li class="current"><span>卷首</span></li><li><a href="01-overview.html">1 总览</a></li><li><a href="02-display.html">2 显示架构</a></li><li><a href="03-processing.html">3 处理架构</a></li><li><a href="04a-tones.html">4a 影调</a></li><li><a href="04b-color.html">4b 色彩</a></li><li><a href="04c-detail.html">4c 细节</a></li><li><a href="04d-geometry-masks.html">4d 几何·蒙版</a></li></ul>
-    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>67cc5dc</code></p>
+    <p class="sidebar-note">α 阶段 · 随代码变动<br>基准 <code>60f8280</code></p>
   </aside>
   <main id="content" class="content">
     <nav class="page-toc"><p class="toc-title">本页</p><ul><li class="toc-2"><a href="#α-阶段声明">α 阶段声明</a></li><li class="toc-2"><a href="#读者">读者</a></li><li class="toc-2"><a href="#三个域先说清楚">三个域，先说清楚</a></li><li class="toc-2"><a href="#记法">记法</a></li><li class="toc-2"><a href="#术语表">术语表</a></li><li class="toc-2"><a href="#与另外两份文档的分工">与另外两份文档的分工</a></li><li class="toc-2"><a href="#版本基准">版本基准</a></li></ul></nav>
     <article>
 <h1 id="卷首这份文档是什么">卷首：这份文档是什么</h1>
-<p>Photons 是 macOS 上的一个原生 RAW 工作流：导入一个文件夹，挑片，非破坏性显影，然后导出。它自己不带解码器。去马赛克、镜头校正、机器学习降噪都来自 Apple 的 <code>CIRAWFilter</code>（<code>Sources/PhotonsCore/RAWDecoder.swift:1</code>）。解码之上的整条算术链、蒙版、色彩管理、XMP 与导出，由 Photons 自己的 Metal 渲染图画。</p>
+<p>Photons 是 macOS 上的一个原生 RAW 工作流：导入一个文件夹，挑片，非破坏性显影，然后导出。它自己不带解码器。去马赛克、镜头校正、机器学习降噪都来自 Apple 的 <code>CIRAWFilter</code>（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/RAWDecoder.swift#L1" title="Sources/PhotonsCore/RAWDecoder.swift:1">RAWDecoder.swift:1</a>）。解码之上的整条算术链、蒙版、色彩管理、XMP 与导出，由 Photons 自己的 Metal 渲染图画。</p>
 <p>这份文档只讲解码之上的那一半：画面怎么被画到屏幕上、每个参数作用在哪个域、这些参数的具体算法是什么。</p>
 <h2 id="α-阶段声明">α 阶段声明</h2>
 <p>项目还在 α。本文写的是当前实现，不是稳定 API，也不是路线图。管线阶段、参数范围、常数都会变。每一页页脚写着构建时的代码基准（<code>git rev-parse --short HEAD</code>），正文里每个常数后面跟着 <code>文件:行</code>。文档和代码冲突时以代码为准，并把那一处当成文档的 bug。</p>
@@ -78,7 +78,7 @@
 </tr>
 </tbody>
 </table>
-<p>一条贯穿全文的规则：<strong>一个操作必须待在它的量所在的域里</strong>。把曝光做成显示域增益，被压缩的高光就再也拿不回来；把去雾做成显示域减法，<code>A = 1</code> 时高光越去雾越亮（<code>Sources/PhotonsCore/Stage.swift:56</code>）。第三、四章的大部分篇幅都在解释这条规则的后果。</p>
+<p>一条贯穿全文的规则：<strong>一个操作必须待在它的量所在的域里</strong>。把曝光做成显示域增益，被压缩的高光就再也拿不回来；把去雾做成显示域减法，<code>A = 1</code> 时高光越去雾越亮（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/Stage.swift#L56" title="Sources/PhotonsCore/Stage.swift:56">Stage.swift:56</a>）。第三、四章的大部分篇幅都在解释这条规则的后果。</p>
 <h2 id="记法">记法</h2>
 <table>
 <colgroup>
@@ -110,7 +110,7 @@
 </tr>
 <tr>
 <td><code>u</code></td>
-<td>曲线的横轴坐标：<code>0…0.5</code> 是 SDR 显示码，<code>0.5…1</code> 是 <code>+0…+4 EV</code>（<code>Sources/PhotonsCore/HDRCurve.swift:57</code>）</td>
+<td>曲线的横轴坐标：<code>0…0.5</code> 是 SDR 显示码，<code>0.5…1</code> 是 <code>+0…+4 EV</code>（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/HDRCurve.swift#L57" title="Sources/PhotonsCore/HDRCurve.swift:57">HDRCurve.swift:57</a>）</td>
 </tr>
 <tr>
 <td><code>S0…S4</code></td>
@@ -190,9 +190,9 @@
 <h2 id="版本基准">版本基准</h2>
 <ul>
 <li>代码：<code>main</code> @ <code>7d342fc</code>（构建时自动写入页脚）</li>
-<li>文档 schema：13（<code>Sources/PhotonsCore/EditModel.swift:132</code>）；<code>processVersion = 2</code></li>
-<li>解码配方：<code>DecodeRecipe.current = "v3-lens"</code>（<code>Sources/PhotonsCore/LinearImageStore.swift:17</code>）</li>
-<li>曲线格式：<code>version 2</code>、<code>type: double</code>、<code>max: 2</code>、<code>domain: hdr</code>（<code>Sources/PhotonsCore/EditModel.swift:1779</code>）</li>
+<li>文档 schema：13（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/EditModel.swift#L132" title="Sources/PhotonsCore/EditModel.swift:132">EditModel.swift:132</a>）；<code>processVersion = 2</code></li>
+<li>解码配方：<code>DecodeRecipe.current = "v3-lens"</code>（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/LinearImageStore.swift#L17" title="Sources/PhotonsCore/LinearImageStore.swift:17">LinearImageStore.swift:17</a>）</li>
+<li>曲线格式：<code>version 2</code>、<code>type: double</code>、<code>max: 2</code>、<code>domain: hdr</code>（<a class="cite" href="https://github.com/chemharuka/photons/blob/60f8280/Sources/PhotonsCore/EditModel.swift#L1779" title="Sources/PhotonsCore/EditModel.swift:1779">EditModel.swift:1779</a>）</li>
 <li>构建环境：macOS 27 / Xcode 27 / Swift 6（<code>README.md</code>）</li>
 </ul>
 
@@ -202,7 +202,7 @@
       <a class="next" href="01-overview.html">1 总览 →</a>
     </nav>
     <footer class="page-footer">
-      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>67cc5dc</code> · 2026-11-10</p>
+      <p>Photons 渲染白皮书 · α 阶段草案 · 代码基准 <code>60f8280</code> · 2026-11-10</p>
       <p>本文档描述的是实现，不是承诺；与代码冲突时以 <code>Sources/</code> 为准。</p>
     </footer>
   </main>

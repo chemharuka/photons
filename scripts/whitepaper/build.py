@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -58,6 +59,86 @@ def pandoc_text(path: Path) -> str:
     except SystemExit:
         return ""
     return re.sub(r"\s+", " ", text).strip()
+
+
+# ── citations → links ───────────────────────────────────────────────────
+#
+# The prose cites code as `Sources/PhotonsCore/Stage.swift:183` (or a bare
+# `Stage.swift:183`, a `Kernels/x.metal:9` suffix, or a continuation `:184`).
+# Printed in full those paths eat half a table cell, so the built page shows
+# `Stage.swift:183` as a link to the file at the revision the page was built
+# from, with the full path in the tooltip. The Markdown source keeps the
+# literal `path:line`, which is what the citation checker reads.
+
+REPO_URL = "https://github.com/chemharuka/photons"
+# Pinned to the revision the page is built from, which is the revision the
+# footer names and the one the line numbers were checked against. Building with
+# `PHOTONS_CITE_REV=main` links to the branch instead (survives unpublished
+# commits, but line numbers can drift).
+CITE_REV = os.environ.get("PHOTONS_CITE_REV") or None
+# `<code>File.swift:12</code>` is a citation; `<code>File.swift</code>` (no line)
+# only seeds the "same file" state so the `:13` that follows can resolve.
+CITE = re.compile(r"<code>([^<]*?):(\d+)</code>"
+                  r"|<code>([A-Za-z0-9_./-]+\.(?:swift|metal|py|sh))</code>"
+                  r"|</h[1-6]>")
+SOURCE_GLOBS = ("Sources/**/*.swift", "Sources/**/*.metal", "Tests/**/*.swift",
+                "Tests/**/*.json", "scripts/**/*.py", "scripts/**/*.sh")
+
+
+def source_index() -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for pattern in SOURCE_GLOBS:
+        for path in ROOT.glob(pattern):
+            if path.is_file():
+                index.setdefault(path.name, []).append(str(path.relative_to(ROOT)))
+    return index
+
+
+def resolve_source(expr: str, index: dict[str, list[str]]) -> str | None:
+    """Repo-relative path for a citation target, or None if it is not code."""
+    expr = expr.strip()
+    if expr.startswith(("Sources/", "Tests/", "scripts/")):
+        return expr if (ROOT / expr).is_file() else None
+    if "/" in expr and expr.rsplit(".", 1)[-1] in ("swift", "metal", "py", "sh"):
+        hits = [str(p.relative_to(ROOT)) for p in ROOT.glob(f"Sources/**/{expr}") if p.is_file()]
+        return hits[0] if len(hits) == 1 else None
+    hits = index.get(expr)
+    return hits[0] if hits and len(hits) == 1 else None
+
+
+def linkify_citations(fragment: str, revision: str) -> str:
+    revision = CITE_REV or revision
+    index = source_index()
+    last: list[str | None] = [None]
+    out: list[str] = []
+    cursor = 0
+    for match in CITE.finditer(fragment):
+        out.append(fragment[cursor:match.start()])
+        cursor = match.end()
+        if match.group(0).startswith("</"):
+            out.append(match.group(0))
+            last[0] = None          # a continuation never crosses a block
+            continue
+        if match.group(1) is None:  # a bare `<code>path/to/file.ext</code>`
+            bare = resolve_source(match.group(3), index)
+            if bare:
+                last[0] = bare
+            out.append(match.group(0))
+            continue
+        expr, line = match.group(1), match.group(2)
+        target = last[0] if expr == "" else resolve_source(expr, index)
+        if expr and target:
+            last[0] = target
+        if not target:
+            out.append(match.group(0))
+            continue
+        label = f"{target.rsplit('/', 1)[-1]}:{line}" if expr else f":{line}"
+        href = f"{REPO_URL}/blob/{revision}/{target}#L{line}"
+        out.append(f'<a class="cite" href="{href}" title="{html.escape(target)}:{line}">'
+                   f"{html.escape(label)}</a>")
+    out.append(fragment[cursor:])
+    return "".join(out)
+
 
 
 def strip_tags(value: str) -> str:
@@ -149,7 +230,7 @@ def main() -> None:
     for position, chapter in enumerate(chapters):
         source = SRC / chapter["file"]
         if source.exists():
-            fragment = pandoc_body(source)
+            fragment = linkify_citations(pandoc_body(source), revision)
             text = pandoc_text(source)
         else:
             fragment = (

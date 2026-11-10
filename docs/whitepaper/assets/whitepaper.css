@@ -237,6 +237,30 @@ math[display="block"] {
   overflow-y: hidden;
 }
 
+/* ── citations: `Stage.swift:183` is a link to the file at build time ── */
+
+.cite {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: .92em;
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 1px dotted color-mix(in srgb, currentColor 45%, transparent);
+}
+.cite:hover {
+  border-bottom-style: solid;
+  color: var(--accent, inherit);
+}
+.cite::after {
+  content: "↗";
+  font-size: .75em;
+  opacity: .5;
+  margin-left: .1em;
+}
+@media print {
+  .cite { border-bottom: none; }
+  .cite::after { content: ""; }
+}
+
 /* ── pager / footer ──────────────────────────────────────────────────── */
 
 .pager {
