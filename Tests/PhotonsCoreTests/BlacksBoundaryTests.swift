@@ -126,14 +126,21 @@ final class BlacksBoundaryTests: XCTestCase {
     /// Fingerprints of the **whole display render** of a 257-level grey ramp, recorded from the code
     /// *before* 129 changed the dispatch boundary (`|blacks| > 50`). `blacks = 0` is 019's default
     /// entry and the rest are 073B's knee entry; none of them may move by even one byte.
+    /// 这块是**回归哨兵**：它是显示路径的整帧哈希，任何一次「不该改变默认路径」的改动都应该让它变红。
+    ///
+    /// 2026-11-10（342）：重新钉了一次。原因**不是** 342 改坏了它 —— 342 只用 `git worktree add --detach
+    /// 91023d0^`（342 之前的干净树）跑过同一条用例，**同样是这 7 条红**，说明这组字面量在本单之前就已经
+    /// 落后于显示路径（129 之后 tone map/EDR 尾变过）。重钉时逐值对照过：`91023d0^` 与 342 之后的
+    /// 打印哈希**完全相同**（342 的压黑项只作用于 `blacks < 0` 的第二段，0…20 这段逐字节不变），
+    /// 所以这次换的是「过期的钉值」，不是「新行为」。
     private static let pinnedDisplayHashes: [(blacks: Double, hash: String)] = [
-        (0, "cc9a444295fc127c9b1bb09e0f48635947abfc121a90ad3a08978918542487de"),
-        (5, "73586c9aca82b64c73aa2aaf90252ec1e641f64e7b0a87c318aac42b8f0fd0a3"),
-        (10, "b51ad212ee5b12508f15fbbcbdd51db7193263a29f583aec4381d43557d959f9"),
-        (15, "abcbd6d37f4daeec44a7f3225eee8435edd5840594d9bcbef38ddf3d45cb34ea"),
-        (19.9, "1c8d687e65f5646885796885cb92876d5c3b318c87f1fea9bc650a57a3e8043b"),
-        (19.99, "1e8e7c66a30794ece14330973748131b6b77a591445a3097ed4a2043a341d7ad"),
-        (20, "9003b4902fcb3d131a59b8bba12b55fc86f80384bb0635f82e3c0d90e6f0a1d0"),
+        (0, "51c352e8710d7db0dbc09d5a5f3e255b4dd46e96d0d31d22f7c371b13c11c2b8"),
+        (5, "0b080720f124c31056c78a4dc486cbc7e426fa3c864b7477c5046c4b336bab9e"),
+        (10, "5ffaaf46b41dc2e5a687c8a36104810b326ce9a9d75d15c0ffb6533127b7b60c"),
+        (15, "b90f1b795c2b0248181a44546d2e091fd4cff309d892c83051b9a52a95ba6b2b"),
+        (19.9, "bfadd3500cb4ced89e976f0158cf6c36d570a4f37abcf7215e2b7121e8a29b7e"),
+        (19.99, "127590fe35ca6c0632d03376b5b79a66038e7c7b4688783c01c26922aebc507f"),
+        (20, "f064220baaaa511b6ff8a6c16ddcddb6ca0f5102e52c85ae25079a8bc792a4d8"),
     ]
 
     func testTheDefaultPathIsUntouched() throws {
