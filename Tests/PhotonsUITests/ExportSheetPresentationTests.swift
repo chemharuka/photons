@@ -13,7 +13,8 @@ import SwiftUI
 /// 这条测试就是那条路：不再自己搭窗口，而是让 controller 开它自己的 sheet，然后在**真实宿主的
 /// 坐标系里**读 `form`（ScrollView）与第一行 `export.format` 的 frame。两条读数：
 ///
-///   1. `form` 的高度 ≥ 7 行的 pitch（7 × 32 = 224）—— 七行常驻决定得真有可能看见；
+///   1. `form` 的高度 ≥ 6 行的 pitch（6 × 32 = 192）—— 六行常驻决定得真有可能看见
+///      （322：水印不透明度进了水印段，7 → 6）；
 ///   2. 第一行 `export.format` 整条落在窗口内容区里（不是 frame 有值但跑到窗口外/被裁掉）。
 @MainActor
 final class ExportSheetPresentationTests: XCTestCase {
@@ -104,7 +105,7 @@ final class ExportSheetPresentationTests: XCTestCase {
         print("321 dump · model.rows.count \(controller.model.rows.count) · preset \(controller.model.preset.format.rawValue)/\(controller.model.preset.quality)")
     }
 
-    func testTheRealSheetHasRoomForSevenRowsAndShowsTheFirstOne() throws {
+    func testTheRealSheetHasRoomForSixRowsAndShowsTheFirstOne() throws {
         let (controller, window, content) = try presentSheetLikeTheApp()
         dump(controller, window, content)
 
@@ -114,10 +115,11 @@ final class ExportSheetPresentationTests: XCTestCase {
         let formatRow = try XCTUnwrap(rows.first { $0.rowID == "export.format" }, "格式行探针不存在")
         let rowRect = frame(of: formatRow, in: content)
 
-        // 1 —— 七行常驻决定的高度（pitch 32 × 7 = 224）。
-        let sevenRows = ExportRowGrid.rowPitch * 7
-        XCTAssertGreaterThanOrEqual(formRect.height, sevenRows,
-                                    "321 · form 只有 \(formRect.height) pt，装不下 7 行（需 \(sevenRows)）")
+        // 1 —— 六行常驻决定的高度（pitch 32 × 6 = 192）。322 之前是 7 行：水印不透明度
+        // 现在在水印折叠段里。
+        let residentRows = ExportRowGrid.rowPitch * 6
+        XCTAssertGreaterThanOrEqual(formRect.height, residentRows,
+                                    "321 · form 只有 \(formRect.height) pt，装不下 6 行（需 \(residentRows)）")
 
         // 2 —— 第一行整条在窗口内容区里，而且真的在 `form` 的可见区里（ScrollView 高度为 0 时
         // frame 照样有值，但那一行谁也看不见 —— 这正是用户看到的空面板）。

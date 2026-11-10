@@ -6,9 +6,11 @@ import SwiftUI
 /// 288 的五列（96 / 8 / 240 / 46 / 52 / 64）是列表的度量：46 / 52 / 64 三列在商业产品里没有对应物，
 /// 行高 20 + 行距 6 也装不下 macOS 标准控件，那是「重心不稳」的直接来源。302 把它收回表单：
 ///
-///     [padding 20] [label 110 trailing] [gap 8] [control 250 leading] …… [readout 102 trailing] [padding 20]
+///     [padding 20] [label 110 trailing] [gap 8] [control 286 leading] [gutter 8] [readout 108 trailing] [padding 20]
 ///
-/// 读数（值 + 单位）是一个**右对齐到面板右 padding** 的块：块内 46 / 4 / 52 只是为了让数值框和
+/// 322 只重算了宽度，三条列线的位置（标签右沿 130 / 控件左沿 138 / 读数右沿 540）一个没动。
+///
+/// 读数（值 + 单位）是一个**右对齐到面板右 padding** 的块：块内 46 / 4 / 58 只是为了让数值框和
 /// 单位在每一行都换到同一个 x（288 的列对齐思想），块本身是一条右沿，不再有第三条列。
 ///
 /// 行高 24 / 行距 8 → **pitch 32，只有这一种**；节与节之间额外 16，节标题 24，标题到首行 8。
@@ -25,15 +27,27 @@ enum ExportRowGrid {
     // MARK: 三列
 
     /// 标签列，右对齐。
+    ///
+    /// 322 量过整张表的标签（三段全展开、20 行）：最长的是「水印不透明度」71.5 pt，加上勾选框
+    /// 自己的盒子（16 + 4 + 文字，见 `toggleBoxWidth`）最宽的「写入 XMP」也只 78 —— 110 有 32 pt
+    /// 的余量。所以**不加宽标签列**：加宽它只会把控件列挤窄，而三条列线（130 / 138 / 540）是
+    /// 302 的实测值，不能动。
     static let labelWidth: CGFloat = 110
     /// 标签右沿到控件左沿。
     static let gap: CGFloat = 8
     /// 控件列，左对齐，统一高度 24。
-    static let controlWidth: CGFloat = 250
+    ///
+    /// 322：250 → 286。被截的是控件块里的三件东西 —— 「尺寸」行的模式选择 + 像素量读数、
+    /// 「存到」行的路径、「半尺寸」行的说明；这 36 pt 从控件块与读数块之间的空白（50 → 8）里出，
+    /// 所以标签右沿 130、控件左沿 138、读数右沿 540 三条线一个不动。
+    static let controlWidth: CGFloat = 286
     /// 读数块里的数值框（288 的 46 宽度，保持不变，免得同类型控件换位）。
     static let valueWidth: CGFloat = 46
     /// 读数块里的单位。
-    static let unitWidth: CGFloat = 52
+    ///
+    /// 322：52 → 58 —— 「像素/英寸」量出来 54.3 pt，在 52 里被截成「像素/…」（用户看到的就是
+    /// 「不写入「像素/…」」）。读数块因此 102 → 108，**右沿仍是 540**，多出来的宽度向左长。
+    static let unitWidth: CGFloat = 58
     static let readoutGap: CGFloat = 4
 
     // MARK: 纵向节奏
@@ -60,19 +74,31 @@ enum ExportRowGrid {
     // MARK: 推导出的锚点（测试读的就是这些）
 
     static var contentWidth: CGFloat { panelWidth - horizontalPadding * 2 }
-    /// 标签右沿：20 + 110 = 118。
+    /// 标签右沿：20 + 110 = 130。（302 的注释写成 118 是笔误，实测一直是 130。）
     static var labelRight: CGFloat { horizontalPadding + labelWidth }
-    /// 控件左沿：118 + 8 = 138。
+    /// 控件左沿：130 + 8 = 138。
     static var controlLeft: CGFloat { labelRight + gap }
-    /// 控件右沿：138 + 250 = 388。
+    /// 控件右沿：138 + 286 = 424。
     static var controlRight: CGFloat { controlLeft + controlWidth }
-    /// 读数块宽：46 + 4 + 52 = 102。
+    /// 读数块宽：46 + 4 + 58 = 108。
     static var readoutWidth: CGFloat { valueWidth + readoutGap + unitWidth }
     /// 读数右沿 = 面板右 padding：560 − 20 = 540。
     static var readoutRight: CGFloat { panelWidth - horizontalPadding }
     static var readoutLeft: CGFloat { readoutRight - readoutWidth }
     /// 行 pitch：24 + 8 = 32。
     static var rowPitch: CGFloat { rowHeight + rowSpacing }
+    /// 控件块与读数块之间的走道（560 − 20·2 − 110 − 8 − 286 − 108 = 8）。
+    static var controlToReadout: CGFloat { contentWidth - labelWidth - gap - controlWidth - readoutWidth }
+
+    /// 322 —— 勾选框的点击框宽度，按**标签文字自己**量：16 的盒子 + 4 的间距 + 文字 + 4 的余量。
+    ///
+    /// 302 把它写死成 34，于是「不扩大」（55.8）、「写入 XMP」（73.9）、「移除位置」（67.7）、
+    /// 「半尺寸」（55.8）、「PPI」（39.0）全被截成「…」。勾选框是行修饰，框要跟着自己的字走。
+    static func toggleBoxWidth(for title: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: Font.label, weight: .medium)
+        let text = ceil((title as NSString).size(withAttributes: [.font: font]).width)
+        return 20 + text + 4
+    }
 
     /// 288 §2.4 / 302 §2A —— 字号表。标题 13 只留给面板标题。
     enum Font {
@@ -244,7 +270,8 @@ struct ExportRowGridRow<Label: View, Control: View, Value: View, Unit: View, Acc
             Spacer(minLength: 0)
             readout
         }
-        .frame(height: ExportRowGrid.rowHeight)
+        // 322 —— 两行行（长说明）按内容长高；单行的行仍然正好 24。
+        .frame(minHeight: ExportRowGrid.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(ExportRowGridProbeHost(kind: .row, rowID: rowID))
     }

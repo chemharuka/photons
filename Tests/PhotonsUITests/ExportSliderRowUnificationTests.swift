@@ -50,9 +50,13 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         let window: NSWindow
     }
 
-    private func host(model sheet: ExportSheetModel) throws -> Hosted {
+    /// 322 —— 水印不透明度在「输出后」段里；量它的行得把那一段展开。
+    private func host(model sheet: ExportSheetModel, expanded: Bool = true) throws -> Hosted {
         NSApplication.shared.setActivationPolicy(.accessory)
-        let host = NSHostingView(rootView: ExportSheetView(model: sheet))
+        let store: ExportSectionCollapseStore = expanded
+            ? .memory([ExportSheetView.afterSection: true])
+            : .memory()
+        let host = NSHostingView(rootView: ExportSheetView(model: sheet, sectionStore: store))
         host.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)

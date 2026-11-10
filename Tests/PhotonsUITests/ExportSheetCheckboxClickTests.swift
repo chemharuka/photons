@@ -208,7 +208,9 @@ final class ExportSheetCheckboxClickTests: XCTestCase {
         let hosted = try host(model: sheet)
         let probe = try toggleProbe("export.ppi.enabled", in: hosted.host)
         let rect = probe.convert(probe.bounds, to: nil)
-        XCTAssertEqual(rect.width, 34.5, accuracy: 2.0)
+        // 322 —— 框宽跟着自己的字走（302 的 34 装不下「PPI」的 39，界面上是「PP…」）。
+        XCTAssertEqual(rect.width, ExportRowGrid.toggleBoxWidth(for: "PPI"), accuracy: 1.0)
+        XCTAssertLessThan(rect.minX + 7, rect.maxX, "点击点仍在盒子里")
         XCTAssertEqual(sheet.preset.ppi, 240)
 
         click(probe, in: hosted.window)

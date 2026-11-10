@@ -295,7 +295,8 @@ final class ExportSheetLayout288Tests: XCTestCase {
 
     func testQualityIsShownAsPercentAndWritesTheStoredFraction() throws {
         let sheet = model()
-        let hosted = try host(model: sheet, expanded: false)
+        // 322 —— 水印不透明度进了「输出后」段，读数要量它就得把那一段展开。
+        let hosted = try host(model: sheet, expanded: true)
 
         let quality = try numberField("export.quality", in: hosted.host)
         XCTAssertEqual(quality.stringValue, "85", "默认 0.85 必须显示 85")
