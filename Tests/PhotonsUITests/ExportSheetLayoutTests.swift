@@ -47,7 +47,7 @@ final class ExportSheetLayoutTests: XCTestCase {
         _ = NSApplication.shared
         let host = NSHostingView(rootView: ExportSheetView(model: sheet))
         host.frame = NSRect(x: 0, y: 0, width: 620, height: height)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

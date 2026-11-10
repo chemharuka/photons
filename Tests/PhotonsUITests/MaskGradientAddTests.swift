@@ -51,12 +51,12 @@ final class MaskGradientAddTests: XCTestCase {
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = loupe.view
         loupe.canvasView.frame = window.contentLayoutRect
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)
         // The 蒙版 workspace: the chrome's owner, and the state the user is in when they pick 新建.

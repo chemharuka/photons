@@ -101,7 +101,7 @@ final class HighlightCeilingRowTests: XCTestCase {
     func testTheRenderedLightCardCarriesTheRowAfterTheToneRows() {
         let host = NSHostingView(rootView: InspectorView(session: CatalogSession()))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: 2600)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: true)
         window.contentView = host
         Self.windows.append(window)

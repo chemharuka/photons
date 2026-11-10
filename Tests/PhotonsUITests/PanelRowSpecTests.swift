@@ -253,7 +253,7 @@ final class PanelRowSpecTests: XCTestCase {
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state,
                                                          cardSpecs: specs))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: Self.panelHeight)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

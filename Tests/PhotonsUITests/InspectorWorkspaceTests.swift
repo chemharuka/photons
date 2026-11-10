@@ -520,7 +520,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         let state = state ?? InspectorWorkspaceState()
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: width, height: height)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

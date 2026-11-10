@@ -42,7 +42,7 @@ final class NativeTrafficLightsTests: XCTestCase {
     /// 同 styleMask 的裸 `NSWindow`，只做对照：系统自己会把三颗按钮放在哪。
     private func makeBare(_ size: NSSize) -> NSWindow {
         _ = NSApplication.shared
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+        let window = TestWindows.make(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable,
                                           .fullSizeContentView],
                               backing: .buffered,

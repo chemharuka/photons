@@ -553,12 +553,12 @@ final class ZoomGlassSliderTests: XCTestCase {
         controller.autoRenderEnabled = false
         controller.collectsHistogram = false
         controller.reducesMotion = true
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = controller.view
         controller.canvasView.frame = window.contentLayoutRect
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         controller.view.layoutSubtreeIfNeeded()
         pump(0.05)
 

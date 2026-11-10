@@ -435,7 +435,7 @@ final class BlackAndWhiteCardTests: XCTestCase {
         let state = InspectorWorkspaceState(.colour)   // 2026-10-28: 黑白 lives in 色彩 now
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: width, height: Self.panelHeight)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()
@@ -489,10 +489,10 @@ final class BlackAndWhiteCardTests: XCTestCase {
                            onCommit: @escaping (Double) -> Void,
                            _ body: (FieldHarness) throws -> Void) rethrows {
         NSApplication.shared.setActivationPolicy(.accessory)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 60),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 240, height: 60),
                               styleMask: [.titled], backing: .buffered, defer: false)
         Self.windows.append(window)
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
 
         let controller = NumberFieldController(row: row, fontSize: 10, onCommit: onCommit)
         let field = NumberTextField(frame: NSRect(x: 10, y: 10, width: 120, height: 18))

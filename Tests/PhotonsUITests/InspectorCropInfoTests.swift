@@ -338,7 +338,7 @@ final class InspectorCropInfoTests: XCTestCase {
         _ = NSApplication.shared
         let host = NSHostingView(rootView: InspectorView(session: session))
         host.frame = NSRect(x: 0, y: 0, width: inspectorWidth, height: 800)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         pump(window)

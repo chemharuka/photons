@@ -77,10 +77,10 @@ final class ExportSheetCheckboxClickTests: XCTestCase {
         NSApplication.shared.setActivationPolicy(.accessory)
         let host = NSHostingView(rootView: ExportSheetView(model: sheet))
         host.frame = NSRect(x: 0, y: 0, width: 620, height: 900)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.contentView = host
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.5))
         host.layoutSubtreeIfNeeded()

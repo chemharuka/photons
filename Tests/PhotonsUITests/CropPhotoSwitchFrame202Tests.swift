@@ -78,10 +78,10 @@ final class CropPhotoSwitchFrame202Tests: XCTestCase {
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
-        let window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 1100, height: 760),
+        let window = TestWindows.make(contentRect: NSRect(x: 200, y: 200, width: 1100, height: 760),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = loupe.view
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)
         let deadline = Date().addingTimeInterval(2)

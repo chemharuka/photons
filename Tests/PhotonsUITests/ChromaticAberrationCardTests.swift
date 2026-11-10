@@ -593,7 +593,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
         // 调整 is the default workspace, and 开发 is its sixth card — the card this task added to.
         let host = NSHostingView(rootView: InspectorView(session: session))
         host.frame = NSRect(x: 0, y: 0, width: width, height: Self.panelHeight)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

@@ -284,11 +284,11 @@ final class ChecklistLayoutTests: XCTestCase {
 
     private func makeBar() -> FilterBarView {
         let bar = FilterBarView()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 120),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 700, height: 120),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = bar
         bar.frame = NSRect(x: 0, y: 0, width: 700, height: 120)
-        window.orderFront(nil)
+        TestWindows.show(window)
         windows.append(window)
         // The app's loop: a click writes through the session, the session calls back into `update`.
         bar.onChange = { [weak bar] next in bar?.update(filter: next, cameraKeys: []) }
@@ -305,12 +305,12 @@ final class ChecklistLayoutTests: XCTestCase {
         popover.animates = false
         popover.contentViewController = controller
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
                               styleMask: [.titled], backing: .buffered, defer: false)
         let anchor = NSButton(title: "anchor", target: nil, action: nil)
         window.contentView = anchor
         anchor.frame = NSRect(x: 40, y: 60, width: 90, height: 24)
-        window.orderFront(nil)
+        TestWindows.show(window)
         windows.append(window)
 
         controller.reload(rows)

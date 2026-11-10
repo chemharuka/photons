@@ -39,10 +39,10 @@ final class CropBarLayoutTests: XCTestCase {
         let (session, _) = try CropUITestSupport.makeSession(in: workDir)
         let controller = CropToolController(session: session)
         let bar = CropToolBar(frame: NSRect(x: 0, y: 0, width: 900, height: 34))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 60),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 900, height: 60),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = bar
-        window.orderFront(nil)
+        TestWindows.show(window)
         bar.controller = controller
         return (bar, controller, session, window)
     }

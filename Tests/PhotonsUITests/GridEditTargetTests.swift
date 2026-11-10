@@ -76,7 +76,7 @@ final class GridEditTargetTests: XCTestCase {
 
     /// A grid + strip over the same session, laid out in a window so the frames exist.
     private func makeViews(session: CatalogSession) -> (AssetGridController, FilmstripController, NSWindow) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1400, height: 900))

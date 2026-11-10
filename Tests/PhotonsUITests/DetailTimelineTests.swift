@@ -48,7 +48,7 @@ final class DetailTimelineTests: XCTestCase {
         controller.autoRenderEnabled = false
         controller.collectsHistogram = false
         controller.frameSource = source
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = controller.view
         controller.canvasView.frame = window.contentLayoutRect

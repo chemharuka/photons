@@ -56,7 +56,7 @@ final class LoupeFirstFrameTests: XCTestCase {
         controller.autoRenderEnabled = true
         controller.collectsHistogram = true
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
                               styleMask: [.titled], backing: .buffered, defer: false)
         windows.append(window)
         window.contentView = controller.view
@@ -71,7 +71,7 @@ final class LoupeFirstFrameTests: XCTestCase {
         XCTAssertNil(controller.lastFrame, "a frame cannot be presented off-screen")
 
         // The user's window appears. From here on nothing touches the camera.
-        window.orderFront(nil)
+        TestWindows.show(window)
         let appeared = waitFor(30) { controller.lastFrame != nil }
         let stats = controller.developmentStats
         XCTContext.runActivity(named: "first frame diagnostics") { _ in

@@ -334,7 +334,7 @@ final class MissingFilesUITests: XCTestCase {
     private static func host(session: CatalogSession) throws -> NSView {
         let host = NSHostingView(rootView: InspectorView(session: session))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: 800)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

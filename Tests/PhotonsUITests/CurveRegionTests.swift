@@ -495,10 +495,10 @@ final class CurveRegionTests: XCTestCase {
         // A *titled* window on purpose: a borderless one never becomes key, and a SwiftUI gesture in a
         // non-key window ignores the synthetic events. `makeKeyAndOrderFront` is what makes the press
         // below a real one — the same click the owner made in the app.
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.contentView = host
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         windows.append(window)
         host.layoutSubtreeIfNeeded()
         return Hosted(host: host, window: window)

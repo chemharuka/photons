@@ -411,10 +411,10 @@ final class CropPanelTests: XCTestCase {
         let controller = CropToolController(session: session)
         XCTAssertTrue(controller.begin())
         let bar = CropToolBar(frame: NSRect(x: 0, y: 0, width: 900, height: 34))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1700, height: 60),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1700, height: 60),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = bar
-        window.orderFront(nil)
+        TestWindows.show(window)
         defer { window.orderOut(nil) }
         bar.controller = controller
 

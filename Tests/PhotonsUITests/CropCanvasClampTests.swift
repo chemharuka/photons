@@ -168,10 +168,10 @@ final class CropCanvasClampTests: XCTestCase {
         loupe.collectsHistogram = false
         // A real window with a real canvas: the projection is `bounds × backingScale`, and a canvas
         // that was never laid out has no size (every number below would be degenerate).
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = loupe.view
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.canvasView.frame = NSRect(origin: .zero, size: window.contentLayoutRect.size)
         loupe.view.layoutSubtreeIfNeeded()
         CropUITestSupport.pump(0.05)

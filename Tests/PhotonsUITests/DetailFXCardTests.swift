@@ -82,7 +82,7 @@ final class DetailFXCardTests: XCTestCase {
         let state = InspectorWorkspaceState(.adjust)
         let host = NSHostingView(rootView: InspectorView(session: session, workspaces: state))
         host.frame = NSRect(x: 0, y: 0, width: 330, height: 4200)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.contentView = host
         host.layoutSubtreeIfNeeded()

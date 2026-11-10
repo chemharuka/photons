@@ -211,7 +211,7 @@ final class LoupeRenderTests: XCTestCase {
     func testCanvasLayerEDRFlagFollowsTheDisplayHeadroom() throws {
         let controller = LoupeController(session: CatalogSession())
         controller.autoRenderEnabled = false
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
                               styleMask: [.titled], backing: .buffered, defer: false)
         defer { window.orderOut(nil) }
         window.contentView = controller.view

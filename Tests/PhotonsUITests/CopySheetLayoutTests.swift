@@ -20,7 +20,7 @@ final class CopySheetLayoutTests: XCTestCase {
     // MARK: §1 — the sheet belongs to the editor window
 
     func testThePanelIsASheetOnTheEditorWindow() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered,
                               defer: false)

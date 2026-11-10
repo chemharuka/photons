@@ -73,10 +73,10 @@ final class PanFollowTests: XCTestCase {
         let loupe = LoupeController(session: session)
         loupe.autoRenderEnabled = false
         loupe.collectsHistogram = false
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 200, y: 200), size: Self.canvas),
+        let window = TestWindows.make(contentRect: NSRect(origin: NSPoint(x: 200, y: 200), size: Self.canvas),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = loupe.view
-        window.orderFront(nil)
+        TestWindows.show(window)
         loupe.view.layoutSubtreeIfNeeded()
         windows.append(window)
         CropUITestSupport.pump(0.05)

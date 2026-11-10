@@ -70,12 +70,12 @@ final class HistogramPointerReadoutTests: XCTestCase {
         controller.autoRenderEnabled = false
         controller.collectsHistogram = false
         controller.reducesMotion = true
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: canvasPoints),
+        let window = TestWindows.make(contentRect: NSRect(origin: .zero, size: canvasPoints),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = controller.view
         controller.canvasView.frame = NSRect(origin: .zero, size: canvasPoints)
         windows.append(window)
-        window.orderFront(nil)
+        TestWindows.show(window)
         controller.view.layoutSubtreeIfNeeded()
         pump(0.05)
         controller.frameSource = LoupeController.FrameSource(url: url, identity: identity,

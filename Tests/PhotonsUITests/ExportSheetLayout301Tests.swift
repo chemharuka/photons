@@ -73,10 +73,10 @@ final class ExportSheetLayout301Tests: XCTestCase {
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0,
                             width: ExportRowGrid.panelWidth, height: ExportRowGrid.contentMaxHeight)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
+        let window = TestWindows.make(contentRect: host.frame, styleMask: [.titled],
                               backing: .buffered, defer: false)
         window.contentView = host
-        window.makeKeyAndOrderFront(nil)
+        TestWindows.show(window, key: true)
         host.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.5))
         host.layoutSubtreeIfNeeded()

@@ -93,7 +93,7 @@ enum CropUITestSupport {
         editor.session.mode = .loupe
         editor.rootView.loupeController.autoRenderEnabled = false
         editor.rootView.loupeController.collectsHistogram = false
-        editor.window?.orderFront(nil)
+        TestWindows.show(editor.window)
         editor.window?.contentView?.layoutSubtreeIfNeeded()
         editor.rootView.needsLayout = true
         editor.rootView.layoutSubtreeIfNeeded()
@@ -123,7 +123,7 @@ enum CropUITestSupport {
         _ = NSApplication.shared
         let controller = EditorWindowController(size: size)
         let window = controller.window!
-        window.orderFront(nil)
+        TestWindows.show(window)
         window.setContentSize(size)
         window.contentView?.layoutSubtreeIfNeeded()
         pump(0.05)
