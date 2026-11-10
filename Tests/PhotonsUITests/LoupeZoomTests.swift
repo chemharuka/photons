@@ -344,15 +344,34 @@ final class LoupeZoomTests: XCTestCase {
         XCTAssertEqual(moved.zoom, state.zoom, accuracy: 1e-12, "panning never changes the zoom")
     }
 
-    func testPanIsRotatedIntoSourceSpace() {
-        let f = framing(degrees: 30)
-        let state = actual(zoom: 2)
-        let moved = f.panning(state, byContent: (x: 100, y: 0))
-        let dx = moved.centerX - state.centerX
-        let dy = moved.centerY - state.centerY
-        XCTAssertEqual(hypot(dx, dy), 50, accuracy: 1e-9, "magnitude is still delta/zoom")
-        XCTAssertEqual(dx, 50 * cos(30 * .pi / 180), accuracy: 1e-9)
-        XCTAssertEqual(dy, 50 * sin(30 * .pi / 180), accuracy: 1e-9)
+    /// 358 — a pan is a **screen**-space quantity, and the straighten must not be applied to it here.
+    ///
+    /// The window centre is a point in the same frame pixels the crop rect lives in
+    /// (`LoupeMapping.framePoint`, `FrameTransform.windowInS3`), and that space is axis-aligned with
+    /// the canvas; θ belongs to the picture and is applied by the projection alone. Until 358 this
+    /// method turned the delta by `R(θ)` on the way in, so the picture came out turned **twice**: a
+    /// horizontal drag kept its length but arrived θ off the screen axis (30° here, i.e. `50·cos30`
+    /// and `50·sin30` of window travel). The assertion below is a 1e-9 equality, not a tolerance —
+    /// the delta is either turned or it is not.
+    func testPanIsNotRotatedIntoSourceSpace() {
+        for degrees in [0.0, 9.0, 15.0, 30.0, 45.0] {
+            let f = framing(degrees: degrees)
+            let state = actual(zoom: 2)
+            let moved = f.panning(state, byContent: (x: 100, y: 0))
+            let dx = moved.centerX - state.centerX
+            let dy = moved.centerY - state.centerY
+            XCTAssertEqual(dx, 50, accuracy: 1e-9,
+                           "\(degrees)°: the window did not move delta/zoom in x")
+            XCTAssertEqual(dy, 0, accuracy: 1e-9, "\(degrees)°: the window moved off the screen axis")
+            // …and that is exactly what the projection makes the picture do: 100 device px along
+            // screen x, nothing in y, whatever the angle.
+            let a = f.mapping(of: state).viewPoint(sourceX: state.centerX, sourceY: state.centerY)
+            let b = f.mapping(of: moved).viewPoint(sourceX: state.centerX, sourceY: state.centerY)
+            XCTAssertEqual(b.x - a.x, -100, accuracy: 1e-6,
+                           "\(degrees)°: the picture did not travel the drag along screen x")
+            XCTAssertEqual(b.y - a.y, 0, accuracy: 1e-6,
+                           "\(degrees)°: the picture slid \(b.y - a.y) px off the screen axis")
+        }
     }
 
     /// The picture may leave the frame now, so a drag is no longer stopped with the window's far edge on

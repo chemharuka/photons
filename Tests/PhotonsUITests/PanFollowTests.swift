@@ -330,33 +330,67 @@ final class PanFollowTests: XCTestCase {
 
     // MARK: - 3. straighten keeps the picture on the screen's axes
 
-    /// With the picture straightened the pan is still a screen-axis translation: the hand moves right,
-    /// the photograph moves right — it does not slide along the picture's own rotated axis.
-    /// (`LoupeFraming.panning` rotates the delta into source space and the projection rotates it back,
-    /// which is exact, so the tolerance here is the measurement's, not the maths'.)
+    /// With the picture straightened the pan is still a **screen-axis translation**: the hand moves
+    /// right, the photograph moves right by the same 120 pt — it does not slide along the picture's
+    /// own rotated axis, and it does not lose any of its length to the rotation.
+    ///
+    /// 358 — this is the measurement the fix was written against. `panning` used to turn the delta
+    /// by `R(θ)` before adding it to the window centre, but that centre lives in the **frame** space
+    /// (`LoupeMapping.framePoint`: crop rect ⟷ canvas, axis-aligned, no rotation) — the θ belongs to
+    /// the picture and is applied by the projection alone. Turned twice, `(+120, 0)` arrived as
+    /// `(118.5, 19.0)` at 9° and `(84.9, 84.9)` at 45°: the right length, the wrong axis.
+    ///
+    /// Five angles × two directions, each on its own window so one clamped drag cannot bias the next
+    /// row: direction off the screen axis ≤ 2 pt, length ratio 1.000 ± 0.005, both axes.
     func testStraightenedPictureStillPansAlongTheScreenAxis() throws {
-        for degrees in [9.0, 45.0] {
+        var table: [String] = []
+        var measured: [String: CGPoint] = [:]
+        for degrees in [0.0, 9.0, 15.0, 30.0, 45.0] {
             let (loupe, session, window) = try makeLoupe()
             defer { window.orderOut(nil) }
             session.applyEdit { $0.geometry.rotationDegrees = degrees }
             CropUITestSupport.pump(0.02)
             oneToOne(loupe)
 
-            let before = loupe.viewState
-            let grabbed = try sourcePixel(loupe, at: Self.centre)
-            let a = try screenPoint(loupe, of: grabbed, in: before)
-            loupe.panImage(byPoints: CGSize(width: 120, height: 0))
-            CropUITestSupport.pump(0.02)
-            let after = loupe.viewState
-            let b = try screenPoint(loupe, of: grabbed, in: after)
-            let shift = CGPoint(x: b.x - a.x, y: b.y - a.y)
-            print(String(format: "④ straighten %.0f° · hand(120,0)→picture(%.2f,%.2f)pt",
-                         degrees, shift.x, shift.y))
-            XCTAssertGreaterThanOrEqual(shift.x, 119,
-                                        "\(degrees)°: the picture did not travel 120 pt along screen x")
-            XCTAssertLessThanOrEqual(abs(shift.y), 2,
-                                     "\(degrees)°: the picture slid off the screen axis (y \(shift.y) pt)")
+            // `panImage(byPoints:)` takes **window** points (y up), so a hand moving down is −y.
+            let rows: [(axis: String, hand: CGSize, horizontal: Bool)] = [
+                ("horizontal", CGSize(width: 120, height: 0), true),
+                ("vertical", CGSize(width: 0, height: -120), false),
+            ]
+            for row in rows {
+                let before = loupe.viewState
+                let grabbed = try sourcePixel(loupe, at: Self.centre)
+                let a = try screenPoint(loupe, of: grabbed, in: before)
+                loupe.panImage(byPoints: row.hand)
+                CropUITestSupport.pump(0.02)
+                let b = try screenPoint(loupe, of: grabbed, in: loupe.viewState)
+                let shift = CGPoint(x: b.x - a.x, y: b.y - a.y)
+                let length = hypot(shift.x, shift.y)
+                let ratio = length / 120
+                let angle = atan2(shift.y, shift.x) * 180 / .pi
+                let offAxis = row.horizontal ? abs(shift.y) : abs(shift.x)
+                let along = row.horizontal ? shift.x : shift.y
+                measured["\(Int(degrees))° \(row.axis)"] = shift
+                table.append(String(format: "%.0f°%@ Δ(%.2f,%.2f) ∠%.2f° ×%.4f",
+                                    degrees, row.horizontal ? "→" : "↓",
+                                    shift.x, shift.y, angle, ratio))
+                XCTAssertGreaterThanOrEqual(along, 119,
+                                            "\(degrees)° \(row.axis): the picture did not travel 120 pt "
+                                            + "along the screen axis (moved \(along) pt)")
+                XCTAssertLessThanOrEqual(offAxis, 2,
+                                         "\(degrees)° \(row.axis): the picture slid off the screen axis "
+                                         + "by \(offAxis) pt (\(shift.x), \(shift.y))")
+                XCTAssertEqual(ratio, 1, accuracy: 0.005,
+                               "\(degrees)° \(row.axis): 120 pt of hand was \(length) pt of picture")
+            }
         }
+        print("④ straighten pans on the screen axes · " + table.joined(separator: " · "))
+
+        // The 45° vector, spelled out: half a right angle is where the old rotation ate exactly the
+        // half of the drag it turned into y (85.0, 85.0 — the same length, 45° off the axis).
+        let fortyFive = try XCTUnwrap(measured["45° horizontal"])
+        XCTAssertEqual(fortyFive.x, 120, accuracy: 2, "45°: 120 pt right did not arrive as 120 pt right")
+        XCTAssertEqual(fortyFive.y, 0, accuracy: 2, "45°: 120 pt right arrived with \(fortyFive.y) pt of y")
     }
 
     // MARK: - 4. the edge rule is untouched
