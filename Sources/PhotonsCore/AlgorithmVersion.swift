@@ -90,7 +90,13 @@ public enum StageAlgorithmVersion {
     /// shadows scale with the white end; 073C's blacks travel and 073B's EV shoulder are unchanged.
     /// **2** — 073C: `blacks`/`whites` are no longer an affine level alone; the blacks travel is an EV
     /// toe for its first half and an EV + black-point *level* move above |50| (`s1_scene_linear.metal`).
-    public static let sceneLinear = 8
+    /// **9** — 342: the crush side of the blacks travel got a second, wider black-point level
+    /// (`B_LEV_CRUSH`, linear-light window 0.020…0.135) so `blacks = −100` reaches **code 64** instead
+    /// of code 48. It rides `smoothstep(0.5, 1, |blacks|/100)`, which is exactly 0 at `|blacks| ≤ 50`,
+    /// so the whole first half of the travel is byte-identical to 8 (and to every generation before
+    /// it) — only a document with **blacks < −50** renders different pixels. The bump is the statement
+    /// that the stage's arithmetic grew a term, not that every frame moved.
+    public static let sceneLinear = 9
     /// **6** — 215: the linear gradient lost its `smoothstep` and now ramps **linearly across the
     /// whole span**, with `feather` split outside the two lines instead of centring a symmetric band
     /// on ½. `alpha = clamp((t' + f/2)/(1 + f))`: 10 % of the span is 0.10 at `f = 0` (it used to be
@@ -127,7 +133,10 @@ public enum StageAlgorithmVersion {
     /// contrast is 0 is bit-identical to 3 (the arithmetic it used to run was the identity).
     /// **3** — 079 A3: a mask's `temperature`/`tint` are `WhiteBalanceSolver.gain` (linear light) in
     /// the global coordinate instead of `LightGroup.whiteBalanceGains` (display-encoded, 2.2× weak).
-    public static let localApply = 4
+    /// **5** — 342: S1.6 calls the same `s1_end_points`, so a mask that carries `blacks < −50` now runs
+    /// the second crush level too (a full-coverage mask stays within 1 code of the global slider).
+    /// Masks with `blacks ≥ −50` are bit-identical to 4.
+    public static let localApply = 5
     /// **2** — 137: a curve may descend as a whole (film-negative inversion). A document whose curve
     /// was already non-decreasing keeps its table byte for byte, but a document holding an inverted
     /// curve used to render the identity (buildOne's fold fallback) and now renders the inverted

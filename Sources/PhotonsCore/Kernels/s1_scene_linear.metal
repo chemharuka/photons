@@ -65,9 +65,15 @@ using namespace metal;
 // black point off the floor. So the travel is two mechanisms, blended:
 //
 //     t = blacks/100                       a = |t|
-//     m = smoothstep(0.5, 1, a)            0 for the whole first half, 1 at the end
-//     EV:    v *= exp2(B_EV · t · (1 − ½m) · wb)      — `wb` is the existing 7 EV toe
+//     m = smoothstep(0.2, 1, a)            (`a449462`: the level enters at 20, not 50)
+//     EV:    v *= exp2(B_EV · t · wb)      — `wb` is the existing 7 EV toe, full 3 EV
 //     level: v  = toe(v + B_LEV · t · m · wl, LEV_KNEE),  wl = 1 − smoothstep(LEV_LO_EV, LEV_HI_EV, L)
+//     342:   v  = toe(v + B_LEV·t·m·wl − B_LEV_CRUSH·a·m₅·wl₂),  m₅ = smoothstep(0.5, 1, a)
+//            — the crush side's own, wider level: `blacks = −100` reaches code 64. `m₅` is exactly 0
+//            at `a ≤ 0.5`, so the first half (and ±25/±50, already on this instantiation) is byte-still.
+//            Its window is in **linear light**, `1 − smoothstep(0.02, 0.135, luma)`, because a
+//            log-domain window that has to fall 0.05 between code 64 and code 103 folds the map;
+//            see `B_LEV_CRUSH` in `tone_shape.metal`.
 //
 // **A = B_EV is forced, not chosen.** The invariant "the first half of the travel is *bit-identical*
 // to 073B" means `exp2(A·t·(1 − ½·0)·wb)` must be `exp2(B_EV·t·wb)` for every |t| ≤ 0.5, i.e. A = 3.

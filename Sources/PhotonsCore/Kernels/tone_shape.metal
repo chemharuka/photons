@@ -198,6 +198,35 @@ constant float LEV_LO_EV = -6.0;
 constant float LEV_HI_EV = -1.0;
 constant float LEV_KNEE = 1e-3;
 
+// 342 — the **crush side's own level**, and why it is ~10× `B_LEV` rather than 2×.
+//
+// The brief (2026-11-10): 「黑色的色阶调节范围扩大，现在 −100 大概只能让亮度 32/255 的变成 0，扩大到
+// −100 能让亮度 64/255 变为 0」. `B_LEV` at full travel moves the black point by 0.006 linear = sRGB
+// **code 17.9**, and with its window (0.73 at code 64) it lands on **code 48.3** — measured, see
+// `BlacksTravelTests`. Code 64 is 0.0513 linear, so a level term that reaches it cannot also be the
+// one that reaches 0.006: a *single* coefficient can only be one black point. Doubling `B_LEV` to
+// 0.012 puts the black point at code 25 — still 40 codes short.
+//
+// So the crush side gets a **second** level with its own window and its own amplitude. Two properties
+// force the shape rather than taste:
+//
+//   · `m₅ = smoothstep(0.5, 1, |blacks|/100)` — **exactly 0 at |blacks| ≤ 50**, and its slope is 0
+//     there, so the whole first half of the travel keeps 073C's bytes (including ±25 and ±50, which
+//     already run this instantiation) and the slider has no seam at 50.
+//   · the window is in **linear light**, not EV, because the crush is a black-point *move*: `off(v)`
+//     must fall from ~0.05 at code 64 to 0 at code 103, and a log-domain smoothstep packs that fall
+//     into the region where `v` is smallest, where `d(off)/dv > 1` would fold the transfer. In linear
+//     light `|d(off)/dv| ≤ 1.5·B_LEV_CRUSH/(CRUSH_HI − CRUSH_LO) = 0.78 < 1` — monotone by
+//     construction, which the 0…255 ramp in `BlacksTravelTests` checks code by code.
+//
+// B_LEV_CRUSH = 0.060 is linear **0.060** = sRGB code 69; with the window's own weight at code 64
+// (0.82) the term lands 0.0493 there, and 0.0493 + `B_LEV`'s 0.0044 > 0.0513 — code 64 goes to 0 and
+// code 65 stays above it. The window (0.020 … 0.135 = sRGB code 39 … 103) is what keeps 18 % grey
+// **bit-identical**: `wl₂(0.18) == 0`, so the mid-tones move by nothing at all.
+constant float B_LEV_CRUSH = 0.060;
+constant float CRUSH_LO = 0.020;
+constant float CRUSH_HI = 0.135;
+
 // Whites: an EV move that rises monotonically through display white, plus a **multiplicative** level.
 //
 // 127: the level used to be additive and windowed (`+ W_LEV·Δw·|Δw|·ww`, W_LEV = 0.06), so at −2 EV
@@ -269,6 +298,10 @@ static inline float3 s1_toe(float3 x) {
 ///     t = blacks/100, a = |t|, m = smoothstep(0.2, 1, a)          (2026-10-29: enters at 20)
 ///     EV:    v *= exp2(B_EV · t · wb)                             wb = the 7 EV toe
 ///     level: v  = toe(v + B_LEV · t · m · wl)                     wl = the −6…−1 EV window
+///     342:   v  = toe(v + B_LEV·t·m·wl − B_LEV_CRUSH·a·m₅·wl₂)    m₅ = smoothstep(0.5, 1, a),
+///                                                                 wl₂ = 1 − smoothstep(0.02, 0.135, luma)
+///            └ the crush side only (`t < 0`), and exactly 0 for `a ≤ 0.5`: `blacks = −100` moves the
+///              black point to code 64 instead of the code 48 `B_LEV` alone reached. See `B_LEV_CRUSH`.
 ///     whites: v *= 2^(W_EV·w·ww) · 1/(1 − W_LEV·w·|w|)            ww = the EV shoulder, level global (127)
 ///
 /// **147 — whites is read on the unexposed scale.** S1's exposure gain `g = 2^EV` is already in `v`
@@ -310,12 +343,21 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites,
         // 增益又被砍成 1.5 EV。现在电平的窗口抬到 −1.0 EV、增益保留满 3 EV，于是 30 % 码值真的变暗
         // （−100：30 % → 24.8 %，20 % → 12.9 %）。
         float mb = smoothstep(0.2, 1.0, abs(db));
+        // 342 — the crush side's own blend: **exactly 0 for |blacks| ≤ 50** (and with a zero slope
+        // there), so the first half of the travel keeps 073C's bytes and the slider has no seam.
+        float m5 = smoothstep(0.5, 1.0, abs(db));
 
         // The level: the black point moves by `off` linear units over its own window. The window is a
         // weight in L, not a clip, so it is continuous at both ends; `wl = 0` makes `off` ±0 and the
         // pixel bit-still.
         float wl = 1.0 - smoothstep(LEV_LO_EV, LEV_HI_EV, L);
         float off = B_LEV * db * mb * wl;
+        // 342 — the second half's extra crush (see the constants above). It is `wl₂`'s **linear**
+        // window, and the subtraction of an exact `+0` at `m5 == 0` is bit-identical to the old line.
+        if (db < 0.0) {
+            float wl2 = 1.0 - smoothstep(CRUSH_LO, CRUSH_HI, luma);
+            off -= B_LEV_CRUSH * abs(db) * m5 * wl2;
+        }
         float gain = exp2(B_EV * db * wb);
 
         // **The order depends on the sign, and that is what keeps the response monotone.**

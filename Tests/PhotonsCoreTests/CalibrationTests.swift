@@ -179,7 +179,7 @@ final class CalibrationTests: XCTestCase {
         XCTAssertEqual(neutral.keyMaterial(.sceneLinear, algorithmVersion: false),
                        "ev=0.00000;temp=shot;tint=shot;hlr=0.00000;wh=0.00000;bl=0.00000")
         XCTAssertEqual(neutral.keyMaterial(.sceneLinear),
-                       "ev=0.00000;temp=shot;tint=shot;hlr=0.00000;wh=0.00000;bl=0.00000;alg=8")
+                       "ev=0.00000;temp=shot;tint=shot;hlr=0.00000;wh=0.00000;bl=0.00000;alg=9")
 
         // A document loaded from the recorded fixtures carries the group too — absent key = zeros.
         for name in ["edit-neutral", "edit-push"] {
