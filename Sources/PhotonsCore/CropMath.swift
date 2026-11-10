@@ -294,11 +294,13 @@ extension AspectLock: Codable {
 /// in closed form (see `inscribedRect`), never by search.
 public struct PerspectiveMap: Sendable, Equatable {
 
-    /// The slider's range, and the one place a document value is clamped. **347** — ±200: the
-    /// travel the user asked for after ±100 ran out on real keystones. It is *only* the clamp and
-    /// the slider's track; the strength is scaled by `strengthUnit`, never by this number (see
-    /// `verticalStrength` for the trap).
-    public static let limit = 200.0
+    /// The slider's range, and the one place a document value is clamped. **353** — ±400: the
+    /// travel 347 opened to ±200 still ran out on narrow pairs (two verticals 20 % of the frame
+    /// apart need v = 208 at a mere 5° of convergence; measured, see `docs/tasks/353-...`). 400 is
+    /// `0.84` of strength, `w ≥ 1 − 0.84/2 = 0.58` — still convex, still no pole. It is *only* the
+    /// clamp and the slider's track; the strength is scaled by `strengthUnit`, never by this
+    /// number (see `verticalStrength` for the trap).
+    public static let limit = 400.0
     /// **347** — the unit the strength is divided by: **100**, hard-wired, no longer `limit`.
     ///
     /// The strength used to read `-vertical / PerspectiveMap.limit * tangentPerUnit`. Widening
@@ -311,7 +313,7 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// of the travel, 200 units is `0.42`, i.e. 12.39° of convergence.
     public static let tangentPerUnit = 0.21
 
-    public var vertical: Double      // clamped −200…200 (347; was ±100)
+    public var vertical: Double      // clamped −400…400 (353; 347 was ±200)
     public var horizontal: Double
 
     public init(vertical: Double, horizontal: Double) {
@@ -319,7 +321,7 @@ public struct PerspectiveMap: Sendable, Equatable {
         self.horizontal = PerspectiveMap.clamp(horizontal)
     }
 
-    /// A value read from a document, made legal: finite and inside ±`limit` (347: ±200).
+    /// A value read from a document, made legal: finite and inside ±`limit` (353: ±400).
     static func clamp(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max(value, -limit), limit)

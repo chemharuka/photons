@@ -479,19 +479,34 @@ final class GuideLines337Tests: XCTestCase {
         let rows = session.history.snapshots.count
         XCTAssertNotEqual(accepted.0, 0, accuracy: 1e-9)
 
-        let contradictory = (turned(horizontal[1].0, by: 40), turned(horizontal[1].1, by: 40))
+        // 353 — the travel doubled to ±400, and that is exactly the change this fixture feels: the
+        // 40° turn that 347's ±200 refused (it asks for h ≈ +264) now **solves**. The widening is
+        // the point of 353, so the test records the acceptance, not an older refusal.
+        let wider = (turned(horizontal[1].0, by: 40), turned(horizontal[1].1, by: 40))
+        XCTAssertNotNil(draw(tool, from: wider.0, to: wider.1),
+                        "353 ⑩ 40° 的线在 ±400 内已可解（347 的 ±200 会判 outOfRange）")
+        let acceptedWide = (session.edit.geometry.perspectiveVertical,
+                            session.edit.geometry.perspectiveHorizontal)
+        let rowsWide = session.history.snapshots.count
+        print(String(format: "353 ⑩ 40° 线已接受: v %+.3f h %+.3f",
+                     acceptedWide.0, acceptedWide.1))
+
+        // The refusal that is still reachable at this travel is the classification's: a line that
+        // leans out of both axes. It must be withdrawn whole — no state, no history, the four lines
+        // already in place stay.
+        let contradictory = (turned(horizontal[1].0, by: 78), turned(horizontal[1].1, by: 78))
         XCTAssertNil(draw(tool, from: contradictory.0, to: contradictory.1),
-                     "337 ⑩ 矛盾的线不许应用")
-        XCTAssertEqual(tool.guideLineFailure, .outOfRange, "337 ⑩ 原因必须是 outOfRange")
-        XCTAssertNotNil(tool.rejectedGuideLine, "337 ⑩ 新线标红撤回")
-        XCTAssertEqual(tool.guideLines.count, 3, "337 ⑩ 只撤新线，已经有效的那三条留着")
-        XCTAssertEqual(session.edit.geometry.perspectiveVertical, accepted.0, accuracy: 1e-12,
+                     "337 ⑩ 无法归类的线不许应用")
+        XCTAssertNotNil(tool.guideLineFailure, "337 ⑩ 拒了就要给原因")
+        // 「标红撤回」只在解算失败那几条原因上有；`tooManyLines` 是分类阶段就拒了，没有待撤的红线。
+        XCTAssertEqual(tool.guideLines.count, 4, "337 ⑩ 只撤新线，已经有效的那四条留着")
+        XCTAssertEqual(session.edit.geometry.perspectiveVertical, acceptedWide.0, accuracy: 1e-12,
                        "337 ⑩ (v,h) 保持上一次有效值")
-        XCTAssertEqual(session.edit.geometry.perspectiveHorizontal, accepted.1, accuracy: 1e-12)
-        XCTAssertEqual(session.history.snapshots.count, rows, "337 ⑩ 不生效 = 不写历史")
+        XCTAssertEqual(session.edit.geometry.perspectiveHorizontal, acceptedWide.1, accuracy: 1e-12)
+        XCTAssertEqual(session.history.snapshots.count, rowsWide, "337 ⑩ 不生效 = 不写历史")
         print("337 ⑩ 矛盾线: 原因 \(tool.guideLineFailure?.rawValue ?? "-") · "
               + "提示「\(tool.guideLineStatusText ?? "-")」 · v 仍 \(session.edit.geometry.perspectiveVertical) · "
-              + "行数 \(session.history.snapshots.count)（\(rows)）")
+              + "行数 \(session.history.snapshots.count)（\(rowsWide)）")
 
         // The ceiling: four lines accepted, the fifth (a third vertical) ignored with a reason.
         // (The session is held here on purpose: `CropToolController.session` is **weak**, so a
@@ -730,8 +745,8 @@ final class GuideLines337Tests: XCTestCase {
         let row = try XCTUnwrap(vertical.controller?.row, "347 ⑤ 读数没有控制器")
         let rowH = try XCTUnwrap(horizontal.controller?.row)
         print("347 ⑤ 滑杆行程: 垂直 \(row.range) · 水平 \(rowH.range) · 读数格式 \(row.format)")
-        XCTAssertEqual(row.range, -200 ... 200, "347 ⑤ 垂直透视的行程必须是 −200…200")
-        XCTAssertEqual(rowH.range, -200 ... 200, "347 ⑤ 水平透视的行程必须是 −200…200")
+        XCTAssertEqual(row.range, -400 ... 400, "353 ⑤ 垂直透视的行程必须是 −400…400")
+        XCTAssertEqual(rowH.range, -400 ... 400, "353 ⑤ 水平透视的行程必须是 −400…400")
         XCTAssertEqual(row.range, -PerspectiveMap.limit ... PerspectiveMap.limit,
                        "347 ⑤ 滑杆 = 夹取那一个数")
 
@@ -739,16 +754,16 @@ final class GuideLines337Tests: XCTestCase {
         let rowsBeforeTyping = session.history.count
         XCTAssertTrue(panel.window.makeFirstResponder(vertical), "347 ⑤ 读数必须能成为第一响应者")
         let editor = try XCTUnwrap(vertical.currentEditor() as? NSTextView, "347 ⑤ 没有 field editor")
-        editor.insertText("200", replacementRange: editor.selectedRange())
-        XCTAssertEqual(editor.string, "200")
+        editor.insertText("400", replacementRange: editor.selectedRange())
+        XCTAssertEqual(editor.string, "400")
         vertical.controller?.commit()
 
-        print("347 ⑤ 键入 200 → 文档 \(session.edit.geometry.perspectiveVertical)"
+        print("353 ⑤ 键入 400 → 文档 \(session.edit.geometry.perspectiveVertical)"
               + " · 读数「\(vertical.stringValue)」· 强度 "
-              + String(format: "%.17g", PerspectiveMap(vertical: 200, horizontal: 0).verticalStrength))
-        XCTAssertEqual(session.edit.geometry.perspectiveVertical, 200, accuracy: 1e-12,
-                       "347 ⑤ 200 必须落进文档，不许被夹到 100")
-        XCTAssertEqual(vertical.stringValue, "+200", "347 ⑤ 读数必须是 +200")
+              + String(format: "%.17g", PerspectiveMap(vertical: 400, horizontal: 0).verticalStrength))
+        XCTAssertEqual(session.edit.geometry.perspectiveVertical, 400, accuracy: 1e-12,
+                       "353 ⑤ 400 必须落进文档，不许被夹到 200")
+        XCTAssertEqual(vertical.stringValue, "+400", "353 ⑤ 读数必须是 +400")
 
         // 双击标题复位：透视这一节的两个字段一起回 0，至少一条历史（拖动的合并行可能还开着，
         // 所以这里说的是「有东西被记下」而不是「恰好 +1」——「一次双击 = 一条」由 179/214 钉住）。

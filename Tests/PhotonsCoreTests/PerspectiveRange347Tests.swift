@@ -169,6 +169,7 @@ final class PerspectiveRange347Tests: XCTestCase {
         try requireMetal()
         let travel: [(vertical: Double, horizontal: Double)] = [
             (120, 0), (-120, 0), (150, 0), (-150, 0), (200, 0), (-200, 0),
+            (300, 0), (-300, 0), (400, 0), (-400, 0),   // 353 — 行程到 ±400
         ]
         var smallestW = Double.infinity
         for t in travel {
@@ -206,23 +207,33 @@ final class PerspectiveRange347Tests: XCTestCase {
                      + " · 六档全局最小 %.17g",
                      vertical200.min() ?? .nan, horizontal200.min() ?? .nan,
                      both.min() ?? .nan, smallestW))
+        let vertical400 = cornerW(PerspectiveMap(vertical: 400, horizontal: 0))
+        let horizontal400 = cornerW(PerspectiveMap(vertical: 0, horizontal: 400))
+        let both400 = cornerW(PerspectiveMap(vertical: 400, horizontal: 400))
+        print(String(format: "353 ④ min w: 垂直 400 = %.17g · 水平 400 = %.17g · 双 400 = %.17g",
+                     vertical400.min() ?? .nan, horizontal400.min() ?? .nan, both400.min() ?? .nan))
         XCTAssertGreaterThanOrEqual(vertical200.min() ?? 0, 0.78, "347 ④ 垂直 200 的 w 余量")
         XCTAssertGreaterThanOrEqual(horizontal200.min() ?? 0, 0.78, "347 ④ 水平 200 的 w 余量")
         XCTAssertGreaterThan(both.min() ?? 0, 0, "347 ④ 双 200 仍无奇点")
-        XCTAssertGreaterThanOrEqual(smallestW, 0.78, "347 ④ 六档里最小的 w")
+        XCTAssertGreaterThanOrEqual(vertical400.min() ?? 0, 0.58, "353 ④ 垂直 400 的 w 余量（1 − 0.84/2）")
+        XCTAssertGreaterThanOrEqual(horizontal400.min() ?? 0, 0.58, "353 ④ 水平 400 的 w 余量")
+        XCTAssertGreaterThan(both400.min() ?? 0, 0, "353 ④ 双 400 仍无奇点")
+        XCTAssertGreaterThanOrEqual(smallestW, 0.58, "353 ④ 十档里最小的 w")
     }
 
     // MARK: - the clamp lives on `limit`, the strength on 100
 
     func testTheLimitMovesAndTheUnitDoesNot() {
         print("347 · limit \(PerspectiveMap.limit) · strengthUnit \(PerspectiveMap.strengthUnit)")
-        XCTAssertEqual(PerspectiveMap.limit, 200, "347: limit = 200（只用于夹取与行程）")
+        XCTAssertEqual(PerspectiveMap.limit, 400, "353: limit = 400（只用于夹取与行程）")
         XCTAssertEqual(PerspectiveMap.strengthUnit, 100, "347: 强度分母写死 100")
-        XCTAssertEqual(PerspectiveMap(vertical: 250, horizontal: 0).vertical, 200,
-                       "347: 文档里 250 夹到 200")
-        XCTAssertEqual(PerspectiveMap(vertical: -250, horizontal: 0).vertical, -200)
+        XCTAssertEqual(PerspectiveMap(vertical: 450, horizontal: 0).vertical, 400,
+                       "353: 文档里 450 夹到 400")
+        XCTAssertEqual(PerspectiveMap(vertical: -450, horizontal: 0).vertical, -400)
+        XCTAssertEqual(PerspectiveMap(vertical: 400, horizontal: 0).vertical, 400,
+                       "353: 400 本身不再被夹")
         XCTAssertEqual(PerspectiveMap(vertical: 200, horizontal: 0).vertical, 200,
-                       "347: 200 本身不再被夹")
+                       "353: 200 仍合法（347 的行程未被收回）")
         XCTAssertEqual(PerspectiveMap(vertical: .nan, horizontal: 0).vertical, 0, "347: 非数 → 0")
     }
 }
