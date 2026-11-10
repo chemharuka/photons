@@ -203,8 +203,10 @@ extension InspectorView {
                                            label: CropSection.angle.title)
                       },
                       onEditingChanged: { editing in
-                          guard !editing else { return }
-                          _ = tool?.commitStraighten()
+                          // 356 — press opens the gesture's session; the release writes the angle and
+                          // closes it (`commitStraighten` → one row). Neither end asks the history.
+                          if editing { session.beginToolGesture(tool: "裁切", label: "转动") }
+                          else { _ = tool?.commitStraighten() }
                       })
         }
         .background(CropRowProbeHost(rowID: CorrectionCardRow.straighten.probeID))
@@ -290,7 +292,10 @@ extension InspectorView {
                           _ = session.commitEdit(label: "透视", coalesce: false)
                       },
                       onEditingChanged: { editing in
-                          if !editing { session.commitEdit(label: "透视", coalesce: true) }
+                          // 356 — the drag is the gesture: press opens its session, release closes it
+                          // with one row. Nothing has to know whether a session happened to be open.
+                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
+                          else { session.endToolGesture(label: "透视", coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveVertical.probeID))
             sliderRow(CorrectionCardRow.perspectiveHorizontal.title,
@@ -308,7 +313,9 @@ extension InspectorView {
                           _ = session.commitEdit(label: "透视", coalesce: false)
                       },
                       onEditingChanged: { editing in
-                          if !editing { session.commitEdit(label: "透视", coalesce: true) }
+                          // 356 — the same two ends as 垂直透视.
+                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
+                          else { session.endToolGesture(label: "透视", coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
         }

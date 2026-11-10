@@ -1102,6 +1102,10 @@ public final class CatalogSession {
     /// is exactly the failure this paste-back prevents.
     @discardableResult
     public func undo() -> Bool {
+        // 356 — ⌘Z is a command, not a gesture: a session a gesture left open would be closed *after*
+        // the undo and commit `base → edit`, resurrecting the state ⌘Z had just stepped away from.
+        // Closing first is a no-op when nothing is open, so the door is the same either way.
+        endToolSession()
         guard let model = history.undo() else { return false }
         restore(model)
         persist()
@@ -1162,8 +1166,32 @@ public final class CatalogSession {
         history.beginSession(tool, label: label)
     }
 
-    /// Is a tool session open? A discrete control that writes the document itself (裁切 bar's flips)
-    /// asks this so it can close/reopen the session around its own row (see `CropToolController.flip`).
+    /// 356 — **a slider drag is a gesture: these are its two ends.**
+    ///
+    /// Press: close anything a previous gesture left open (a leak must not swallow this gesture's
+    /// row), then open this one's. Release: close it — one row, `base → edit` — or, when the slider
+    /// was driven without a press at all (a test, a preset, a reset), commit the same one row.
+    ///
+    /// The pair exists so a panel never asks the history whether a session is open: the two calls are
+    /// the same whatever it contains, which is what makes a slider's row — and therefore what ⌘Z
+    /// gives back — independent of it.
+    public func beginToolGesture(tool: String, label: String) {
+        endToolSession()                        // no-op when nothing is open
+        history.beginSession(tool, label: label)
+    }
+
+    @discardableResult
+    public func endToolGesture(label: String, coalesce: Bool = true) -> Bool {
+        if endToolSession(label: label) { return true }
+        return commitEdit(label: label, coalesce: coalesce)
+    }
+
+    /// Is a tool session open?
+    ///
+    /// 356 — **only a gesture may make this true**, and no geometry judgement may read it. The crop
+    /// tool asks nothing of it any more: `CropToolController` opens one on mouse-down and closes it on
+    /// mouse-up, and closes any leftover before a command writes. It survives as the one question a
+    /// *test* can ask ("is a session still open?") and nothing in the geometry paths branches on it.
     public var isToolSessionActive: Bool { history.isSessionActive }
 
     /// 应用: close the session with exactly one snapshot (`base → edit`), or none if nothing moved.
@@ -1189,9 +1217,29 @@ public final class CatalogSession {
         notifyEditObservers(assetID: editedAssetID)
     }
 
+    /// 356 — **the one writer for a command that changes the transform geometry** (双击「垂直透视」,
+    /// a section reset, the card's title). A command is not a gesture, so it closes whatever a gesture
+    /// left open — that close records the crop-so-far, which 应用 would have written anyway — then
+    /// writes the document and commits **one** row.
+    ///
+    /// The three steps are the same whether or not a session was open, which is the whole point: the
+    /// old shape ended-and-reopened a session only if there was one, so the same double-click left one
+    /// row or none depending on what the history happened to contain, and the next ⌘Z therefore put a
+    /// different document back.
+    @discardableResult
+    public func commitGeometryCommand(label: String,
+                                      _ mutate: (inout GeometryGroup) -> Bool) -> Bool {
+        endToolSession()                       // no-op when no gesture is running
+        var changed = false
+        applyEdit { model in changed = mutate(&model.geometry) }
+        guard changed else { return false }
+        return commitEdit(label: label, coalesce: false)
+    }
+
     /// ⇧⌘Z.
     @discardableResult
     public func redo() -> Bool {
+        endToolSession()            // 356 — same rule as `undo()`: a command closes the gesture's session
         guard let model = history.redo() else { return false }
         restore(model)
         persist()
@@ -1416,6 +1464,9 @@ public final class CatalogSession {
                 lastPresetError = nil
                 return false
             }
+            // 356 — a preset is a command: close a gesture's session first, or `commitEdit` answers
+            // `nil` and the preset moves the document with no row (⌘Z then cannot take it back).
+            endToolSession()
             applyEditInPlace { $0 = merged }
             let committed = commitEdit(label: "预设 \(record.name)")
             lastPresetError = committed ? nil : "预设没有落地"
@@ -1710,10 +1761,12 @@ public final class CatalogSession {
 
     /// The live-document half of ⌘V. (See `frameAspect(of:)` for the `destinationAspect` term.)
     private func pasteIntoLiveDocument(_ payload: EditSnapshot) -> SettingsPasteReport? {
-        // A tool session owns the next snapshot (`EditHistory.beginSession`): an edit made inside it
-        // records no row of its own, so a paste here would move the document with nothing to undo.
-        // Refused rather than folded into the tool's base.
-        guard !isToolSessionActive else { return nil }
+        // 356 — a paste is a command, not a gesture: close whatever a gesture left open (its row is
+        // the crop-so-far, which 应用 would have written anyway) instead of **refusing** the paste.
+        // The old `guard !…isSessionActive else { return nil }` made ⌘V do nothing at all
+        // whenever the history happened to hold a session — the user's 「只要历史里有东西…」.
+        // `endToolSession` is a no-op when nothing is open, so the door is the same either way.
+        endToolSession()
         let current = MaskViewState.documentOnly(edit)
         let merged = payload.applied(to: current,
                                      destinationAspect: frameAspect(of: loadedEditAssetID ?? ""))
