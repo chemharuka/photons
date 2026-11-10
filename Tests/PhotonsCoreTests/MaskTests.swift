@@ -552,33 +552,11 @@ final class MaskTests: XCTestCase {
         XCTAssertNil(l.maskAtlas, "no masks: the atlas stage must not exist")
         XCTAssertNil(l.localApply, "no masks: the local stage must not exist")
 
-        let expected: [(String, String, String)] = [
-            ("geometry", "0eddd5f3e95e3f2047bf41a8c13c28b103801c0ec168b65cffae1d94eb8fbd42",
-             "photons-render-v1|keyvec-fixture|6000x4000|1500x1000|1500x1000|pv=2;crop=0.10000,0.05000,0.80000,0.75000;rot=1.50000;flip=10;alg=3"),
-            ("sceneLinear", "cc86187fedbf30311bf7d1b48d1baaa0574ab159394ee7ea604e1575733b10f5",
-             "0eddd5f3e95e3f2047bf41a8c13c28b103801c0ec168b65cffae1d94eb8fbd42|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-5.00000;alg=8"),
-            ("curve", "fa4b02aadb04a0e6934916054ad8dc73f9460ba78a19a78ce01efce2c77bfa2a",
-             "cc86187fedbf30311bf7d1b48d1baaa0574ab159394ee7ea604e1575733b10f5|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000|r=0.000000,0.000000;2.000000,2.000000|g=0.000000,0.000000;2.000000,2.000000|b=0.000000,0.000000;2.000000,2.000000;alg=2"),
-            // 159: the contrast link is seeded by the tone map and feeds colour; alg=3.
-            // 228 换算子后重钉（alg=2→3）
-            ("toneMap", "c9545e6315687f4cc23769269377cddf2509aa81009fef25a4514710585aa302",
-             "fa4b02aadb04a0e6934916054ad8dc73f9460ba78a19a78ce01efce2c77bfa2a|hi=-30.00000;sh=15.00000;alg=7"),
-            // 228 换算子后重钉（alg=2→3）
-            ("contrast", "f8082a2adb05b983c3457782295c4e74e0c0ad2a6d736f32e88ea492cdccd919",
-             "c9545e6315687f4cc23769269377cddf2509aa81009fef25a4514710585aa302|contrast|con=20.00000;alg=3"),
-            // 228 换算子后重钉（alg=2→3）
-            ("color", "a3f011fd5e8100ec622ea0547008285cb79d91027f41866ef3d39c21ee8f994c",
-             "f8082a2adb05b983c3457782295c4e74e0c0ad2a6d736f32e88ea492cdccd919|vib=15.00000;sat=-10.00000;alg=1"),
-            // 228 换算子后重钉（alg=2→3）
-            ("hsl", "81a12874d1193d3cae5c3ae58336fd2c12435a8e3dabb50af04d161e5633344c",
-             "a3f011fd5e8100ec622ea0547008285cb79d91027f41866ef3d39c21ee8f994c|hsl|hsl=bands=0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;20.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=1"),
-            // 228 换算子后重钉（alg=2→3）
-            ("vignette", "403cbf29dc1e3f217053fff1a246c0244ec49aa56c4eaeb7951f9c5d045a43ea",
-             "81a12874d1193d3cae5c3ae58336fd2c12435a8e3dabb50af04d161e5633344c|vig=-40.00000;mid=45.00000;fea=60.00000;alg=3"),
-            // 228 换算子后重钉（alg=2→3）
-            ("display", "9c64f557ba3599822a5a01e14082893d52ca71af3f8f82a9799be94417efae6a",
-             "403cbf29dc1e3f217053fff1a246c0244ec49aa56c4eaeb7951f9c5d045a43ea|sRGB;bits=8;headroom=1.000|1500x1000"),
-        ]
+        // 329 — the vector is composed from the constants (`StageAlgorithmVersion`,
+        // `EditModel.currentProcessVersion`, `DisplayOptions.ceilingKeyString`) in `M1KeyVector`, which
+        // `WindowTests` reads too: the two copies of this table used to be typed by hand and both went
+        // stale in the same way. `M1KeyVector` also records which task moved which token.
+        let expected = M1KeyVector.stages
 
         let actual: [String: String] = [
             "geometry": l.geometry, "sceneLinear": l.sceneLinear, "toneMap": l.toneMap,
@@ -595,11 +573,14 @@ final class MaskTests: XCTestCase {
             "display": keys.display,
         ]
 
-        for (name, digest, canonical) in expected {
+        for (name, canonical) in expected {
             XCTAssertEqual(actual[name], canonical, "\(name): canonical text changed against M1")
-            XCTAssertEqual(Self.sha256(canonical), digest, "\(name): the pinned digest is not SHA-256 of the pinned text")
-            XCTAssertEqual(keyByStage[name], digest, "\(name): the graph's key differs from M1")
+            XCTAssertEqual(keyByStage[name], M1KeyVector.sha256(canonical),
+                           "\(name): the graph's key is not the digest of its own material")
         }
+        XCTAssertEqual(M1KeyVector.vectorDigest, M1KeyVector.pinnedDigest,
+                       "the empty-mask key vector moved: \(M1KeyVector.vectorDigest) — re-pin only "
+                       + "with the reason written next to `M1KeyVector.pinnedDigest`")
     }
 
     /// With masks the chain is nine links, and the two mask keys separate cleanly: a slider move
@@ -1115,14 +1096,16 @@ final class MaskTests: XCTestCase {
         let graph = try makeGraph(image)
         let result = try graph.render(EditModel.neutral,
                                       options: RenderOptions(scale: 1, wantsPixels: true))
-        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.allCases))
+        // 314: 锐化's resting amount is 50, so S3.10 is unconditional in practice — `allCases` plus
+        // the sharpen pass, and nothing else.
+        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.allCases).union([.sharpen]))
         XCTAssertFalse(result.trace.executed.contains(.maskAtlas))
         XCTAssertFalse(result.trace.executed.contains(.localApply))
         XCTAssertFalse(result.trace.skipped.contains(.maskAtlas))
         XCTAssertFalse(result.trace.skipped.contains(.localApply))
         XCTAssertNil(result.keys.maskAtlas)
         XCTAssertNil(result.keys.localApply)
-        XCTAssertEqual(result.keys.pipeline.count, 7)
+        XCTAssertEqual(result.keys.pipeline.count, 8, "314: the resting document visits S3.10")
         let dump = try graph.maskAtlas(EditModel.neutral, options: RenderOptions(scale: 1))
         XCTAssertNil(dump, "no masks: no atlas, not an empty one")
     }
@@ -1149,11 +1132,14 @@ final class MaskTests: XCTestCase {
                                && $0 != .grade && $0 != .detailFX && $0 != .heal
                                && $0 != .dehaze   // 117: no dehaze value ⇒ no S1.9
                                && $0 != .contrast   // 098: no contrast value ⇒ no S1.8
-                               && $0 != .sharpen    // 185: no sharpAmount ⇒ no S3.10
+                           // 314: no `.sharpen` filter any more — 锐化's resting amount is 50, so
+                           // this document *does* visit S3.10 (S3.10 used to be here because 185's
+                           // predicate was `sharpAmount > 0` and the resting value was 0).
                        }))
         XCTAssertFalse(result.trace.executed.contains(.localColor),
                        "a mask with only an exposure must not add a colour stage")
-        XCTAssertEqual(result.keys.pipeline.count, 9)
+        XCTAssertEqual(result.keys.pipeline.count, 10,
+                       "nine pre-314 links plus S3.10 (314)")
         XCTAssertNil(result.keys.localColor)
         XCTAssertNotNil(result.keys.maskAtlas)
         XCTAssertNotNil(result.keys.localApply)
@@ -2514,8 +2500,15 @@ final class MaskTests: XCTestCase {
         let result = try graph.render(EditModel.neutral, options: RenderOptions(scale: 1, wantsPixels: true))
         XCTAssertNil(result.maskReport, "no masks: no mask work to report")
         XCTAssertNil(result.keys.maskAtlas)
-        XCTAssertEqual(result.keys.pipeline.count, 7)
-        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.allCases))
+        // 314 — **the resting document now sharpens** (锐化 default 50 / radius 2.0), so the pass
+        // count is 8, not 7, and S3.10 is in the visited set: 锐化 is not a conditional stage while
+        // its resting amount is non-zero (`EditModel.neutral.hasSharpen`). It is the only addition —
+        // the point of this test is that no **mask** work happens, which the three assertions above
+        // still say.
+        XCTAssertEqual(result.keys.pipeline.count, 8)
+        XCTAssertEqual(Set(result.trace.executed), Set(RenderStage.allCases).union([.sharpen]))
+        XCTAssertFalse(result.trace.executed.contains(.maskAtlas))
+        XCTAssertFalse(result.trace.executed.contains(.localApply))
     }
 
     /// The 005d golden: one mask softened by `feather`, one sharpened by `refine`, on the ramp so the
@@ -2540,6 +2533,14 @@ final class MaskTests: XCTestCase {
                             ])))],
                           adjustments: LocalAdjustments(amount: 80, exposure: -0.7))
         edit.masks = [soft, guided]
+        // 329 — **锐化 is part of the fixture, at 0.** These four mask goldens were recorded when the
+        // resting amount was 0; 314 made it 50. Re-rendered with the default the frames move by
+        // mean |Δ| 0.22–0.37 code (max 1–5), 15×15 |ΔDC| 0.04–0.07 %, and the high-band energy ratio
+        // is only 1.06–1.10 — under the 1.2 that would make this a *sharpening* golden. The atlas
+        // digests (what these files exist to pin) do not move at all. So the document names the
+        // 锐化 it was recorded with, and the sharpened frames stay with
+        // `SharpenGoldenImpactTests` and the three `render-edit-*` goldens.
+        edit.sharpen = SharpenGroup(amount: 0)
 
         let dump = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
         let display = try XCTUnwrap(
@@ -2770,7 +2771,12 @@ final class MaskTests: XCTestCase {
     private func goldenRecord() throws -> (record: MaskGolden, json: String) {
         let image = flatImage(0.4, width: 96, height: 64)
         let graph = try makeGraph(image, identity: "mask-golden")
-        let edit = goldenEdit()
+        var edit = goldenEdit()
+        // 329 — the golden pins coverage and the local pass, with 锐化 explicitly at 0: see the note
+        // in `goldenFeatherRefineRecord` (314 turned the resting amount on, and its halo is 0.22–0.37
+        // code on these synthetic fixtures — too small to be a re-record of a *mask* frame, and the
+        // four files' atlas digests never moved).
+        edit.sharpen = SharpenGroup(amount: 0)
         let dump = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
         let display = try XCTUnwrap(
             graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true)).display)
@@ -2834,6 +2840,7 @@ final class MaskTests: XCTestCase {
                                             tolerance: 0.15, smoothness: 0.6)))],
                           adjustments: LocalAdjustments(amount: 60, exposure: -0.8, saturation: 20))
         edit.masks = [brush, colour]
+        edit.sharpen = SharpenGroup(amount: 0)      // 329 — see `goldenRecord`
 
         let dump = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
         let display = try XCTUnwrap(

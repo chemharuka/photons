@@ -528,7 +528,8 @@ final class MaskSemanticTests: XCTestCase {
         let emptyLinks = links(empty)
         XCTAssertNil(emptyLinks.maskAtlas)
         XCTAssertNil(emptyLinks.localApply)
-        XCTAssertEqual(RenderKeyChain.keys(emptyLinks, identity: "keyvec").pipeline.count, 7)
+        // 314: 锐化's resting amount is 50, so an empty document is eight links, not seven.
+        XCTAssertEqual(RenderKeyChain.keys(emptyLinks, identity: "keyvec").pipeline.count, 8)
 
         // And `changedStages` says "display only".
         XCTAssertEqual(on.changedStages(from: edit), [.display])
@@ -625,6 +626,13 @@ final class MaskSemanticTests: XCTestCase {
         let image = rampImage()   // 96 × 65
         var doc = twoMaskDoc()
         doc.showMaskID = "m-b"
+        // 329 — **锐化 is part of the fixture, at 0.** `Tests/Golden/mask-*.json` were recorded when
+        // 锐化's resting amount was 0; 314 made it 50, which is an unsharp mask and moves the frame
+        // the golden pins (measured: mean |Δ| 0.22 code, max 2, 15×15 |ΔDC| 0.041 %, and the high
+        // band's energy ratio only 1.09 — i.e. *not* the > 1.2 that would justify re-pinning a mask
+        // frame for a sharpening change). The subject here is coverage and the overlay, so the
+        // document says what it wants instead of inheriting a default that changed under it.
+        doc.sharpen = SharpenGroup(amount: 0)
         let graph = try makeGraph(image, identity: "show-mask-golden")
 
         let dump = try XCTUnwrap(try graph.maskAtlas(doc, options: RenderOptions(scale: 1)))

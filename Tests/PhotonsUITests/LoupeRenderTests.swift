@@ -102,29 +102,50 @@ final class LoupeRenderTests: XCTestCase {
         var b = a
         b.centerX = 3000 + 128      // half the window, exactly
 
-        let frameA = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
-                                         edit: .neutral, state: a)
-        let frameB = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
-                                         edit: .neutral, state: b)
-        let pixelsA = Self.pixels(of: frameA.texture)
-        let pixelsB = Self.pixels(of: frameB.texture)
-        XCTAssertEqual(pixelsA.count, pixelsB.count)
-
-        var worst: Float = 0
-        var compared = 0
-        for y in 0..<viewport.height {
-            for x in 0..<128 {
-                for c in 0..<4 {
-                    let i = (y * viewport.width + x) * 4 + c
-                    let j = (y * viewport.width + (x + 128)) * 4 + c
-                    let d = abs(pixelsA[j] - pixelsB[i])
-                    worst = max(worst, d)
-                    compared += 1
+        func compare(_ edit: EditModel) throws -> Float {
+            let frameA = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
+                                             edit: edit, state: a)
+            let frameB = try loupe.makeFrame(url: url, viewport: viewport, decodeScale: 0.5,
+                                             edit: edit, state: b)
+            let pixelsA = Self.pixels(of: frameA.texture)
+            let pixelsB = Self.pixels(of: frameB.texture)
+            XCTAssertEqual(pixelsA.count, pixelsB.count)
+            var worst: Float = 0
+            var compared = 0
+            for y in 0..<viewport.height {
+                for x in 0..<128 {
+                    for c in 0..<4 {
+                        let i = (y * viewport.width + x) * 4 + c
+                        let j = (y * viewport.width + (x + 128)) * 4 + c
+                        worst = max(worst, abs(pixelsA[j] - pixelsB[i]))
+                        compared += 1
+                    }
                 }
             }
+            XCTAssertEqual(compared, viewport.height * 128 * 4)
+            return worst
         }
-        XCTAssertGreaterThan(compared, 90_000)
-        XCTAssertLessThan(worst, 0.01, "overlapping windows disagree (worst Δ \(worst))")
+
+        // 314/329 — **the contract holds on the pipeline that can hold it.** A pan re-render must not
+        // shift the picture by a fraction of a pixel; with 锐化 at 0 (the document this test used to
+        // be, before 314 made the resting amount 50) that is asserted to the old tolerance. S3.10 is
+        // a *neighbourhood* pass anchored to the texture it is handed, i.e. to the window
+        // (`encodeSharpen`, `RenderGraph.swift:4835`; the aperture limit is the one
+        // `RenderOptions.outputWindow` states, `RenderGraph.swift:118-122`), so with the default 50
+        // the overlap differs by that halo instead of by a shift: measured, and bounded by the
+        // sharpen's own step. A displaced picture would fail both halves.
+        var flat = EditModel.neutral
+        flat.sharpen = SharpenGroup(amount: 0)
+        let flatWorst = try compare(flat)
+        XCTAssertLessThan(flatWorst, 0.01,
+                          "overlapping windows disagree with 锐化 at 0 (worst Δ \(flatWorst))")
+
+        let sharpWorst = try compare(.neutral)
+        print("overlap: 锐化 0 worst Δ \(flatWorst) · 锐化 50 worst Δ \(sharpWorst) "
+              + "(S3.10's window-anchored halo, 314)")
+        XCTAssertLessThan(sharpWorst, 0.05,
+                          "the default 50 differs by an S3.10 halo, not by a displaced picture "
+                          + "(worst Δ \(sharpWorst))")
     }
 
     // MARK: 3. EDR off is pixel-identical to headroom 1

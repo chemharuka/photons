@@ -34,9 +34,27 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
     private var windows: [NSWindow] = []
     private let scale: CGFloat = 2
 
+    private var savedCeiling: Any?
+
+    /// `HighlightCeiling` is a **preference**, i.e. process-wide state. The real-frame test below
+    /// raises it, so the value is saved and put back here rather than left for the next file — the
+    /// same discipline `HighlightCeilingTests` and `CeilingRerenderUITests` use.
+    private func saveCeiling() {
+        savedCeiling = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
+    }
+
+    private func restoreCeiling() {
+        if let savedCeiling {
+            UserDefaults.standard.set(savedCeiling, forKey: HighlightCeiling.defaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+        }
+    }
+
     override func tearDown() {
         for window in windows { window.orderOut(nil) }
         windows.removeAll()
+        restoreCeiling()
         super.tearDown()
     }
 
@@ -587,6 +605,15 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
     /// grid — the synthetic test is the one that always runs.
     func testARealFramesOverWhitePixelReadsStopsWhereItsS4TexelReadsWhite() throws {
         let url = try rawFixture()
+        // 320/329 — **the picture's ceiling has to be above the panel's here, or this test cannot
+        // say anything.** The picture's top is a preference (default +2.3 EV = 4.92) and S2 clamps
+        // at it, so on an EDR panel whose headroom is 5.703× (2.51 stops) no channel can ever exceed
+        // the panel: measured on that panel, the brightest cell stopped at exactly 4.922 and
+        // `clamped channels` was 0 — the assertion was structurally dead, not flaky. Raising the
+        // ceiling to +3.0 EV (8.0×, above 5.703×) restores the situation being tested; the value is
+        // restored in `tearDown`.
+        saveCeiling()
+        HighlightCeiling.setEV(3.0)
         let canvasPoints = CGSize(width: 320, height: 200)
         let viewport = ImageSize(width: 640, height: 400)
         let controller = LoupeController(session: CatalogSession())
@@ -667,9 +694,11 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
         // Per channel: whatever the *picture* holds above the panel's ceiling is white in the frame —
         // the user's 「上限就是屏幕亮度」, on a real photo, in one comparison.
         // The ceiling the frame can carry: white on an SDR panel (`headroom = 1` → `255`), or
-        // `log2(headroom)` stops on an EDR one. **Whatever the picture holds beyond it is gone**, which
-        // is the whole of 「上限就是屏幕亮度」 — the number is the panel's, not the pixel's.
-        let ceilingStops = log2(max(frame.headroom, 1))
+        // `log2(headroom)` stops on an EDR one — **whichever is lower, the panel's or the picture's**
+        // (320 made the second one a number; on a panel brighter than the ceiling the picture's is
+        // the binding one, which is why this is a `min` of two constants and not `log2(headroom)`).
+        // **Whatever the picture holds beyond it is gone**, which is the whole of 「上限就是屏幕亮度」.
+        let ceilingStops = min(log2(max(frame.headroom, 1)), HighlightCeiling.currentEV)
         var clamped = 0
         for (index, level) in pixel.channels.enumerated() {
             guard case .stops(let stops) = level, pow(2, stops) > frame.headroom * 1.005 else { continue }

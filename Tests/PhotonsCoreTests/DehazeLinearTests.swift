@@ -109,7 +109,14 @@ final class DehazeLinearTests: XCTestCase {
                               unboundedRecovery: Bool = false) throws -> DisplayImage {
         let display = DisplayOptions(primaries: .rec2020, bitDepth: 16, headroom: headroom,
                                      linearOutput: true)
-        let result = try graph.render(edit, options: RenderOptions(
+        // 329 — **锐化 at 0, because this file measures 去雾.** Every number below is a statement
+        // about the veil (sky preservation, the skyline halo, exposure commutation) and they were all
+        // measured when 锐化's resting amount was 0; 314 made it 50, so S3.10's unsharp mask now rides
+        // in these frames and moves exactly these metrics (sky J/I 0.985 → 0.935, halo 2.8 % → 4.0 %,
+        // the exposure commute 1e-4 → 1e-1). The subject of the file is S1.9, so its fixture says so.
+        var doc = edit
+        doc.sharpen = SharpenGroup(amount: 0)
+        let result = try graph.render(doc, options: RenderOptions(
             scale: 1, display: display, useCache: false, wantsPixels: true,
             probesDehazeAirlight: probeAirlight,
             legacyDehazeBlockVeil: legacyBlockVeil,
@@ -265,8 +272,11 @@ final class DehazeLinearTests: XCTestCase {
                                          edit: untouched,
                                          display: DisplayOptions(headroom: 1))
         XCTAssertNil(links.dehaze, "dehaze == 0 就没有 S1.9 链接 —— 不是「链接了但乘 0」")
-        XCTAssertEqual(links.pipeline, RenderStage.allCases)
-        XCTAssertEqual(links.pipeline.count, 7, "M1 的七段，一段不多")
+        // 314: the resting document visits S3.10 (锐化 50) as well; what this file asserts is that
+        // there is **no S1.9** in it, which the `dehaze` assertions above and below say.
+        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .vignette, .toneMap,
+                                        .color, .sharpen, .display])
+        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S3.10")
 
         let (_, trace) = try renderWithTrace(graph, untouched)
         XCTAssertFalse(trace.executed.contains(.dehaze), "中性帧不许编码 S1.9")
@@ -641,7 +651,7 @@ final class DehazeLinearTests: XCTestCase {
         }
         XCTAssertNil(links(.neutral).dehaze)
         XCTAssertNotNil(links(e).dehaze)
-        XCTAssertEqual(links(e).pipeline.count, 8)
+        XCTAssertEqual(links(e).pipeline.count, 9, "314: + S3.10 on top of the dehaze chain")
         XCTAssertTrue(links(e).pipeline.contains(.dehaze))
     }
 

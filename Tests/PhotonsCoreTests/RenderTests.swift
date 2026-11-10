@@ -88,6 +88,12 @@ final class RenderTests: XCTestCase {
         let (graph, decoded) = try makeGraph()
         var edit = EditModel.neutral
         edit.geometry.rotationDegrees = 0
+        // 314 made 锐化 default to 50, so `EditModel.neutral` is no longer the identity graph: S3.10
+        // is an **unsharp mask**, whose output is not `decode + OETF` by definition. The identity
+        // path this test is about — the two primaries matrices and the display encode — is the
+        // document with 锐化 explicitly at 0 (same convention as 2e6ab4a / 1a5e021 / 05b3bce for the
+        // geometry-identity tests; the sharpened frame is what `SharpenGoldenImpactTests` measures).
+        edit.sharpen = SharpenGroup(amount: 0)
         let result = try graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true))
         let pixels = try XCTUnwrap(result.display)
 
@@ -203,7 +209,9 @@ final class RenderTests: XCTestCase {
         let opts = RenderOptions(scale: 0.5, wantsPixels: true)
 
         let first = try graph.render(neutral, options: opts)
-        XCTAssertEqual(Set(first.trace.executed), Set(RenderStage.allCases),
+        // 314: 锐化's resting amount is 50, so every document visits S3.10 — the cold set is
+        // `allCases` plus the sharpen pass (the conditional stages of this document are still out).
+        XCTAssertEqual(Set(first.trace.executed), Set(RenderStage.allCases).union([.sharpen]),
                        "a cold graph must run every stage")
 
         let second = try graph.render(colored, options: opts)
@@ -460,9 +468,10 @@ final class RenderTests: XCTestCase {
 
         XCTAssertTrue(b.trace.executed.contains(.hsl), "a band must run S3.6")
         XCTAssertNotNil(b.keys.hsl)
-        // 116 moved the vignette into the linear chain, so HSL is now the last pass before the encode
-        // rather than two steps before the vignette.
-        XCTAssertEqual(Array(b.keys.pipeline.suffix(2)), [.hsl, .display])
+        // 116 moved the vignette into the linear chain, so HSL is no longer two steps before the
+        // vignette; 314 then put S3.10 after it, so the tail is HSL → 锐化 → display (the sharpen
+        // pass is unconditional at the resting 50, which is why it is allowed to be spelled here).
+        XCTAssertEqual(Array(b.keys.pipeline.suffix(3)), [.hsl, .sharpen, .display])
         let vignetteIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .vignette))
         let toneMapIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .toneMap))
         XCTAssertEqual(toneMapIndex, vignetteIndex + 1,
