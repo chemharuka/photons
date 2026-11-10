@@ -28,7 +28,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private let headerCount = NSTextField(labelWithString: "")
     private let footer = NSTextField(labelWithString: "")
     private let sourcesOutline = NSOutlineView()
-    private let photosTable = NSTableView()
+    /// 352 — the same press hook `AssetCollectionView` exposes: the double-click guard gets the
+    /// event *before* the table starts its own selection/double-click tracking, and can eat it.
+    private let photosTable = PhotoListTableView()
     /// 右键：从库中删除… / 查找丢失的文件… — one menu object, the same verbs as the grid.
     public let contextMenu = AssetContextMenu()
     private let sourcesScroll = NSScrollView()
@@ -202,6 +204,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // `doubleAction` + `target` 才会响应双击，这里以前从没接过，所以双击等于没发生。
         photosTable.target = self
         photosTable.doubleAction = #selector(openPhotoRowInLoupe(_:))
+        // 352 — the press reaches the guard before `NSTableView` selects: a second press inside the
+        // double-click window that lands on a **different** row is the one that slid under the
+        // pointer, and it is eaten whole (`true`) instead of switching photo.
+        photosTable.onMouseDown = { [weak self] event in
+            guard let self else { return false }
+            let point = self.photosTable.convert(event.locationInWindow, from: nil)
+            return self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date()) == .swallow
+        }
+        clickGuard.onCenter = { [weak self] id in self?.performDeferredCenter(anchorID: id) }
+        clickGuard.onCenterDropped = { [weak self] id in self?.settleWithoutCentering(anchorID: id) }
 
         // 右键：the same removal verbs the grid and the filmstrip offer, on the same menu object. The
         // list resolves the click through `clickedRow`, which AppKit keeps current for us.
@@ -630,15 +642,23 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// 它是 −1，此时退回 `selectedRow`，所以两种入口都能用。
     @objc private func openPhotoRowInLoupe(_ sender: Any?) {
         let row = photosTable.clickedRow >= 0 ? photosTable.clickedRow : photosTable.selectedRow
-        openRowInLoupe(row)
+        guard let session, let asset = session.assets[safe: row] else { return }
+        // 352 — the photo a double-click means is the one the **first** press hit. After 332 slid the
+        // list, `clickedRow` is the row that drifted under the pointer, not the one the user chose.
+        openRowInLoupe(row, assetID: clickGuard.openTargetID(fallback: asset.id))
     }
 
     /// The body of the double-click, addressable from tests (`clickedRow` is AppKit's business).
     /// Returns whether it actually opened something — a row outside the list does nothing.
+    ///
+    /// - Parameter assetID: 352 — the photo the first press hit, when the pair is still open. It
+    ///   overrides the row, because a re-centre between the two presses can move the row.
     @discardableResult
-    public func openRowInLoupe(_ row: Int) -> Bool {
+    public func openRowInLoupe(_ row: Int, assetID: String? = nil) -> Bool {
         guard let session, let asset = session.assets[safe: row] else { return false }
-        session.selectOnly(asset.id)
+        let id = assetID ?? asset.id
+        guard session.assets.contains(where: { $0.id == id }) else { return false }
+        session.selectOnly(id)
         session.mode = .loupe
         return true
     }
@@ -647,6 +667,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public var photoListForTesting: NSTableView { photosTable }
 
     // MARK: 332 — keep the anchor photo in the middle of the photo list
+
+    /// 352 — the press/double-click/deferred-centre rule, shared verbatim with `FilmstripController`.
+    public let clickGuard = BrowserClickGuard()
 
     /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
     let scrollActivity = CenteredScroll.Activity()
@@ -688,9 +711,54 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     /// Centre whenever the anchor moved, whichever door moved it.
+    ///
+    /// 352 — **except** when the anchor is the one a click is still deciding about: that centre waits
+    /// on `clickGuard.pendingCenter` for one double-click window, so the list cannot slide a
+    /// different row under the second press of a double-click.
     private func centerAnchorIfChanged() {
         guard let id = session?.anchorID, id != centredAnchorID else { return }
+        guard !clickGuard.isCenterDeferred(id) else { return }
         if centerAnchor() { centredAnchorID = id }
+    }
+
+    /// 352 — the parked centre fired (a window after the press, or now because the second press was a
+    /// double-click). Centre only; the selection is not touched.
+    private func performDeferredCenter(anchorID: String) {
+        guard let session, session.anchorID == anchorID, anchorID != centredAnchorID else { return }
+        if centerAnchor() { centredAnchorID = anchorID }
+    }
+
+    /// 352 — the parked centre was dropped because the user scrolled; settle the anchor so a later
+    /// model refresh does not pull the list back over them.
+    private func settleWithoutCentering(anchorID: String) {
+        guard session?.anchorID == anchorID else { return }
+        centredAnchorID = anchorID
+    }
+
+    /// 352 — the row under `point` (table coordinates) at **press time**, or nil for empty space.
+    public func hit(at point: NSPoint) -> BrowserClickGuard.Hit? {
+        guard let session else { return nil }
+        let row = photosTable.row(at: point)
+        guard row >= 0, let asset = session.assets[safe: row] else { return nil }
+        return BrowserClickGuard.Hit(index: row, assetID: asset.id)
+    }
+
+    /// The click seam AppKit drives (`photosTable.onMouseDown`) plus the one step a real
+    /// `NSTableView.mouseDown` would take next — select the row. Split out so the acceptance tests
+    /// press real coordinates at real timestamps; the decision is the shipping `clickGuard.mouseDown`.
+    @discardableResult
+    public func handleMouseDown(at point: NSPoint, now: Date = Date()) -> BrowserClickGuard.Decision {
+        let decision = clickGuard.mouseDown(hit: hit(at: point), now: now)
+        guard decision == .forward else { return decision }
+        let row = photosTable.row(at: point)
+        guard row >= 0, let session, let asset = session.assets[safe: row] else { return decision }
+        // The delegate door a forwarded press lands on: the table selects, the model follows.
+        isApplyingModel = true
+        photosTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isApplyingModel = false
+        session.setSelection([asset.id], anchor: asset.id)
+        updateSelectionAndActive()
+        return decision
     }
 
     // MARK: right-click (same verbs as the grid and the strip)
@@ -821,7 +889,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func photoListDidScroll() {
+        // 352 — a move `Activity` did not attribute to our own animation is the user scrolling: the
+        // parked centre is dropped, not pulled back over them.
+        let before = scrollActivity.lastUserChangeAt
         scrollActivity.noteChange()
+        clickGuard.noteUserScroll(scrollActivity.lastUserChangeAt != before)
         scheduleThumbnailReconcile()
     }
 
@@ -1635,5 +1707,17 @@ final class PhotoRowCell: NSTableCellView {
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)
+    }
+}
+
+/// 352 — the photo list's table, with one hook: the press reaches `BrowserPaneController` **before**
+/// `NSTableView` starts selecting, so the double-click guard can swallow the second press of a pair
+/// that landed on a different row — the row that slid under the pointer when 332 recentred.
+final class PhotoListTableView: NSTableView {
+    var onMouseDown: ((NSEvent) -> Bool)?
+
+    override func mouseDown(with event: NSEvent) {
+        if onMouseDown?(event) == true { return }
+        super.mouseDown(with: event)
     }
 }

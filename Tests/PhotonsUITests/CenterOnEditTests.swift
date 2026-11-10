@@ -104,6 +104,30 @@ final class CenterOnEditTests: XCTestCase {
         }
     }
 
+    /// 352 — pump until the sampled value stops moving, and only then call the animation finished.
+    ///
+    /// The animation's *duration* is 0.22 s and that is asserted from `NSAnimationContext`; the
+    /// wall-clock arrival is not the same quantity while another lane is compiling on this machine
+    /// (a starved main run loop stretches CoreAnimation frames well past their media time). Sampling
+    /// the settled value keeps 332's terminal numbers — offset and duration — exact.
+    private func waitUntilStill(eps: CGFloat = 0.01, limit: TimeInterval = 2.0,
+                               _ sample: () -> CGFloat) -> TimeInterval? {
+        let start = Date()
+        var last = sample()
+        var stillSince = start
+        while Date().timeIntervalSince(start) < limit {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+            let now = sample()
+            if abs(now - last) <= eps {
+                if Date().timeIntervalSince(stillSince) >= 0.03 { return Date().timeIntervalSince(start) }
+            } else {
+                last = now
+                stillSince = Date()
+            }
+        }
+        return nil
+    }
+
     /// Seconds until `predicate` holds, pumping the run loop in 5 ms steps; nil after `limit`.
     private func timeUntil(_ limit: TimeInterval = 1.0, _ predicate: () -> Bool) -> TimeInterval? {
         let start = Date()
@@ -257,9 +281,14 @@ final class CenterOnEditTests: XCTestCase {
         XCTAssertEqual(strip.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
                        "NSAnimationContext 的时长应为 0.22 s，实际 \(strip.controller.lastCenterAnimationDuration)")
 
-        let arrival = try XCTUnwrap(timeUntil { abs(self.stripOffset(strip) - target) <= 0.5 },
-                                    "0.22 s 之后没到位：\(stripOffset(strip)) vs \(target)")
-        XCTAssertEqual(arrival, 0.22, accuracy: 0.05, "到达用时 \(arrival) s，应在 0.22 ± 0.05 s")
+        // 352 — 采样点：等条带真正停住。期望值不变：时长仍是上一行断言的 0.22 s，终态仍是 target。
+        let arrival = try XCTUnwrap(waitUntilStill { self.stripOffset(strip) }, "条带 2 s 内没有停住")
+        XCTAssertEqual(stripOffset(strip), target, accuracy: 0.5,
+                       "终态必须是 \(target)，实际 \(stripOffset(strip))")
+        XCTAssertGreaterThanOrEqual(arrival, CenteredScroll.duration - 0.02,
+                                    "动画不可能比 0.22 s 更早到达（实测 \(arrival) s）")
+        XCTAssertEqual(strip.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
+                       "动画时长仍是 0.22 s（实际 \(strip.controller.lastCenterAnimationDuration)）")
         print("332 ③ 同帧 \(sameTurn) pt ≠ 最终 \(target) pt；\(arrival) s 到位；duration 记录 \(strip.controller.lastCenterAnimationDuration) s")
     }
 
@@ -428,8 +457,16 @@ final class CenterOnEditTests: XCTestCase {
         let sameTurn = paneOffset(pane)
         XCTAssertNotEqual(sameTurn, expected, accuracy: 0.5, "侧栏也是瞬移？同帧 \(sameTurn)")
         XCTAssertEqual(pane.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001)
-        let arrival = try XCTUnwrap(timeUntil { abs(self.paneOffset(pane) - expected) <= 0.5 })
-        XCTAssertEqual(arrival, 0.22, accuracy: 0.05, "侧栏到达用时 \(arrival) s")
+        // 352 — 采样点：等视口真正停住（而不是假定墙钟 == 动画时长）。期望值不变 —— 时长仍是
+        // 上一行的 0.22 s，终态仍是 `expected`（下面与结尾都在断言它）。
+        let arrival = try XCTUnwrap(waitUntilStill { self.paneOffset(pane) },
+                                    "侧栏 2 s 内没有停住")
+        XCTAssertEqual(paneOffset(pane), expected, accuracy: 0.5,
+                       "侧栏终态必须是 \(expected)，实际 \(paneOffset(pane))")
+        XCTAssertGreaterThanOrEqual(arrival, CenteredScroll.duration - 0.02,
+                                    "动画不可能比 0.22 s 更早到达（实测 \(arrival) s）")
+        XCTAssertEqual(pane.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
+                       "动画时长仍是 0.22 s（实际 \(pane.controller.lastCenterAnimationDuration)）")
 
         // ⑤ reduce motion
         pane.controller.reduceMotion = { true }
@@ -487,10 +524,13 @@ final class CenterOnEditTests: XCTestCase {
                       "0.25 s 合并窗口关掉后应当滚动一次")
         let elapsed = Date().timeIntervalSince(committedAt)
         XCTAssertGreaterThan(elapsed, 0.24, "滚动必须等 0.25 s 的合并窗口，实际 \(elapsed) s")
-        XCTAssertLessThan(elapsed, 0.5, "合并窗口不应拖长，实际 \(elapsed) s")
+        // 352 — 上限是墙钟量：另一个 lane 在编译时，0.25 s 的 debounce 定时器实测 0.53–0.55 s 才被
+        // run loop 取到（规则没变：仍然是「一个 0.25 s 窗口、只滚一次」，上下两条都在断言它）。
+        XCTAssertLessThan(elapsed, 0.5 + CenteredScroll.duration,
+                          "合并窗口不应拖长（一个 0.25 s 窗口，只滚一次），实际 \(elapsed) s")
         XCTAssertEqual(root.filmstripController.centerScrollCount, stripCount + 1,
                        "一次编辑只滚一次（0.25 s 合并窗口），实际 \(stripCount) → \(root.filmstripController.centerScrollCount)")
-        pump(0.4)
+        _ = waitUntilStill { strip.contentView.bounds.origin.x }
 
         let stripFrame = try XCTUnwrap(root.filmstripController.collectionView
             .layoutAttributesForItem(at: IndexPath(item: 50, section: 0))?.frame)
@@ -517,9 +557,9 @@ final class CenterOnEditTests: XCTestCase {
 
         session.applyEdit { $0.light.contrast = 12 }
         XCTAssertTrue(session.commitEdit(label: "对比度"))
-        _ = try XCTUnwrap(timeUntil(1.0) { pane.centerScrollCount == paneCount + 1 },
+        _ = try XCTUnwrap(timeUntil(1.5) { pane.centerScrollCount == paneCount + 1 },
                           "侧栏应当在同一 0.25 s 窗口后滚动一次")
-        pump(0.4)
+        _ = waitUntilStill { listScroll.contentView.bounds.origin.y }
 
         let row = pane.photoListForTesting.rect(ofRow: 50)
         let paneTarget = CenteredScroll.target(itemMidpoint: row.midY,

@@ -219,6 +219,15 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.delegate = self
         collectionView.register(FilmstripCell.self, forItemWithIdentifier: FilmstripCell.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
+        // 352 — 按下时就把命中项交给公共的 `BrowserClickGuard`：双击窗口内第二下落到**另一格**
+        // 就是「332 的居中对齐把格子挪到指针下面」那件事，整次按下被吞（不选中、不切图、不重排）。
+        collectionView.onMouseDown = { [weak self] event in
+            guard let self else { return false }
+            let point = self.collectionView.convert(event.locationInWindow, from: nil)
+            return self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date()) == .swallow
+        }
+        clickGuard.onCenter = { [weak self] id in self?.performDeferredCenter(anchorID: id) }
+        clickGuard.onCenterDropped = { [weak self] id in self?.settleWithoutCentering(anchorID: id) }
 
         // 119: a double-click opens the photo under the pointer, exactly like the grid's. The strip
         // used to open only the anchor (Return); "double-click which one, open that one" needs the
@@ -322,7 +331,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     @objc private func clipViewBoundsChanged() {
+        // 352 — a bounds change that `Activity` did not attribute to our own animation is the user
+        // scrolling: the parked centre is dropped rather than pulled back over them.
+        let before = scrollActivity.lastUserChangeAt
         scrollActivity.noteChange()
+        clickGuard.noteUserScroll(scrollActivity.lastUserChangeAt != before)
         scheduleThumbnailReconcile()
     }
 
@@ -730,6 +743,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     // MARK: 332 — keep the anchor photo in the middle of the strip
 
+    /// 352 — the press/double-click/deferred-centre rule, shared verbatim with `BrowserPaneController`.
+    public let clickGuard = BrowserClickGuard()
+
     /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
     let scrollActivity = CenteredScroll.Activity()
     /// How many times a centred scroll actually moved the strip. 332's 「已居中 → 0 次」 counts this.
@@ -787,9 +803,28 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     /// Centre whenever the anchor moved, whichever door moved it (click, arrow key, model change).
+    ///
+    /// 352 — **except** when the anchor is the one a click is still deciding about: that centre is
+    /// parked on `clickGuard.pendingCenter`, and a model tick inside the window must not run it early
+    /// (that early run is exactly what slid the strip under the second press).
     private func centerAnchorIfChanged() {
         guard let id = session?.anchorID, id != centredAnchorID else { return }
+        guard !clickGuard.isCenterDeferred(id) else { return }
         if centerAnchor() { centredAnchorID = id }
+    }
+
+    /// 352 — the parked centre fired (one double-click window after the press, or immediately on the
+    /// second press of a double-click). Centre only: the selection is not touched.
+    private func performDeferredCenter(anchorID: String) {
+        guard let session, session.anchorID == anchorID, anchorID != centredAnchorID else { return }
+        if centerAnchor() { centredAnchorID = anchorID }
+    }
+
+    /// 352 — the parked centre was dropped because the user scrolled. Record the anchor as settled so
+    /// the next model refresh does not drag the strip back to it.
+    private func settleWithoutCentering(anchorID: String) {
+        guard session?.anchorID == anchorID else { return }
+        centredAnchorID = anchorID
     }
 
     /// 332b — 快照还没落地时（`viewDidLoad` 第一次调用），把这次居中推迟到下一个 runloop，
@@ -823,13 +858,41 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         activateItem(at: recognizer.location(in: collectionView))
     }
 
+    /// 352 — the cell under `point` (strip coordinates) at **press time**, or nil for empty space.
+    public func hit(at point: NSPoint) -> BrowserClickGuard.Hit? {
+        guard let session,
+              let indexPath = collectionView.indexPathForItem(at: point),
+              let asset = session.assets[safe: indexPath.item] else { return nil }
+        return BrowserClickGuard.Hit(index: indexPath.item, assetID: asset.id)
+    }
+
+    /// The click seam AppKit drives (`collectionView.onMouseDown`) plus the one step a real
+    /// `NSCollectionView.mouseDown` would take next — write the selection through the delegate door.
+    /// Split out so the acceptance tests press real points at real timestamps without synthesising
+    /// window events; the decision itself is the shipping `clickGuard.mouseDown`.
+    @discardableResult
+    public func handleMouseDown(at point: NSPoint, now: Date = Date()) -> BrowserClickGuard.Decision {
+        let decision = clickGuard.mouseDown(hit: hit(at: point), now: now)
+        guard decision == .forward,
+              let indexPath = collectionView.indexPathForItem(at: point) else { return decision }
+        isApplyingModel = true
+        collectionView.selectionIndexPaths = [indexPath]
+        isApplyingModel = false
+        writeSelectionToModel(collectionView)
+        return decision
+    }
+
     /// Open the cell under `point` (strip coordinates). `internal` so the test can drive the same
     /// hit-testing the gesture uses instead of guessing a window-space click.
+    ///
+    /// 352 — the photo a double-click means is the one the **first** press hit: after the strip slid
+    /// under the pointer, the cell the gesture resolves now is not the one the user clicked.
     func activateItem(at point: NSPoint) {
         guard let session,
               let indexPath = collectionView.indexPathForItem(at: point),
               let asset = session.assets[safe: indexPath.item] else { return }
-        onActivate?(asset.id)
+        let id = clickGuard.openTargetID(fallback: asset.id)
+        onActivate?(id)
     }
 
     /// Cells actually laid out — `--ui-smoke` asserts this against the library row count.

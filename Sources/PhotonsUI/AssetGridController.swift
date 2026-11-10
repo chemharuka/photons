@@ -11,6 +11,10 @@ import PhotonsCore
 /// whether M3.5 needs the other path.
 public final class AssetCollectionView: NSCollectionView {
     public var onKeyDown: ((NSEvent) -> Bool)?
+    /// 352 — the press hook. Returning `true` swallows the press entirely (no selection, no cell
+    /// change): the double-click guard's answer when the second press of a pair landed on a
+    /// different cell than the first. `nil` (the grid) behaves exactly as before.
+    public var onMouseDown: ((NSEvent) -> Bool)?
     /// Right-click plumbing. AppKit asks the *view* for its menu, and only the view knows where the
     /// click landed — a right-click on an unselected cell means that cell, so the resolution has to
     /// happen here (where the event is) and not in `validateMenuItem`.
@@ -21,6 +25,11 @@ public final class AssetCollectionView: NSCollectionView {
     public override func keyDown(with event: NSEvent) {
         if onKeyDown?(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        if onMouseDown?(event) == true { return }
+        super.mouseDown(with: event)
     }
 
     public override func menu(for event: NSEvent) -> NSMenu? {
