@@ -447,7 +447,10 @@ final class TransformPanelTests: XCTestCase {
         let grid = try XCTUnwrap(panel.row(CropCardID.grid), "九宫格没有画出来")
         XCTAssertGreaterThan(stays.minY, try XCTUnwrap(panel.row(CropAspectRow.customProbeID)).maxY,
                              "334: 「不出像素」在宽高比/自定义之下")
-        XCTAssertGreaterThan(grid.minY, stays.maxY, "336: 九宫格在「不出像素」之下 —— 它现在是卡内最底一行")
+        XCTAssertEqual(grid.minY, stays.minY, accuracy: 1.0,
+                       "343（用户）：九宫格与「不出像素」在同一行 —— 两行已并成一行")
+        XCTAssertGreaterThan(grid.minX, stays.maxX,
+                             "343（用户）：「不出像素」左对齐、九宫格右对齐")
 
         // 卡内不再有应用/取消：行探针不在卡里，按钮探针也不在.
         let cardRows = panel.probes.filter { $0.rowID != CropCardID.card }.filter {
