@@ -301,7 +301,7 @@ public enum CropTool {
         // frame a user set — a rectangle of the *photograph* — lands as a quad, and 324's TODO («
         // overlay 仍走旋转投影 ») was exactly this rectangle being drawn on top of a warped picture.
         //
-        // The one map is `CropGeometry.documentPoint` (P → R, the same walk `photoQuad()` and the
+        // The one map is `CropGeometry.documentPointInCanvas` (P → R, the same walk `photoQuad()` and the
         // renderer's `M = R · P` are built from) followed by `LoupeMapping.documentView` (the camera).
         // Nothing here re-derives a corner, and the no-keystone path is untouched bit for bit.
         let keystone = mapping.transform?.perspective
@@ -353,7 +353,7 @@ public enum CropTool {
                 }
             }
             if let keystoneGeometry {
-                let p = keystoneGeometry.documentPoint(normalizedX: u, v)
+                let p = keystoneGeometry.documentPointInCanvas(normalizedX: u, v)
                 if let drawn = mapping.documentView(p) {
                     return CGPoint(x: carry.applyX(drawn.x) / scale, y: carry.applyY(drawn.y) / scale)
                 }

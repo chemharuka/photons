@@ -51,7 +51,7 @@ public extension CropMath {
     /// **文档画布映射**：photo-normalized → document-canvas-normalized，任意文档。
     ///
     /// 这不是新的一条映射，而是**导出那条映射在 `.full` 上的取值**：`perspectiveCanvas(crop: .full, …)`
-    /// 的 forward 恰好就是 324 的 `documentPoint` 走的 `P → R → −AABB origin`（无透视时 `P = I`，
+    /// 的 forward 恰好就是 324 的 `documentPointInCanvas` 走的 `P → R → −AABB origin`（无透视时 `P = I`，
     /// 面积就是 `rotatedExtent(source)`）。所以导出、overlay、夹取、迁移读的是同一个 `sampling`。
     static func documentCanvas(source: ImageSize, straightenDegrees: Double,
                                perspective: PerspectiveMap?) -> PerspectiveCanvas {
@@ -112,7 +112,7 @@ public extension CropGeometry {
 
     /// `rect` (source-normalized) as the AABB of its image on the document canvas — canvas-normalized.
     ///
-    /// The walk is `documentPoint` (P → R → −AABB origin), which is *unconditionally* the
+    /// The walk is `documentPointInCanvas` (P → R → −AABB origin), which is *unconditionally* the
     /// photograph-to-canvas map — it does not read `cropSpace`, which is what makes this the right
     /// primitive for the migration and for the `.source` branch of `canvasCrop`.
     func canvasRect(fromSource rect: CropRect) -> CropRect {
@@ -120,7 +120,7 @@ public extension CropGeometry {
         let w = max(e.width, 1e-9), h = max(e.height, 1e-9)
         let corners = [(rect.left, rect.top), (rect.right, rect.top),
                        (rect.right, rect.bottom), (rect.left, rect.bottom)]
-            .map { documentPoint(normalizedX: $0.0, $0.1) }
+            .map { documentPointInCanvas(normalizedX: $0.0, $0.1) }
         let xs = corners.map(\.x), ys = corners.map(\.y)
         return CropRect(left: (xs.min() ?? 0) / w, top: (ys.min() ?? 0) / h,
                         right: (xs.max() ?? w) / w, bottom: (ys.max() ?? h) / h)

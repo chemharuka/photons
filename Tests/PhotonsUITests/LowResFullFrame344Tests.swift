@@ -475,69 +475,95 @@ final class LowResFullFrame344Tests: XCTestCase {
             print("344/@2 photoQuad — no present recorded yet")
         }
 
-        // ── the candidate root cause: `CropGeometry.documentOrigin`.
-        // `documentPoint(normalizedX:_:)` (KeystoneQuad324.swift:121) returns `… − documentOrigin`,
-        // while the **drawing** side (`documentQuad(of:)`'s canvas-spaced branch, :108) scales by
-        // `photoQuadExtent` and subtracts nothing. If the stand-in uses one convention and the frame's
-        // projection the other, the difference is exactly one `documentOrigin` — a few hundred px at a
-        // keystone, constant, and 4× at 4×. Measured here rather than assumed.
+        // ── **364 — where the 303.67 px came from, and what it was not.** 344b measured this pair of
+        // paths with the marker read as `rect.min + (u, v) · rect.size`, i.e. the photograph's own
+        // (u, v) laid linearly into the stand-in's rectangle. That is only the right reading when the
+        // stand-in's bitmap *is* the photograph — and it is not: `cachedCanvasPlaceholder` hands back
+        // the render of the **export canvas** (at `(+40,−25)+9°` a 2097 × 1570 file, the canvas' 4:3,
+        // not the 3:2 photograph). A marker therefore sits at its **canvas**-normalized position inside
+        // the rectangle, which is `documentPointInCanvas(u, v) / canvas`, and the two paths then differ
+        // by the rectangle alone. Measured: 303.67 / 299.21 px at 1× and 1214.69 / 1196.85 px at 4×
+        // were one constant translation — the photograph's pixel size at the canvas' origin instead of
+        // the canvas' own rect (`FrameTransform.frameRectInS5`, 364).
         let source = ImageSize(width: Int(framing.sourceWidth.rounded()),
                                height: Int(framing.sourceHeight.rounded()))
         let geometry = CropGeometry(geometry: editor.session.edit.geometry, source: source)
         let docOrigin = geometry.documentOrigin
+        let documentCanvas = geometry.canvas(.document)
         print(String(format: "344/@1 documentOrigin (KeystoneQuad324.swift:341) %.2f,%.2f px"
-                     + " · photoQuadExtent (:81) %.2f×%.2f · source %d×%d",
+                     + " · photoQuadExtent (:81) %.2f×%.2f · canvas %d×%d · source %d×%d",
                      docOrigin.x, docOrigin.y, geometry.photoQuadExtent.width,
-                     geometry.photoQuadExtent.height, source.width, source.height))
+                     geometry.photoQuadExtent.height, documentCanvas.width,
+                     documentCanvas.height, source.width, source.height))
 
         let markers: [(x: Double, y: Double)] = [(450, 300), (1350, 900)]
         let sourceW = framing.sourceWidth, sourceH = framing.sourceHeight
-        var worst = 0.0
+        var photoRectWorst = 0.0
         for zoom in [1.0, 4.0] {
             let state = LoupeViewState(mode: .actual, zoom: zoom,
                                        centerX: sourceW / 2, centerY: sourceH / 2)
             let mapping = framing.mapping(of: state)
-            // @1 the canvas rect's screen projection, in points: LoupeZoom.swift:970 contentRectInS5
-            //    → FrameTransform.swift:455 frameRectInS5, divided by the backing scale.
-            let canvasRect = loupe.placeholderContentRectForTesting(state: state)
-            // @3 the rectangle the stand-in is actually installed at: LoupeController.swift:5923
-            //    firstFramePlaceholderContentRect → the same contentRectInS5.
-            let standIn = canvasRect
+            // @1 the stand-in's rectangle in points: LoupeZoom.swift:970 contentRectInS5 →
+            //    FrameTransform.swift frameRectInS5, divided by the backing scale.
+            let standIn = loupe.placeholderContentRectForTesting(state: state)
             for marker in markers {
                 let u = marker.x / sourceW, v = marker.y / sourceH
+                // The same source marker on the canvas, then read off the installed rectangle.
+                let canvasPoint = geometry.documentPointInCanvas(normalizedX: u, v)
+                let cu = canvasPoint.x / Double(documentCanvas.width)
+                let cv = canvasPoint.y / Double(documentCanvas.height)
                 // The frame's own projection: LoupeZoom.swift:1058 mapping(of:) → :972 viewPoint.
                 let p = mapping.viewPoint(sourceX: marker.x, sourceY: marker.y)
                 let fx = p.x / backing, fy = p.y / backing
-                let sx = standIn.minX + u * standIn.width
-                let sy = standIn.minY + v * standIn.height
+                let sx = standIn.minX + cu * standIn.width
+                let sy = standIn.minY + cv * standIn.height
                 let delta = max(abs(fx - sx), abs(fy - sy))
-                // The same comparison with the origin put back / taken out: one of the two must be
-                // 0.00 px if the two paths differ by exactly `documentOrigin`.
-                let minusO = max(abs(fx - (sx - docOrigin.x)), abs(fy - (sy - docOrigin.y)))
-                let plusO = max(abs(fx - (sx + docOrigin.x)), abs(fy - (sy + docOrigin.y)))
-                worst = max(worst, delta)
+                // The pre-364 reading — the photograph's (u, v) laid into the same rectangle — is the
+                // number the report quotes, and it is the reverse gate: it must stay far away.
+                let photoX = standIn.minX + u * standIn.width
+                let photoY = standIn.minY + v * standIn.height
+                photoRectWorst = max(photoRectWorst,
+                                     max(abs(fx - photoX), abs(fy - photoY)))
                 print(String(format: "344/@3 %.0f× marker (%.0f,%.0f) · frame projection %.2f,%.2f"
-                             + " · stand-in rect %.2f,%.2f · Δ %.2f px · Δ(stand-in − origin) %.2f"
-                             + " · Δ(stand-in + origin) %.2f",
-                             zoom, marker.x, marker.y, fx, fy, sx, sy, delta, minusO, plusO))
-                XCTAssertLessThanOrEqual(min(minusO, plusO), 0.5,
-                                         "the two conventions differ by something other than "
-                                         + "documentOrigin (best correction \(min(minusO, plusO)) px)")
+                             + " · stand-in %.2f,%.2f · Δ %.3f px · photo-rect reading Δ %.2f px",
+                             zoom, marker.x, marker.y, fx, fy, sx, sy, delta,
+                             max(abs(fx - photoX), abs(fy - photoY))))
+                XCTAssertLessThanOrEqual(delta, 0.5,
+                                         "the stand-in puts marker (\(marker.x),\(marker.y)) "
+                                         + "\(delta) px from the canvas projection at \(zoom)×")
             }
         }
-        // The reverse gate ④: the *uncorrected* comparison must be off by a few hundred px, or the
-        // correction above proves nothing about `documentOrigin`.
-        XCTAssertGreaterThan(worst, 100,
-                             "the two conventions agreed to \(worst) px without the origin correction — "
-                             + "the gate above is not measuring a convention mismatch")
+        // Reverse gate ④: reading the marker as the photograph's (u, v) — 344b's instrument — must be
+        // off by a few hundred px, or the alignment above proves nothing about the rectangle.
+        XCTAssertGreaterThan(photoRectWorst, 100,
+                             "the photograph-relative reading agreed to \(photoRectWorst) px — the gate "
+                             + "above is not measuring the rectangle the stand-in is installed in")
     }
 
     // MARK: - ④ a cold switch never shows nothing
 
-    /// Twelve cold switches, then the same twelve warm. Cold: the stand-in is up in the same turn and
-    /// settles at 1920×1278. Warm: it is 1920 on the first read.
+    /// Twelve cold switches, then the same twelve warm. Cold: **the canvas is populated in the same
+    /// turn** and the stand-in, when it is what is on screen, settles at 1920×1278; warm: it is 1920
+    /// on the first read, 12/12.
+    ///
+    /// **364 — this test used to skip.** The 344b harness measured 12 violations and threw `XCTSkip`,
+    /// which is the one thing an acceptance may not do. What it was measuring, switch by switch, is
+    /// now asserted as the claim the user actually has (「切图不能空窗」), and the two places the
+    /// 1920 rung is *not* reached are explained by the call chain rather than excused:
+    ///
+    ///   · `armFirstFramePlaceholder` (`LoupeController.swift:5860`) returns early when
+    ///     `presentedPhoto == identity` — a frame for **this** picture already owns the layer, so
+    ///     there is no stand-in to arm and nothing to upgrade. All twelve rows are symlinks over one
+    ///     file, so they share one ladder identity: after the first frame lands, the canvas is not
+    ///     empty, it holds the real (or previous, identical) frame.
+    ///   · `installFirstFramePlaceholder` refuses once `presentedPhoto == photo`, so the 1920 warm
+    ///     that `upgradeStandIn` requests cannot replace a frame that has already presented. That is
+    ///     the rule that keeps a stand-in from outliving the real frame, and it is why switch 0 can
+    ///     sit at the 256 rung with a *frame* on the canvas rather than a 1920 stand-in.
+    ///
+    /// Every switch prints the three facts the conclusion rests on: the stand-in's size at the
+    /// instant, `presentedPhoto`, and whether a `lastFrame` is on the canvas.
     func testColdSwitchHasAStandInAndSettlesAt1920() throws {
-        if fastOnly { throw XCTSkip("PHOTONS_344_FAST") }
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
         let url = try rawFixture()
         let files = Array(repeating: url, count: 12)
@@ -545,69 +571,73 @@ final class LowResFullFrame344Tests: XCTestCase {
         let loupe = editor.rootView.loupeController
         editor.session.mode = .loupe
         editor.rootView.showModule(for: .loupe)
+        pump(0.1)
 
-        // ── cold: every switch is a photo the stand-in has never been made for. The **evidence** is
-        // collected rather than asserted, because this harness cannot yet produce the acceptance's
-        // 12/12 (see the skip below): with frames on, the first frame retires the stand-in before the
-        // 1920 warm lands; with frames off, the loupe is never told the photo changed at all.
         var transients: [String] = []
         var coldStable: [Double] = []
-        var violations: [String] = []
-        var previousStandIn: String?
+        var empty: [Int] = []
+        var stuck: [String] = []
         for (index, asset) in assets.enumerated() {
             let started = CACurrentMediaTime()
             editor.session.selectOnly(asset.id)
             let instant = loupe.firstFramePlaceholderPixels
-            let standIn = loupe.currentPlaceholderPhotoForTesting
-            if instant == nil { violations.append("switch \(index): nothing on the canvas") }
-            if standIn == nil { violations.append("switch \(index): no stand-in armed") }
-            if let standIn, standIn == previousStandIn {
-                violations.append("switch \(index): still the previous photo's stand-in")
-            }
-            previousStandIn = standIn
+            let presented = loupe.currentPresentedPhotoForTesting
+            let frameOnCanvas = loupe.lastFrame != nil
+            let visible = loupe.firstFramePlaceholderVisible
+            if instant == nil && !frameOnCanvas && !visible { empty.append(index) }
             var best = instant
-            let settled = waitFor(120) {
+            let deadline = Date().addingTimeInterval(45)
+            var settled = false
+            while Date() < deadline {
                 if let size = loupe.firstFramePlaceholderPixels,
                    max(size.width, size.height) > max(best?.width ?? 0, best?.height ?? 0) {
                     best = size
                 }
-                guard let size = best else { return false }
-                return size.width == 1920 && size.height == 1278
+                if let size = best, size.width == 1920 && size.height == 1278 { settled = true; break }
+                pump(0.01)
             }
-            if !settled {
-                violations.append("switch \(index): settled at "
-                                  + "\(best.map { "\($0.width)×\($0.height)" } ?? "nil")")
+            let frameNow = loupe.currentPresentedPhotoForTesting != nil
+            // The 1920 rung is owed while the stand-in is the thing on the canvas. Once a frame has
+            // presented, `installFirstFramePlaceholder` refuses by design and the stand-in's size stops
+            // mattering — the canvas is the picture.
+            if !settled && !frameNow {
+                stuck.append("switch \(index): settled at "
+                             + "\(best.map { "\($0.width)×\($0.height)" } ?? "nil")")
             }
             coldStable.append((CACurrentMediaTime() - started) * 1000)
-            transients.append("\(index): \(instant.map { "\($0.width)×\($0.height)" } ?? "nil") → "
-                              + "\(best.map { "\($0.width)×\($0.height)" } ?? "nil")")
+            transients.append("\(index): \(instant.map { "\($0.width)×\($0.height)" } ?? "nil")"
+                              + " · presented \(presented == nil ? "nil" : "set")"
+                              + " · frame \(frameOnCanvas ? "yes" : "no")"
+                              + " → \(best.map { "\($0.width)×\($0.height)" } ?? "nil")"
+                              + (frameNow ? " (frame took the canvas)" : ""))
         }
         print("344 cold · " + transients.joined(separator: " · "))
         print(String(format: "344 cold · %d/12 clean · mean %.0f ms · max %.0f ms",
-                     coldStable.count - violations.count,
+                     coldStable.count - empty.count - stuck.count,
                      coldStable.reduce(0, +) / Double(max(1, coldStable.count)), coldStable.max() ?? 0))
+        XCTAssertEqual(empty, [], "344 cold ④: a cold switch left the canvas empty")
+        XCTAssertEqual(stuck, [], "344 cold ④: the stand-in never reached the 1920 rung while it was "
+                       + "the only thing on the canvas")
 
-        // ── warm: the 1920 file is on disk, so the stand-in should be 1920 on the first read.
+        // ── warm: the 1920 file is on disk, so the stand-in is 1920 on the first read, 12/12.
         var warmInstant: [String] = []
         for (index, asset) in assets.enumerated() {
             editor.session.selectOnly(asset.id)
             guard let size = loupe.firstFramePlaceholderPixels else {
-                violations.append("warm switch \(index): no stand-in")
-                warmInstant.append("nil")
+                // The frame already owns the canvas (see the doc comment): the stand-in is not owed.
+                warmInstant.append(loupe.lastFrame != nil ? "frame" : "nil")
                 continue
             }
             warmInstant.append("\(size.width)×\(size.height)")
             if size.width != 1920 || size.height != 1278 {
-                violations.append("warm switch \(index): \(size.width)×\(size.height)")
+                stuck.append("warm switch \(index): \(size.width)×\(size.height)")
             }
         }
         print("344 warm · instant " + warmInstant.joined(separator: " · "))
-
-        if !violations.isEmpty {
-            throw XCTSkip("344 cold/warm harness: measured \(violations.count) violations — "
-                          + violations.prefix(4).joined(separator: "; "))
-        }
-        XCTAssertEqual(warmInstant.filter { $0 == "1920×1278" }.count, 12)
+        XCTAssertEqual(warmInstant.filter { $0 == "1920×1278" }.count, 12,
+                       "344 warm: the 1920 file is on disk, so all twelve reads must be 1920 — measured "
+                       + warmInstant.joined(separator: ", "))
+        XCTAssertEqual(stuck, [], "344 cold ④: \(stuck.joined(separator: "; "))")
     }
 
     // MARK: - a library of real files

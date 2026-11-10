@@ -26,6 +26,24 @@ import Foundation
 // of `documentQuad(of:)` — the crop rect's image under the same `P → R` walk, which is what the
 // overlay draws and what a drag moves. `photoQuad()` is the same walk for the whole photograph.
 
+/// **364 — the two reverse gates.** Test-only knobs; the app never touches them (`false` / `false` is
+/// what ships, and they are spelled here rather than at a call site so that no call site can grow a
+/// private `± documentOrigin` again).
+///
+/// ① `foldsDocumentOriginIntoCanvas = false` — the single entry stops subtracting `documentOrigin`,
+///    i.e. the pre-364 convention: it answers **photo pixels** while the camera answers canvas pixels.
+/// ② `standInRectUsesPhotoPixels = true` — `FrameTransform.frameRectInS5` goes back to re-deriving
+///    the stand-in's rectangle from the crop's photo pixels (`unrotatedSourceToView`) instead of
+///    asking the canvas for the export frame's own rect.
+public enum DocumentCanvasConvention364 {
+
+    /// ① the convention at `documentPointInCanvas`.
+    nonisolated(unsafe) public static var foldsDocumentOriginIntoCanvas = true
+
+    /// ② the stand-in's rectangle.
+    nonisolated(unsafe) public static var standInRectUsesPhotoPixels = false
+}
+
 /// A point in the **document canvas'** pixel grid: origin at the AABB's top-left corner, y down, one
 /// unit = one pixel of the canvas `.document` allocates.
 public struct DocumentPoint: Sendable, Equatable, Hashable {
@@ -113,18 +131,35 @@ public extension CropGeometry {
                 .map { DocumentPoint($0.0 * w, $0.1 * h) }
         }
         return [(c.left, c.top), (c.right, c.top), (c.right, c.bottom), (c.left, c.bottom)]
-            .map { documentPoint(normalizedX: $0.0, $0.1, origin: origin) }
+            .map { documentPointInCanvas(normalizedX: $0.0, $0.1, origin: origin) }
     }
 
-    /// A normalized point of the **turned photograph** in document-canvas pixels — the forward walk
-    /// in the header.
-    func documentPoint(normalizedX nx: Double, _ ny: Double) -> DocumentPoint {
-        documentPoint(normalizedX: nx, ny, origin: documentOrigin)
+    /// A normalized point of the **turned photograph** in document-canvas pixels — **the one entry**.
+    ///
+    /// **364 — the convention, and it is this function's contract.** A document-canvas pixel is the
+    /// grid the camera speaks: `FrameTransform.s1ToS3` produces it, `s3ToS5` consumes it, and its
+    /// `(0, 0)` is the canvas' top-left corner — which for a keystoned document is the AABB of the
+    /// warped picture, i.e. `documentOrigin` in photo pixels. The origin is therefore **folded into
+    /// the value here, once**: callers never add or subtract it, they draw, hit-test and compare with
+    /// canvas rects directly.
+    ///
+    /// The two spaces are one subtraction apart and the difference is not academic — `canvas` (this
+    /// function) versus **photo pixels** (`warpedTurnedPhotoCorners`, `documentOrigin`) — so the
+    /// photo-pixel space is named for what it is and is reached only by measurement code
+    /// (`photoNormalized`, the diagnostics). A second forward spelling that forgot the subtraction
+    /// put the loupe's stand-in 303.67 / 299.21 px off the frame at `(+40, −25) + 9°` and exactly 4×
+    /// that at 4× (364 §0: a constant source-space translation, not a scale error).
+    func documentPointInCanvas(normalizedX nx: Double, _ ny: Double) -> DocumentPoint {
+        documentPointInCanvas(normalizedX: nx, ny,
+                              origin: DocumentCanvasConvention364.foldsDocumentOriginIntoCanvas
+                                  ? documentOrigin : (x: 0, y: 0))
     }
 
-    /// `documentPoint` with the document origin handed in (see `documentQuad(of:origin:)`).
-    internal func documentPoint(normalizedX nx: Double, _ ny: Double,
-                                origin: (x: Double, y: Double)) -> DocumentPoint {
+    /// `documentPointInCanvas` with the document origin handed in — the clamp translates a rect dozens
+    /// of times and the origin is a property of the document, not of the rect. `origin` is
+    /// `documentOrigin` at every call site; passing anything else is asking for photo pixels.
+    internal func documentPointInCanvas(normalizedX nx: Double, _ ny: Double,
+                                        origin: (x: Double, y: Double)) -> DocumentPoint {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
         var px = nx, py = ny
         if hasKeystoneQuad, let perspective {
@@ -136,7 +171,7 @@ public extension CropGeometry {
         return DocumentPoint(turned.x + w / 2 - origin.x, turned.y + h / 2 - origin.y)
     }
 
-    /// The inverse of `documentPoint` — what a document-space measurement needs to come back to the
+    /// The inverse of `documentPointInCanvas` — what a document-space measurement needs to come back to the
     /// crop's own normalized coordinates (the keystone `documentCanvasCropRect`, a diagnostic).
     func photoNormalized(documentX: Double, _ documentY: Double) -> NormalizedPoint {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))

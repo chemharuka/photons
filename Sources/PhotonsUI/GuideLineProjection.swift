@@ -15,7 +15,7 @@ import PhotonsCore
 // **Two halves, and both are somebody else's function.**
 //
 //   · In the crop workspace (`LoupeMapping.transform.canvasRole == .document`, the only place guide
-//     lines exist) the walk is `CropGeometry.documentPoint` + `LoupeMapping.documentView` — the exact
+//     lines exist) the walk is `CropGeometry.documentPointInCanvas` + `LoupeMapping.documentView` — the exact
 //     pair `CropTool.layout` draws the crop quad with (`CropTool.swift:328-332`). Nothing here
 //     re-derives a corner, and `GuideLines354DisplayTests` §A measures the distance as 0.00e+00 px
 //     over `P = 0/±60`, `s = 0/±9°`, fit and 400 %.
@@ -115,7 +115,7 @@ public struct GuideLineProjection: Sendable, Equatable {
             return framePixel(point)
         }
         if usesDocumentCanvas {
-            let doc = display.documentPoint(normalizedX: Double(point.x) / width,
+            let doc = display.documentPointInCanvas(normalizedX: Double(point.x) / width,
                                             Double(point.y) / height)
             if let drawn = mapping.documentView(doc) { return drawn }
         }

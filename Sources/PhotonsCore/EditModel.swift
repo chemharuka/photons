@@ -1414,7 +1414,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
               let perspective, perspective.hasWarp else { return false }
         let geometry = CropGeometry(geometry: self, source: source)
         // `renderCrop` (the aspect lock's own answer) is read off the **stored** group, and
-        // `canvasRect(fromSource:)` walks `documentPoint`, which never reads `cropSpace` — so the
+        // `canvasRect(fromSource:)` walks `documentPointInCanvas`, which never reads `cropSpace` — so the
         // conversion cannot accidentally be an identity on an already-migrated view.
         let converted = geometry.canvasRect(fromSource: renderCrop(source: source))
         crop = converted.normalizedRect

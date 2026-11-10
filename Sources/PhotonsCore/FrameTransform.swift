@@ -441,6 +441,12 @@ public struct FrameTransform: Sendable, Equatable {
     }
 
     /// The S2 frame as a quad in S5: the crop tool's four corners, in frame order.
+    ///
+    /// **364 — frame space, not document-canvas pixels.** This walk is the *un-turned* frame (the
+    /// rectangle a crop drag moves and a straightened picture turns under), so it neither takes `P`
+    /// nor subtracts the canvas origin, and it is the inverse of `viewPointToUnrotatedSource` — which
+    /// is exactly what a hit test needs. It is **not** where a picture or a stand-in is installed:
+    /// that is `frameRectInS5` below, which asks the canvas for the export frame's own rect.
     public func frameQuadInS5() -> [Point] {
         [(crop.left, crop.top), (crop.right, crop.top),
          (crop.right, crop.bottom), (crop.left, crop.bottom)]
@@ -450,14 +456,40 @@ public struct FrameTransform: Sendable, Equatable {
             }
     }
 
-    /// The crop frame's bounding rect in S5 (axis-aligned; a straightened frame's actual shape is
-    /// `frameQuadInS5`).
+    /// The crop frame's rect in S5 — **the rectangle the loupe's stand-in is installed in**, and the
+    /// one `LoupeFraming.contentRectInS5` hands over.
+    ///
+    /// **364 — one walk, not two.** This used to re-derive the rect from the crop's *photo* pixels
+    /// (`unrotatedSourceToView`), which is a second spelling of a place the canvas already names: the
+    /// stand-in's bitmap is the **export canvas** (the crop frame at 1:1 — a keystoned document's
+    /// 2097 × 1570 file, not its 3:2 photograph), so the rect it belongs in is where that canvas'
+    /// rect sits inside the document canvas, in the canvas' own pixels: `canvasInset(role)` for the
+    /// origin and `geometry.frameSize` for the box, pushed through the one camera (`s3ToS5`).
+    ///
+    /// The two agree bit for bit without a keystone (there `frameSize` is the crop's own pixel size
+    /// and the photo walk's four corners are the same rect), and they part by exactly one
+    /// `documentOrigin` at a keystone — where `frameSize` is the *canvas* (246) and the photo walk
+    /// answered the photograph's size at the canvas' own origin. Measured at `(+40, −25) + 9°`:
+    /// the stand-in was 303.67 / 299.21 px off at 1× and 1214.69 / 1196.85 px at 4×, i.e. a constant
+    /// source-space translation, which is the report's 「换个方向切图时首帧排布不对」.
     public func frameRectInS5() -> CGRect {
-        let quad = frameQuadInS5()
-        let xs = quad.map(\.x), ys = quad.map(\.y)
-        return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
-                      width: (xs.max() ?? 0) - (xs.min() ?? 0),
-                      height: (ys.max() ?? 0) - (ys.min() ?? 0))
+        if DocumentCanvasConvention364.standInRectUsesPhotoPixels {
+            // Reverse gate ②: the pre-364 derivation, kept verbatim so the gate measures the old
+            // rectangle and not a paraphrase of it.
+            let quad = frameQuadInS5()
+            let xs = quad.map(\.x), ys = quad.map(\.y)
+            return CGRect(x: xs.min() ?? 0, y: ys.min() ?? 0,
+                          width: (xs.max() ?? 0) - (xs.min() ?? 0),
+                          height: (ys.max() ?? 0) - (ys.min() ?? 0))
+        }
+        let inset = geometry.canvasInset(canvasRole)
+        let size = geometry.frameSize
+        let topLeft = Self.apply(s3ToS5, SIMD2(inset.x, inset.y))
+        let bottomRight = Self.apply(s3ToS5, SIMD2(inset.x + Double(size.width),
+                                                   inset.y + Double(size.height)))
+        return CGRect(x: min(topLeft.x, bottomRight.x), y: min(topLeft.y, bottomRight.y),
+                      width: abs(bottomRight.x - topLeft.x),
+                      height: abs(bottomRight.y - topLeft.y))
     }
 
     /// The frame's top-left in S5; `RenderGraph`'s `frameOrigin` is `origin − this`.

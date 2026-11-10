@@ -242,7 +242,7 @@ public extension CropGeometry {
     ///
     /// 324 — a keystoned document's canvas is the AABB of the photo **quad**, and the crop's own axes
     /// are not its axes, so the rect is the AABB of the canvas' four corners walked back through the
-    /// one `documentPoint` map. It is the same served region the renderer fills with `000000`
+    /// one `documentPointInCanvas` map. It is the same served region the renderer fills with `000000`
     /// (a superset of the AABB in the crop's axes, never a second box).
     var documentCanvasCropRect: CropRect {
         // 330 — a canvas-spaced crop's legal area, expressed in the crop's **own** coordinates, is the
