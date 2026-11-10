@@ -706,3 +706,47 @@ Metal 源码形状的断言。
 `CanvasRole` 是类型而不是两个 `Bool`，因为 301 与 301b 正是「两个开关各说一半」才分叉的：现在
 `RenderGraph.plan`、`FrameTransform`、`LoupeFraming`、`RenderOptions` 各有一处 `switch`，而
 `CropGeometry.canvas` / `canvasInset` 保留 301 含义，任何旧调用点不改就是 `.export`。
+
+## 19. 缩略图「生成慢」在解码的**队列**和每个 graph 的**Metal 编译**，不在 JPEG 编码（351，2026-11-10 实测）
+
+用户口径：
+
+> 另外现在胶片条和侧栏的缩略图生成速度也很慢，感觉和以前 heic 一样，现在修改为了 jpeg 不应该这么慢
+
+**五项流水（24 张不同 RAW，release，10 核，格子 460×340，p50 ms）**
+
+| | 改前 | 改后 |
+|---|---|---|
+| `render`（RAW 解码 + graph init + 一帧 1920） | 3532 | 2312 |
+| `encode`（PQ JPEG） | 53 | 61 |
+| `write`（落盘） | 1.5 | 2.1 |
+| `decode`（ImageIO → 格子像素） | 10.1 | 17.5 |
+| 排队（admit/pump/等 slot） | 3587 | 2395 |
+| 24 格冷首屏（首格入队 → 第 24 格交付） | **13007** | **6358** |
+
+改前 `render` 有 3.5 s，而同一 graph 的第二帧只要 14 ms；`render#1` 与 `render#2` 的差就是
+**每个 `RenderGraph` 一份 `KernelLibrary`** 的运行时 Metal 编译（`makeLibrary(source:)` 编译 9 个
+kernel）。一屏 24 格就是 24 次编译，9 个 worker 同时编译时还互相排队。修成进程级缓存
+`(device, file[, function])` 之后，同一 graph 的 `render#1` 从 513 ms 落到 51 ms。
+
+瓶颈不在 `decode`：它只是 ImageIO 降采样（单格 **8.4 ms**）。真正串行的是 **RAW 解码本身**——
+`RAWDecoder` 一个实例 = 一个 `MTLCommandQueue`，命令缓冲在同一队列上按序执行。
+实测 4 张并发解码：共用一个 decoder 1.42×，每 worker 一个 decoder 1.96×（后来机器负载高时 1.34×）。
+所以 `defaultConcurrency = 9`、`activePeak = 9/9` 都是真的，**吞吐**却接近 1。HD 生产端改为
+每个 worker 一个 decoder（`ThumbnailProvider.thumbnailDecoder()`），24 格冷首屏 11.0 s → 6.4 s。
+
+另外 `sourceLongEdge(url:)` 用 ImageIO 读一个 60 MB DNG 的主图像尺寸要 **147 ms**，而每格渲染都要
+一次；目录里早就有 `Asset.width/height`，改成随请求带过去（`sourceProbes` 恒 0）。
+
+四条「最可疑」的结论：
+
+1. **解码走的是 ImageIO 降采样**，不是全解码再缩放：单格 p50 8.42 ms（反向门：改成全解码 +
+   `CGContext` 缩放到格子 → 23.81 ms，24 格首屏 60 → 170 ms，两条断言同时红）。
+2. **生成没有「每格重渲」**：`ThumbKey.hdJPEG` 不含格子尺寸；同一 `contentHash + editFingerprint`
+   的三个格子尺寸（460×340 / 326×242 / 68×68）实测 **renders 1 / decodes 3 / keys 1**。
+3. **键里没有易变量**：24 格第二轮 = **24 hits / 0 renders / 0 coalesced**。
+4. **并发没有「配置成 1」**：`defaultConcurrency` 9、`service.config.maxConcurrency` 9、
+   `activePeak` 9/9。掉的是吞吐（上面两条），不是上限；326 的入队/恢复重发保持不动。
+
+24 格热首屏（全新 provider + 热目录）改后 **79/60/71 ms（best 60）**，308 的 34/27/28 是同一
+测量在更空机器上的读数；budget 断言写在 `ThumbnailPhaseBenchTests`（`PHOTONS_THUMB_PHASES=1`）。

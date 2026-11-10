@@ -219,6 +219,42 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// retiring the HEIC is that the second number was the expensive half of a warm.
     private var lastHDRenderMilliseconds: Double = 0
     private var lastHDEncodeMilliseconds: Double = 0
+    /// 351 — the five-way breakdown of a first screen: every HD render, every encode and every cell
+    /// decode, as a distribution (bounded to the most recent 1024 samples each).
+    ///
+    /// The service owns `write` (`Stats.writeTimes`) and the queue (`waited − produced − write`), so
+    /// these plus those two are the whole pipeline per cell. Kept as samples rather than as an
+    /// average because the acceptance is stated in p50/p95/max — and `render` is itself split
+    /// (`rawDecode` / `graphInit` / `graphRender`) so a report can say *which* half of "render" the
+    /// time is in instead of guessing that the graph arithmetic is slow.
+    public struct PhaseTimes: Sendable {
+        /// The whole producer render leg (RAW decode + graph init + one frame).
+        public var render: [Double] = []
+        /// PQ JPEG encode.
+        public var encode: [Double] = []
+        /// The consumer's ImageIO downsample to the cell's pixels.
+        public var decode: [Double] = []
+        /// Inside `render`: the RAW decode at the thumbnail's scale.
+        public var rawDecode: [Double] = []
+        /// Inside `render`: `RenderGraph` construction.
+        public var graphInit: [Double] = []
+        /// Inside `render`: the one graph frame (S0 → S4 at 1920).
+        public var graphRender: [Double] = []
+    }
+
+    private var phaseTimesStore = PhaseTimes()
+    private static let phaseSampleLimit = 1024
+    /// 351 — the source's long edge, remembered per key digest from the catalog's own row.
+    ///
+    /// `sourceLongEdge(url:)` opens the file with ImageIO and reads the primary image's properties:
+    /// measured **147 ms** for one 60 MB DNG on this machine — per cell, because the producer only
+    /// receives a key and a URL. The catalog has known `width`/`height` since import, so the request
+    /// that *does* carry the `Asset` hands the number over and the producer stops re-scanning the RAW
+    /// for a number it was already told.
+    private var sourceEdges: [String: Int] = [:]
+    private var sourceEdgeOrder: [String] = []
+    /// How many times the producer had to open the file to learn its edge (351's reading).
+    private var sourceProbeCount = 0
     /// 223 — digest → the display size its bitmap was last stored at (the back-compat lookup).
     private var displaySizesByDigest: [String: ImageSize] = [:]
     private var displaySizeOrder: [String] = []
@@ -236,6 +272,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
     private var runsPerContent: [String: Int] = [:]
     private var decoder: RAWDecoder?
     private var decoderUnavailable = false
+    /// 351 — the HD thumbnail producer's decoder pool (one command queue each) and its cursor.
+    private var thumbnailDecoders: [RAWDecoder] = []
+    private var decoderCursor: Int64 = 0
     /// 258 — decoded whole-picture stand-ins, keyed by the thumbnail key's digest. The grid's memory
     /// LRU holds display-sized **crops**, not the aspect-preserved picture the loupe's stand-in needs,
     /// so it cannot serve this path; without a small cache of its own every photo switch paid the
@@ -429,6 +468,29 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
     }
 
+    /// Hand the producer the source's long edge so it does not re-open the RAW to measure it (351).
+    private func rememberSourceEdge(_ edge: Int?, for digest: String) {
+        guard let edge, edge > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        if sourceEdges[digest] == nil { sourceEdgeOrder.append(digest) }
+        sourceEdges[digest] = edge
+        while sourceEdgeOrder.count > ThumbnailProvider.indexLimit {
+            sourceEdges.removeValue(forKey: sourceEdgeOrder.removeFirst())
+        }
+    }
+
+    private func rememberedSourceEdge(_ digest: String) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return sourceEdges[digest]
+    }
+
+    /// 351 — times the producer had to open a file to learn its own dimensions. Should stay at 0 for
+    /// every request that came through `request(asset:)`, which is all three browsers.
+    public var sourceProbes: Int {
+        lock.lock(); defer { lock.unlock() }
+        return sourceProbeCount
+    }
+
     // MARK: - loading
 
     /// Load a cell's thumbnail. `completion` always runs on the main actor and is skipped entirely
@@ -456,6 +518,9 @@ public final class ThumbnailProvider: @unchecked Sendable {
             // encodes per render, and the HEIC was the expensive one.
             key = ThumbKey.hdJPEG(contentHash: asset.contentHash, document: doc)
             rememberDocument(doc, for: key.digest)
+            // 351 — the catalog already knows the pixel size; the producer must not re-open the RAW
+            // to learn it (147 ms per cell).
+            rememberSourceEdge(ThumbnailProvider.sourceLongEdge(of: asset), for: key.digest)
         } else {
             let plan = ThumbnailProvider.effectiveTier(requested: tier, ext: asset.ext)
             if let reason = plan.skipReason {
@@ -604,6 +669,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         // The callback is bookkeeping only: the bytes on disk are the whole product, so nothing is
         // decoded here and nothing enters the memory LRU.
         rememberDocument(document, for: key.digest)
+        rememberSourceEdge(ThumbnailProvider.sourceLongEdge(of: asset), for: key.digest)
         let ticket = service.request(ThumbRequestSpec(key: key, source: fileURL,
                                                       isBackgroundWarm: true),
                                      priority: .prefetch) {
@@ -686,6 +752,7 @@ public final class ThumbnailProvider: @unchecked Sendable {
         // 308 — three now: HEIC (Core Image → texture), 1920 PQ JPEG (ImageIO downsample), and the
         // legacy ladder (ImageIO whole image).
         let image: CGImage?
+        let decodeStart = CACurrentMediaTime()
         if result.key.spec == .hd {
             image = ThumbnailProvider.decodeHD(data, display: display)
             if image != nil { note { $0.gpuDecodes += 1 } }
@@ -696,6 +763,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
             image = ThumbnailCache.decode(data)
             if image != nil { note { $0.imageIOWholeDecodes += 1 } }
         }
+        // 351 — the cell's decode is the fourth leg of the pipeline (`decode`), and the only one a
+        // cell can feel directly: it runs on the worker after the file exists.
+        let decodeMs = (CACurrentMediaTime() - decodeStart) * 1000
+        lock.lock(); Self.append(decodeMs, to: &phaseTimesStore.decode); lock.unlock()
         guard let image else {
             DispatchQueue.main.async { completion(index, result.key, nil) }
             return
@@ -834,6 +905,8 @@ public final class ThumbnailProvider: @unchecked Sendable {
         runsPerContent[key.contentHash, default: 0] += 1
         lastHDRenderMilliseconds = renderMs
         lastHDEncodeMilliseconds = encodeMs
+        Self.append(renderMs, to: &phaseTimesStore.render)
+        Self.append(encodeMs, to: &phaseTimesStore.encode)
         lock.unlock()
         return ThumbPayload(data: jpeg, source: "graph-pq-jpeg",
                             sourceLongEdge: rendered.longEdge)
@@ -855,30 +928,44 @@ public final class ThumbnailProvider: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: source.path) else {
             throw ThumbProviderError.unreadable(source)
         }
-        guard let decoder = rawDecoder() else { throw ThumbProviderError.noRAWDecoder }
+        // 351 — a decoder per worker, not the loupe's single queue (see `thumbnailDecoder`).
+        guard let decoder = thumbnailDecoder() else { throw ThumbProviderError.noRAWDecoder }
 
         let longEdge = ThumbSpec.hdJPEG.longEdge
         // Decode no larger than needed for 1920 (a 60 MP RAW at 0.25 already covers it), and never
         // so small that the thumbnail has to upscale. The 512 JPEG is a downscale of this frame.
-        let sourceEdge = ThumbnailProvider.sourceLongEdge(url: source) ?? longEdge
-        let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, sourceEdge))))
+        //
+        // 351 — the edge comes from the request's `Asset` when it was given; only a caller that has
+        // no catalog row (a CLI batch, a probe) pays the ImageIO scan, and that scan is 147 ms for a
+        // 60 MB DNG — more than the graph render it is used to size.
+        var sourceEdge = rememberedSourceEdge(key.digest)
+        if sourceEdge == nil {
+            sourceEdge = ThumbnailProvider.sourceLongEdge(url: source)
+            lock.lock(); sourceProbeCount += 1; lock.unlock()
+        }
+        let edge = sourceEdge ?? longEdge
+        let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, edge))))
         // The HD thumbnail is our own graph, so it must ask for the document's whole development:
         // version and detail are decode inputs too (the key's `editFingerprint` carries them, and
         // omitting them here would file a v8 picture under a v9 key).
         let inputs = document.decodeInputs
+        let decodeStart = CACurrentMediaTime()
         let decoded = try decoder.decode(source, options: DecodeOptions(
             decoderVersion: inputs.decoderVersion,
             scale: Float(decodeScale),
             whiteBalance: inputs.whiteBalance,
             detail: inputs.detail))
+        let rawDecodeMs = (CACurrentMediaTime() - decodeStart) * 1000
         let w = decoded.width, h = decoded.height
         let scale = min(1, Double(longEdge) / Double(max(w, h, 1)))
 
+        let initStart = CACurrentMediaTime()
         let graph = try RenderGraph(input: RenderInput(image: decoded,
                                                        identity: "thumb-hd|\(key.digest)",
                                                        sourceURL: source,
                                                        whiteBalance: inputs.whiteBalance),
                                     textureRetention: .none)
+        let graphInitMs = (CACurrentMediaTime() - initStart) * 1000
         defer { graph.releaseAllTextures() }
 
         // Display P3 primaries, linear exit: HDREncoding converts this to `displayP3_PQ` by the
@@ -887,7 +974,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
                                           display: DisplayOptions(primaries: .displayP3, bitDepth: 16,
                                                                   headroom: 1, linearOutput: true),
                                           useCache: false, wantsPixels: true)
-        guard let linear = try? graph.render(document, options: linearOptions).display else {
+        let frameStart = CACurrentMediaTime()
+        let frame = try? graph.render(document, options: linearOptions).display
+        let frameMs = (CACurrentMediaTime() - frameStart) * 1000
+        lock.lock()
+        Self.append(rawDecodeMs, to: &phaseTimesStore.rawDecode)
+        Self.append(graphInitMs, to: &phaseTimesStore.graphInit)
+        Self.append(frameMs, to: &phaseTimesStore.graphRender)
+        lock.unlock()
+        guard let linear = frame else {
             throw ThumbProviderError.encodeFailed(source)
         }
         return HDRender(image: linear.withLinear(LinearPixels(linear)),
@@ -1023,6 +1118,40 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
     }
 
+    /// 351 — one decoder **per worker** for the HD thumbnail path.
+    ///
+    /// A `RAWDecoder` owns one `MTLCommandQueue` and one `CIContext`, and command buffers on one queue
+    /// execute in order. Nine thumbnail workers sharing the loupe's decoder therefore did not run nine
+    /// decodes at once: four concurrent decodes through one decoder measured **1212 ms** against
+    /// 1718 ms sequential (1.42×), while the same four through four decoders measured **876 ms**
+    /// (1.96×). The service's ceiling was never the problem — `activePeak` reaches 9 in the report —
+    /// the decode leg was. The pool is sized by that same ceiling and created lazily, so a library that
+    /// never generates an HD thumbnail pays nothing.
+    ///
+    /// `rawDecoder()` stays the single shared instance for the rare non-HD paths (a RAW with no
+    /// embedded preview, the preview producer): those are one-off and must not allocate a pool.
+    private func thumbnailDecoder() -> RAWDecoder? {
+        let capacity = max(1, service.config.maxConcurrency)
+        lock.lock()
+        let index = Int(decoderCursor % Int64(capacity))
+        decoderCursor &+= 1
+        if index < thumbnailDecoders.count {
+            let existing = thumbnailDecoders[index]
+            lock.unlock()
+            return existing
+        }
+        if decoderUnavailable { lock.unlock(); return nil }
+        lock.unlock()
+        guard let made = try? RAWDecoder() else {
+            lock.lock(); decoderUnavailable = true; lock.unlock()
+            return nil
+        }
+        lock.lock()
+        thumbnailDecoders.append(made)
+        lock.unlock()
+        return made
+    }
+
     // MARK: - stats
 
     public var stats: Stats {
@@ -1045,6 +1174,22 @@ public final class ThumbnailProvider: @unchecked Sendable {
 
     /// The service's own counters (requests, coalesced, hits, generated, cancelled, waits).
     public var serviceStats: ThumbnailService.Stats { service.stats() }
+
+    /// 351 — the phases the provider owns, as samples (ms). `write` is `serviceStats.writeTimes`
+    /// and the queue is `waited − produced − write`.
+    public var phaseTimes: PhaseTimes {
+        lock.lock(); defer { lock.unlock() }
+        return phaseTimesStore
+    }
+
+    /// Bounded append for a phase sample. The cap keeps a 10k-photo import from turning a diagnostic
+    /// into an allocation that grows with the library.
+    static func append(_ value: Double, to samples: inout [Double]) {
+        samples.append(value)
+        if samples.count > phaseSampleLimit {
+            samples.removeFirst(samples.count - phaseSampleLimit)
+        }
+    }
 
     public func resetStats() {
         lock.lock(); counters = Stats(); lock.unlock()

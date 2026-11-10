@@ -29,28 +29,46 @@ public enum RenderError: LocalizedError {
 ///
 /// Runtime compilation (rather than a prebuilt `default.metallib`) is deliberate: SwiftPM has no
 /// dependable Metal-build step, and the Metal *toolchain* component is a network download that has
-/// already failed on this machine. `makeLibrary(source:)` needs no Xcode — the OS ships the compiler
-/// — and it happens once per process, so it cannot show up in a frame-time budget.
+/// already failed on this machine. `makeLibrary(source:)` needs no Xcode — the OS ships the compiler.
+///
+/// 351 — **the cache is the process's, not the graph's.** It used to be per instance, on the
+/// assumption that "it happens once per process". It does not: every `RenderGraph` owns one of these,
+/// and the thumbnail producer builds a graph per photo, so 24 cells compiled the same nine kernels 24
+/// times. Measured on 24 RAWs (release, this machine): `render` 3532 ms p50 per cell, of which
+/// 499 ms was the first frame's per-graph pipeline creation alone when only one graph was alive —
+/// and ~2.5 s when nine workers each compiled the same sources at once (the Metal compiler
+/// serialises). `MTLLibrary` and pipeline states are immutable and the device is process-wide, so the
+/// cache key is `(device, file[, function])` and the compile is done once, under one lock.
 final class KernelLibrary {
     private let device: MTLDevice
-    private var libraries: [String: MTLLibrary] = [:]
-    private var pipelines: [String: MTLComputePipelineState] = [:]
-    private var renderPipelines: [String: MTLRenderPipelineState] = [:]
+
+    private static let cacheLock = NSLock()
+    private static var libraries: [String: MTLLibrary] = [:]
+    private static var pipelines: [String: MTLComputePipelineState] = [:]
+    private static var renderPipelines: [String: MTLRenderPipelineState] = [:]
+
+    /// Same device ⇒ same compiled code. `registryID` is stable for the process's device object and
+    /// does not keep the device alive.
+    private var deviceKey: String { "dev\(device.registryID)" }
 
     init(device: MTLDevice) {
         self.device = device
     }
 
     func pipeline(file: String, function: String) throws -> MTLComputePipelineState {
-        let cacheKey = "\(file):\(function)"
-        if let p = pipelines[cacheKey] { return p }
-        let library = try library(named: file)
+        let cacheKey = "\(deviceKey)|\(file):\(function)"
+        // The lock is held across the compile on purpose: nine workers asking for the *same* file
+        // must compile it once and wait, not compile it nine times in parallel (measured slower).
+        Self.cacheLock.lock()
+        defer { Self.cacheLock.unlock() }
+        if let p = Self.pipelines[cacheKey] { return p }
+        let library = try libraryLocked(named: file)
         guard let fn = library.makeFunction(name: function) else {
             throw RenderError.missingKernelFunction(file, function)
         }
         do {
             let p = try device.makeComputePipelineState(function: fn)
-            pipelines[cacheKey] = p
+            Self.pipelines[cacheKey] = p
             return p
         } catch {
             throw RenderError.pipelineFailed(file, error.localizedDescription)
@@ -58,12 +76,15 @@ final class KernelLibrary {
     }
 
     /// Render pipelines (the on-screen present pass) are compiled the same way: source from the
-    /// resource bundle, pipeline cached per colour-attachment format.
+    /// resource bundle, pipeline cached per colour-attachment format — and, like `pipeline`, per
+    /// **(device, file, functions, pixel format)** rather than per graph (351).
     func renderPipeline(file: String, vertex: String, fragment: String,
                         pixelFormat: MTLPixelFormat) throws -> MTLRenderPipelineState {
-        let cacheKey = "\(file):\(vertex)+\(fragment):\(pixelFormat.rawValue)"
-        if let p = renderPipelines[cacheKey] { return p }
-        let library = try library(named: file)
+        let cacheKey = "\(deviceKey)|\(file):\(vertex)+\(fragment):\(pixelFormat.rawValue)"
+        Self.cacheLock.lock()
+        defer { Self.cacheLock.unlock() }
+        if let p = Self.renderPipelines[cacheKey] { return p }
+        let library = try libraryLocked(named: file)
         guard let vfn = library.makeFunction(name: vertex) else {
             throw RenderError.missingKernelFunction(file, vertex)
         }
@@ -77,22 +98,24 @@ final class KernelLibrary {
         desc.colorAttachments[0].pixelFormat = pixelFormat
         do {
             let p = try device.makeRenderPipelineState(descriptor: desc)
-            renderPipelines[cacheKey] = p
+            Self.renderPipelines[cacheKey] = p
             return p
         } catch {
             throw RenderError.pipelineFailed(file, error.localizedDescription)
         }
     }
 
-    private func library(named file: String) throws -> MTLLibrary {
-        if let l = libraries[file] { return l }
+    /// Caller holds `cacheLock`.
+    private func libraryLocked(named file: String) throws -> MTLLibrary {
+        let key = "\(deviceKey)|\(file)"
+        if let l = Self.libraries[key] { return l }
         guard let url = Self.kernelSourceURL(file) else {
             throw RenderError.missingKernelSource(file)
         }
         let source = try Self.expandingLocalIncludes(of: url)
         do {
             let l = try device.makeLibrary(source: source, options: nil)
-            libraries[file] = l
+            Self.libraries[key] = l
             return l
         } catch {
             throw RenderError.kernelCompileFailed(file, error.localizedDescription)
