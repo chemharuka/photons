@@ -409,24 +409,24 @@ $$
 | 恒等点列 | — | (0,0),(2,2) | （`Sources/PhotonsCore/EditModel.swift:1823`） |
 | 表长 $N$ | 4096 | 4096 | 采样点（`Sources/PhotonsCore/EditCurve.swift:45`） |
 | 表数 | 4（W/R/G/B） | 4 | 张（`Sources/PhotonsCore/EditCurve.swift:52`） |
-| 末段斜率 | −2…+2 | 由末两点算 | EV/u（`Sources/PhotonsCore/HDRCurve.swift:190`、`Sources/PhotonsCore/HDRCurve.swift:200`） |
+| 末段斜率 | 0…+2 | 由末两点算 | EV/u（`Sources/PhotonsCore/HDRCurve.swift:190`、`Sources/PhotonsCore/HDRCurve.swift:194`） |
 | 曲线格式 | version 2、`double`、`max: 2` | 同 | （`Sources/PhotonsCore/EditModel.swift:1549`） |
 | `processVersion` | 2 | 2 | （`Sources/PhotonsCore/EditModel.swift:141`） |
 
 **实现**
 
-一张 4×4096 的 float 表在 GPU 缓冲里，kernel 只读（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:187`）。恒等表按位掩码跳过（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:218`、`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:227`）——整形器往返会带 ~5e-7 的误差，在 fp16 边界上就是 1 bit。末段斜率由表尾两点算（`Sources/PhotonsCore/EditCurve.swift:126`），夹取的两端是同一个数：`tailSlopeLimit = 2`、`tailSlopeFloor = -2`（`Sources/PhotonsCore/HDRCurve.swift:190`、`Sources/PhotonsCore/HDRCurve.swift:200`）。
+一张 4×4096 的 float 表在 GPU 缓冲里，kernel 只读（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:187`）。恒等表按位掩码跳过（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:218`、`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:227`）——整形器往返会带 ~5e-7 的误差，在 fp16 边界上就是 1 bit。末段斜率由表尾两点算（`Sources/PhotonsCore/EditCurve.swift:126`），夹取的两端是同一个数：`tailSlopeLimit = 2`、`tailSlopeFloor = 0`（`Sources/PhotonsCore/HDRCurve.swift:190`、`Sources/PhotonsCore/HDRCurve.swift:194`）。
 
 **开源对照**
 
-- darktable `tonecurve`（`src/iop/tonecurve.c`）：表的末段用拟合出的幂律外推，不夹取；本实现的末段是线性外推加 ±2 的斜率夹取，斜率直接就是 +4 EV 以上的对数对比——https://github.com/darktable-org/darktable/blob/master/src/iop/tonecurve.c
+- darktable `tonecurve`（`src/iop/tonecurve.c`）：表的末段用拟合出的幂律外推，不夹取；本实现的末段是线性外推加 0…+2 的斜率夹取，斜率直接就是 +4 EV 以上的对数对比——https://github.com/darktable-org/darktable/blob/master/src/iop/tonecurve.c
 - darktable `AgX`（`src/iop/agx.c`）：基色压缩 + log + sigmoid 的整幅色调映射，形状由模块给；本实现的曲线形状由用户点列给，模块只负责轴与边界——https://github.com/darktable-org/darktable/blob/master/src/iop/agx.c
 - Filmulator 的胶片曲线（`filmulator-gui/Halide/applyfilmlikecurve.cpp`）：先把 RGB 排序，逐通道查表，中间通道按低/高两条的差线性插值以保序；本实现的 W 曲线是亮度增益，三通道按同一 $\Delta$ 缩放，保的是色相与饱和——https://github.com/CarVac/filmulator-gui/blob/master/filmulator-gui/Halide/applyfilmlikecurve.cpp
 
 **取舍**
 
-- W 曲线永远不会被反相：下降的 W 点列到了 kernel 就是恒等表（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:97`）。负片的下降只能交给 R/G/B 三张表，它们各自可以整体下降（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:99`）。
-- $u>1$ 是线性外推，一段之外没有第二道形状；斜率夹在 ±2 是防手改文档，不是画面决定（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:71`）。
+- 曲线必须**非递减**：下降的点列不是这台引擎会建的表。文档里若已经存着一条（137 曾一度允许、357 撤销后留下的旧文档），`buildOne` 排序去重后看见一段下降，就落回恒等表——不是报错，也不是反相。所以「反相／负片」不多带一个开关，也不多带一条渲染路径（`Sources/PhotonsCore/EditCurve.swift:192`、`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:171`）。
+- $u>1$ 是线性外推，一段之外没有第二道形状；斜率夹在 0…+2 是防手改文档，不是画面决定（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:71`）。
 - $\Delta$ 夹在 ±12 EV 是 fp16 保护：把白点从 0.5 拖到 1.0 是 +9 EV，200 级的像素在 half float 里已经接近 inf（`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:235`、`Sources/PhotonsCore/Kernels/s1_7_hdr_curve.metal:238`）。所以极端的点列会被截断，而且不会有提示。
 
 ---

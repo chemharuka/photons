@@ -185,8 +185,9 @@ final class CacheVersionTests: XCTestCase {
                        "215: the linear gradient ramps across its whole span")
         XCTAssertEqual(StageAlgorithmVersion.vignette, 3,
                        "134: half-diagonal radius, circular contour, midpoint reaches the corner")
-        XCTAssertEqual(StageAlgorithmVersion.curve, 2,
-                       "137: inverted curves render the descending table instead of the identity")
+        XCTAssertEqual(StageAlgorithmVersion.curve, 3,
+                       "357: 137 reverted — a descending curve folds to the identity again")
+
         // 191: S3.10's radius, mask knee and block window are image pixels converted to the canvas,
         // so a cached 185-era frame at any scale but 1 holds pixels this build would not produce.
         // 192: the σ floor is gone (σ is exactly `radius·S`) and the base plane's stride follows the

@@ -145,12 +145,18 @@ public enum StageAlgorithmVersion {
     /// the second crush level too (a full-coverage mask stays within 1 code of the global slider).
     /// Masks with `blacks ≥ −50` are bit-identical to 4.
     public static let localApply = 6
+    /// **3** — 357: 派单 137 is **reverted**. A curve must be non-decreasing again: a document holding a
+    /// descending point list renders the identity (the fold fallback), W is never substituted and the
+    /// kernel's tail-slope floor is 0 again — so the *same* stored points produce the pixels generation
+    /// 1 produced. The token still moves, because cache entries written by 2 hold frames built from the
+    /// descending table; it moves **forward** (2 → 3) and not back to 1, so a drive holding 2-era frames
+    /// cannot collide with the pre-137 generation's keys.
     /// **2** — 137: a curve may descend as a whole (film-negative inversion). A document whose curve
-    /// was already non-decreasing keeps its table byte for byte, but a document holding an inverted
-    /// curve used to render the identity (buildOne's fold fallback) and now renders the inverted
-    /// table, so the same stored points produce different pixels. The stage's generation moves;
-    /// the positive-curve pixels do not.
-    public static let curve = 2
+    /// was already non-decreasing kept its table byte for byte, but a document holding an inverted
+    /// curve used to render the identity (buildOne's fold fallback) and now rendered the inverted
+    /// table, so the same stored points produced different pixels. Withdrawn in 357.
+    /// **1** — Unchanged (030's HDR curve).
+    public static let curve = 3
     /// **3** — 228：全局对比度回增益域. 159's multiscale residual operator is gone; the stage is one
     /// global power curve on the unexposed display luma, `gain = ((Y/e)/0.18)^(γ−1)`, applied to all
     /// three channels, with no clamp at white. Same stored number, different pixels for every

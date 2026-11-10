@@ -91,5 +91,12 @@ enum M1KeyVector {
     ///   · 329 (`…|vignette|vig=…`): the 暗角 material now reaches the S2 seed, which is what makes a
     ///     vignette drag miss the cached frame instead of returning it (see `RenderKeyChain.links`).
     /// 314 (锐化 default 50) moves **no key** — it moves the *pipeline* (`+s3.10`), not the chain.
-    static let pinnedDigest = "2e39041e32d03fcdfcb2e51062189768ed7fde850b27db815eeea2e1cde091fa"
+    ///
+    /// 357 — re-pinned for one token: `.curve` 2 → 3 (派单 137 reverted). The stage's arithmetic is
+    /// 1's again (a descending point list folds to the identity), but the generation moves **forward**
+    /// because cache entries written under 2 hold frames that build the descending table — a token
+    /// returned to 1 would let a 2-era frame answer a 1-era key. Only the `alg=` number on the curve
+    /// link changed; every material text and every parent digest below it moved with it, which is the
+    /// behaviour `CacheVersionTests` describes for any bump.
+    static let pinnedDigest = "5d15d35747806ad4b13ed9741638a74d72c6eef43870c451428888b46ae2274e"
 }

@@ -6511,7 +6511,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
 
         if var cache = curveTablesCache, cache.buffer.length == CurveLUT.tableCount * sliceBytes {
             for t in 0..<CurveLUT.tableCount where cache.keys[t] != keys[t] {
-                let table = CurveLUT.buildTable(points[t], index: t)
+                let table = CurveLUT.buildOne(points[t])
                 cache.buffer.contents().advanced(by: t * sliceBytes).copyMemory(
                     from: table, byteCount: sliceBytes)
                 cache.keys[t] = keys[t]
