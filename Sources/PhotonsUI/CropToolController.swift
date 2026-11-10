@@ -923,6 +923,12 @@ public final class CropToolController {
     public private(set) var guideLineSolution: GuideLineSolution?
     /// Why the last gesture did **not** take — `nil` after a success.
     public private(set) var guideLineFailure: GuideLineFailure?
+    /// 348 — how far apart the lines were when the fit refused, in degrees: 「线间相差 6.2°」 has to
+    /// print the 6.2, or the user only learns that something is wrong.
+    public private(set) var guideLineMeasuredPairwise: Double?
+    /// 348 — `.rotationOutOfRange` when the keystone took but the turn could not be held by the
+    /// dial (±45°); the two steps are independent, so this is not a refusal.
+    public private(set) var guideLineRotationFailure: GuideLineFailure?
     /// The line the last gesture drew and threw away, drawn red for the same 0.3 s.
     public private(set) var rejectedGuideLine: GuideLine?
     public private(set) var rejectedGuideLineAlpha: Double = 1
@@ -1103,6 +1109,8 @@ public final class CropToolController {
             _ = setDrawStraightenArmed(false)
             isGuideLinesArmed = true
             guideLineFailure = nil
+            guideLineMeasuredPairwise = nil
+            guideLineRotationFailure = nil
         } else {
             cancelGuideLines()
         }
@@ -1220,6 +1228,8 @@ public final class CropToolController {
             // §2b.2 — all-or-nothing: the line is withdrawn (red for the same 0.3 s), the accepted
             // set and the document keep their last valid state.
             guideLineFailure = fit.failure
+            guideLineMeasuredPairwise = fit.measuredWorstPairwise
+            guideLineRotationFailure = nil
             rejectedGuideLine = line
             rejectedGuideLineAlpha = 1
             guideLineStroke = nil
@@ -1232,6 +1242,8 @@ public final class CropToolController {
         guideLines = candidate
         guideLineSolution = solution
         guideLineFailure = nil
+        guideLineMeasuredPairwise = solution.worstResidual
+        guideLineRotationFailure = solution.rotationFailure
         rejectedGuideLine = nil
         guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
         guideLineStrokeAlpha = 1
@@ -1256,24 +1268,31 @@ public final class CropToolController {
         guideLineStrokeAlpha = 1
         guideLines = []
         guideLineSolution = nil
+        guideLineMeasuredPairwise = nil
+        guideLineRotationFailure = nil
         rejectedGuideLine = nil
         rejectedGuideLineAlpha = 1
         if wasLive { onGuideLineChange?() }
         return wasLive
     }
 
-    /// §2.5 — the one write: both parameters into the document, **one** history row.
+    /// §2.5 — the one write: both parameters **and the turn** into the document, **one** history row.
     ///
-    /// The two fields are the sliders' own (`GeometryGroup.perspectiveVertical/Horizontal`), so the
-    /// card's readout follows by construction — there is no second copy to update. The row is closed
-    /// the way `commitStraighten` closes 转动's (end/reopen the crop session), because a guide-line
-    /// fit is one discrete gesture and must not fold into a drag that is still in flight.
+    /// The fields are the sliders' own (`GeometryGroup.perspectiveVertical/Horizontal` and
+    /// `rotationDegrees`), so the card's readout follows by construction — there is no second copy to
+    /// update. 348 writes the third value here because 「先平行，再摆正」 is one gesture to the user:
+    /// two rows would make ⌘Z put the keystone back while leaving the picture turned.
+    /// The row is closed the way `commitStraighten` closes 转动's (end/reopen the crop session),
+    /// because a guide-line fit is one discrete gesture and must not fold into a drag still in flight.
     private func writeGuideLineSolution(_ solution: GuideLineSolution) {
         guard let session else { return }
         let before = session.edit.geometry
         session.applyEdit {
             $0.geometry.perspectiveVertical = solution.vertical
             $0.geometry.perspectiveHorizontal = solution.horizontal
+            // `solution.straighten` is the dial's value either way: when the turn was skipped it is
+            // the angle the document already had, so this line is a no-op for `.rotationOutOfRange`.
+            $0.geometry.rotationDegrees = CropTool.clampStraighten(solution.straighten)
         }
         guard session.edit.geometry != before else { return }
         let inSession = session.isToolSessionActive
@@ -1287,6 +1306,8 @@ public final class CropToolController {
         // 应用 all see the picture the fit just produced.
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
         draft.perspectiveHorizontal = session.edit.geometry.perspectiveHorizontal
+        // 348 — and the turn, so the angle dial and the overlay agree with the picture on screen.
+        draft.straighten = CropTool.clampStraighten(session.edit.geometry.rotationDegrees)
         // §2c — Lightroom's `Constrain Crop` equivalent, and the **existing** switch: with
         // 「不出像素」 on (the default) the frame is inscribed once into the photo quad, so the
         // export has no black pixel; with it off the frame may stay on the `000000` corners. No new
@@ -1339,10 +1360,19 @@ public final class CropToolController {
     }
 
     /// The card's one-line status (§2.3's 「另一方向请再画两条」 included). `nil` prints nothing.
+    ///
+    /// 348 — a refusal says **how far apart** the lines are (`measuredWorstPairwise`), and a fit that
+    /// took but could not be turned upright appends the turn's own reason: 「透视已应用」 has to be in
+    /// the sentence, or the user will think nothing happened when the keystone did.
     public var guideLineStatusText: String? {
-        if let failure = guideLineFailure { return failure.message }
+        if let failure = guideLineFailure {
+            return failure.message(measuredWorstPairwise: guideLineMeasuredPairwise)
+        }
         guard let solution = guideLineSolution else { return nil }
         var text = solution.summary
+        if let rotation = solution.rotationFailure {
+            text += " · " + rotation.message(measuredWorstPairwise: solution.straightenRequested)
+        }
         if GuideLinesSolve.isMixedDirection(guideLines) { text += " · 另一方向请再画两条" }
         return text
     }
