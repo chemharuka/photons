@@ -74,9 +74,27 @@ final class HDRCurveTests: XCTestCase {
         return bands(values, height: height)
     }
 
+    /// 314 — the **resting** document of this file.
+    ///
+    /// A shipped document sharpens by default (`amount` 50, σ 2.0) and S3.10 runs *after* S1.7, so
+    /// `EditModel.neutral` is no longer a document a transfer function can be read off: the unsharp
+    /// pass mixes the one-pixel-wide bands below into each other, and before 320 its
+    /// `clamp(…, 0, 4)` tail guard also clipped the HDR end. `amount = 0` is 314's own spelling of
+    /// "S3.10 does not exist", and is the remedy 314 applied to DetailFX / LocalDetail / ToneMap /
+    /// SharpenScale and 318 to the exposure-equivariance laws (`algebraOnly`). The default itself is
+    /// pinned by `SharpenDefaultTests`; nothing here is a statement about it.
+    private static var pre314: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return e
+    }
+
     private func render(_ graph: RenderGraph, _ edit: EditModel, headroom: Double = 1,
+                        ceiling: Double = HighlightCeiling.defaultLinear,
                         forceArithmetic: Bool = false) throws -> DisplayImage {
-        let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: headroom),
+        let options = RenderOptions(scale: 1,
+                                    display: DisplayOptions(headroom: headroom,
+                                                            highlightCeiling: ceiling),
                                     useCache: false, wantsPixels: true,
                                     forceCurveArithmetic: forceArithmetic)
         let result = try graph.render(edit, options: options)
@@ -480,7 +498,10 @@ final class HDRCurveTests: XCTestCase {
         let graph = try makeGraph(bands(values))
 
         // Identity: 64 → 64, 1e-4 → 1e-4 (in display units, via S4 with a headroom that keeps it).
-        let identity = bandValues(try render(graph, .neutral, headroom: 64), count: 3)
+        // 320 — the picture's own ceiling is a *display* decision and defaults to +2.3 EV; a test of
+        // `x → x` states where the shaper puts light, so it asks for a ceiling above 64 and the
+        // ceiling's own behaviour is `HighlightCeilingTests`'.
+        let identity = bandValues(try render(graph, Self.pre314, headroom: 64, ceiling: 64), count: 3)
         // In linear light: the stored value is an fp16 sRGB code, and the encode's own rounding is
         // 5e-4 (`HeadroomTests` documents the same 0.9995 for a clamped 1.0).
         XCTAssertEqual(decode(identity[2]) / 64, 1, accuracy: 2e-3, "out(64) must be 64")
@@ -488,7 +509,7 @@ final class HDRCurveTests: XCTestCase {
         // Black end lifted to 0.10: an exact 0 input still comes out 0 (rule 3), not 0.0012.
         let zeroImage = bands([0, 1e-4])
         let zeroGraph = try makeGraph(zeroImage, identity: "hdr-curve-zero")
-        var lifted = EditModel.neutral
+        var lifted = Self.pre314
         lifted.curve.white = [CurvePoint(u: 0, v: 0.10), CurvePoint(u: 1, v: 1)]
         let liftedOut = bandValues(try render(zeroGraph, lifted, headroom: 64), count: 2)
         print(String(format: "030 endpoints: lifted (0,0.10): x=0 → %.6f, x=1e-4 → %.6f",
@@ -501,9 +522,9 @@ final class HDRCurveTests: XCTestCase {
         // `v = (1−r)·u`, i.e. a shift of `−r·u`, not `−r`. Only at u = 1 (x = xHI = 16) are the two
         // the same. The W curve turns `v` back into light, so the claim is `out = x(v)` — which on
         // this axis is the same statement as "an exposure offset of `log2(x(v)/x(u64))`".
-        var rolled = EditModel.neutral
+        var rolled = Self.pre314
         rolled.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 0.86)]
-        let rolledOut = bandValues(try render(graph, rolled, headroom: 64), count: 3)
+        let rolledOut = bandValues(try render(graph, rolled, headroom: 64, ceiling: 64), count: 3)
         let u64 = HDRCurve.axis.forward(64)
         let rampTable = table([CurvePoint(u: 0, v: 0), CurvePoint(u: 1, v: 0.86)])
         let v64 = HDRCurve.lutValue(rampTable, slope: CurveLUT.slope(of: rampTable), u: u64)
@@ -514,9 +535,9 @@ final class HDRCurveTests: XCTestCase {
                        "the white end's roll-off must land where the shaper says")
 
         // Black end pressed *and* the middle pulled down: 1e-4 gets smaller but stays positive.
-        var pressed = EditModel.neutral
+        var pressed = Self.pre314
         pressed.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.3), CurvePoint(u: 1, v: 1)]
-        let pressedOut = bandValues(try render(graph, pressed, headroom: 64), count: 3)
+        let pressedOut = bandValues(try render(graph, pressed, headroom: 64, ceiling: 64), count: 3)
         XCTAssertGreaterThan(pressedOut[0], 0, "a pressed curve must not delete the 1e-4 level")
         XCTAssertLessThan(pressedOut[0], identity[0], "…it must make it darker")
     }
@@ -529,7 +550,8 @@ final class HDRCurveTests: XCTestCase {
     func testHDRExtendIsNotClamped() throws {
         let values: [Float] = [0.5, 1, 2, 4, 8, 16, 32, 64]
         let graph = try makeGraph(bands(values))
-        let out = bandValues(try render(graph, .neutral, headroom: 64, forceArithmetic: true),
+        let out = bandValues(try render(graph, Self.pre314, headroom: 64, ceiling: 64,
+                                        forceArithmetic: true),
                              count: values.count)
         for (i, v) in values.enumerated() {
             let linear = decode(out[i])
@@ -542,7 +564,8 @@ final class HDRCurveTests: XCTestCase {
         // measuring the ceiling it just set, not the curve.
         let ladder: [Float] = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16]
         let ladderGraph = try makeGraph(bands(ladder), identity: "hdr-curve-ladder")
-        let headroom16 = bandValues(try render(ladderGraph, .neutral, headroom: 16), count: ladder.count)
+        let headroom16 = bandValues(try render(ladderGraph, Self.pre314, headroom: 16, ceiling: 16),
+                                    count: ladder.count)
         for i in 1..<ladder.count {
             XCTAssertGreaterThan(headroom16[i], headroom16[i - 1],
                                  "level \(ladder[i]) did not survive S4 at headroom 16")
@@ -554,9 +577,10 @@ final class HDRCurveTests: XCTestCase {
         // this a ceiling and not a clamp of the whole picture.
         let ceiling = [Float(0.2), 0.5, 1, 2, 4, 8, 16, 32, 64]
         let ceilGraph = try makeGraph(bands(ceiling), identity: "hdr-curve-ceiling")
-        var ceilEdit = EditModel.neutral
+        var ceilEdit = Self.pre314
         ceilEdit.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.5), CurvePoint(u: 1, v: 0.5)]
-        let ceilOut = bandValues(try render(ceilGraph, ceilEdit, headroom: 64), count: ceiling.count)
+        let ceilOut = bandValues(try render(ceilGraph, ceilEdit, headroom: 64, ceiling: 64),
+                                 count: ceiling.count)
         print("030 ceiling curve (1,0.5): " + ceilOut.map { String(format: "%.4f", $0) }.joined(separator: " "))
         for i in 3..<ceiling.count {
             XCTAssertEqual(ceilOut[i], ceilOut[2], accuracy: 1e-4,
@@ -573,7 +597,8 @@ final class HDRCurveTests: XCTestCase {
     func testBeyondPlusFourEVContinues() throws {
         let values: [Float] = [128, 1000]
         let graph = try makeGraph(bands(values))
-        let out = bandValues(try render(graph, .neutral, headroom: 4096, forceArithmetic: true),
+        let out = bandValues(try render(graph, Self.pre314, headroom: 4096, ceiling: 4096,
+                                        forceArithmetic: true),
                              count: 2)
         let back128 = decode(out[0])
         let back1000 = decode(out[1])
@@ -587,9 +612,9 @@ final class HDRCurveTests: XCTestCase {
         XCTAssertEqual(CurveLUT.slope(of: table([CurvePoint(u: 0, v: 0), CurvePoint(u: 0.99, v: 1), CurvePoint(u: 1, v: 1)])),
                        0, accuracy: 1e-6, "a flat last segment has slope 0")
 
-        var hardTop = EditModel.neutral
+        var hardTop = Self.pre314
         hardTop.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.99, v: 1), CurvePoint(u: 1, v: 1)]
-        let topOut = bandValues(try render(graph, hardTop, headroom: 4096), count: 2)
+        let topOut = bandValues(try render(graph, hardTop, headroom: 4096, ceiling: 4096), count: 2)
         let top1000 = decode(topOut[1])
         print(String(format: "030 ceiling at the white end: 1000 → %.4f", top1000))
         XCTAssertEqual(top1000, 16, accuracy: 0.5, "slope 0 means 16 (+4 EV) and no further")
@@ -677,13 +702,13 @@ final class HDRCurveTests: XCTestCase {
         let values: [Float] = [0.5, 1, 2, 4, 8, 16, 32, 64]
         let graph = try makeGraph(bands(values), identity: "hdr-curve-tail-slope")
 
-        var steep = EditModel.neutral
+        var steep = Self.pre314
         steep.curve.white = steepTailPoints
-        var one = EditModel.neutral
+        var one = Self.pre314
         one.curve.white = oneTailPoints
 
-        let steepFrame = try render(graph, steep, headroom: 4096)
-        let oneFrame = try render(graph, one, headroom: 4096)
+        let steepFrame = try render(graph, steep, headroom: 4096, ceiling: 4096)
+        let oneFrame = try render(graph, one, headroom: 4096, ceiling: 4096)
         let steepOut = bandValues(steepFrame, count: values.count)
         let oneOut = bandValues(oneFrame, count: values.count)
 
@@ -866,7 +891,7 @@ final class HDRCurveTests: XCTestCase {
         let graph = try makeGraph(bands(values))
 
         let raised: [CurvePoint] = [CurvePoint(u: 0.2, v: 0.3), CurvePoint(u: 0.6, v: 0.5), CurvePoint(u: 1, v: 1)]
-        var edit = EditModel.neutral
+        var edit = Self.pre314
         edit.curve.red = raised
         edit.curve.green = raised
         edit.curve.blue = raised
@@ -880,7 +905,7 @@ final class HDRCurveTests: XCTestCase {
 
         // 整帧的 min/max/mean：暗部的下限被抬到那个常量上，均值随之上升 —— "压平"看得见
         let clippedImage = try render(graph, edit)
-        let neutralImage = try render(graph, .neutral)
+        let neutralImage = try render(graph, Self.pre314)
         func stats(_ img: DisplayImage) -> (min: Float, max: Float, mean: Double) {
             var lo = Double.greatestFiniteMagnitude, hi = -Double.greatestFiniteMagnitude
             var sum = 0.0
@@ -899,7 +924,7 @@ final class HDRCurveTests: XCTestCase {
                      clippedStats.min, clippedStats.max, clippedStats.mean))
 
         // **反证**：051 的形状（首点钉在 0），同样的五个输入是斜坡
-        var pinned = EditModel.neutral
+        var pinned = Self.pre314
         let pinnedCurve: [CurvePoint] = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.6, v: 0.5), CurvePoint(u: 1, v: 1)]
         pinned.curve.red = pinnedCurve
         pinned.curve.green = pinnedCurve
@@ -1021,11 +1046,11 @@ final class HDRCurveTests: XCTestCase {
     /// display codes (so the appearance change is readable).
     func testAFixedCurveOnTheNewAxisIsTheAnalyticReference() throws {
         let push = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.22, v: 0.17), CurvePoint(u: 0.55, v: 0.58), CurvePoint(u: 1, v: 1)]
-        var edit = EditModel.neutral
+        var edit = Self.pre314
         edit.curve.white = push
         let levels: [Float] = [0.02, 0.05, 0.18, 0.5, 1, 2, 4, 8, 16]
         let graph = try makeGraph(bands(levels))
-        let out = bandValues(try render(graph, edit, headroom: 64), count: levels.count)
+        let out = bandValues(try render(graph, edit, headroom: 64, ceiling: 64), count: levels.count)
 
         let tables = CurveLUT.build(edit.curve)
         let slopes = CurveLUT.slopes(tables)

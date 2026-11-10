@@ -276,7 +276,12 @@ final class LocalColorStageTests: XCTestCase {
                                  edit: edit, display: DisplayOptions())
         }
 
-        var exposureOnly = EditModel.neutral
+        // 314 — the resting document sharpens, so a shipped `EditModel.neutral` carries **ten**
+        // pipeline links (S3.10 is a real stage) and the trace below would be measuring the
+        // sharpener. The claim here is 056's («a mask with hue or saturation ≠ 0 adds exactly one
+        // link»), so the document is 314's explicit `amount = 0` — S3.10 does not exist — and the
+        // counts stay the pre-056 nine. 314's own default is pinned by `SharpenDefaultTests`.
+        var exposureOnly = Self.unsharpened
         exposureOnly.masks = [fullCanvasMask(LocalAdjustments(exposure: 0.5))]
         XCTAssertFalse(exposureOnly.hasLocalColor)
         XCTAssertEqual(links(exposureOnly).pipeline.count, 9)
@@ -340,6 +345,17 @@ final class LocalColorStageTests: XCTestCase {
             let v = 0.10 + 0.55 * Double(x) / Double(max(width - 1, 1))
             return (v, v * 0.95, v * 0.9)
         }
+    }
+
+    /// 314 — the resting document before the sharpener became the shipped default.
+    ///
+    /// `amount = 0` is 314's own spelling of "S3.10 does not exist" (an absent key is the *default*
+    /// now, so it cannot mean that any more). Tests that count pipeline links or compare a frame to
+    /// a pre-314 reference use this document; tests about the sharpener use `EditModel.neutral`.
+    static var unsharpened: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return e
     }
 
     /// The stage's cache entry must be keyed by what it reads: the second frame is a hit (same

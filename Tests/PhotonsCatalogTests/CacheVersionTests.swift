@@ -74,7 +74,12 @@ final class CacheVersionTests: XCTestCase {
         // 159: contrast sits **after** the tone map, so the "strip the version" chain has the new
         // shape: curve → toneMap → [contrast →] color. It must be the same graph as production with
         // only the `;alg=` tokens removed, or ⑤ would compare two different graphs.
-        let toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(stripped(.toneMap)).canonical
+        let toneMap = KeyBuilder(KeyBuilder.digest(of: curve)).add(stripped(.toneMap))
+            // 323 — the ceiling is key material for S2 too, and it is spelled **unconditionally** on
+            // the production link; the frozen copy has to carry it or ⑤ compares a chain shape, not a
+            // version. `DisplayOptions()` is the shipped ceiling (+2.3 EV), the one this fixture uses.
+            .add(DisplayOptions().ceilingKeyString)
+            .canonical
         var colorSeed = toneMap
         if edit.hasContrastStage || edit.hasLocalContrast {
             colorSeed = KeyBuilder(KeyBuilder.digest(of: toneMap))
@@ -83,7 +88,18 @@ final class CacheVersionTests: XCTestCase {
                 .canonical
         }
         let color = KeyBuilder(KeyBuilder.digest(of: colorSeed)).add(stripped(.color)).canonical
-        let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(stripped(.vignette)).canonical
+        // 314 — 锐化's resting amount became 50, so a shipped document has a real S3.10 and its link
+        // sits between S3 and the vignette (185's slot). Mirroring it here is the same rule as the
+        // contrast link above: the frozen chain must be production's chain with only the `;alg=`
+        // tokens removed. Before 314 this stanza never fired for `contrastEdit()`.
+        var vignetteSeed = color
+        if edit.hasSharpen {
+            vignetteSeed = KeyBuilder(KeyBuilder.digest(of: color))
+                .add("sharpen")
+                .add(stripped(.sharpen))
+                .canonical
+        }
+        let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(stripped(.vignette)).canonical
         let display = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(DisplayOptions().keyString).add(size).canonical
         return (KeyBuilder.digest(of: geometry), KeyBuilder.digest(of: sceneLinear),

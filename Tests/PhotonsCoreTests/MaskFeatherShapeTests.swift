@@ -56,9 +56,15 @@ final class MaskFeatherShapeTests: XCTestCase {
 
     /// One mask, one component, **no mask-level feather** (that operator is 005d's spatial blur, a
     /// different thing with a different radius function), so the atlas is the shape's own coverage.
+    ///
+    /// 314 — the document is the **unsharpened** resting one. A shipped `EditModel.neutral` now
+    /// carries 锐化 50 / 2.0, and the digest in §4 is the pre-A4 **frame**, so the sharpener would be
+    /// part of the measurement (its halo also trips the frame's darkest-pixel read in the centroid
+    /// tests). `amount = 0` is 314's own spelling of "S3.10 does not exist".
     private func doc(_ shape: MaskShape, feather: Double,
                      adjustments: LocalAdjustments = LocalAdjustments(exposure: 0.8)) -> EditModel {
         var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
         edit.masks = [Mask(id: "m-\(shape.kind)", opacity: 1, feather: 0, refine: 0,
                            components: [MaskComponent(id: "c", feather: feather, shape: shape)],
                            adjustments: adjustments)]

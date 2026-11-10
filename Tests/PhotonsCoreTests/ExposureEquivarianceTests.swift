@@ -86,9 +86,18 @@ final class ExposureEquivarianceTests: XCTestCase {
 
     /// S4's linear exit in the **working primaries** (Rec.2020), so the frame is the scene light
     /// itself: S2/S3 are the identity for these documents and only the stage under test runs.
-    private func linearRender(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
+    ///
+    /// 320 — the picture's own ceiling (`DisplayOptions.highlightCeiling`, shipped +2.3 EV = 4.925)
+    /// is applied at the end of S2 on **every** document. It is a display decision, so a law stated
+    /// as `render(E=k) == 2^k·render(0)` has to be measured below it: a pixel whose exposed value
+    /// crosses 4.925 comes back at the ceiling and the law is false there by construction (measured
+    /// on the local-adjustment law: expected 4.9375, got 4.921875, 47 of 38 400 pixels). Callers that
+    /// deliberately measure across the ceiling pass one above it; the ceiling's own behaviour is
+    /// `HighlightCeilingTests`'.
+    private func linearRender(_ graph: RenderGraph, _ edit: EditModel,
+                              ceiling: Double = HighlightCeiling.defaultLinear) throws -> DisplayImage {
         let display = DisplayOptions(primaries: .rec2020, bitDepth: 16, headroom: 1,
-                                     linearOutput: true)
+                                     linearOutput: true, highlightCeiling: ceiling)
         let result = try graph.render(edit, options: RenderOptions(
             scale: 1, display: display, useCache: false, wantsPixels: true))
         if let t = result.output { graph.recycle(output: t) }
@@ -373,9 +382,13 @@ final class ExposureEquivarianceTests: XCTestCase {
         let img = LinearImage(width: 200, height: 140, rgba: rgba,
                               colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
         let graph = try makeGraph(img, identity: "eq-mask-render")
-        let base = try linearRender(graph, edit(masks: masks(luma: true)))
+        // 320 — E = +2 and the mask's own +0.5 EV put the brightest pixel at 0.96 × 4 × 2^0.5 = 5.4,
+        // past the shipped +2.3 EV ceiling (4.925); the ratio law is measured with the ceiling above
+        // the frame so the two frames differ only by exposure × gain.
+        let base = try linearRender(graph, edit(masks: masks(luma: true)), ceiling: 16)
         for k in [-2.0, 1.0, 2.0] {
-            let exposed = try linearRender(graph, edit(exposure: k, masks: masks(luma: true)))
+            let exposed = try linearRender(graph, edit(exposure: k, masks: masks(luma: true)),
+                                           ceiling: 16)
             assertCommutes(base, exposed, gain: Float(pow(2.0, k)), "synthetic luma-mask E=\(Int(k))")
         }
     }

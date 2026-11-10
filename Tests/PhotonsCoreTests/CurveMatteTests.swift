@@ -282,9 +282,28 @@ final class CurveMatteTests: XCTestCase {
     /// curve render's content bytes did not move at all: `testCurveContentPixelsAreUnchanged` still
     /// matches its 030-era constants (`11578fbd…`), so the half-ULP flips live in the uncurved
     /// pass-through, not in the LUT path.
+    ///
+    /// 314 — both identities were re-anchored on the **unsharpened** resting document (see
+    /// `unsharpened`). The constants themselves did not move: with S3.10 out of the graph these
+    /// frames are the pre-314 bytes.
+    private static var unsharpened: EditModel {
+        var e = EditModel.neutral
+        e.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return e
+    }
+
+    /// 314 — the resting document this file's digests were recorded on.
+    ///
+    /// Since 314 a shipped document sharpens (`amount` 50 / σ 2.0) and S3.10 runs after S1.7, so
+    /// `EditModel.neutral`'s frame is no longer the frame these constants were taken from (both
+    /// identities here moved at 314 and at nothing else — measured in the 360 lane: green at
+    /// `9f1f1ad`, red at `44d56f3`). The subject of both tests is the **matte guard / curve path**,
+    /// not the sharpener: `amount = 0` is 314's own spelling of "S3.10 does not exist" and the
+    /// remedy 314 used for DetailFX / LocalDetail / ToneMap / SharpenScale. The sharpen default is
+    /// pinned by `SharpenDefaultTests`.
     func testIdentityCurveHashesAreUnchanged() throws {
         let graph = try makeGraph(rampImage())
-        let neutral = EditModel.neutral
+        let neutral = Self.unsharpened
 
         let plain = try XCTUnwrap(graph.render(neutral, options: RenderOptions(scale: 1, wantsPixels: true)).display)
         XCTAssertEqual(plain.width, 480)
@@ -313,7 +332,7 @@ final class CurveMatteTests: XCTestCase {
     /// alone (`contentHash`), so this pins the picture and ignores the bars on purpose.
     func testCurveContentPixelsAreUnchanged() throws {
         let graph = try makeGraph(rampImage())
-        var edit = EditModel.neutral
+        var edit = Self.unsharpened
         edit.curve = liftedBlackCurve
 
         var hashes: [String: String] = [:]
@@ -344,9 +363,9 @@ final class CurveMatteTests: XCTestCase {
         let rect = contentRect(try graph.render(edit, options: options(boxes[0])))
         let drift = maxAbsDifference(unwrapped, (x: 0, y: 0), boxed, rect)
 
-        let neutralUnwrapped = try XCTUnwrap(graph.render(EditModel.neutral,
+        let neutralUnwrapped = try XCTUnwrap(graph.render(Self.unsharpened,
                                                           options: RenderOptions(scale: 1, wantsPixels: true)).display)
-        let neutralBoxed = try XCTUnwrap(graph.render(EditModel.neutral, options: options(boxes[0])).display)
+        let neutralBoxed = try XCTUnwrap(graph.render(Self.unsharpened, options: options(boxes[0])).display)
         let neutralDrift = maxAbsDifference(neutralUnwrapped, (x: 0, y: 0), neutralBoxed, rect)
         print("派单 008C content [canvas vs none]: max |Δ| = \(drift) with the curve, "
               + "\(neutralDrift) without it (S0's 1:1 resample, amplified by the curve's slope)")
