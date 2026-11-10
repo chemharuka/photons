@@ -300,22 +300,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The layer's presenter, for a test that asserts on what reached the drawable (068). Read-only and
     /// `nil` only before `viewDidLoad` — the app never reaches for it.
     public var canvasPresenter: CanvasPresenter? { presenter }
-    private var graph: RenderGraph?
-    private var graphIdentity: String?
-    /// 065: the **photo** `graph` was built from (`contentHash|assetID`, or a frame source's identity).
-    ///
-    /// The graph is the frame path's, and it is only replaced when a frame of the new photo is
-    /// rendered — so between a photo switch and that first frame it still holds the previous picture's
-    /// decoded pixels. The backdrop renders through this graph, which meant a request that outlived its
-    /// photo could render **A's pixels through B's edit** and file the result under B's key: a backdrop
-    /// that claims to be the new photo and is the old one. `renderBackdrop` compares this with the key.
-    private var graphPhoto: String?
-    /// The decoder version / detail amounts `graph`'s buffer was developed with. The backdrop key
-    /// carries them too (`DecodeInputs.key`), so a request that lands between a decoder switch and the
-    /// new frame must not render the old buffer under the new key. White balance is deliberately not
-    /// compared: the drag preview is an S1 gain on the resident buffer, not a new development.
-    private var graphDecodeVersion: String?
-    private var graphDetail: DetailSettings = .identity
+    // 340 — `graph / graphIdentity / graphPhoto / graphDecodeVersion / graphDetail` used to sit here
+    // as five bare fields: `makeFrame` wrote them on `photons.loupe.render`, and `anchorBaseWhiteBalance`,
+    // `measuredAsShotIlluminant`, `sampleForPointColor`, `present` and `measureHistogramNow` read them on
+    // the main thread. Same race as 333's `decoded*`, same kind of `.ips` (an over-release on a `RenderGraph`
+    // reference instead of a `LinearImage`). They are the second half of `FrameSnapshot` now — one box,
+    // one store, and a frame can never be seen beside another frame's graph.
 
     /// 037 ② / 039 — the low-resolution **whole picture** the canvas draws outside a shrinking frame.
     ///
@@ -332,6 +322,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private let ladder = DecodeLadder()
 
     /// **333 — the frame state: which pixels the canvas has, whose they are, at what rung.**
+    ///
+    /// 340 — and now also **the graph that draws them**: `graph / graphIdentity / graphPhoto /
+    /// graphDecodeVersion / graphDetail` were a second set of bare fields with the same defect, written
+    /// by the same `makeFrame` and read by the same main thread. They live in this one struct because
+    /// they are the same frame's — a reader that sees a new buffer must see the graph built for it, not
+    /// the previous picture's.
     ///
     /// Five bare fields (`decoded / decodedIdentity / decodedURL / decodedScale / decodedCaps`) were
     /// written by `makeFrame` on `photons.loupe.render` and read by the main thread — `framing()`,
@@ -364,6 +360,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
         var url: URL?
         var scale: Double = 0.5
         var capabilities: DecoderCapabilities?
+
+        // ── 340 · the graph group: the other half of the same frame ──────────────────────────────
+        //
+        // The `RenderGraph` this frame was rendered through. A **class** reference: one `graph?.x` on
+        // the main thread is a retain, and until 340 the render queue could swap it and let go of the
+        // last reference in the same instant — the main thread then retained freed memory and the next
+        // release was the `.ips`. Copying the struct under the lock is that retain, on the right side
+        // of the lock.
+        var graph: RenderGraph?
+        /// Which rung of which photo the graph was built for (`"<rung identity>-s<scale>"`). Read by
+        /// `makeFrame` to decide whether the graph can be reused, and by `measureHistogramNow` to decide
+        /// whether it can measure through it.
+        var graphIdentity: String?
+        /// 065: the **photo** `graph` was built from (`contentHash|assetID`, or a frame source's identity).
+        ///
+        /// The graph is the frame path's, and it is only replaced when a frame of the new photo is
+        /// rendered — so between a photo switch and that first frame it still holds the previous
+        /// picture's decoded pixels. The backdrop renders through this graph, which meant a request that
+        /// outlived its photo could render **A's pixels through B's edit** and file the result under B's
+        /// key: a backdrop that claims to be the new photo and is the old one. `renderBackdrop` compares
+        /// this with the key.
+        var graphPhoto: String?
+        /// The decoder version / detail amounts `graph`'s buffer was developed with. The backdrop key
+        /// carries them too (`DecodeInputs.key`), so a request that lands between a decoder switch and
+        /// the new frame must not render the old buffer under the new key. White balance is deliberately
+        /// not compared: the drag preview is an S1 gain on the resident buffer, not a new development.
+        var graphDecodeVersion: String?
+        var graphDetail: DetailSettings = .identity
     }
 
     private final class FrameSnapshotBox {
@@ -396,6 +420,26 @@ public final class LoupeController: NSViewController, HeadroomSource {
     var decodedIdentityForTesting: String? { frameState.identity }
     /// 333 probe seam — the other main-thread reader in the crash chain (`290`).
     var hasIngestedPlaceholderSourceForProbe: Bool { hasIngestedPlaceholderSource }
+    /// 340 probe / acceptance seam — the **graph group** (`graph / graphIdentity / graphPhoto /
+    /// graphDecodeVersion / graphDetail`), read on the caller's thread.
+    ///
+    /// 340 之前这五个是 `makeFrame` 在 `photons.loupe.render` 上写的裸字段，而主线程的
+    /// `anchorBaseWhiteBalance` / `measuredAsShotIlluminant` / `sampleForPointColor` / `present` /
+    /// `measureHistogramNow` 也在读它们 —— 与 333 的 `decoded*` 是同一类竞态。340 之后它们与
+    /// `decoded*` 在**同一个** `FrameSnapshot` 里，这条 seam 因此只做一件事：取**一次**快照，再把五个
+    /// 字段一起交出去（与那些读点的「先取后比」完全同形）。
+    var graphGroupForTesting: (photo: String?, decodeVersion: String?, detail: DetailSettings,
+                               identity: String?, hasGraph: Bool) {
+        let frame = frameState
+        return (frame.graphPhoto, frame.graphDecodeVersion, frame.graphDetail,
+                frame.graphIdentity, frame.graph != nil)
+    }
+    /// 340 — the frame's own cache key (`makeFrame`'s `cacheIdentity`), so the ④ equivalence suite can
+    /// pin the **key** beside the projection. A pure function of the photo and the document's decode
+    /// inputs — the same two things `makeFrame` keys a rung on.
+    func frameCacheKeyForTesting(url: URL, edit: EditModel) -> String {
+        Self.rungIdentity(url.lastPathComponent, inputs: edit.decodeInputs)
+    }
     /// 333 diagnostic counter — how many `framing()` calls one gesture costs. The crash chain
     /// amplified itself by calling it **4–5×** per wheel event; the acceptance reads this number.
     public private(set) var framingCalls = 0
@@ -900,7 +944,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// so a drag reads one number instead of re-scanning the buffer; a graph that does not exist yet
     /// means the first development has not landed and there is nothing to preview against.
     private var previewIlluminant: WhiteBalanceEstimate.Illuminant {
-        graph?.measuredAsShotIlluminant ?? .neutral
+        // 340 — one snapshot for the read: the graph is the frame's, and it can be replaced at any
+        // instant by the render queue.
+        frameState.graph?.measuredAsShotIlluminant ?? .neutral
     }
 
     /// One preview render, snapshotted on the main thread. The render queue must never read
@@ -1045,7 +1091,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///     and therefore a different base.
     ///
     /// Nothing else reads it: it is not part of a render key, a decode key or an export.
-    public var anchorBaseWhiteBalance: WhiteBalance { graph?.bufferWhiteBalance ?? .asShot }
+    public var anchorBaseWhiteBalance: WhiteBalance {
+        frameState.graph?.bufferWhiteBalance ?? .asShot      // 340 — one snapshot, then the graph
+    }
 
     /// S1's own triple for `whiteBalance` — the same call the settled render makes, so the two cannot
     /// disagree.
@@ -1056,7 +1104,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // — the gain from as shot — which is the same number only while the resident buffer *is* the
         // as-shot one. When there is no graph yet there is nothing to preview against; the caller's
         // `makeWhiteBalancePreviewRequest` refuses in the same situation.
-        guard let graph else {
+        let frame = frameState                                  // 340 — the graph group is the frame's
+        guard let graph = frame.graph else {
             let g = WhiteBalanceEstimate.gain(for: whiteBalance, asShot: previewIlluminant)
             return SIMD3(g.r, g.g, g.b)
         }
@@ -1075,11 +1124,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 333 — one snapshot for the whole request: the buffer, the file it came from and the rung it
         // was developed at travel together, so a frame landing mid-way cannot mix two of them.
         let frame = frameState
-        guard let url = frame.url, let image = frame.image, graph != nil else { return nil }
+        guard let url = frame.url, let image = frame.image, frame.graph != nil else { return nil }
         // The buffer must be the photo the document belongs to: after a switch the controller can
         // still hold the previous picture until the first frame of the new one lands, and rendering
         // that through the new document's pair would paint the wrong photo.
-        if let photo = graphPhoto {
+        if let photo = frame.graphPhoto {
             let current = frameSource?.identity
                 ?? session?.anchorAsset.map { ladderIdentity($0) }
             if let current, current != photo { return nil }
@@ -1091,11 +1140,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // balance. Everything else about it (decoder version, detail amounts) is the document's, because
         // that is what developed it; only the pair is read off the graph.
         var rungInputs = document.decodeInputs
-        rungInputs.whiteBalance = graph?.bufferWhiteBalance ?? .asShot
+        rungInputs.whiteBalance = frame.graph?.bufferWhiteBalance ?? .asShot
         return WhiteBalancePreviewRequest(
             target: target, token: 0, tickTime: CACurrentMediaTime(),
             edit: document,
-            url: url, baseIdentity: graphPhoto ?? url.lastPathComponent,
+            url: url, baseIdentity: frame.graphPhoto ?? url.lastPathComponent,
             viewport: camera, decodeScale: Float(frame.scale), state: viewState,
             useCache: true, rungInputs: rungInputs,
             canvasRole: cropTool.canvasRole, cropIsActive: cropTool.isActive,
@@ -1143,7 +1192,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let started = CFAbsoluteTimeGetCurrent()
         // The texture this frame comes from is this graph's; a photo switch can replace `graph`
         // before the completion runs, and the old texture must go back to the pool it came from.
-        let graph = self.graph
+        let graph = self.frameState.graph      // 340 — the texture is that graph's; one snapshot
         queue.async { [weak self] in
             guard let self else { return }
             let outcome: Result<FrameResult, Error>
@@ -3123,7 +3172,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// It deliberately does **not** fall back to `decoded`: a frame that is not ready reports
     /// `.notReady`.
     public func sampleForPointColor(atViewPoint point: CGPoint) -> PointColorDropperOutcome {
-        guard graph != nil, let frame = lastFrame else { return .notReady }
+        guard frameState.graph != nil, let frame = lastFrame else { return .notReady }
         if case .edited = frame.mode {} else { return .notReady }
         guard let texel = textureTexel(forViewPoint: point) else { return .outsideImage }
         let picture = frame.photoRect
@@ -3157,7 +3206,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// frame that is actually on screen"; the probe itself is a tiny render, not a frame.
     private func probePointColorInput(contentX: Int, contentY: Int, scale: Double,
                                       edit: EditModel) -> (rgb: RGBSample, milliseconds: Double)? {
-        guard let graph else { return nil }
+        // 340 — the graph this click is probed through, taken once (the render queue may replace it).
+        guard let graph = frameState.graph else { return nil }
         var result: RGBSample?
         var milliseconds = 0.0
         queue.sync {
@@ -3209,7 +3259,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// applies the same gain the settled render will apply; the app itself never reads this (the
     /// render does, through the graph).
     public var measuredAsShotIlluminant: WhiteBalanceEstimate.Illuminant {
-        graph?.measuredAsShotIlluminant ?? .neutral
+        frameState.graph?.measuredAsShotIlluminant ?? .neutral     // 340 — one snapshot
     }
 
     /// The picture's mean colour, for the 自动 preset. The same grey-world input Lightroom's Auto WB
@@ -5611,7 +5661,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// passes nothing).
     public func reclaimIdleTextures(completion: (() -> Void)? = nil) {
         queue.async { [weak self] in
-            let bytes = self?.graph?.releaseIdleTextures() ?? 0
+            let bytes = self?.frameState.graph?.releaseIdleTextures() ?? 0
             guard let self else { return }
             if bytes > 0 { self.reclaimedIdleTextureBytes += bytes }
             if let completion { DispatchQueue.main.async(execute: completion) }
@@ -6284,7 +6334,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 065: 「可取消」. A switch has already bumped the serial, so this generation is nobody's: do not
         // render it, and do not leave it queued in front of the new photo's bottom image.
         guard backdrop.isCurrent(serial) else { return }
-        guard let graph else {
+        // 340 — one snapshot for the whole generation: the graph, the photo it was built from and the
+        // decode inputs it carries are the *same frame's* facts, so a frame landing mid-way can no
+        // longer make this render A's pixels and file them under B's key with B's version.
+        let frame = frameState
+        guard let graph = frame.graph else {
             DispatchQueue.main.async { [weak self] in
                 self?.backdrop.fail(key, error: "no frame yet (nothing decoded)")
             }
@@ -6297,7 +6351,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // Refusing is the honest answer: no backdrop is 025's edge extrapolation, the old picture is
         // not shown. The request is re-armed once this photo's own graph exists (see
         // `retryBackdropAfterPhotoSwitch`), so the flow does finish without a second pointer entry.
-        let photo = graphPhoto ?? ""
+        let photo = frame.graphPhoto ?? ""
         guard photo == key.photo else {
             let reason = "the frame graph is still \(photo.isEmpty ? "unset" : photo)"
             DispatchQueue.main.async { [weak self] in
@@ -6313,9 +6367,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the new key would be a backdrop that says v9 and shows v8. Wait for the frame (the guard
         // re-arms `backdropWanted`, and `present` serves it once the graph has developed).
         let requested = job.edit.decodeInputs
-        guard graphDecodeVersion == requested.decoderVersion, graphDetail == requested.detail else {
+        guard frame.graphDecodeVersion == requested.decoderVersion,
+              frame.graphDetail == requested.detail else {
             let reason = "the frame graph is still"
-                + " \(graphDecodeVersion ?? "auto")/\(graphDetail.summary)"
+                + " \(frame.graphDecodeVersion ?? "auto")/\(frame.graphDetail.summary)"
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.backdrop.fail(key, error: "\(reason), not the requested decode")
@@ -6631,46 +6686,57 @@ public final class LoupeController: NSViewController, HeadroomSource {
             outcome = (resident, true)
         }
         let image = outcome.rung.image
-        let usedCache = outcome.cached
+        // 333 / 340 — **one** store, not nine. The frame's facts leave the render queue as a single
+        // value: the decoded group (which pixels, whose, at what rung) **and** the graph group (the
+        // graph drawn from them, and what it was built for). `previous` is what the last frame stored —
+        // this queue is the only writer — so a cached rung carries its graph forward untouched instead
+        // of the graph flashing to `nil` while that rung is still on screen.
+        let previous = frameState
         if !outcome.cached {
             decodeMilliseconds = outcome.rung.milliseconds
             // P1b: a different rung of this picture (or another picture) means the graph's idle
             // textures are for a canvas nobody will ask for again. Hand them back *before* the new
             // source is built, not at the same moment as its 483 MB source texture.
-            graph?.releaseIdleTextures()
-            graph = nil                      // a new source needs a new graph
-            graphIdentity = nil
-            graphPhoto = nil
-            graphDecodeVersion = nil
-            graphDetail = .identity
+            previous.graph?.releaseIdleTextures()
+            // A new source needs a new graph, so the graph group is deliberately **not** carried
+            // forward here: the `identity` check below then always builds one.
         }
-        // 333 — **one** store, not five. The five facts about the frame leave the render queue as a
-        // single value: a reader can no longer see the new buffer beside the previous picture's
-        // identity, rung or capabilities (and no reader can retain a value this side is releasing).
         let capabilities = outcome.rung.capabilities
-        frameBox.store(FrameSnapshot(image: image, identity: baseIdentity, url: url,
-                                     scale: ds, capabilities: capabilities))
+        let usedCache = outcome.cached
+        var next = FrameSnapshot(image: image, identity: baseIdentity, url: url,
+                                 scale: ds, capabilities: capabilities)
+        if outcome.cached {
+            next.graph = previous.graph
+            next.graphIdentity = previous.graphIdentity
+            next.graphPhoto = previous.graphPhoto
+            next.graphDecodeVersion = previous.graphDecodeVersion
+            next.graphDetail = previous.graphDetail
+        }
         currentDecodeScale = decodeScale
 
         let identity = "\(cacheIdentity)-s\(decodeScale)"
-        if graph == nil || graphIdentity != identity {
-            graph = try RenderGraph(input: RenderInput(
+        if next.graph == nil || next.graphIdentity != identity {
+            next.graph = try RenderGraph(input: RenderInput(
                 image: image, identity: identity, sourceURL: url,
                 lensProfile: outcome.rung.lensProfile,
                 whiteBalance: inputs.whiteBalance,
                 // 195 — the drag's matrix is a ratio against the balance these pixels are already
-                // at, and for an as-shot buffer that is the **file's** pair (measured 5872 K/+20 and
+                // at, and for an as-shot buffer it is the **file's** pair (measured 5872 K/+20 and
                 // 5552 K/+24 on two fixtures), never the nominal 6500 K.
                 asShotPair: outcome.rung.capabilities.asShotWhiteBalance))
-            graphIdentity = identity
-            graphPhoto = baseIdentity
-            graphDecodeVersion = inputs.decoderVersion
-            graphDetail = inputs.detail
+            next.graphIdentity = identity
+            next.graphPhoto = baseIdentity
+            next.graphDecodeVersion = inputs.decoderVersion
+            next.graphDetail = inputs.detail
             // A new photo (or a new rung of it): its key is a different picture, so the measurement
             // armed below is a fresh one — the card must not keep the previous picture's numbers.
             lastFrameState = nil
         }
-        guard let graph else { throw RenderError.allocationFailed("loupe graph") }
+        // The one publication point for the whole frame. On a failed `RenderGraph` allocation nothing
+        // is stored: the previous frame state stays (it is the frame the canvas is still showing), and
+        // `RenderError.allocationFailed` goes up the same path it always did.
+        frameBox.store(next)
+        guard let graph = next.graph else { throw RenderError.allocationFailed("loupe graph") }
 
         // The camera. 080: 「显示原图」 shows the **whole decode**, so its framing is the whole decode's
         // — the crop is a property of the document, and a frame of the decode that framed itself with
@@ -7115,7 +7181,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 185 — the ⌥ overlay rides on the frame that is actually on screen: same canvas, same size,
         // so the mask lines up to the pixel. It is computed from `texture` and never from a key, which
         // is why holding ⌥ cannot evict a cached frame.
-        if sharpenMaskPreview.isShowing, let graph, let session {
+        if sharpenMaskPreview.isShowing, let graph = frameState.graph, let session {
             sharpenMaskPreview.refresh(in: canvasView.metalLayer, graph: graph,
                                        texture: texture, edit: session.edit)
         } else {
@@ -7379,6 +7445,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
             lastPresentError = "no Metal presenter"
             return
         }
+        // 340 — **one** snapshot for the whole present. The graph this frame's texture belongs to and
+        // the photo it is of are two facts of the same frame: reading them separately let a frame land
+        // in between and pair this texture with the next picture's graph.
+        let presented = frameState
         // 065 (H2) / 065b: a frame landing is the frame graph moving on — the new photo's first frame,
         // which is exactly when the bottom image this photo asked for at the open can be made. The
         // request is answered here, behind that frame, never in front of it.
@@ -7409,11 +7479,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 if old.state != state { zoomBridgePendingDrops += 1 }
                 if let graph = old.graph { queue.async { graph.recycle(output: old.frame.texture) } }
             }
-            pendingFrame = (frame, graphOverride ?? graph, renderMilliseconds, state)
+            pendingFrame = (frame, graphOverride ?? presented.graph, renderMilliseconds, state)
             zoomBridgeCoveredPresents += 1
             return
         }
-        let graphAtFrame = graphOverride ?? graph
+        let graphAtFrame = graphOverride ?? presented.graph
         // 118: the new frame landed. If it carries the revision the release committed — or anything
         // newer — this is the real white balance, so the simulation is dropped **before** the draw:
         // one atomic switch from old-frame×gain to the new frame, never a flash of the old pair.
@@ -7539,7 +7609,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 235 — the real frame is on the layer. Record what the eye saw until this instant (the
         // acceptance's content enum) and then take the stand-in down. Both happen only on a
         // successful present: a refused drawable must keep the thumbnail, not uncover the matte.
-        let currentPhoto = graphPhoto ?? backdropPhotoKey
+        let currentPhoto = presented.graphPhoto ?? backdropPhotoKey
         if awaitingFirstFrameContent {
             if firstFramePlaceholderPhoto != nil, canvasView.isShowingFirstFramePlaceholder {
                 firstFrameContent = .displayThumbnail
@@ -8219,8 +8289,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)
         }
         let graphIdentityForRung = "\(identity)-s\(outcome.rung.scale)"
+        // 340 — the measurer question is answered from **one** snapshot: the identity and the graph are
+        // the same frame's, so "this graph is that rung" cannot be decided from two different frames.
+        let frame = frameState
         let measurer: RenderGraph
-        if graphIdentity == graphIdentityForRung, let existing = graph {
+        if frame.graphIdentity == graphIdentityForRung, let existing = frame.graph {
             measurer = existing
         } else {
             measurer = try RenderGraph(input: RenderInput(image: outcome.rung.image,
