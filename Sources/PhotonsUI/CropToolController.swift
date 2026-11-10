@@ -124,16 +124,21 @@ public final class CropToolController {
         /// (the crop is a rectangle of the document canvas); `.source` for everything else, which is
         /// where the two spaces are the same picture anyway.
         public var cropSpace: CropSpace = .source
+        /// 354 — the guide lines, as the draft carries them so 应用 keeps them and Esc (which restores
+        /// the geometry the tool was entered with) puts them back.
+        public var guideLines: [StoredGuideLine] = []
 
         public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original,
                     perspectiveVertical: Double = 0, perspectiveHorizontal: Double = 0,
-                    cropSpace: CropSpace = .source) {
+                    cropSpace: CropSpace = .source,
+                    guideLines: [StoredGuideLine] = []) {
             self.crop = crop
             self.straighten = straighten
             self.lock = lock
             self.perspectiveVertical = perspectiveVertical
             self.perspectiveHorizontal = perspectiveHorizontal
             self.cropSpace = cropSpace
+            self.guideLines = guideLines
         }
 
         public var perspective: PerspectiveMap? {
@@ -156,7 +161,8 @@ public final class CropToolController {
                           quarterTurns: document.quarterTurns,
                           perspectiveVertical: perspectiveVertical,
                           perspectiveHorizontal: perspectiveHorizontal,
-                          cropSpace: cropSpace)
+                          cropSpace: cropSpace,
+                          guideLines: guideLines)
         }
 
         public init(geometry: GeometryGroup) {
@@ -167,7 +173,8 @@ public final class CropToolController {
                       lock: geometry.aspectLock,
                       perspectiveVertical: geometry.perspectiveVertical,
                       perspectiveHorizontal: geometry.perspectiveHorizontal,
-                      cropSpace: geometry.cropSpace)
+                      cropSpace: geometry.cropSpace,
+                      guideLines: geometry.guideLines)
         }
     }
 
@@ -682,6 +689,10 @@ public final class CropToolController {
         // arrives the session's own snapshot only covers the last gesture. Remembering the geometry
         // this tool was entered with is what makes 「除非 esc 取消回退」 true after several drags.
         entryGeometry = session.edit.geometry
+        // 354 — the lines are part of the document now, so reopening 裁切 finds the ones the last fit
+        // stood on. Rebuilt through the same value the fit reads, so a line that comes back is a line
+        // the solver can still use.
+        guideLines = Self.guideLines(from: session.edit.geometry.guideLines)
         isActive = true
         isDragging = false
         drag = nil
@@ -918,6 +929,12 @@ public final class CropToolController {
     /// Its opacity, from `GuideLinesSolve.alpha(elapsed:)` — the 0.3 s flash after the release.
     public private(set) var guideLineStrokeAlpha: Double = 1
     /// The lines the current fit stands on, oldest first. At most 2 vertical + 2 horizontal.
+    ///
+    /// **354 — these are source pixels**, and this array is the *only* place a line's geometry lives.
+    /// Every screen position is `GuideLineProjection.screenPoint` of these numbers under the current
+    /// document and camera, computed at draw time; there is no cached view copy left to go stale
+    /// (before this task the array was `[CropToolSegment]` in view points, written only when a line
+    /// was drawn, so a zoom or a keystone left the line behind — the reported bug).
     public private(set) var guideLines: [GuideLine] = []
     /// The accepted fit (the values the document holds), or `nil` before the first success.
     public private(set) var guideLineSolution: GuideLineSolution?
@@ -1166,17 +1183,17 @@ public final class CropToolController {
         }
 
         let scale = pointScale > 0 ? pointScale : 1
-        // §2.4 — the material points: the stroke's ends through the **current** composite inverse
-        // (`P_current⁻¹ · R⁻¹`, plus the crop window and the camera). The gate's `false` branch uses
-        // the view points as they are — the screen reading the acceptance shows going red.
+        // §2.4 — the material points: the stroke's ends through the **one** projection's inverse
+        // (`P⁻¹ · R⁻¹` + the camera, `GuideLineProjection.sourcePoint`) — the same map the line is
+        // drawn back with, so 「屏幕上画的 == 存下来的」 holds to rounding. The gate's `false` branch
+        // uses the view points as they are — the screen reading the acceptance shows going red.
+        let projection = guideLineProjection(mapping: mapping)
         let a: CGPoint, b: CGPoint
         if guideLinesMapBackToSource {
-            let p = mapping.sourcePoint(viewX: Double(stroke.a.x) * scale,
-                                        viewY: Double(stroke.a.y) * scale)
-            let q = mapping.sourcePoint(viewX: Double(stroke.b.x) * scale,
-                                        viewY: Double(stroke.b.y) * scale)
-            a = CGPoint(x: p.x, y: p.y)
-            b = CGPoint(x: q.x, y: q.y)
+            a = projection.sourcePoint(viewX: Double(stroke.a.x) * scale,
+                                       viewY: Double(stroke.a.y) * scale)
+            b = projection.sourcePoint(viewX: Double(stroke.b.x) * scale,
+                                       viewY: Double(stroke.b.y) * scale)
         } else {
             a = stroke.a
             b = stroke.b
@@ -1188,10 +1205,10 @@ public final class CropToolController {
         }
 
         let viewAngle = GuideLinesSolve.fold(GuideLinesSolve.degrees(dx: dx, dy: dy))
-        let line = GuideLine(start: stroke.a, end: stroke.b,
-                             sourceStart: a, sourceEnd: b,
+        let line = GuideLine(a: a, b: b,
                              viewAngle: viewAngle,
-                             axis: GuideLinesSolve.axis(forFoldedAngle: viewAngle))
+                             axis: GuideLinesSolve.axis(forFoldedAngle: viewAngle),
+                             viewLength: length)
 
         // §2b.1 — at most four lines, at most two per axis. The fifth is ignored **with a reason**,
         // never silently: the previous fit (and its document values) stay.
@@ -1248,7 +1265,7 @@ public final class CropToolController {
         guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
         guideLineStrokeAlpha = 1
         guideLineApplyCount += 1
-        writeGuideLineSolution(solution)
+        writeGuideLineSolution(solution, lines: candidate)
         scheduleGuideLineFade()
         onGuideLineChange?()
         return solution
@@ -1276,23 +1293,49 @@ public final class CropToolController {
         return wasLive
     }
 
-    /// §2.5 — the one write: both parameters **and the turn** into the document, **one** history row.
+    /// **「清除引导线」** — 354 §2.5's explicit door: every line goes, the picture stays where the last
+    /// fit put it (nothing is un-solved), the tool stays armed. Distinct from 双击线身, which deletes
+    /// *one* line and re-solves on the rest, and from Esc, which also drops the tool.
+    @discardableResult
+    public func clearGuideLines() -> Bool {
+        guard !guideLines.isEmpty else { return false }
+        guideLines = []
+        guideLineSolution = nil
+        guideLineFailure = nil
+        guideLineMeasuredPairwise = nil
+        guideLineRotationFailure = nil
+        rejectedGuideLine = nil
+        rejectedGuideLineAlpha = 1
+        writeGuideLineSolution(nil, lines: [])
+        onGuideLineChange?()
+        return true
+    }
+
+    /// §2.5 — the one write: the endpoints, both parameters **and the turn** into the document, **one**
+    /// history row.
     ///
     /// The fields are the sliders' own (`GeometryGroup.perspectiveVertical/Horizontal` and
     /// `rotationDegrees`), so the card's readout follows by construction — there is no second copy to
     /// update. 348 writes the third value here because 「先平行，再摆正」 is one gesture to the user:
     /// two rows would make ⌘Z put the keystone back while leaving the picture turned.
+    /// 354 adds the endpoints to the same write, for the same reason: a drag **is** its re-solve, so
+    /// one gesture is one row and one document (the lines are document data now, not view state).
     /// The row is closed the way `commitStraighten` closes 转动's (end/reopen the crop session),
     /// because a guide-line fit is one discrete gesture and must not fold into a drag still in flight.
-    private func writeGuideLineSolution(_ solution: GuideLineSolution) {
+    private func writeGuideLineSolution(_ solution: GuideLineSolution?, lines: [GuideLine]) {
         guard let session else { return }
         let before = session.edit.geometry
+        let stored = lines.map(Self.stored)
         session.applyEdit {
-            $0.geometry.perspectiveVertical = solution.vertical
-            $0.geometry.perspectiveHorizontal = solution.horizontal
-            // `solution.straighten` is the dial's value either way: when the turn was skipped it is
-            // the angle the document already had, so this line is a no-op for `.rotationOutOfRange`.
-            $0.geometry.rotationDegrees = CropTool.clampStraighten(solution.straighten)
+            if let solution {
+                $0.geometry.perspectiveVertical = solution.vertical
+                $0.geometry.perspectiveHorizontal = solution.horizontal
+                // `solution.straighten` is the dial's value either way: when the turn was skipped it
+                // is the angle the document already had, so this line is a no-op for
+                // `.rotationOutOfRange`.
+                $0.geometry.rotationDegrees = CropTool.clampStraighten(solution.straighten)
+            }
+            $0.geometry.guideLines = stored
         }
         guard session.edit.geometry != before else { return }
         let inSession = session.isToolSessionActive
@@ -1306,6 +1349,7 @@ public final class CropToolController {
         // 应用 all see the picture the fit just produced.
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
         draft.perspectiveHorizontal = session.edit.geometry.perspectiveHorizontal
+        draft.guideLines = session.edit.geometry.guideLines
         // 348 — and the turn, so the angle dial and the overlay agree with the picture on screen.
         draft.straighten = CropTool.clampStraighten(session.edit.geometry.rotationDegrees)
         // §2c — Lightroom's `Constrain Crop` equivalent, and the **existing** switch: with
@@ -1354,9 +1398,242 @@ public final class CropToolController {
         guideLineTimer = nil
     }
 
-    /// The lines the overlay draws dimly: every accepted line of the current fit, in view points.
-    public var acceptedGuideLineSegments: [CropToolSegment] {
-        guideLines.map { CropToolSegment(a: $0.start, b: $0.end) }
+    // MARK: 354 — the one projection, the lines it draws, and the hand that moves them
+    //
+    // Everything below reads the endpoints out of `guideLines` (source pixels) and asks
+    // `GuideLineProjection` where they are **now**: `P → R → view`, with the document's keystone and
+    // angle and the camera the overlay is about to be drawn with. Nothing here stores a screen
+    // position, so 「透视变了 / 转了 / 缩放了，线要跟着走」 is not a subscription to a change
+    // notification — it is the only arithmetic there is.
+
+    /// The projection for `mapping`: the **document's** `P` and `R` (not the draft's — the picture on
+    /// the canvas is the document's, `CropToolController.canvasEdit`) plus the camera.
+    public func guideLineProjection(mapping: LoupeMapping) -> GuideLineProjection {
+        let g = session?.edit.geometry ?? .identity
+        return GuideLineProjection(source: sourceSize,
+                                   perspective: g.perspective,
+                                   straightenDegrees: CropTool.clampStraighten(g.straightenDegrees),
+                                   mapping: mapping)
+    }
+
+    /// The accepted lines in **device pixels**, at this camera — 每帧从源坐标重算.
+    public func guideLineSegments(mapping: LoupeMapping) -> [CropToolSegment] {
+        guideLineProjection(mapping: mapping).segments(of: guideLines)
+    }
+
+    /// A line's ends in device pixels, for a hit test or a readout.
+    public func guideLineSegment(at index: Int, mapping: LoupeMapping) -> CropToolSegment? {
+        guard guideLines.indices.contains(index) else { return nil }
+        let p = guideLineProjection(mapping: mapping)
+        return CropToolSegment(a: p.screenPoint(guideLines[index].a),
+                               b: p.screenPoint(guideLines[index].b))
+    }
+
+    /// What a press landed on. Endpoints first (they are the smaller target and the one the user
+    /// reached for), then the body; newest line first, so the line drawn last wins an overlap.
+    public enum GuideLineHandle: Equatable, Sendable {
+        /// The `a` end of line `index`.
+        case start(Int)
+        /// The `b` end.
+        case end(Int)
+        /// The line itself — a drag moves both ends together.
+        case body(Int)
+
+        public var index: Int {
+            switch self {
+            case .start(let i), .end(let i), .body(let i): return i
+            }
+        }
+
+        public var isBody: Bool { if case .body = self { return true }; return false }
+    }
+
+    /// §2.4 — the endpoint's reach, in device pixels (12 pt at 1×, like the crop frame's corners).
+    public static let guideLineEndpointHitRadius: Double = 10
+    /// The body's reach, in device pixels — smaller than an endpoint's so a short line can still be
+    /// grabbed by either end.
+    public static let guideLineBodyHitRadius: Double = 6
+
+    /// The line under `point` (device pixels), or `nil`.
+    public func guideLineHit(atViewPoint point: CGPoint, mapping: LoupeMapping) -> GuideLineHandle? {
+        let projection = guideLineProjection(mapping: mapping)
+        for index in guideLines.indices.reversed() {
+            let a = projection.screenPoint(guideLines[index].a)
+            let b = projection.screenPoint(guideLines[index].b)
+            if Self.distance(point, a) <= Self.guideLineEndpointHitRadius { return .start(index) }
+            if Self.distance(point, b) <= Self.guideLineEndpointHitRadius { return .end(index) }
+            if Self.distanceToSegment(point, a, b) <= Self.guideLineBodyHitRadius {
+                return .body(index)
+            }
+        }
+        return nil
+    }
+
+    /// One line gesture in flight: what was grabbed, where the hand went down, and the endpoints as
+    /// they were — the drag is measured against the **start** state, so a hand that wanders and comes
+    /// back leaves the line where it started (no accumulation).
+    private struct GuideLineMove {
+        var handle: GuideLineHandle
+        var origin: CGPoint
+        var lines: [GuideLine]
+    }
+
+    private var guideLineMove: GuideLineMove?
+    /// The handle the hand is on, for the overlay / the bar. `nil` between gestures.
+    public private(set) var draggingGuideLineHandle: GuideLineHandle?
+    public var isDraggingGuideLine: Bool { guideLineMove != nil }
+
+    /// A press on a line: take it. `false` means the press was not on a line and the canvas may have
+    /// it (the frame's grips, the inside, a pan).
+    @discardableResult
+    public func beginGuideLineDrag(atViewPoint point: CGPoint, mapping: LoupeMapping) -> Bool {
+        guard isActive, let handle = guideLineHit(atViewPoint: point, mapping: mapping) else {
+            return false
+        }
+        guideLineMove = GuideLineMove(handle: handle, origin: point, lines: guideLines)
+        draggingGuideLineHandle = handle
+        swallowedGestures += 1
+        onGuideLineChange?()
+        return true
+    }
+
+    /// One tick. **The order §2.4 asks for**: the screen point under the hand → back through the
+    /// projection's inverse → a source pixel → stored. Nothing is solved here (a tick must not write
+    /// the document, or one drag would be a hundred history rows); `endGuideLineDrag` re-solves once.
+    public func continueGuideLineDrag(atViewPoint point: CGPoint, mapping: LoupeMapping) {
+        guard let move = guideLineMove else { return }
+        let projection = guideLineProjection(mapping: mapping)
+        let dx = Double(point.x - move.origin.x), dy = Double(point.y - move.origin.y)
+        func moved(_ source: CGPoint) -> CGPoint {
+            let screen = projection.screenPoint(source)
+            return projection.sourcePoint(viewX: Double(screen.x) + dx,
+                                          viewY: Double(screen.y) + dy)
+        }
+        var lines = move.lines
+        guard lines.indices.contains(move.handle.index) else { return }
+        switch move.handle {
+        case .start(let index):
+            lines[index].a = moved(move.lines[index].a)
+        case .end(let index):
+            lines[index].b = moved(move.lines[index].b)
+        case .body(let index):
+            lines[index].a = moved(move.lines[index].a)
+            lines[index].b = moved(move.lines[index].b)
+        }
+        guideLines = lines
+        onGuideLineChange?()
+    }
+
+    /// Mouse-up: **one** re-solve on the lines as they now stand, and **one** history row
+    /// (endpoints + the parameters they imply). The line stays — §2.5's 「保留」 — and so does the
+    /// other end: a body drag moved both, an endpoint drag moved exactly one.
+    @discardableResult
+    public func endGuideLineDrag(mapping: LoupeMapping) -> GuideLineSolution? {
+        guard guideLineMove != nil else { return nil }
+        guideLineMove = nil
+        draggingGuideLineHandle = nil
+        let solution = reSolveGuideLines(guideLines)
+        onGuideLineChange?()
+        return solution
+    }
+
+    /// Drop the drag without a solve (Esc while the hand is still down).
+    @discardableResult
+    public func cancelGuideLineDrag() -> Bool {
+        guard let move = guideLineMove else { return false }
+        guideLineMove = nil
+        draggingGuideLineHandle = nil
+        guideLines = move.lines
+        onGuideLineChange?()
+        return true
+    }
+
+    /// **双击线身删除** (§2.5): the line under `point` goes, and the remaining ones are re-solved —
+    /// fewer than two lines keep the picture where it is (there is nothing to fit).
+    @discardableResult
+    public func deleteGuideLine(atViewPoint point: CGPoint, mapping: LoupeMapping) -> Bool {
+        guard isActive, let handle = guideLineHit(atViewPoint: point, mapping: mapping) else {
+            return false
+        }
+        var remaining = guideLines
+        remaining.remove(at: handle.index)
+        guideLines = remaining
+        _ = reSolveGuideLines(remaining)
+        guideLineApplyCount += 1
+        onGuideLineChange?()
+        return true
+    }
+
+    /// The re-solve both the drag and the delete land in: one fit, one write, one row.
+    ///
+    /// `nil` for fewer than two lines (the parameters are kept — §2.5's 「<2 条保留当前值」) and for a
+    /// refusal (the lines stay where the user put them, the picture does not move).
+    @discardableResult
+    private func reSolveGuideLines(_ lines: [GuideLine]) -> GuideLineSolution? {
+        guard lines.count >= 2 else {
+            guideLineSolution = nil
+            guideLineFailure = .notEnoughLines
+            guideLineMeasuredPairwise = nil
+            guideLineRotationFailure = nil
+            writeGuideLineSolution(nil, lines: lines)
+            return nil
+        }
+        let fit = GuideLinesSolve.fit(lines: lines,
+                                      current: documentPerspective,
+                                      source: sourceSize,
+                                      straightenDegrees: CropTool.clampStraighten(draft.straighten),
+                                      tolerance: guideLineTolerance)
+        guard let solution = fit.solution else {
+            guideLineFailure = fit.failure
+            guideLineMeasuredPairwise = fit.measuredWorstPairwise
+            guideLineRotationFailure = nil
+            // The endpoints still go to the document: the user moved them, and a move that could not
+            // be solved is still a move (⌘Z is the way back).
+            writeGuideLineSolution(nil, lines: lines)
+            return nil
+        }
+        guideLineSolution = solution
+        guideLineFailure = nil
+        guideLineMeasuredPairwise = solution.worstResidual
+        guideLineRotationFailure = solution.rotationFailure
+        rejectedGuideLine = nil
+        writeGuideLineSolution(solution, lines: lines)
+        return solution
+    }
+
+    // MARK: - persistence (354)
+
+    static func stored(_ line: GuideLine) -> StoredGuideLine {
+        StoredGuideLine(ax: Double(line.a.x), ay: Double(line.a.y),
+                        bx: Double(line.b.x), by: Double(line.b.y),
+                        vertical: line.axis == .vertical)
+    }
+
+    /// The document's lines as the fit's own value. `viewAngle` is recomputed from the **source**
+    /// pair (it is only the readout's number); the axis is the stored intent, which is the half the
+    /// pixels cannot carry.
+    static func guideLines(from stored: [StoredGuideLine]) -> [GuideLine] {
+        stored.map { s in
+            let a = CGPoint(x: s.ax, y: s.ay), b = CGPoint(x: s.bx, y: s.by)
+            let angle = GuideLinesSolve.fold(GuideLinesSolve.degrees(dx: Double(b.x - a.x),
+                                                                     dy: Double(b.y - a.y)))
+            return GuideLine(a: a, b: b, viewAngle: angle,
+                             axis: s.vertical ? .vertical : .horizontal)
+        }
+    }
+
+    private static func distance(_ p: CGPoint, _ q: CGPoint) -> Double {
+        let dx = Double(p.x - q.x), dy = Double(p.y - q.y)
+        return (dx * dx + dy * dy).squareRoot()
+    }
+
+    /// Point → segment, in the same units. The body's hit test.
+    static func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> Double {
+        let dx = Double(b.x - a.x), dy = Double(b.y - a.y)
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 1e-12 else { return distance(p, a) }
+        let t = min(max((Double(p.x - a.x) * dx + Double(p.y - a.y) * dy) / lengthSquared, 0), 1)
+        return distance(p, CGPoint(x: Double(a.x) + t * dx, y: Double(a.y) + t * dy))
     }
 
     /// The card's one-line status (§2.3's 「另一方向请再画两条」 included). `nil` prints nothing.

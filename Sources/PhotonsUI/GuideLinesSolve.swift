@@ -100,38 +100,55 @@ public enum GuideLineAxis: String, Sendable, Equatable, Hashable, CaseIterable {
 
 // MARK: - one drawn line
 
-/// One 引导线 gesture: the stroke as drawn (view points), the same two points in **source** pixels
-/// (what the photograph holds — the material line the fit is about), and how it was read.
+/// One 引导线 gesture: the two ends in **source pixels** — what the photograph holds — plus how the
+/// stroke was read (its screen angle at the moment it was drawn, which decides the axis).
+///
+/// **354 — the endpoints are the only geometry stored.** Before this task the line also cached the
+/// two ends in *view* points at the moment it was drawn, and the overlay stroked those; a zoom, a
+/// pan, a fit, a keystone or a straighten then left the line where the old camera had put it
+/// (measured: 4220.3 px at 400 %, 144.7 px at `s = 9°`, 31.9 px at `P = +60` — see
+/// `docs/reports/354-guide-display.md` §1). View points are a *projection* of these numbers, never a
+/// second copy of them: the one entry is `GuideLineProjection.screenPoint`.
 public struct GuideLine: Equatable, Sendable {
-    /// The stroke as drawn, in view points — what the overlay strokes.
-    public var start: CGPoint
-    public var end: CGPoint
-    /// The same two ends in source pixels, through the current composite inverse
-    /// (`P_current⁻¹ · R⁻¹` + crop + camera). The fit never looks at the view points again.
-    public var sourceStart: CGPoint
-    public var sourceEnd: CGPoint
-    /// The stroke's angle **on the screen**, folded into `(−90°, +90°]` — the number the axis
-    /// decision and the readout use.
+    /// The two ends in **source pixels** (`Double` precision) of the oriented source frame.
+    public var a: CGPoint
+    public var b: CGPoint
+    /// The stroke's angle **on the screen when it was drawn**, folded into `(−90°, +90°]` — the
+    /// number the axis decision uses. A fact about the hand, not about where the line is now.
     public var viewAngle: Double
     /// Which axis the fold put it on.
     public var axis: GuideLineAxis
+    /// The stroke's length **on the screen when it was drawn**, in view points — 328's 20 pt misfire
+    /// threshold is a question about the gesture, so it is measured once, where the gesture is.
+    public var viewLength: Double
 
+    public init(a: CGPoint, b: CGPoint,
+                viewAngle: Double, axis: GuideLineAxis,
+                viewLength: Double = 0) {
+        self.a = a
+        self.b = b
+        self.viewAngle = viewAngle
+        self.axis = axis
+        self.viewLength = viewLength
+    }
+
+    /// The pre-354 initializer, kept so a caller that has both spellings in hand does not have to
+    /// choose: the **source** pair is what is stored, and the view pair only measures the gesture.
     public init(start: CGPoint, end: CGPoint,
                 sourceStart: CGPoint, sourceEnd: CGPoint,
                 viewAngle: Double, axis: GuideLineAxis) {
-        self.start = start
-        self.end = end
-        self.sourceStart = sourceStart
-        self.sourceEnd = sourceEnd
-        self.viewAngle = viewAngle
-        self.axis = axis
+        let dx = Double(end.x - start.x), dy = Double(end.y - start.y)
+        self.init(a: sourceStart, b: sourceEnd, viewAngle: viewAngle, axis: axis,
+                  viewLength: (dx * dx + dy * dy).squareRoot())
     }
 
-    /// The stroke's length in **view points** — 20 pt is the misfire threshold (§4.6, 328's number).
-    public var length: Double {
-        let dx = Double(end.x - start.x), dy = Double(end.y - start.y)
-        return (dx * dx + dy * dy).squareRoot()
-    }
+    /// The same two ends, under the names 337/348 gave them («the material points»).
+    public var sourceStart: CGPoint { a }
+    public var sourceEnd: CGPoint { b }
+
+    /// The stroke's length as drawn, in view points — 20 pt is the misfire threshold (§4.6, 328's
+    /// number).
+    public var length: Double { viewLength }
 
     /// The line's angle in **source** pixels, folded — the angle the photograph holds, which is the
     /// one 「两条线几乎平行」 is asked about (a screen angle would answer for the keystone that is

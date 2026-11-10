@@ -248,6 +248,21 @@ extension InspectorView {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
+            if let tool, !tool.guideLines.isEmpty {
+                // 354 §2.5 — 「清除引导线」: every line goes, the picture stays (the lines are on the
+                // card's own row, next to the switch, so it cannot be mistaken for Esc — which also
+                // drops the tool — or for 双击线身, which deletes one line and re-solves).
+                Button {
+                    _ = tool.clearGuideLines()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("清除引导线")
+                .accessibilityIdentifier(CorrectionCardRow.guideLines.clearID)
+            }
             if let status = tool?.guideLineStatusText {
                 Text(status)
                     .font(.system(size: 9))
@@ -409,6 +424,9 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
 
     /// 337 — the row's status label (the fit's `(v,h)` and residual, or why it did not take).
     public var statusID: String { "inspector.crop.\(rawValue).status" }
+
+    /// 354 — 「清除引导线」, on the same row (only drawn while there are lines).
+    public var clearID: String { "inspector.crop.\(rawValue).clear" }
 }
 
 // MARK: - 082: the section names

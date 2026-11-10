@@ -344,7 +344,8 @@ public final class LoupeCanvasView: NSView {
         case .cropTool:
             isCropDragging = controller?.beginCropDrag(
                 atViewPoint: point,
-                rotate: event.modifierFlags.contains(.command)) ?? false
+                rotate: event.modifierFlags.contains(.command),
+                clickCount: event.clickCount) ?? false
             return
         case .cropToolApply:
             controller?.applyCropTool()

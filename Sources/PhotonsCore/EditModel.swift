@@ -1137,6 +1137,14 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// keystone-free document — where the two spaces are the same picture — re-encodes byte for byte.
     public var cropSpace: CropSpace
 
+    /// 354 — the 引导线 the fit stood on, as **source pixels**. View state until this task; a line
+    /// the user drew and then lost when the tool closed was the same bug the missing projection was.
+    ///
+    /// Written only when non-empty (the `quarterTurns`/`perspectiveVertical` discipline), and
+    /// deliberately absent from the geometry **key material**: a guide line describes the picture, it
+    /// does not change a pixel, so it must never split a render cache.
+    public var guideLines: [StoredGuideLine]
+
     public static let identity = GeometryGroup(crop: .full, rotationDegrees: 0,
                                                flipHorizontal: false, flipVertical: false,
                                                aspectLock: .original, quarterTurns: 0)
@@ -1149,7 +1157,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                 quarterTurns: Int = 0,
                 perspectiveVertical: Double = 0,
                 perspectiveHorizontal: Double = 0,
-                cropSpace: CropSpace = .source) {
+                cropSpace: CropSpace = .source,
+                guideLines: [StoredGuideLine] = []) {
         self.crop = crop
         self.rotationDegrees = rotationDegrees
         self.flipHorizontal = flipHorizontal
@@ -1159,6 +1168,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         self.perspectiveVertical = perspectiveVertical
         self.perspectiveHorizontal = perspectiveHorizontal
         self.cropSpace = cropSpace
+        self.guideLines = guideLines
     }
 
     /// `n % 4` into `0…3` — the one place a turn count is made legal.
@@ -1190,6 +1200,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         // rect to a canvas rect needs the image's pixel size, so it is not done here — see
         // `migrateCropToCanvasSpace(source:)`.
         v.cropSpace = c.val("cropSpace", v.cropSpace)
+        // 354: absent on every document written before this task, which reads as 「no guide lines」.
+        v.guideLines = c.val("guideLines", v.guideLines)
         self = v
     }
 
@@ -1223,6 +1235,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         // two spaces are the same picture there) keeps its bytes exactly.
         if cropSpace != .source {
             try c.encode(cropSpace, forKey: AnyCodingKey("cropSpace"))
+        }
+        // 354: the two guide-line endpoints, **only when there are lines** — a document that never
+        // drew one keeps its bytes exactly (the `quarterTurns`/`pvy`/`cropSpace` discipline).
+        if !guideLines.isEmpty {
+            try c.encode(guideLines, forKey: AnyCodingKey("guideLines"))
         }
     }
 
