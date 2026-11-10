@@ -18,7 +18,7 @@ import PhotonsCore
 /// 这份文件钉的是**分家**本身，每一条都对着宿主在真窗口里、排过版的那张面板：
 ///
 ///   ① 三张卡，标题与顺序 == 裁切 / 校正 / 变换；
-///   ② 裁切卡的 id 集合只有比例 + 自定义 + 不出像素 + 九宫格 + 应用/取消（没有 angle.* / perspective.*）；
+///   ② 裁切卡的 id 集合只有比例 + 自定义 + 不出像素 + 九宫格（336：应用/取消搬到了面板的固定页脚）；
 ///   ③ 校正卡四行 == 拉直 / 画线拉直 / 垂直透视 / 水平透视，画线拉直的图标是水平仪 `level`；
 ///   ④ 变换卡两行 == 旋转 / 镜像，左转一次 `quarterTurns` ±1；
 ///   ⑤ 反向断言：裁切卡里 perspective 行 0；校正卡里 aspect 行 0；
@@ -94,7 +94,7 @@ final class TransformCards334Tests: XCTestCase {
                        "334: 裁切卡的 AppKit 叶子应正好是这八个（多 \(leaves.subtracting(required).sorted())"
                        + " · 少 \(required.subtracting(leaves).sorted())）")
 
-        // ── 九宫格 · 取消 · 应用：三个 SwiftUI 叶子，按它们所在的行认 ──────────────────
+        // ── 九宫格：SwiftUI 叶子，按它所在的行认（336：取消/应用 已不在卡里）────────────────
         let rows = Set(panel.probes.filter {
             $0.rowID != CropCardID.card
         }.filter {
@@ -105,9 +105,9 @@ final class TransformCards334Tests: XCTestCase {
         let expectedRows: Set<String> = [CropCardID.section(.crop),
                                          CropAspectRow.probeID, CropAspectRow.extrasProbeID,
                                          CropAspectRow.customProbeID, CropCardID.staysInsidePixels,
-                                         CropCardID.grid, CropCardID.apply]
+                                         CropCardID.grid]
         XCTAssertEqual(rows, expectedRows,
-                       "334: 裁切卡的行应正好是 \(expectedRows)（多 \(rows.subtracting(expectedRows).sorted())"
+                       "334/336: 裁切卡的行应正好是 \(expectedRows)（多 \(rows.subtracting(expectedRows).sorted())"
                        + " · 少 \(expectedRows.subtracting(rows).sorted())）")
         // 那两个 SwiftUI 叶子用的就是 086/317 的 id（沿用，不新造）.
         XCTAssertEqual(CropChip.titleID("九宫格"), "inspector.crop.chip.九宫格")
@@ -127,21 +127,20 @@ final class TransformCards334Tests: XCTestCase {
         XCTAssertEqual(perspectiveRows.count, 0,
                        "334: 裁切卡里透视行必须是 0 条（实际 \(perspectiveRows.map(\.rowID))）")
 
-        // ── 用户补充：应用/取消在最底下 ────────────────────────────────────────────
-        let apply = try XCTUnwrap(panel.row(CropCardID.apply))
+        // ── 336：应用 / 取消 不再是卡内最底一行 —— 它们搬到了面板的固定页脚 ─────────────
+        //   ① 卡里没有 apply 行；② 页脚存在、在卡外、且不在 `ScrollView` 的内容里.
+        XCTAssertFalse(rows.contains(CropCardID.apply), "336: 裁切卡里还有 apply 行")
+        XCTAssertNil(panel.row(CropCardID.apply).flatMap { card.contains($0) ? $0 : nil },
+                     "336: 应用/取消 的按钮行还在裁切卡里")
+        let footer = try XCTUnwrap(panel.row(CropApplyFooter.probeID), "336: 固定页脚没有画出来")
+        XCTAssertGreaterThan(footer.minY, card.maxY, "336: 页脚在裁切卡下方（卡外）")
+        let applyProbe = try XCTUnwrap(panel.probes.first { $0.rowID == CropApplyRow.applyButtonProbe })
+        XCTAssertNil(applyProbe.enclosingScrollView, "336: 页脚必须在 ScrollView 内容之外")
         let grid = try XCTUnwrap(panel.row(CropCardID.grid))
         let stays = try XCTUnwrap(panel.row(CropCardID.staysInsidePixels))
-        let lowestOther = panel.probes
-            .filter { $0.rowID != CropCardID.apply && $0.rowID != CropCardID.card }
-            .map { $0.convert($0.bounds, to: panel.host) }
-            .filter { card.contains($0.origin) }
-            .map(\.maxY).max() ?? 0
-        print(String(format: "334 ② · stays minY %.1f · grid minY %.1f · apply minY %.1f（卡内最大）· card maxY %.1f",
-                     stays.minY, grid.minY, apply.minY, card.maxY))
-        XCTAssertGreaterThan(apply.minY, stays.minY)
-        XCTAssertGreaterThan(apply.minY, grid.minY)
-        XCTAssertLessThanOrEqual(lowestOther, apply.maxY + 1,
-                                 "334: 应用/取消必须是最底一行（其它内容最低 \(lowestOther)）")
+        XCTAssertGreaterThan(grid.minY, stays.maxY, "336: 九宫格在「不出像素」之下")
+        print(String(format: "336 ② · 卡内最低 = 九宫格 maxY %.1f · card maxY %.1f · 页脚 %@",
+                     grid.maxY, card.maxY, NSStringFromRect(footer)))
     }
 
     // MARK: - ③ 校正卡：四行 + 水平仪图标

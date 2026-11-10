@@ -116,13 +116,12 @@ final class CropCardSectionsTests: XCTestCase {
         XCTAssertGreaterThan(correctionCard.minY, cropCard.maxY, "334: 校正卡在裁切卡之后")
         XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY, "334: 变换卡在最后")
 
-        // 334: 三张卡三套行 —— 每行对着拥有它的那张卡量。
-        //   裁切 = 宽高比（四个按钮 + 原始/自由 + 自定义）· 不出像素 · 九宫格 · 取消/应用
+        // 334/336: 三张卡三套行 —— 每行对着拥有它的那张卡量。
+        //   裁切 = 宽高比（四个按钮 + 原始/自由 + 自定义）· 不出像素 · 九宫格（336：应用/取消 已是页脚）
         //   校正 = 拉直 · 画线拉直 · 垂直透视 · 水平透视
         //   变换 = 旋转 · 镜像
         let owners: [(CGRect, [String], [CropSection])] = [
-            (cropCard, [CropCardID.aspect, CropCardID.staysInsidePixels,
-                        CropCardID.grid, CropCardID.apply],
+            (cropCard, [CropCardID.aspect, CropCardID.staysInsidePixels, CropCardID.grid],
              [.crop]),
             (correctionCard, CorrectionCardRow.allCases.map(\.probeID),
              [.angle, .perspective]),
