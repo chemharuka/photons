@@ -1162,20 +1162,28 @@ public struct LoupeFraming: Equatable, Sendable {
     /// Move the window by a **content** delta in device pixels (drag right → the picture moves right,
     /// so the window moves left).
     ///
-    /// The delta is rotated into source space: with straighten the S0 sampling applies R(θ) to the
-    /// window offset, so a pan of `d` canvas pixels is `R(θ)·d / zoom` source pixels. Flips need no
-    /// term of their own — they mirror *inside* the window, so the window moves with the hand.
+    /// 358 — the delta is **not** rotated. The window centre is a point in the **frame** space the
+    /// crop rect lives in (`LoupeMapping.framePoint` / `FrameTransform.windowInS3`:
+    /// `cropRect(of:)` divides it by the source size, `framePoint`/`frameView` convert it to the
+    /// canvas without any rotation), and that space is axis-aligned with the screen. The angle
+    /// belongs to the *picture*, and the projection is the only place it is applied
+    /// (`FrameTransform.sourceToView` = the S0 sampling).
+    ///
+    /// Turning the delta here (`R(θ)·d/z`, what this did until 358) turned it a second time, because
+    /// a window move of `w` in frame pixels already shows as `−w·zoom` on screen whatever θ is: a
+    /// `(+120, 0)` drag arrived as `(118.5, 19.0)` at 9° and `(85, 85)` at 45° — the right length
+    /// along the **picture's** axis, i.e. a photograph that slides diagonally under a horizontal hand.
+    /// A camera pan is a screen-space quantity; the source space is reached only when the window is
+    /// *written back* (`cropRect(of:)`, `sourcePoint`), and by then the rotation is the projection's.
+    ///
+    /// Flips need no term of their own either — they mirror *inside* the window, so the window moves
+    /// with the hand; and the coverage limit stays in the same frame pixels it was measured in.
     public func panning(_ state: LoupeViewState, byContent delta: (x: Double, y: Double)) -> LoupeViewState {
         guard state.mode == .actual else { return state }
         let z = zoom(of: state)
         guard z > 0 else { return state }
-        // 2026-11-01 — the rotation of the delta comes from `CropGeometry.RotationMatrix`, the one
-        // place the angle's sign lives (it used to be a private `cos`/`sin` pair right here, the
-        // fourth spelling of `R(θ)` in the app).
-        let turned = CropGeometry.RotationMatrix(degrees: straightenDegrees)
-            .apply(x: delta.x, y: delta.y)
-        let dx = turned.x / z
-        let dy = turned.y / z
+        let dx = delta.x / z
+        let dy = delta.y / z
         // A drag that runs off the edge of the picture keeps its picture: the window may hang over the
         // edge (`minimumPictureCoverage`), it stops where the canvas would stop being photograph, and
         // it stays there when the hand lets go.
