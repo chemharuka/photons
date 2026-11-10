@@ -309,6 +309,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         super.viewDidLayout()
         layoutPanes()
         scheduleThumbnailReconcile()
+        // 332 — the first real viewport only exists after layout.
+        centerAnchorIfChanged()
     }
 
     deinit {
@@ -393,6 +395,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public func updateSelectionAndActive() {
         guard isViewLoaded, let session else { return }
         applySelectionFromModel()
+        // 332 — the anchor can move without the list changing: every door (click, arrow key, a model
+        // write from elsewhere) lands here, and centring is idempotent when it has not moved.
+        centerAnchorIfChanged()
         footer.stringValue = session.selection.isEmpty
             ? "未选择"
             : "已选 \(session.selection.count)"
@@ -641,6 +646,53 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
 
+    // MARK: 332 — keep the anchor photo in the middle of the photo list
+
+    /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
+    let scrollActivity = CenteredScroll.Activity()
+    /// How many times a centred scroll actually moved the list. 332's 「已居中 → 0 次」 counts this.
+    public private(set) var centerScrollCount = 0
+    /// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion` in the app; a test replaces it.
+    public var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// What the last centred scroll gave `NSAnimationContext` — 0 on the jumped (reduce-motion) path.
+    public private(set) var lastCenterAnimationDuration: TimeInterval = 0
+    /// The anchor this pane last centred, so a metadata refresh of the same photo does not scroll.
+    private var centredAnchorID: String?
+
+    /// The vertical twin of `FilmstripController.centerAnchor()` — same rule, same animation,
+    /// different axis. One entry for both triggers of 332 §2 (anchor changed / edit landed).
+    ///
+    /// - Returns: `true` when there was an anchor and live geometry to work with.
+    @discardableResult
+    public func centerAnchor() -> Bool {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let row = session.assets.firstIndex(where: { $0.id == id }),
+              row < photosTable.numberOfRows else { return false }
+        let clip = photosScroll.contentView
+        let visible = clip.bounds.height
+        let content = photosTable.bounds.height
+        let item = photosTable.rect(ofRow: row)
+        guard visible > 0, content > 0, item.height > 0 else { return false }
+        if scrollActivity.isUserScrolling(photosScroll) { return true }
+        let target = CenteredScroll.target(itemMidpoint: item.midY,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        lastCenterAnimationDuration = 0
+        let moved = CenteredScroll.scroll(photosScroll, axis: .vertical, to: target,
+                                          activity: scrollActivity,
+                                          reduceMotion: reduceMotion()) { [weak self] duration in
+            self?.lastCenterAnimationDuration = duration
+        }
+        if moved { centerScrollCount += 1 }
+        return true
+    }
+
+    /// Centre whenever the anchor moved, whichever door moved it.
+    private func centerAnchorIfChanged() {
+        guard let id = session?.anchorID, id != centredAnchorID else { return }
+        if centerAnchor() { centredAnchorID = id }
+    }
+
     // MARK: right-click (same verbs as the grid and the strip)
 
     /// Refresh the shared menu's state from the row the click landed on (`clickedRow`, which AppKit
@@ -769,6 +821,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func photoListDidScroll() {
+        scrollActivity.noteChange()
         scheduleThumbnailReconcile()
     }
 

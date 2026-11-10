@@ -292,6 +292,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         super.viewDidLayout()
         fitItemHeightToContainer()
         scheduleThumbnailReconcile()
+        // 332 — the first real viewport only exists after layout; an anchor that was set before the
+        // strip had a width centres here instead of on the next unrelated model change.
+        centerAnchorIfChanged()
     }
 
     /// `scrollDirection = .horizontal` does **not** mean "one row". A horizontal
@@ -319,6 +322,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     @objc private func clipViewBoundsChanged() {
+        scrollActivity.noteChange()
         scheduleThumbnailReconcile()
     }
 
@@ -343,10 +347,14 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         let next = modelSnapshot(session)
         guard next != lastSnapshot else {
             updateSelectionAndActive()
+            // 332 — the anchor can move without the list changing (arrow keys, the menu, a model
+            // write from elsewhere): every door lands here, so this is the one anchor trigger.
+            centerAnchorIfChanged()
             return
         }
         lastSnapshot = next
         refresh()
+        centerAnchorIfChanged()
     }
 
     /// Selection/anchor are view state: update the rings in place, never reload the cells.
@@ -706,7 +714,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         updateSelectionAndActive()
         // The new anchor is priority ① for the next reconcile.
         scheduleThumbnailReconcile()
-        revealAnchor()
+        centerAnchorIfChanged()
     }
 
     public func applySelectionFromModel() {
@@ -720,11 +728,57 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         isApplyingModel = false
     }
 
-    public func revealAnchor() {
-        guard let session, let id = session.anchorID,
-              let index = session.assets.firstIndex(where: { $0.id == id }) else { return }
-        collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)],
-                                     scrollPosition: .nearestHorizontalEdge)
+    // MARK: 332 — keep the anchor photo in the middle of the strip
+
+    /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
+    let scrollActivity = CenteredScroll.Activity()
+    /// How many times a centred scroll actually moved the strip. 332's 「已居中 → 0 次」 counts this.
+    public private(set) var centerScrollCount = 0
+    /// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion` in the app; a test replaces it.
+    public var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// What the last centred scroll gave `NSAnimationContext` — 0 on the jumped (reduce-motion) path.
+    public private(set) var lastCenterAnimationDuration: TimeInterval = 0
+    /// The anchor this strip last centred, so a metadata refresh of the same photo does not scroll.
+    private var centredAnchorID: String?
+
+    /// Put the anchor photo in the middle of the strip — ends flush, no blank space — animated.
+    ///
+    /// **The** entry point for both triggers of 332 §2: the anchor changing, and an edit landing
+    /// (303's 0.25 s window calls it). Idempotent: already-centred (≤ 2 pt) is a no-op, so a
+    /// redundant trigger can never make the strip jitter, and a scroll the user is driving is
+    /// dropped rather than fought over.
+    ///
+    /// - Returns: `true` when there was an anchor and live geometry to work with (whether or not
+    ///   the viewport had to move).
+    @discardableResult
+    public func centerAnchor() -> Bool {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let scroll = collectionView.enclosingScrollView,
+              let index = session.assets.firstIndex(where: { $0.id == id }),
+              let item = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
+        else { return false }
+        let clip = scroll.contentView
+        let visible = clip.bounds.width
+        let content = collectionView.collectionViewLayout?.collectionViewContentSize.width ?? 0
+        guard visible > 0, content > 0 else { return false }
+        if scrollActivity.isUserScrolling(scroll) { return true }
+        let target = CenteredScroll.target(itemMidpoint: item.frame.midX,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        lastCenterAnimationDuration = 0
+        let moved = CenteredScroll.scroll(scroll, axis: .horizontal, to: target,
+                                          activity: scrollActivity,
+                                          reduceMotion: reduceMotion()) { [weak self] duration in
+            self?.lastCenterAnimationDuration = duration
+        }
+        if moved { centerScrollCount += 1 }
+        return true
+    }
+
+    /// Centre whenever the anchor moved, whichever door moved it (click, arrow key, model change).
+    private func centerAnchorIfChanged() {
+        guard let id = session?.anchorID, id != centredAnchorID else { return }
+        if centerAnchor() { centredAnchorID = id }
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {

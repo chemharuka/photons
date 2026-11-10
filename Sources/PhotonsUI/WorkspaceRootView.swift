@@ -394,6 +394,11 @@ public final class WorkspaceRootView: NSView {
             browserPane.refreshThumbnail(forAssetID: assetID)
             gridController.refreshThumbnail(forAssetID: assetID)
             filmstripController.refreshThumbnail(forAssetID: assetID)
+            // 332 — the edit landed. The same 0.25 s tick that refreshes the thumbnails also puts
+            // the current photo back in the middle of the two lists that follow it; the anchor
+            // changing uses the same entry (`centerAnchor`), so a new edit path cannot miss it.
+            browserPane.centerAnchor()
+            filmstripController.centerAnchor()
         }
         // The panel gets **this** object, not a fresh one: the root is the handle the smoke runner
         // (and the unit test behind it) switches workspaces through.
