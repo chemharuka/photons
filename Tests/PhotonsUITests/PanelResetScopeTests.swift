@@ -20,13 +20,16 @@ import PhotonsCore
 @MainActor
 final class PanelResetScopeTests: XCTestCase {
 
-    // MARK: - 1. 声明自身：非空、由 sections 推导、两卡互斥且覆盖全部字段
+    // MARK: - 1. 声明自身：非空、由 sections 推导、三卡互斥且覆盖全部字段
 
     func testEveryCardDeclarationIsNonEmptyAndMatchesItsSections() {
         let specs = TransformCardSpec.all
+        // 334: 裁切 → 校正 → 变换.
         XCTAssertEqual(specs.map(\.title),
-                       [InspectorView.Section.crop.title, InspectorView.Section.angle.title],
-                       "变换工作区的两张卡")
+                       [InspectorView.Section.crop.title,
+                        InspectorView.Section.transformCorrection.title,
+                        InspectorView.Section.angle.title],
+                       "变换工作区的三张卡")
         XCTAssertEqual(TransformCardSpec.issues(in: specs), [],
                        "声明与 sections 不一致：\(TransformCardSpec.issues(in: specs))")
 

@@ -3,30 +3,30 @@ import CoreGraphics
 import PhotonsCore
 import SwiftUI
 
-// MARK: - 变换工作区：第一张卡是裁切（2026-10-27；086 起卡头无按钮、底部三件）
+// MARK: - 变换工作区：三张卡 —— 裁切 / 校正 / 变换（334）
 //
-// 用户的历次原话（2026-10-27 / 2026-10-28）：
+// 用户的历次原话（2026-10-27 / 2026-10-28 / 2026-11-10）：
 //
 //   > 将裁切下拉菜单中的相关功能，移动到右侧第二栏「变换」，变换包括裁切、旋转等功能；点开变换窗口，
-//   > **第一个卡片是裁切**；点按**直角尺图标**后进入裁切模式，出现裁切框；长宽比选择以及值的输入，
-//   > UI 类似于调节栏。
+//   > **第一个卡片是裁切**；点按**直角尺图标**后进入裁切模式，出现裁切框。
 //
 //   > 右侧裁切模式的 UI 要重写，裁切、角度、旋转、镜像等要区分更大，现在挤在一起。
-//   > 裁切模式下方悬浮栏的调节功能全部移动到右侧面板，只保留比例，像素，角度的信息。
 //
-//   > 进入变换界面后……裁切卡片名称右边的按钮删除，只要进入变换界面就提供裁切框，同时下面的功能
-//   > 不能变灰。接下来二级标题是「宽高比」，取代第二个「裁切」，右边是选单和交换。九宫格/应用/取消
-//   > 放在最底下。
+//   > 画线拉直的UI在哪？做到变换窗口中，另外变换窗口的卡片要重新改：透视从裁切中拿出来，现在有三个
+//   > 卡片：裁切，校正，变换。裁切只含宽高比，常见比例的按钮(1:1 4:3 16:9 2:3)都放出来，不要做成
+//   > 点击切换的模式。此外需要一个自定义比例的输入框。校正包括旋转、透视、以及新做的引导线UI，变换
+//   > 包括旋转和镜像。旋转旁边的画线确定水平面功能，UI LOGO要改一下…用来和引导线UI区分开。
 //
-// 于是这张卡是裁切工具的**全部**控件，五段，每段一条分隔线 + 11 pt 次级小标题：
+// 于是这张工作区是**三张卡**，顺序就是用户说的那三张：
 //
-//     宽高比   标题 · 比例选单 · ⇄ 交换（同一行）
-//     角度     滑块角度（−45…+45 的行，行标签「角度」）
-//     透视     垂直 / 水平两条滑杆（183）
-//     底部     九宫格（左）· 应用 取消（右，卡片最后一行）
+//     裁切   宽高比（1:1 · 4:3 · 16:9 · 2:3 四个按钮常显）· 原始 / 自由 · 自定义比例
+//            不出像素 · 九宫格 · **最底一行 取消 / 应用**
+//     校正   拉直（滑杆 + 读数）· 画线拉直（水平仪 `level`）· 透视 垂直 · 透视 水平
+//     变换   左转 / 右转 90° · 镜像 水平 / 垂直
 //
-// 第二张卡是 旋转 / 镜像。分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里五区不
-// 换行、不重叠、任何两行不相交（`CropCardSectionsTests` 量的是真实 frame）。
+// 每张卡声明的 section 就是它的全部内容（`TransformCardSpec`），卡名双击复位的是那张卡 section
+// 的字段并集 —— 三张卡互不越界。分区之间 12 pt，小标题与自己的内容之间 6 pt：244 pt 的面板里
+// 不换行、不重叠、任何两行不相交（`CropCardSectionsTests` 量的是真实 frame）。
 //
 // ## 进变换就进裁切，卡头不再有开关
 //
@@ -40,25 +40,32 @@ import SwiftUI
 //
 //   · **草稿**（裁切框、滑块角度、比例锁）→ `CropToolController.draft`。应用时那一次 `apply()` 是唯一
 //     写文档的地方（`CropToolController.apply`）。
-//   · **文档**（水平/垂直翻转、`quarterTurns`、`straightenDegrees`）→ `session.edit.geometry`，和 072 §F
-//     说的一样只有一份：卡、菜单、裁切栏、⌘[ / ⌘] 读的是同一批字段。
+//   · **文档**（水平/垂直翻转、`quarterTurns`、`straightenDegrees`、透视）→ `session.edit.geometry`，和
+//     072 §F 说的一样只有一份：卡、菜单、裁切栏、⌘[ / ⌘] 读的是同一批字段。
 //   · **纯视图态**（九宫格）→ `CropToolController.showsGrid`，不进文档、不进历史。
 //
 // `CropToolController` 是 `@Observable`，`CatalogSession` 本来就是，所以草稿的一个 tick、模式的一次
-// 切换、文档的一次翻转/旋转都会让这张卡自己重画 —— 不需要调用方记得 `sync()`。
+// 切换、文档的一次翻转/旋转都会让这些卡自己重画 —— 不需要调用方记得 `sync()`。
 //
 // ## 两个角度
 //
-// 「滑块角度」是 `draft.straighten`（−45…+45，行的滑杆）；「实际角度」= 滑块角度 + 90 × quarterTurns
-// （`CropToolController.actualAngle`）。093 起卡片上不再印只读读数 —— 滑块行自身只显示滑块角度，
-// 悬浮栏的 `角度` 段仍印**实际角度**。
+// 「滑块角度」是 `draft.straighten`（−45…+45，校正卡的「拉直」行）；「实际角度」= 滑块角度 +
+// 90 × quarterTurns（`CropToolController.actualAngle`）。093 起卡片上不再印只读读数 —— 滑块行自身
+// 只显示滑块角度，悬浮栏的 `角度` 段仍印**实际角度**。
 
 extension InspectorView {
 
-    /// 「变换」的第一张卡：宽高比 + 角度 + 透视 + 底部三件。
+    // MARK: - 第一张卡：裁切 —— 只有宽高比（334）
+
+    /// 「裁切」: 宽高比 · 自定义比例 · 不出像素 · 九宫格 · 取消 / 应用.
     ///
-    /// 214: the card's sections are its `TransformCardSpec`'s, and the title reset is the union of
-    /// their `fields` — 旋转 / 镜像 belong to the second card and keep what they hold here.
+    /// 334 (user): 「裁切只含宽高比…画线拉直的UI在哪？…变换窗口的卡片要重新改：透视从裁切中拿出来」.
+    /// So this card owns **only** `CropSection.crop`: the four common ratios as four buttons that are
+    /// always on screen (no cycling chip), 原始 / 自由, and a typed-ratio field. The straighten, the
+    /// draw-a-line switch and the two keystone sliders are the 校正 card's, one card below.
+    ///
+    /// The title reset is the card's own `TransformCardSpec` union — `.cropRect + .aspectLock` — so a
+    /// double-click here can no longer undo a straighten (that is 校正's).
     var cropTransformCard: some View {
         let tool = loupe?.cropTool
         let spec = TransformCardSpec.cropCard
@@ -66,10 +73,20 @@ extension InspectorView {
                                   reset: { resets.cropCard(spec) },
                                   accessory: { EmptyView() }) {
             VStack(alignment: .leading, spacing: Self.cropSectionGap) {
-                cropAspectSection(tool)
-                cropAngleSection(tool)
-                cropPerspectiveSection()
-                cropBottomRow(tool)
+                CropAspectRow(tool: tool,
+                              onReset: {
+                                  _ = resets.reset(fields: CropSection.crop.fields,
+                                                   label: CropSection.crop.title)
+                              })
+                cropStaysInsideRow(tool)
+                cropGridRow(tool)
+                // 086/334: 取消 / 应用 is the card's **last** row (the user: 「应用和取消放在最底下」),
+                // right-aligned to the content edge as it has been since 086.
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    CropApplyRow(onApply: { loupe?.completeCropTool() },
+                                 onCancel: { loupe?.cancelCropTool() })
+                }
             }
         }
         // The card's own frame (「卡片清单第一张 = 裁切」 is measured on it) — behind the chrome, so the
@@ -77,9 +94,36 @@ extension InspectorView {
         .background(CropRowProbeHost(rowID: CropCardID.card))
     }
 
-    /// 「变换」的第二张卡（087）：旋转 / 镜像。没有应用 / 取消 —— 旋转与镜像是一次文档动作，
-    /// Esc 才是回退。214: its title reset is `.rotation + .mirror`; 角度 / 透视 belong to the first
-    /// card and are not touched.
+    // MARK: - 第二张卡：校正 —— 拉直 + 画线拉直 + 透视（334）
+
+    /// 「校正」: 拉直 → 画线拉直 → 垂直透视 → 水平透视.
+    ///
+    /// 334: the four geometry *repairs*. 328's 画线拉直 lives here now — the user asked where it was
+    /// while it sat between two perspective sliders inside 裁切, so it gets its own row, under the
+    /// slider it is the shortcut for, before the two keystone knobs.
+    ///
+    /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal`; the
+    /// crop rect and the turn keep what they hold.
+    var correctionTransformCard: some View {
+        let tool = loupe?.cropTool
+        let spec = TransformCardSpec.correctionCard
+        return InspectorCardShell(title: spec.title,
+                                  reset: { resets.cropCard(spec) },
+                                  accessory: { EmptyView() }) {
+            VStack(alignment: .leading, spacing: Self.cropSectionGap) {
+                cropStraightenSection(tool)
+                cropDrawStraightenRow(tool)
+                cropPerspectiveSection()
+            }
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.correctionCard))
+    }
+
+    // MARK: - 第三张卡：变换 —— 转向 + 镜像
+
+    /// 「变换」 (087/093, re-titled by 334): 左转 / 右转 90° + 水平 / 垂直镜像。没有应用 / 取消 ——
+    /// 旋转与镜像是一次文档动作，Esc 才是回退。其 title reset 是 `.rotation + .mirror`；比例、校正
+    /// 属于前面两张卡，不被它碰。
     var angleTransformCard: some View {
         let tool = loupe?.cropTool
         let geometry = session.edit.geometry
@@ -100,84 +144,83 @@ extension InspectorView {
     /// 小标题与其内容之间 6 pt。
     static let cropSectionTitleGap: CGFloat = 6
 
-    // MARK: 宽高比
+    // MARK: 底部：不出像素 / 九宫格
 
-    /// 宽高比 — 小标题、比例选单、⇄ 交换在**同一行**（086）。
+    /// 317 — 「不出像素」，卡片中间那一行（334: 它不再是「底部行」的一份子，应用/取消单独占最底一行）.
     @ViewBuilder
-    private func cropAspectSection(_ tool: CropToolController?) -> some View {
-        HStack(spacing: 6) {
-            CropSectionTitle(title: CropSection.crop.title,
-                             reset: { resets.reset(fields: CropSection.crop.fields,
-                                                   label: CropSection.crop.title) })
-                .background(CropRowProbeHost(rowID: CropCardID.section(.crop)))
-            Spacer(minLength: 2)
-            CropAspectRow(tool: tool)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: 底部三件
-
-    /// 九宫格 / 应用 / 取消 — 卡片最后一行（086）。317：同排左边多一个「不出像素」勾选框。
-    @ViewBuilder
-    private func cropBottomRow(_ tool: CropToolController?) -> some View {
+    private func cropStaysInsideRow(_ tool: CropToolController?) -> some View {
         HStack(spacing: 6) {
             StaysInsidePixelsCheckbox(isOn: tool?.cropStaysInsidePixels ?? false,
                                       onToggle: { tool?.setCropStaysInsidePixels($0) })
                 .fixedSize()
                 .background(CropRowProbeHost(rowID: CropCardID.staysInsidePixels))
             Spacer(minLength: 4)
-            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
-                     help: "裁切框上的三分线（视图态，不进文档）",
-                     action: { loupe?.cropTool.toggleGrid() })
-                .background(CropRowProbeHost(rowID: CropCardID.grid))
-            Spacer(minLength: 4)
-            CropApplyRow(onApply: { loupe?.completeCropTool() },
-                         onCancel: { loupe?.cancelCropTool() })
         }
     }
 
-    // MARK: 角度
+    /// 九宫格 — 视图态（`CropToolController.showsGrid`），不进文档、不进历史。334 起它自己一行，
+    /// 在「不出像素」之下、应用/取消之上；id 沿用 086 的那一个。
+    @ViewBuilder
+    private func cropGridRow(_ tool: CropToolController?) -> some View {
+        HStack(spacing: 6) {
+            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
+                     help: "裁切框上的三分线（视图态，不进文档）",
+                     action: { loupe?.cropTool.toggleGrid() })
+            Spacer(minLength: 4)
+        }
+        .background(CropRowProbeHost(rowID: CropCardID.grid))
+    }
 
-    /// 转动 — 只有滑杆；行标签是「角度」，卡片上不印只读读数。
+    // MARK: 拉直
+
+    /// 拉直 — 滑杆 + 读数，行标签「拉直」（334: 原来是「角度」；校正卡里它说的是「把照片摆直」）。
     ///
     /// 087: the value is **live** — every tick writes the document, release commits one row
     /// (`onEditingChanged(false)`), so there is nothing left for 应用 to do. The crop frame keeps 086's
     /// draft semantics: only the straighten is written here.
     @ViewBuilder
-    private func cropAngleSection(_ tool: CropToolController?) -> some View {
+    private func cropStraightenSection(_ tool: CropToolController?) -> some View {
         let straighten = Binding<Double>(get: { tool?.angleUIValue ?? 0 },
                                          set: { tool?.setAngle(uiValue: $0) })
-        // 122 A: the old 「转动」 sub-header is gone — the angle row sits directly under the card
-        // title. The section keeps its reset on the row itself, wired to the section's declaration.
+        // 122 A: the old 「转动」 sub-header is gone — the straighten row sits directly under the card
+        // title. The row keeps its reset, wired to the section's declaration.
         VStack(alignment: .leading, spacing: Self.cropSectionTitleGap) {
-            HStack(spacing: 6) {
-                sliderRow("角度",
-                          straighten,
-                          -CropTool.straightenLimit ... CropTool.straightenLimit,
-                          "%+.1f°",
-                          decimals: 1,
-                          enabled: true,
-                          accessibilityID: "inspector.crop.angle",
-                          onReset: {
-                              _ = resets.reset(fields: CropSection.angle.fields,
-                                               label: CropSection.angle.title)
-                          },
-                          onEditingChanged: { editing in
-                              guard !editing else { return }
-                              _ = tool?.commitStraighten()
-                          })
-                // 328 — 画线拉直, on the same line as the slider it is the shortcut for.
-                CropDrawStraightenToggle(on: tool?.isDrawStraightenArmed ?? false,
-                                         enabled: tool?.isActive ?? false,
-                                         action: { _ = tool?.toggleDrawStraighten() })
-                    .fixedSize()
-                    // A probe of its own so a panel test can say where the switch sits; its frame
-                    // is the button's, and it never eats a click (`CropRowProbe.hitTest → nil`).
-                    .background(CropRowProbeHost(rowID: CropCardID.drawStraighten))
-            }
-            .background(CropRowProbeHost(rowID: CropCardID.angle))
+            sliderRow(CorrectionCardRow.straighten.title,
+                      straighten,
+                      -CropTool.straightenLimit ... CropTool.straightenLimit,
+                      "%+.1f°",
+                      decimals: 1,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.angle",
+                      onReset: {
+                          _ = resets.reset(fields: CropSection.angle.fields,
+                                           label: CropSection.angle.title)
+                      },
+                      onEditingChanged: { editing in
+                          guard !editing else { return }
+                          _ = tool?.commitStraighten()
+                      })
         }
+        .background(CropRowProbeHost(rowID: CorrectionCardRow.straighten.probeID))
+    }
+
+    // MARK: 画线拉直（328）
+
+    /// 328 — 画线拉直：**自己一行**（334），水平仪图标 + 显示名. 进入「画线」状态后画布上的拖动
+    /// 变成画一条线，松手按线的方向摆正；再点一次或 `Esc` 取消。
+    @ViewBuilder
+    private func cropDrawStraightenRow(_ tool: CropToolController?) -> some View {
+        HStack(spacing: 6) {
+            CropDrawStraightenToggle(on: tool?.isDrawStraightenArmed ?? false,
+                                     enabled: tool?.isActive ?? false,
+                                     action: { _ = tool?.toggleDrawStraighten() })
+                .fixedSize()
+            Text(CorrectionCardRow.drawStraighten.title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+        }
+        .background(CropRowProbeHost(rowID: CorrectionCardRow.drawStraighten.probeID))
     }
 
     // MARK: 透视
@@ -191,7 +234,7 @@ extension InspectorView {
                 _ = resets.reset(fields: CropSection.perspective.fields,
                                  label: CropSection.perspective.title)
             })
-            sliderRow("垂直",
+            sliderRow(CorrectionCardRow.perspectiveVertical.title,
                       Binding(get: { session.edit.geometry.perspectiveVertical },
                               set: { value in
                                   session.applyEdit { $0.geometry.perspectiveVertical = value }
@@ -208,8 +251,8 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           if !editing { session.commitEdit(label: "透视", coalesce: true) }
                       })
-                .background(CropRowProbeHost(rowID: CropCardID.perspectiveVertical))
-            sliderRow("水平",
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveVertical.probeID))
+            sliderRow(CorrectionCardRow.perspectiveHorizontal.title,
                       Binding(get: { session.edit.geometry.perspectiveHorizontal },
                               set: { value in
                                   session.applyEdit { $0.geometry.perspectiveHorizontal = value }
@@ -226,7 +269,7 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           if !editing { session.commitEdit(label: "透视", coalesce: true) }
                       })
-                .background(CropRowProbeHost(rowID: CropCardID.perspectiveHorizontal))
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
         }
     }
 
@@ -291,6 +334,32 @@ extension InspectorView {
             if horizontal { loupe.flipHorizontal() } else { loupe.flipVertical() }
         }
     }
+}
+
+/// The 校正 card's rows, in the order they are stacked (334) — one spelling for the row labels, the
+/// probes and the acceptance.
+///
+/// 334 (user): 「校正包括旋转、透视、以及新做的引导线UI」 → 拉直 → 画线拉直 → 垂直透视 → 水平透视.
+/// The probe ids are the ones 328/183 already used, so nothing that measured a perspective slider
+/// moved: only the card the rows live in did.
+public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
+    case straighten = "angle"
+    case drawStraighten = "drawStraighten"
+    case perspectiveVertical = "perspective.vertical"
+    case perspectiveHorizontal = "perspective.horizontal"
+
+    /// The row's display name — what the card prints next to its slider / button.
+    public var title: String {
+        switch self {
+        case .straighten: return "拉直"
+        case .drawStraighten: return "画线拉直"
+        case .perspectiveVertical: return "垂直透视"
+        case .perspectiveHorizontal: return "水平透视"
+        }
+    }
+
+    /// The `CropRowProbe` id the row's own frame is measured under.
+    public var probeID: String { rawValue }
 }
 
 // MARK: - 082: the section names
@@ -378,119 +447,130 @@ struct CropSectionTitle: View {
     }
 }
 
-// MARK: - the rows
+// MARK: - the 宽高比 row（334: four buttons + 原始/自由 + typed ratio）
 
-/// 104 — 宽高比 row: 小标题 · 🔒/🔓 · 比例 chip · ✎ · ⇄.
+/// 334 — 宽高比: 小标题「宽高比」· **1:1 · 4:3 · 16:9 · 2:3 四个按钮并排常显** · 原始 / 自由 · 自定义比例.
 ///
-/// The menu is gone. The chip **is** the picker — one click advances the fixed cycle, ⇧-click steps
-/// back — and the pencil swaps the chip for an inline `W:H` field **in place** (no `Menu`, no
-/// `NSPanel`, no popover). Every write still goes through `CropToolController.setAspect` /
-/// `setCustomRatio`, the verbs the old popup called; the chip is an entry, not a second state.
+/// The user (2026-11-10): 「裁切只含宽高比，常见比例的按钮(1:1 4:3 16:9 2:3)都放出来，不要做成点击
+/// 切换的模式。此外需要一个自定义比例的输入框」. So 104's cycling chip — one button that walked
+/// `原始 → 1:1 → 4:3 → 3:2 → 16:9 → 自由` — is gone: every common ratio is a button of its own, the
+/// current lock is drawn as that button's pressed state, and 原始 / 自由 keep their own two buttons
+/// because they are the ways *out* of a lock (without them the frame could never be released).
+///
+/// Nothing here stores state: the buttons call `CropToolController.setAspect` / `setCustomRatio` (the
+/// same verbs the chip and the old popup called), and the typed ratio goes through
+/// `CropRatioPanels.commit` — parse, write, or beep and change nothing.
 struct CropAspectRow: View {
 
     let tool: CropToolController?
+    /// 小标题「宽高比」的双击复位（`PanelResets.reset(fields: CropSection.crop.fields)`）—— the row
+    /// cannot reach `resets` itself, so the card hands it in.
+    let onReset: () -> Void
 
-    /// 行 id —— 测试按它找这一行真实的 frame。
+    /// 行 id —— 测试按它找这一行真实的 frame（四个比例按钮那一行）.
     static let probeID = "aspect"
-    /// The four leaves' own frames on the title's line (104).
-    static let chipProbeID = "aspect.chip"
-    static let lockProbeID = "aspect.lock"
-    static let editProbeID = "aspect.edit"
-    static let swapProbeID = "aspect.swap"
-    /// 086's layout test still asks for the picker under this id.
-    static let menuProbeID = chipProbeID
+    /// 原始 / 自由 那一行.
+    static let extrasProbeID = "aspect.extras"
+    /// 自定义比例那一行.
+    static let customProbeID = "aspect.custom"
 
-    /// The accessibility ids every acceptance run uses.
-    static let chipID = "inspector.crop.ratioChip"
-    static let lockID = "inspector.crop.ratioLock"
-    static let fieldID = "inspector.crop.ratioField"
-    static let editID = "inspector.crop.ratioEdit"
-    static let swapID = "inspector.crop.swap"
+    /// 四个常见比例，用户的顺序（334）.
+    static let ratioButtons: [RatioButton] = [.square, .fourThree, .sixteenNine, .twoThree]
+    /// 每个按钮的最小宽度：验收要求 244 pt 卡宽下同排、每颗 ≥ 40 pt.
+    static let minimumButtonWidth: CGFloat = 40
+    static let buttonHeight: CGFloat = 18
+    static let customFieldWidth: CGFloat = 76
 
-    /// The six presets, in the order the chip cycles them.
-    static var items: [CropAspectPreset] { CropAspectPreset.allCases }
+    /// 「原始」 / 「自由」 的 id.
+    static let originalID = "inspector.crop.ratio.original"
+    static let freeID = "inspector.crop.ratio.free"
+    /// 自定义比例字段的 id（334：`crop.ratio.custom`）.
+    static let customID = "inspector.crop.ratio.custom"
+    /// 自定义比例的图标 —— **不是**画线拉直的水平仪（`level`）：334 要求两者的 LOGO 一眼分得开.
+    static let customSymbol = "ruler"
 
-    /// 086: the swap button's minimum hit target (the spec's 18 × 18 pt).
-    static let swapHitSize: CGFloat = 18
-    /// One width for the chip and the field that replaces it, so the row does not jump when typing.
-    static let controlWidth: CGFloat = 58
-
-    @State private var editing = false
+    @State private var typed: String = ""
+    /// 334: bumped on **every** commit attempt — including a refused one, whose text does not change.
+    /// Without it SwiftUI sees no state change and the field would keep the junk string on screen.
+    @State private var revision = 0
 
     var body: some View {
-        HStack(spacing: 6) {
-            RatioLockButtonHost(symbol: Self.lockSymbol(for: tool),
-                                isEnabled: tool != nil,
-                                identifierID: Self.lockID,
-                                action: { tool?.toggleAspectLock() })
-                .fixedSize()
-                .background(CropRowProbeHost(rowID: Self.lockProbeID))
-
-            if editing {
-                RatioInlineFieldHost(initial: Self.editingText(for: tool),
-                                     onCommit: { text in commit(text) },
-                                     onCancel: { editing = false })
-                    .frame(width: Self.controlWidth, height: 18)
-                    .background(CropRowProbeHost(rowID: Self.chipProbeID))
-            } else {
-                RatioChipButtonHost(title: Self.title(for: tool),
-                                    isEnabled: tool != nil,
-                                    identifierID: Self.chipID,
-                                    onCycle: { backward in tool?.cycleAspect(backward: backward) })
-                    .frame(width: Self.controlWidth, height: 18)
-                    .help(Self.help(for: tool))
-                    .background(CropRowProbeHost(rowID: Self.chipProbeID))
-                    .background(DetailRowEnabledProbe(title: "宽高比"))
+        VStack(alignment: .leading, spacing: InspectorView.cropSectionTitleGap) {
+            HStack(spacing: 6) {
+                CropSectionTitle(title: CropSection.crop.title, reset: onReset)
+                    .background(CropRowProbeHost(rowID: CropCardID.section(.crop)))
+                Spacer(minLength: 2)
             }
 
-            RatioIconButtonHost(symbol: "pencil",
-                                title: "键入比例",
-                                identifierID: Self.editID,
-                                isEnabled: tool != nil,
-                                action: { editing = true })
-                .fixedSize()
-                .background(CropRowProbeHost(rowID: Self.editProbeID))
-
-            // ⇄ — 交换长宽 (§C1). A separate door from the chip because a swap is a *value* operation
-            // on the current lock, not another preset.
-            Button {
-                _ = tool?.swapAspect()
-            } label: {
-                Text("⇄")
-                    .font(.system(size: 10))
-                    .frame(minWidth: Self.swapHitSize, minHeight: Self.swapHitSize)
-                    .contentShape(Rectangle())
+            // 四个比例按钮：并排常显、等宽（不是点一下轮换的 chip）.
+            HStack(spacing: 6) {
+                ForEach(Self.ratioButtons, id: \.self) { button in
+                    RatioPresetButtonHost(title: button.title,
+                                          isOn: Self.isOn(button, tool: tool),
+                                          isEnabled: tool != nil,
+                                          identifierID: button.identifier,
+                                          action: { button.apply(to: tool) })
+                        .frame(maxWidth: .infinity)
+                        .frame(height: Self.buttonHeight)
+                }
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.primary)
-            .help("交换长宽")
-            .accessibilityLabel("交换长宽")
-            .accessibilityIdentifier(Self.swapID)
-            .background(CropRowProbeHost(rowID: Self.swapProbeID))
+            .background(CropRowProbeHost(rowID: Self.probeID))
+            .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
+            // 086/334: the readback seam that proves a ratio row is never greyed out with no tool either.
+            .background(DetailRowEnabledProbe(title: CropSection.crop.title))
+
+            // 原始 / 自由：两道解掉约束的门.
+            HStack(spacing: 6) {
+                RatioPresetButtonHost(title: CropAspectPreset.original.displayName,
+                                      isOn: tool?.aspectPreset() == .original,
+                                      isEnabled: tool != nil,
+                                      identifierID: Self.originalID,
+                                      action: { tool?.setAspect(.original) })
+                    .fixedSize()
+                RatioPresetButtonHost(title: CropAspectPreset.free.displayName,
+                                      isOn: tool?.isAspectFree ?? true,
+                                      isEnabled: tool != nil,
+                                      identifierID: Self.freeID,
+                                      action: { tool?.setAspect(.free) })
+                    .fixedSize()
+                Spacer(minLength: 4)
+            }
+            .background(CropRowProbeHost(rowID: Self.extrasProbeID))
+
+            // 自定义比例：`ruler` + 可键入字段（`5:4` / `1.85`）.
+            HStack(spacing: 6) {
+                Image(systemName: Self.customSymbol)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                    .accessibilityHidden(true)
+                CustomRatioFieldHost(text: typed,
+                                     revision: revision,
+                                     onCommit: { commit($0) },
+                                     onCancel: {
+                                         typed = Self.fieldText(for: tool)
+                                         revision &+= 1
+                                     })
+                    .frame(width: Self.customFieldWidth, height: Self.buttonHeight)
+                Spacer(minLength: 4)
+            }
+            .background(CropRowProbeHost(rowID: Self.customProbeID))
         }
-        .background(CropRowProbeHost(rowID: Self.probeID))
-        .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
+        .onAppear { typed = Self.fieldText(for: tool) }
     }
 
-    /// 104 — `lock.fill` while a ratio constrains the frame, `lock.open` only for 自由
-    /// (`AspectLock.original`, the one spelling with `ratio == nil`).
-    static func lockSymbol(for tool: CropToolController?) -> String {
-        (tool?.isAspectFree ?? true) ? "lock.open" : "lock.fill"
+    /// Is this button the lock in force? 2:3 is an explicit `custom(2/3)` (there is no named case).
+    static func isOn(_ button: RatioButton, tool: CropToolController?) -> Bool {
+        guard let tool else { return false }
+        return tool.draft.lock == button.lock
     }
 
-    /// What the chip prints: the preset's own name, or the typed ratio as `W:H` (e.g. `5:4`).
-    ///
-    /// 自定义锁不显示「自由」——`CropAspectPreset(lock:)` 会把任何非预设比值折成 `.free`，而那个名字
-    /// 会让用户以为约束被丢掉了。反过来，「原始」锁在 3:2 的机身上就是一个 `custom(1.5)`（`.matching`），
-    /// 那一份**先**问预设，问不到才说 `W:H` —— 否则「原始」会被印成「3:2」。
-    static func title(for tool: CropToolController?) -> String {
-        guard let tool else { return "—" }
-        let preset = tool.aspectPreset()
-        if preset == .free, case .custom(let ratio) = tool.draft.lock,
-           ratio.isFinite, ratio > 0 {
-            return customRatioText(ratio)
-        }
-        return preset.displayName
+    /// What the typed field shows: the custom ratio in force as `W:H`, else empty (the placeholder
+    /// says what to type). Read from the draft — the field keeps no second copy of the lock.
+    static func fieldText(for tool: CropToolController?) -> String {
+        guard let tool, case .custom(let ratio) = tool.draft.lock,
+              ratio.isFinite, ratio > 0 else { return "" }
+        return customRatioText(ratio)
     }
 
     /// `1.25 → 5:4`, `16/9 → 16:9`, `0.01 → 1:100`; denominators up to 100 (the parser's limit keeps
@@ -508,191 +588,149 @@ struct CropAspectRow: View {
         return String(format: "%.4g:1", ratio)
     }
 
-    /// What the inline field starts from: the typed ratio if one is in force, else the last `W:H`
-    /// (the same UI preference the old centred panel used).
-    static func editingText(for tool: CropToolController?) -> String {
-        if let tool, tool.aspectPreset() == .free, case .custom(let ratio) = tool.draft.lock,
-           ratio.isFinite, ratio > 0 {
-            return customRatioText(ratio)
-        }
-        return CropToolBar.lastCustomRatioText
-    }
-
-    static func help(for tool: CropToolController?) -> String {
-        guard let tool else { return "宽高比（进入变换后可用）" }
-        return "宽高比：\(title(for: tool)) · 单击换下一个，⇧ 单击换上一个"
-    }
-
-    /// One `W:H` commit, in the same place whether it came from the keyboard or a test: parse, write,
-    /// or beep and change nothing. The chip then re-renders from the draft, so a refused string shows
-    /// the old ratio again.
+    /// One `W:H` / decimal commit, in the same place whether it came from the keyboard or a test:
+    /// parse, write, or beep and change nothing. The field then shows what the draft now holds, so a
+    /// refused string leaves the old text.
     private func commit(_ text: String) {
-        _ = CropRatioPanels.shared.commit(text, to: tool)
-        editing = false
+        if let tool { _ = CropRatioPanels.shared.commit(text, to: tool) }
+        typed = Self.fieldText(for: tool)
+        revision &+= 1
     }
 }
 
-// MARK: - 104: the chip, the lock, the pencil and the inline field (AppKit leaves)
+// MARK: - 334: the four ratio buttons
 
-/// The ratio chip itself. A real `NSButton` for the same reason every leaf in this card is AppKit:
-/// the acceptance clicks it and reads the **text** back without an event loop.
-final class RatioChipButton: NSButton {
+/// 334 — one of the four common ratios: 1:1 · 4:3 · 16:9 · 2:3.
+///
+/// `AspectLock` carries three of them by name; 2:3 is the same explicit `custom(2/3)` the typed field
+/// would produce, because the enum deliberately has no fourth named ratio.
+enum RatioButton: String, CaseIterable, Sendable, Hashable {
+    case square = "1x1"
+    case fourThree = "4x3"
+    case sixteenNine = "16x9"
+    case twoThree = "2x3"
 
-    static let height: CGFloat = 18
+    var title: String {
+        switch self {
+        case .square: return "1:1"
+        case .fourThree: return "4:3"
+        case .sixteenNine: return "16:9"
+        case .twoThree: return "2:3"
+        }
+    }
+
+    /// The button's accessibility identifier — `crop.ratio.<n>`, one spelling for the view and the
+    /// acceptance (`inspector.crop.ratio.16x9`).
+    var identifier: String { "inspector.crop.ratio.\(rawValue)" }
+
+    var lock: AspectLock {
+        switch self {
+        case .square: return .square
+        case .fourThree: return .fourThree
+        case .sixteenNine: return .sixteenNine
+        case .twoThree: return .custom(2.0 / 3.0)
+        }
+    }
+
+    /// One click = that lock — through the preset verb where a named preset exists (so 原始's memory
+    /// and the 🔒 rules behave exactly as they did), through `setCustomRatio` for 2:3.
+    @MainActor
+    func apply(to tool: CropToolController?) {
+        guard let tool else { return }
+        switch self {
+        case .square: tool.setAspect(.square)
+        case .fourThree: tool.setAspect(.fourThree)
+        case .sixteenNine: tool.setAspect(.sixteenNine)
+        case .twoThree: _ = tool.setCustomRatio(2.0 / 3.0)
+        }
+    }
+}
+
+/// One ratio button. A real `NSButton` for the reason every leaf in this card is AppKit: the
+/// acceptance clicks it through `performClick(_:)` and reads its pressed state without an event loop.
+final class RatioPresetButton: NSButton {
+
+    static let cornerRadius: CGFloat = 5
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
 
-    var onCycle: ((Bool) -> Void)?
-    private var backward = false
+    private(set) var titleText: String = ""
+    private(set) var isOn = false
 
-    init(title: String) {
-        super.init(frame: NSRect(x: 0, y: 0, width: CropAspectRow.controlWidth, height: Self.height))
-        self.title = title
+    init(title: String, isOn: Bool) {
+        super.init(frame: NSRect(x: 0, y: 0, width: CropAspectRow.minimumButtonWidth,
+                                 height: CropAspectRow.buttonHeight))
         isBordered = false
         bezelStyle = .inline
-        setButtonType(.momentaryChange)
-        font = Self.font
+        setButtonType(.toggle)
         alignment = .center
-        lineBreakMode = .byClipping
+        cell?.lineBreakMode = .byClipping       // 验收：卡宽 244 pt 下不出现「…」
         wantsLayer = true
-        layer?.cornerRadius = 5
+        layer?.cornerRadius = Self.cornerRadius
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.6).cgColor
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
         target = self
         action = #selector(fire)
-        setAccessibilityLabel("宽高比")
+        setAccessibilityLabel(title)
+        refresh(title: title, isOn: isOn, isEnabled: true)
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: CropAspectRow.controlWidth, height: Self.height)
+        NSSize(width: CropAspectRow.minimumButtonWidth, height: CropAspectRow.buttonHeight)
     }
     override var isFlipped: Bool { true }
 
-    /// ⇧-click steps the cycle backwards. The flag is captured on mouse-down; `performClick` (what
-    /// the tests use) keeps the default forward direction.
-    override func mouseDown(with event: NSEvent) {
-        backward = event.modifierFlags.contains(.shift)
-        super.mouseDown(with: event)
-    }
+    @objc private func fire() { }
 
-    @objc private func fire() {
-        onCycle?(backward)
-        backward = false
-    }
-
-    /// The ⇧-click path without an `NSEvent` (the same door a keyboard shortcut would use).
-    func click(backward: Bool) {
-        self.backward = backward
-        performClick(nil)
-    }
-
-    func refresh(title: String, isEnabled: Bool) {
-        self.title = title
+    /// `isOn` is the pressed state the user asked to *see* the current lock in: accent fill + white
+    /// glyph; off is the card's own material + a hairline, like the 九宫格 chip.
+    func refresh(title: String, isOn: Bool, isEnabled: Bool) {
+        titleText = title
+        self.isOn = isOn
         self.isEnabled = isEnabled
-        setAccessibilityValue(title)
+        state = isOn ? .on : .off
+        let colour: NSColor = isOn ? .white : .labelColor
+        self.title = title
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: Self.font,
+            .foregroundColor: colour,
+        ])
+        layer?.backgroundColor = isOn
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.labelColor.withAlphaComponent(0.05).cgColor
+        layer?.borderColor = isOn
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.tertiaryLabelColor.withAlphaComponent(0.6).cgColor
+        setAccessibilityValue(isOn ? "已选中" : "未选中")
         invalidateIntrinsicContentSize()
     }
 }
 
-struct RatioChipButtonHost: NSViewRepresentable {
+struct RatioPresetButtonHost: NSViewRepresentable {
 
     let title: String
+    let isOn: Bool
     let isEnabled: Bool
     let identifierID: String
-    let onCycle: (Bool) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onCycle: onCycle) }
-
-    func makeNSView(context: Context) -> RatioChipButton {
-        let button = RatioChipButton(title: title)
-        button.setAccessibilityIdentifier(identifierID)
-        button.onCycle = context.coordinator.fire
-        button.refresh(title: title, isEnabled: isEnabled)
-        return button
-    }
-
-    func updateNSView(_ button: RatioChipButton, context: Context) {
-        context.coordinator.onCycle = onCycle
-        button.onCycle = context.coordinator.fire
-        button.setAccessibilityIdentifier(identifierID)
-        button.refresh(title: title, isEnabled: isEnabled)
-    }
-
-    final class Coordinator: NSObject {
-        var onCycle: (Bool) -> Void
-        init(onCycle: @escaping (Bool) -> Void) { self.onCycle = onCycle }
-        func fire(_ backward: Bool) { onCycle(backward) }
-    }
-}
-
-/// A bordered-free 18 × 18 icon leaf (🔒 / 🔓 / ✎). Same shape as `BareIconButton`, but the symbol is
-/// mutable: the lock flips between `lock.fill` and `lock.open` as the ratio enters/leaves 自由.
-final class RatioIconButton: NSButton {
-
-    static let size = NSSize(width: 18, height: 18)
-    static let glyphPointSize: CGFloat = 10
-
-    private(set) var symbol: String
-    var onActivate: (() -> Void)?
-
-    init(symbol: String, title: String) {
-        self.symbol = symbol
-        super.init(frame: NSRect(origin: .zero, size: Self.size))
-        isBordered = false
-        bezelStyle = .inline
-        setButtonType(.momentaryChange)
-        imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyDown
-        toolTip = title
-        setAccessibilityLabel(title)
-        target = self
-        action = #selector(fire)
-        refresh(symbol: symbol, title: title)
-    }
-
-    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
-
-    override var intrinsicContentSize: NSSize { Self.size }
-    override var isFlipped: Bool { true }
-
-    @objc private func fire() { onActivate?() }
-
-    func refresh(symbol: String, title: String) {
-        self.symbol = symbol
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: Self.glyphPointSize,
-                                                                 weight: .regular))
-        setAccessibilityLabel(title)
-        setAccessibilityValue(symbol)
-    }
-}
-
-struct RatioIconButtonHost: NSViewRepresentable {
-
-    let symbol: String
-    let title: String
-    let identifierID: String
-    let isEnabled: Bool
     let action: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }
 
-    func makeNSView(context: Context) -> RatioIconButton {
-        let button = RatioIconButton(symbol: symbol, title: title)
+    func makeNSView(context: Context) -> RatioPresetButton {
+        let button = RatioPresetButton(title: title, isOn: isOn)
         button.setAccessibilityIdentifier(identifierID)
         button.target = context.coordinator
         button.action = #selector(Coordinator.fire)
-        button.isEnabled = isEnabled
+        button.refresh(title: title, isOn: isOn, isEnabled: isEnabled)
         return button
     }
 
-    func updateNSView(_ button: RatioIconButton, context: Context) {
+    func updateNSView(_ button: RatioPresetButton, context: Context) {
         context.coordinator.action = action
         button.setAccessibilityIdentifier(identifierID)
-        button.isEnabled = isEnabled
-        button.refresh(symbol: symbol, title: title)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.refresh(title: title, isOn: isOn, isEnabled: isEnabled)
     }
 
     final class Coordinator: NSObject {
@@ -702,44 +740,16 @@ struct RatioIconButtonHost: NSViewRepresentable {
     }
 }
 
-/// The lock leaf: `lock.fill` / `lock.open`, one click = 自由 ⇄ last locked.
-struct RatioLockButtonHost: NSViewRepresentable {
+// MARK: - 334: the typed ratio (always on screen, no panel)
 
-    let symbol: String
-    let isEnabled: Bool
-    let identifierID: String
-    let action: () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
-
-    func makeNSView(context: Context) -> RatioIconButton {
-        let button = RatioIconButton(symbol: symbol, title: "比例锁")
-        button.setAccessibilityIdentifier(identifierID)
-        button.target = context.coordinator
-        button.action = #selector(Coordinator.fire)
-        button.isEnabled = isEnabled
-        return button
-    }
-
-    func updateNSView(_ button: RatioIconButton, context: Context) {
-        context.coordinator.action = action
-        button.setAccessibilityIdentifier(identifierID)
-        button.isEnabled = isEnabled
-        let title = symbol == "lock.open" ? "比例锁：自由（单击恢复上一次比例）" : "比例锁：已锁定（单击改为自由）"
-        button.refresh(symbol: symbol, title: title)
-    }
-
-    final class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func fire() { action() }
-    }
-}
-
-/// 104 — the inline `W:H` field: the chip **becomes** this field in place. `↵` commits, `Esc`
-/// cancels, and **losing focus cancels too** (the same rule the angle number field has: blur is not a
-/// commit). Nothing here creates a window: it is an `NSTextField` inside the card's row.
-final class RatioInlineField: NSTextField, NSTextFieldDelegate {
+/// 334 — the card's **custom ratio field**: always visible (the user: 「需要一个自定义比例的输入框」),
+/// `5:4` and `1.85` both accepted, `↵` commits, `Esc` **or a click elsewhere** puts the stored ratio
+/// back (blur is not a commit — the angle row's rule). Junk beeps and writes nothing.
+///
+/// It does **not** store the ratio: `CropTool.ratio(from:)` + `CropToolController.setCustomRatio`
+/// write the draft's lock, and the last text is a UI preference (`CropToolBar.lastCustomRatioText`),
+/// never a document field.
+final class CustomRatioField: NSTextField, NSTextFieldDelegate {
 
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
 
@@ -747,11 +757,11 @@ final class RatioInlineField: NSTextField, NSTextFieldDelegate {
     var onCancel: (() -> Void)?
 
     private var finished = false
-    private var requestedFocus = false
 
     init(text: String) {
         super.init(frame: .zero)
         stringValue = text
+        placeholderString = "5:4"
         font = Self.font
         isEditable = true
         isSelectable = true
@@ -761,32 +771,31 @@ final class RatioInlineField: NSTextField, NSTextFieldDelegate {
         controlSize = .mini
         focusRingType = .default
         alignment = .center
+        toolTip = "键入比例：5:4 或 1.85（回车生效，非法输入不写入）"
         delegate = self
         target = self
         action = #selector(commitAction)
-        setAccessibilityIdentifier(CropAspectRow.fieldID)
+        setAccessibilityIdentifier(CropAspectRow.customID)
         setAccessibilityLabel("自定义比例")
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: CropAspectRow.controlWidth, height: 18)
+        NSSize(width: CropAspectRow.customFieldWidth, height: CropAspectRow.buttonHeight)
     }
     override var isFlipped: Bool { true }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil, !requestedFocus else { return }
-        requestedFocus = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let window = self.window else { return }
-            window.makeFirstResponder(self)
-            self.currentEditor()?.selectAll(nil)
-        }
+    /// The card pushes the draft's text in; the field is never a second source of truth, and it does
+    /// not steal focus when the workspace appears (it is not a transient editor like 104's chip swap).
+    func refresh(text: String) {
+        guard currentEditor() == nil, stringValue != text else { return }
+        stringValue = text
     }
 
     @objc private func commitAction() { finish(commit: true) }
+
+    func controlTextDidBeginEditing(_ obj: Notification) { finished = false }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         if selector == #selector(NSResponder.insertNewline(_:)) {
@@ -800,7 +809,7 @@ final class RatioInlineField: NSTextField, NSTextFieldDelegate {
         return false
     }
 
-    /// Blur is **not** a commit (the angle field's rule); it closes the editor and keeps the old ratio.
+    /// Blur is **not** a commit: it closes the editor and keeps the old ratio.
     func controlTextDidEndEditing(_ obj: Notification) {
         if !finished { finish(commit: false) }
     }
@@ -812,27 +821,37 @@ final class RatioInlineField: NSTextField, NSTextFieldDelegate {
     }
 
     /// `↵` for the acceptance (the real path is the field editor's `doCommandBy`).
-    func commitForTesting() { finish(commit: true) }
+    func commitForTesting() {
+        finished = false
+        finish(commit: true)
+    }
     /// `Esc` / blur for the acceptance.
-    func cancelForTesting() { finish(commit: false) }
+    func cancelForTesting() {
+        finished = false
+        finish(commit: false)
+    }
 }
 
-struct RatioInlineFieldHost: NSViewRepresentable {
+struct CustomRatioFieldHost: NSViewRepresentable {
 
-    let initial: String
+    let text: String
+    /// Any change re-pushes `text` into the field, even when `text` is the same string (a refused
+    /// commit) — that is how the junk text gets replaced by the ratio the draft still holds.
+    let revision: Int
     let onCommit: (String) -> Void
     let onCancel: () -> Void
 
-    func makeNSView(context: Context) -> RatioInlineField {
-        let field = RatioInlineField(text: initial)
+    func makeNSView(context: Context) -> CustomRatioField {
+        let field = CustomRatioField(text: text)
         field.onCommit = onCommit
         field.onCancel = onCancel
         return field
     }
 
-    func updateNSView(_ field: RatioInlineField, context: Context) {
+    func updateNSView(_ field: CustomRatioField, context: Context) {
         field.onCommit = onCommit
         field.onCancel = onCancel
+        field.refresh(text: text)
     }
 }
 
@@ -1135,6 +1154,9 @@ struct CropApplyRow: View {
     let onCancel: () -> Void
 
     static let probeID = "apply"
+    /// 086/334: the two buttons' identifiers, one spelling for the view and the acceptance.
+    static let applyID = "inspector.crop.apply"
+    static let cancelID = "inspector.crop.cancel"
     /// The two keys `DetailRowEnabledLog` records them under (the panel's existing readback seam).
     static let applyProbe = "裁切.应用"
     static let cancelProbe = "裁切.取消"
@@ -1146,13 +1168,13 @@ struct CropApplyRow: View {
                 .controlSize(.mini)
                 .background(DetailRowEnabledProbe(title: Self.applyProbe))
                 .help("应用裁切（一条历史，一次 ⌘Z）")
-                .accessibilityIdentifier("inspector.crop.apply")
+                .accessibilityIdentifier(Self.applyID)
             Button("取消", action: onCancel)
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
                 .background(DetailRowEnabledProbe(title: Self.cancelProbe))
                 .help("放弃这次裁切，文档一个字节都不动")
-                .accessibilityIdentifier("inspector.crop.cancel")
+                .accessibilityIdentifier(Self.cancelID)
         }
         .background(CropRowProbeHost(rowID: Self.probeID))
         .accessibilityIdentifier("inspector.crop.row.\(Self.probeID)")
@@ -1173,6 +1195,9 @@ struct CropChip: View {
     static let height: CGFloat = 18
     static let cornerRadius: CGFloat = 5
 
+    /// 086/334: the chip's identifier, written once (`inspector.crop.chip.九宫格`).
+    static func titleID(_ title: String) -> String { "inspector.crop.chip.\(title)" }
+
     var body: some View {
         Button(action: action) {
             Text(title)
@@ -1189,7 +1214,7 @@ struct CropChip: View {
         .help(help)
         .accessibilityLabel(title)
         .accessibilityAddTraits(on ? [.isSelected] : [])
-        .accessibilityIdentifier("inspector.crop.chip.\(title)")
+        .accessibilityIdentifier(Self.titleID(title))
         .background(DetailRowEnabledProbe(title: title))
     }
 
@@ -1198,45 +1223,104 @@ struct CropChip: View {
     static func fill(on: Bool) -> Color { on ? Color.accentColor : Color.clear }
 }
 
-// MARK: - 328 「画线拉直」
+// MARK: - 328/334 「画线拉直」
 
-/// The 裁切 card's **画线拉直** switch, next to the 角度 slider: a `Toggle`-style button with
-/// `line.diagonal`, lit while the canvas is drawing lines instead of moving the frame.
+/// 334 — the 校正 card's **画线拉直** switch, on its own row under the 拉直 slider: a `level` glyph
+/// (the spirit level the user asked for: 「旋转旁边的画线确定水平面功能，UI LOGO要改一下，看下有没有
+/// 水平仪的LOGO，用来和引导线UI区分开」), lit while the canvas is drawing lines instead of moving
+/// the frame.
 ///
-/// It is a `Button` and not a SwiftUI `Toggle` because the card's other switches are chips of the
-/// same size (`CropChip`), and because a `Toggle` would print a checkbox beside the icon on macOS;
-/// `.isSelected` carries the on/off state to the accessibility tree instead (the same spelling
-/// `CropChip` uses), so the panel acceptance can read it without a second source of truth.
-struct CropDrawStraightenToggle: View {
+/// 328 shipped it with `line.diagonal`, which is also the idiom for the guide lines it is *not*: the
+/// two have to be told apart on sight, and a bubble level says 「这个摆平」 while a diagonal says
+/// 「这里有一条线」. The custom-ratio field uses `ruler`, so no two controls in this workspace share a
+/// glyph.
+///
+/// A real `NSButton` (334) rather than the SwiftUI `Button` it was: the acceptance has to read the
+/// **image name** back, and a SwiftUI image has no `NSView` to ask.
+final class DrawStraightenButton: NSButton {
+
+    static let size = NSSize(width: 22, height: 18)
+    static let cornerRadius: CGFloat = 5
+    /// The symbol the panel draws — the acceptance's one readback (`image name == level`).
+    static let symbol = "level"
+    static let label = "画线拉直"
+    static let help = "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消"
+    static let identifierID = "inspector.crop.drawStraighten"
+
+    private(set) var symbolName: String = DrawStraightenButton.symbol
+
+    init(symbol: String = DrawStraightenButton.symbol) {
+        super.init(frame: NSRect(origin: .zero, size: Self.size))
+        symbolName = symbol
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.toggle)
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        toolTip = Self.help
+        wantsLayer = true
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.borderWidth = 1
+        setAccessibilityIdentifier(Self.identifierID)
+        target = self
+        action = #selector(fire)
+        refresh(symbol: symbol, on: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize { Self.size }
+    override var isFlipped: Bool { true }
+
+    @objc private func fire() { }
+
+    func refresh(symbol: String, on: Bool) {
+        symbolName = symbol
+        state = on ? .on : .off
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: Self.label)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        contentTintColor = on ? .white : .labelColor
+        layer?.backgroundColor = on
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.clear.cgColor
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(on ? 0 : 0.12).cgColor
+        setAccessibilityLabel(Self.label)
+        setAccessibilityValue(symbol)
+    }
+}
+
+struct CropDrawStraightenToggle: NSViewRepresentable {
 
     let on: Bool
     var enabled: Bool = true
     let action: () -> Void
+    /// 334: injectable only so the reverse gate can hand in `line.diagonal` and prove the acceptance
+    /// reads the *drawn* symbol; production always uses `DrawStraightenButton.symbol`.
+    var symbol: String = DrawStraightenButton.symbol
 
-    static let size = CGSize(width: 22, height: 18)
-    static let cornerRadius: CGFloat = 5
-    static let symbol = "line.diagonal"
-    static let label = "画线拉直"
-    static let help = "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消"
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
 
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: Self.symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(on ? Color.white : Color.primary)
-                .frame(width: Self.size.width, height: Self.size.height)
-                .background(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                    .fill(on ? Color.accentColor : Color.clear))
-                .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(on ? 0 : 0.12), lineWidth: 1))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(Self.help)
-        .disabled(!enabled)
-        .accessibilityLabel(Self.label)
-        .accessibilityIdentifier("inspector.crop.drawStraighten")
-        .accessibilityAddTraits(on ? [.isSelected] : [])
+    func makeNSView(context: Context) -> DrawStraightenButton {
+        let button = DrawStraightenButton(symbol: symbol)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.isEnabled = enabled
+        button.refresh(symbol: symbol, on: on)
+        return button
+    }
+
+    func updateNSView(_ button: DrawStraightenButton, context: Context) {
+        context.coordinator.action = action
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.isEnabled = enabled
+        button.refresh(symbol: symbol, on: on)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
     }
 }
 
@@ -1329,7 +1413,9 @@ final class CropRatioPanels {
 enum CropCardID {
     /// The whole 裁切 card — 「卡片清单第一张 = 裁切」 is measured on this frame.
     static let card = "card"
-    /// 087: the 角度 card's own frame (the second card of the workspace).
+    /// 334: the 校正 card's own frame (the second card of the workspace).
+    static let correctionCard = "correction.card"
+    /// 087: the 变换 card's own frame (the third card of the workspace).
     static let angleCard = "angle.card"
     static let aspect = CropAspectRow.probeID
     static let angle = "angle"

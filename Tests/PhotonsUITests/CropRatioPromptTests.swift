@@ -4,12 +4,12 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// ⑨ → 104 — **键入比例不再弹框**；非法输入仍然一声响、什么都不写。
+/// ⑨ → 104 → 334 — **键入比例永远不弹框**；非法输入仍然一声响、什么都不写。
 ///
 /// ⑨ 原本钉的是「弹层中心 = 窗口中心」，因为 `NSAlert.runModal()` 居中到**屏幕**、sheet 会落在标题栏
-/// 下面。104 的用户口径（2026-10-29）直接取消了弹框：比例 chip 右侧的铅笔把 chip **就地**换成
-/// 等宽的 `W:H` 字段。所以这一份保留 ⑨ 真正在守的语义 —— 「键入非法输入不写文档」 —— 只把入口从
-/// 居中面板换成内联字段；居中的几何已经没有测量对象，删掉的是过时的断言，不是功能。
+/// 下面。104 取消了弹框（chip 就地变字段），334 把字段变成**常显**的那一行（用户：「需要一个自定义
+/// 比例的输入框」）。这一份保留 ⑨ 真正在守的语义 —— 「键入非法输入不写文档」 —— 只把入口换成卡片里
+/// 那个一直看得见的字段；居中的几何已经没有测量对象，删掉的是过时的断言，不是功能。
 @MainActor
 final class CropRatioPromptTests: XCTestCase {
 
@@ -25,7 +25,7 @@ final class CropRatioPromptTests: XCTestCase {
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
     }
 
-    /// 非法输入：内联字段收下字符串 → 一声响、草稿与文档一个字节都不动、chip 回到原文本。
+    /// 非法输入：常显字段收下字符串 → 一声响、草稿与文档一个字节都不动、字段回到原文本。
     func testAnInvalidTypedRatioWritesNothingAndCreatesNoWindow() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
@@ -40,28 +40,19 @@ final class CropRatioPromptTests: XCTestCase {
         XCTAssertTrue(loupe.isCropToolActive, "104: 进变换就已经在裁切模式")
         let tool = loupe.cropTool
         let lockBefore = tool.draft.lock
-        let chipBefore = Self.chip(in: inspector)?.title
+        let fieldBefore = Self.field(in: inspector)?.stringValue
         let documentBefore = CropUITestSupport.documentHash(session)
         let visibleBefore = NSApp.windows.filter(\.isVisible).count
         let panelsBefore = NSApp.windows.filter { $0 is NSPanel }.count
 
-        // The pencil is the inline door — no menu, no panel.
-        let pencil = try XCTUnwrap(Self.iconButton(CropAspectRow.editID, in: inspector),
-                                   "104: 比例行没有铅笔按钮")
-        pencil.performClick(nil)
-        CropUITestSupport.pump(0.1)
-        inspector.layoutSubtreeIfNeeded()
-
-        let field = try XCTUnwrap(Self.inlineField(in: inspector), "104: chip 没有就地变成输入框")
-        XCTAssertTrue(field.isEditable, "104: 内联字段必须可键入")
-        XCTAssertNil(CropRatioPanels.shared.prompt, "104: 键入比例不许创建面板")
-        // AppKit/SwiftUI 在 text field 成为第一响应者时会建一个不可见的 `TUINSWindow`（500×500，
-        // `isVisible == false`）作为文本输入宿主 —— 实测过（104 复核）。它不是一个「弹框」，
-        // 所以这里断言的是**可见窗口**没有增加，以及没有 NSPanel。
+        // The field is part of the card — there is no door to open and nothing to open it with.
+        let field = try XCTUnwrap(Self.field(in: inspector), "334: 自定义比例字段必须常显")
+        XCTAssertTrue(field.isEditable, "334: 字段必须可键入")
+        XCTAssertNil(CropRatioPanels.shared.prompt, "104/334: 键入比例不许创建面板")
         XCTAssertEqual(NSApp.windows.filter(\.isVisible).count, visibleBefore,
-                       "104: 打开内联字段不许新建可见窗口")
+                       "334: 字段常显，不许新建可见窗口")
         XCTAssertEqual(NSApp.windows.filter { $0 is NSPanel }.count, panelsBefore,
-                       "104: 打开内联字段不许新建面板")
+                       "334: 字段常显，不许新建面板")
 
         field.stringValue = "5:x"
         field.commitForTesting()
@@ -71,18 +62,17 @@ final class CropRatioPromptTests: XCTestCase {
         XCTAssertEqual(tool.draft.lock, lockBefore, "⑨/104: 被拒的输入不许改比例")
         XCTAssertEqual(CropUITestSupport.documentHash(session), documentBefore,
                        "⑨/104: 被拒的输入不许写文档")
-        XCTAssertEqual(Self.chip(in: inspector)?.title, chipBefore,
-                       "⑨/104: chip 要回到原来的文本")
-        XCTAssertNil(Self.inlineField(in: inspector), "104: 提交后内联字段收回去")
+        XCTAssertEqual(Self.field(in: inspector)?.stringValue, fieldBefore,
+                       "⑨/104: 字段要回到草稿的文本")
         XCTAssertNil(CropRatioPanels.shared.prompt, "104: 全程没有面板")
         XCTAssertEqual(NSApp.windows.filter(\.isVisible).count, visibleBefore,
                        "104: 提交路径没有创建可见窗口")
         print("104 invalid · lock \(lockBefore.code) → \(tool.draft.lock.code)"
-              + " · chip \(chipBefore ?? "nil") · visible \(visibleBefore) → \(NSApp.windows.filter(\.isVisible).count)")
+              + " · field \(fieldBefore ?? "nil") · visible \(visibleBefore) → \(NSApp.windows.filter(\.isVisible).count)")
     }
 
-    /// `Esc` cancels: the field goes away and the ratio is untouched (the old panel's cancel rule).
-    func testEscapeCancelsTheInlineField() throws {
+    /// `Esc` cancels: the typed text goes back to the draft's ratio and the lock is untouched.
+    func testEscapePutsTheStoredRatioBack() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         let window = try XCTUnwrap(editor.window)
         defer { window.orderOut(nil) }
@@ -93,20 +83,18 @@ final class CropRatioPromptTests: XCTestCase {
         inspector.layoutSubtreeIfNeeded()
 
         let lockBefore = loupe.cropTool.draft.lock
-        let pencil = try XCTUnwrap(Self.iconButton(CropAspectRow.editID, in: inspector))
-        pencil.performClick(nil)
-        CropUITestSupport.pump(0.1)
-        let field = try XCTUnwrap(Self.inlineField(in: inspector))
+        let field = try XCTUnwrap(Self.field(in: inspector))
         field.stringValue = "7:5"
         field.cancelForTesting()
         CropUITestSupport.pump(0.1)
         inspector.layoutSubtreeIfNeeded()
 
-        XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "104: Esc 不许写比例")
-        XCTAssertNil(Self.inlineField(in: inspector), "104: Esc 后字段收回")
+        XCTAssertEqual(loupe.cropTool.draft.lock, lockBefore, "334: Esc 不许写比例")
+        XCTAssertEqual(field.stringValue, CropAspectRow.fieldText(for: loupe.cropTool),
+                       "334: Esc 之后字段回到草稿的文本")
     }
 
-    // MARK: - finding the shipped views
+    // MARK: - finding the shipped view
 
     private static func allViews(in root: NSView) -> [NSView] {
         var found: [NSView] = [root]
@@ -114,18 +102,8 @@ final class CropRatioPromptTests: XCTestCase {
         return found
     }
 
-    private static func chip(in root: NSView) -> RatioChipButton? {
-        allViews(in: root).compactMap { $0 as? RatioChipButton }
-            .first { $0.accessibilityIdentifier() == CropAspectRow.chipID }
-    }
-
-    private static func iconButton(_ id: String, in root: NSView) -> RatioIconButton? {
-        allViews(in: root).compactMap { $0 as? RatioIconButton }
-            .first { $0.accessibilityIdentifier() == id }
-    }
-
-    private static func inlineField(in root: NSView) -> RatioInlineField? {
-        allViews(in: root).compactMap { $0 as? RatioInlineField }
-            .first { $0.accessibilityIdentifier() == CropAspectRow.fieldID }
+    private static func field(in root: NSView) -> CustomRatioField? {
+        allViews(in: root).compactMap { $0 as? CustomRatioField }
+            .first { $0.accessibilityIdentifier() == CropAspectRow.customID }
     }
 }

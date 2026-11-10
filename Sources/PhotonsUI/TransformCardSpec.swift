@@ -110,18 +110,25 @@ public struct TransformCardSpec: Sendable, Hashable {
     /// compares this value with it.
     public var sectionFieldUnion: GeometryFieldSet { TransformCardSpec.union(of: sections) }
 
-    /// 「裁切」 — 宽高比 + 角度 + 透视. Turn and mirror are the other card's, so a double-click here
-    /// keeps them exactly as they were.
+    /// 「裁切」 — **only the aspect ratio** (334). 拉直 / 透视 moved to 「校正」: the user could not
+    /// find 画线拉直 while it lived here, because it sat between two perspective sliders.
     public static let cropCard = TransformCardSpec(
         title: InspectorView.Section.crop.title,
-        sections: [.crop, .angle, .perspective])
+        sections: [.crop])
 
-    /// 「旋转」 — 旋转 + 镜像. The crop rect, its lock and the straighten keep what they hold.
+    /// 「校正」 — 拉直 + 透视 (334). The straighten, the draw-a-line switch and the two keystone knobs
+    /// are all "the picture is not straight / not square" repairs, so they share one card.
+    public static let correctionCard = TransformCardSpec(
+        title: InspectorView.Section.transformCorrection.title,
+        sections: [.angle, .perspective])
+
+    /// 「变换」 — 旋转 + 镜像. The crop rect, its lock and the corrections keep what they hold.
     public static let rotationCard = TransformCardSpec(
         title: InspectorView.Section.angle.title,
         sections: [.rotation, .mirror])
 
-    public static let all: [TransformCardSpec] = [.cropCard, .rotationCard]
+    /// 334: three cards, in the user's order — 裁切 → 校正 → 变换.
+    public static let all: [TransformCardSpec] = [.cropCard, .correctionCard, .rotationCard]
 
     /// The card an `InspectorView.Section` draws, if it is one of the transform cards.
     public static func card(for section: InspectorView.Section) -> TransformCardSpec? {

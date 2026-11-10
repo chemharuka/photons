@@ -51,13 +51,17 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         // The enum is the one spelling, and its order is the stacked order.
-        XCTAssertEqual(InspectorView.Section.angle.title, "旋转", "123: 第二张卡的卡名是「旋转」")
-        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "旋转"])
+        // 334: 三张卡 —— 裁切 → 校正 → 变换.
+        XCTAssertEqual(InspectorView.Section.angle.title, "变换", "334: 第三张卡的卡名是「变换」")
+        XCTAssertEqual(InspectorView.Section.transformCorrection.title, "校正")
+        XCTAssertEqual(InspectorView.cardTitles(in: .transform), ["裁切", "校正", "变换"])
+        XCTAssertEqual(TransformCardSpec.all.map(\.title), ["裁切", "校正", "变换"])
         XCTAssertEqual(CropSection.allCases.map(\.rawValue), ["crop", "angle", "perspective", "rotation", "mirror"])
-        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"])
+        XCTAssertEqual(CropSection.displayOrder.map(\.title), ["宽高比", "角度", "透视", "旋转", "镜像"],
+                       "三张卡的 section 依次拼起来仍是这五个（顺序没动，只是分属三张卡）")
         XCTAssertEqual(CropSection.angleCardOrder.map(\.title), ["旋转", "镜像"])
 
         // …and the panel really drew its headers in that order, top to bottom. 122 A (user 2026-10-29):
@@ -101,21 +105,27 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         let cropCard = try XCTUnwrap(panel.row(CropCardID.card))
+        let correctionCard = try XCTUnwrap(panel.row(CropCardID.correctionCard), "334: 校正卡没有 frame")
         let angleCard = try XCTUnwrap(panel.row(CropCardID.angleCard))
         print("082 §4 · panel 300 pt → 裁切卡 \(String(format: "%.1f×%.1f", cropCard.width, cropCard.height)) "
-              + "· 角度卡 \(String(format: "%.1f×%.1f", angleCard.width, angleCard.height))")
-        XCTAssertGreaterThan(angleCard.minY, cropCard.maxY, "087: 角度卡在裁切卡之后")
+              + "· 校正卡 \(String(format: "%.1f×%.1f", correctionCard.width, correctionCard.height)) "
+              + "· 变换卡 \(String(format: "%.1f×%.1f", angleCard.width, angleCard.height))")
+        XCTAssertGreaterThan(correctionCard.minY, cropCard.maxY, "334: 校正卡在裁切卡之后")
+        XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY, "334: 变换卡在最后")
 
-        // 214: the rows belong to two cards. 裁切 owns 宽高比 / 角度 / 透视 / 底部行; 旋转 owns
-        // 旋转 / 镜像. Each row is measured against the card that owns it.
+        // 334: 三张卡三套行 —— 每行对着拥有它的那张卡量。
+        //   裁切 = 宽高比（四个按钮 + 原始/自由 + 自定义）· 不出像素 · 九宫格 · 取消/应用
+        //   校正 = 拉直 · 画线拉直 · 垂直透视 · 水平透视
+        //   变换 = 旋转 · 镜像
         let owners: [(CGRect, [String], [CropSection])] = [
-            (cropCard, [CropCardID.aspect, CropCardID.angle,
-                        CropCardID.perspectiveVertical, CropCardID.perspectiveHorizontal,
-                        CropCardID.apply],
-             [.crop, .angle, .perspective]),
+            (cropCard, [CropCardID.aspect, CropCardID.staysInsidePixels,
+                        CropCardID.grid, CropCardID.apply],
+             [.crop]),
+            (correctionCard, CorrectionCardRow.allCases.map(\.probeID),
+             [.angle, .perspective]),
             (angleCard, [CropCardID.turn, CropCardID.mirror],
              [.rotation, .mirror]),
         ]
@@ -201,7 +211,7 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         /// 093 §2: the readout that used to spell both angles out is gone from the card.
         func assertNoCardReadout() {
@@ -267,10 +277,10 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         // 122 A (user 2026-10-29: 「转动的二级标题删掉」): there is no 角度 header any more — the angle
-        // row sits directly under the card title, which is now 「旋转」. The other two sections keep
+        // row sits directly under the card title (334: now 「校正」). The other sections keep
         // their headers, hairline and all.
         XCTAssertNil(panel.row("section.\(CropSection.angle.title)"),
                      "122 A: 角度 小标题必须已经删掉")
@@ -285,11 +295,16 @@ final class CropCardSectionsTests: XCTestCase {
                                     "093 §2: 镜像小节仍要有发丝线（实测 \(mirrorHeader.height) pt）")
 
 
-        _ = waitFor(panel) { _ in DetailRowEnabledLog.shared.value("角度") != nil }
-        XCTAssertEqual(DetailRowEnabledLog.shared.value("角度"), true,
-                       "093 §2: 滑块行的标签必须是「角度」（行探针读回 \(String(describing: DetailRowEnabledLog.shared.value("角度")))）")
+        // 334: 拉直行搬进了校正卡，行标签也从「角度」改成「拉直」（用户：校正包括旋转/透视/引导线，
+        // 行要说它干的事）。
+        _ = waitFor(panel) { _ in DetailRowEnabledLog.shared.value(CorrectionCardRow.straighten.title) != nil }
+        XCTAssertEqual(DetailRowEnabledLog.shared.value(CorrectionCardRow.straighten.title), true,
+                       "334: 滑块行的标签必须是「拉直」（行探针读回 "
+                       + "\(String(describing: DetailRowEnabledLog.shared.value(CorrectionCardRow.straighten.title)))）")
         XCTAssertNil(DetailRowEnabledLog.shared.value("转动"),
                      "093 §2: 「转动」已不再是滑块行的标签")
+        XCTAssertNil(DetailRowEnabledLog.shared.value("角度"),
+                     "334: 行标签已从「角度」改成「拉直」")
 
         let source = try Self.source("TransformPanel.swift")
         XCTAssertFalse(source.contains("CropAngleReadout"),
@@ -309,7 +324,7 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 330, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         let row = try XCTUnwrap(panel.row(CropCardID.turn), "旋转行没有画出来")
         let ccw = try XCTUnwrap(panel.view(TurnButton.self, identifier: CropTurnRow.counterClockwiseID),
@@ -366,7 +381,7 @@ final class CropCardSectionsTests: XCTestCase {
         let panel = try host(width: 300, session: session, loupe: loupe)
         defer { panel.window.contentView = nil }
         panel.state.select(.transform)
-        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "angle"] }
+        _ = waitFor(panel) { $0.cards.cardIDs == ["crop", "transformCorrection", "angle"] }
 
         let horizontal = try XCTUnwrap(panel.view(MirrorButton.self,
                                                   identifier: CropMirrorRow.horizontalID),
