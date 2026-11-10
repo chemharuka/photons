@@ -73,7 +73,7 @@ struct SharpenParams {
     int4 d;
     // luma weights (Rec.709) · mask knee g0
     float4 e;
-    // mask knee g1 · allowance (codes) · 0 · 0
+    // mask knee g1 · allowance (codes) · 320's picture ceiling (linear) · 0
     float4 f;
 };
 
@@ -399,7 +399,13 @@ kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]
     float allowance = A * mix(rangeBudget, edgeBudget, m);
     float delta = clamp(raw, -allowance, allowance);
 
-    dst.write(float4(clamp(rgb + delta, 0.0, 4.0), px.a), gid);
+    // 320 — **the clamp the user was hitting.** This line used to be `clamp(rgb + delta, 0.0, 4.0)`
+    // and the pass is on by default (`SharpenGroup` rests at amount 50, 314), so every document's
+    // brightest pixel stopped at 4.0 = +2 EV — the picture, the histogram and the pointer's readout
+    // alike. The upper bound is the picture's ceiling now; `0` in that lane keeps the old 4.0 for a
+    // caller that predates the field.
+    float ceiling = p.f.z > 0.0 ? p.f.z : 4.0;
+    dst.write(float4(clamp(rgb + delta, 0.0, ceiling), px.a), gid);
 }
 
 // MARK: - 4. the ⌥ preview

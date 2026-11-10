@@ -240,6 +240,12 @@ public struct InspectorView: View {
     /// calls `onWhiteBalancePreviewSettled` when the real frame lands.
     @State private var whiteBalancePreviewing = false
 
+    /// 320 — the picture's ceiling (「最高亮度」), in EV above white. View state because the preference
+    /// itself is not observable: the row reads this mirror, writes `HighlightCeiling.setEV` (which
+    /// posts the notification the loupe re-renders on), and the mirror is what redraws the readout.
+    /// Seeded from the stored preference, so the card opens on the number the renders are using.
+    @State private var highlightCeilingEV = HighlightCeiling.currentEV
+
     /// The exposure row of the anchor photo (派单 014). Read handle + last read, both view state:
     /// the catalog stays the source of truth and nothing here is ever written back.
     @State private var metadataReader = InspectorMetadataReader()
@@ -552,8 +558,41 @@ public struct InspectorView: View {
     ///
     /// 047: the title resets the whole card (`PanelResets.group(.light)` — one snapshot, and the two
     /// absolute levels back to `nil`), each name resets its own field.
+    /// 「光」 — the six tone rows, and 320's 「最高亮度」 as the **last row of the card**: the ceiling is a
+    /// display-side preference, not a document field, but the card it belongs under is this one (the
+    /// owner's placement: 「没有显示卡就放 Light 卡最底一行」). It is drawn by the panel's own row view so
+    /// the label/readout/slider geometry cannot drift from the six above it; what it does *not* do is
+    /// commit an edit — a ceiling is a preference, so the write goes to `HighlightCeiling` and the
+    /// loupe re-renders on the notification, with no history entry and no document dirty flag.
     private var lightCard: some View {
-        toneCard(cardSpec(.light))
+        toneCard(cardSpec(.light), extraRow: AnyView(highlightCeilingRow))
+    }
+
+    /// 320 — 「最高亮度」: label, `+2.3 EV` readout, 0…+4 EV slider on a 0.1 grid, double-click on the
+    /// name resets to `HighlightCeiling.defaultEV`. The travel stops at +4 EV because that is the
+    /// histogram's own tail (`Histogram.maxStops`) — a ceiling past it would move a control no reading
+    /// on the card could show.
+    private var highlightCeilingRow: some View {
+        SliderRow(title: "最高亮度",
+                  value: Binding(get: { highlightCeilingEV },
+                                 set: { next in
+                                     highlightCeilingEV = HighlightCeiling.clampEV(next)
+                                     HighlightCeiling.setEV(highlightCeilingEV)
+                                 }),
+                  range: HighlightCeiling.evRange,
+                  format: "%+.1f EV",
+                  decimals: 1,
+                  // 320: **not** an `inspector.light.*` id — this row is not one of the document's
+                  // `light.*` fields, and `PanelRowSpecTests` uses that namespace to prove every
+                  // rendered row maps to a `PanelCardSpec`. A preference has no spec row and no
+                  // keyPath, so it says so in its identifier.
+                  accessibilityID: "inspector.display.highestLight",
+                  rowIdentifierPrefix: "inspector.light.row",
+                  onReset: {
+                      highlightCeilingEV = HighlightCeiling.defaultEV
+                      HighlightCeiling.setEV(HighlightCeiling.defaultEV)
+                  },
+                  onEditingChanged: { _ in })
     }
 
     /// 派单 071: 黑电平 — one row: the additive linear black trim (±0.01, 1/1000 steps).
@@ -1429,7 +1468,11 @@ public struct InspectorView: View {
     /// **A card drawn from its spec.** This is the only body these four cards have: their rows, the
     /// dividers between blocks and the whole-card reset all come from `PanelCardSpec`, so moving a row
     /// from one card to another is one edit in one table (125).
-    private func toneCard(_ spec: PanelCardSpec) -> some View {
+    /// - extraRow: 320 — one more row under the spec's blocks, after a divider. `nil` for every card
+    ///   that has only document parameters; the Light card passes 「最高亮度」, which is a **preference**
+    ///   and has no `ToneRow`/keyPath to sit in the table. A view, not a row spec, because there is
+    ///   nothing for the reset switch (`resets.group`) to write — the row owns its own default.
+    private func toneCard(_ spec: PanelCardSpec, extraRow: AnyView? = nil) -> some View {
         card(spec.section.title, reset: { resets.group(spec) },
              accessory: { toneCardAccessory(spec) }) {
             ForEach(Array(spec.blocks.enumerated()), id: \.offset) { index, block in
@@ -1437,6 +1480,10 @@ public struct InspectorView: View {
                 ForEach(block.rows, id: \.title) { row in
                     toneCardRow(row, in: spec)
                 }
+            }
+            if let extraRow {
+                divider
+                extraRow
             }
         }
         .background { toneCardProbe(spec.section) }

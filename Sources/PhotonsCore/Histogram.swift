@@ -278,8 +278,15 @@ public struct Histogram: Sendable, Equatable {
     /// histogram is always measured from); `editDigest` the document. Nothing about the camera, the
     /// viewport or the display is in here — that is claim A expressed as key material instead of as a
     /// comment.
-    public static func cacheKey(rungIdentity: String, editDigest: String, bins: Int) -> String {
-        "hist|v1|\(rungIdentity)|\(editDigest)|\(bins)"
+    /// - ceiling: 320 — the picture's ceiling, in linear light. It is part of the **key** because it
+    ///   is part of the bins: a ceiling change re-measures instead of serving the old plot (the
+    ///   histogram is measured after the clamp, so a value of 4.925 or 16.0 lands in a different
+    ///   bin). Omitted when it is the shipped default, so a pre-320 key keeps its exact spelling.
+    public static func cacheKey(rungIdentity: String, editDigest: String, bins: Int,
+                                ceiling: Double = HighlightCeiling.defaultLinear) -> String {
+        let base = "hist|v1|\(rungIdentity)|\(editDigest)|\(bins)"
+        guard abs(ceiling - HighlightCeiling.defaultLinear) > 1e-12 else { return base }
+        return base + String(format: "|ceil=%.4f", ceiling)
     }
 
     /// A stable digest of a document's develop settings (JSON with sorted keys, SHA-256, 8 bytes of
