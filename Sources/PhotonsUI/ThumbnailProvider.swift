@@ -150,6 +150,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
         /// `warmedHDKeys` already covered (the "one file per document" counter pair).
         public var warmRequests = 0
         public var warmCoalesced = 0
+        /// 344 — requests per key digest. The global counter cannot say "this document was asked for
+        /// once": opening a photo now warms its own document (the cold stand-in), so one session has
+        /// legitimately more than one warm — one per document, never two for the same one.
+        public var warmRequestsByDigest: [String: Int] = [:]
 
         public var cacheHits: Int { memoryHits + diskHits }
         public var lookups: Int { memoryHits + diskHits + generated }
@@ -210,6 +214,11 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// **not** a set of "already asked" digests: the cache keeps only the newest HD file per photo
     /// (308's retention), so undoing to an earlier document must be able to re-render it.
     private var warmInFlight: (digest: String, ticket: ThumbTicket)?
+    /// 344 — digests whose bytes are already on disk because a warm wrote them. The in-flight pair
+    /// above only covers the concurrent case; this is the **key**-scoped dedupe the 311 contract asks
+    /// for ("同一个 key 只发一次"), and it survives the request completing.
+    private var warmedHDDigests: Set<String> = []
+    private var warmedHDOrder: [String] = []
     /// 311 — the last warm's split: how long it sat in the queue, and how long the producer ran.
     /// Two numbers, because they answer different questions ("did the commit queue behind
     /// something?" vs "what does one HD render cost?").
@@ -602,14 +611,21 @@ public final class ThumbnailProvider: @unchecked Sendable {
             rememberPlaceholder(image, for: hd.digest)
             return image
         }
-        let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
-        let preview = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
-        if let cached = placeholderImage(for: preview.digest) { return cached }
-        if cache.exists(preview), let data = cache.data(for: preview) {
-            guard let decoded = ThumbnailCache.decode(data),
-                  let image = ThumbnailProvider.displayP3Image(decoded) else { return nil }
-            rememberPlaceholder(image, for: preview.digest)
-            return image
+        // 344 — the fallback is a **ladder**, not one rung: whatever the grid already wrote for this
+        // photo (1024, then 512, then 256) is a picture the user can look at, and a switch that shows
+        // the wrong-size photograph for 100 ms is still better than a matte for three seconds. The
+        // 1920 request is on its way either way (`warmHDPreview`), and it replaces this image in
+        // place (`LoupeController.upgradeStandIn`).
+        let requested = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
+        for tier in [requested, .t512, .t256] where tier.rank <= requested.rank {
+            let preview = ThumbKey.preview(contentHash: asset.contentHash, tier: tier)
+            if let cached = placeholderImage(for: preview.digest) { return cached }
+            if cache.exists(preview), let data = cache.data(for: preview) {
+                guard let decoded = ThumbnailCache.decode(data),
+                      let image = ThumbnailProvider.displayP3Image(decoded) else { continue }
+                rememberPlaceholder(image, for: preview.digest)
+                return image
+            }
         }
         return nil
     }
@@ -641,8 +657,13 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// everything else while `isPaused`. A refusal here used to be final: in the loupe no cell ever
     /// asks for this key, so the 1920 preview stayed on the document before the edit. As a warm it is
     /// queued instead and starts when the drag ends.
+    /// - Parameter onLanded: called **on the main queue** once the warm's request finishes (the file
+    ///   is on disk by then). 344 — the loupe's first-frame stand-in uses this to swap a 1024 fallback
+    ///   for the 1920 file the moment it exists, instead of leaving the lower-resolution picture up for
+    ///   the whole development.
     @discardableResult
-    public func warmHDPreview(for asset: Asset, fileURL: URL?, document: EditModel) -> Bool {
+    public func warmHDPreview(for asset: Asset, fileURL: URL?, document: EditModel,
+                              onLanded: (@MainActor () -> Void)? = nil) -> Bool {
         let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
         // The file is the product. If it is already there (a re-render of a document the user came
         // back to) there is nothing to ask for; a stat is cheaper than a queue round trip.
@@ -656,9 +677,15 @@ public final class ThumbnailProvider: @unchecked Sendable {
             lock.unlock()
             return false
         }
+        if warmedHDDigests.contains(key.digest) {
+            counters.warmCoalesced += 1
+            lock.unlock()
+            return false
+        }
         let superseded = warmInFlight
         warmInFlight = nil
         counters.warmRequests += 1
+        counters.warmRequestsByDigest[key.digest, default: 0] += 1
         lock.unlock()
 
         // The document moved on: the older rendering's bytes are obsolete, and a second file for a
@@ -681,7 +708,16 @@ public final class ThumbnailProvider: @unchecked Sendable {
             self.lastWarmWait = max(0, result.waitedMilliseconds - result.producedMilliseconds)
             self.lastWarmProduce = result.producedMilliseconds
             if self.warmInFlight?.digest == result.key.digest { self.warmInFlight = nil }
+            // The bytes on disk are the product; a refusal or a cancel keeps the digest retryable.
+            if result.data != nil || result.origin == .hit {
+                self.warmedHDDigests.insert(result.key.digest)
+                self.warmedHDOrder.append(result.key.digest)
+                while self.warmedHDOrder.count > 64 {
+                    self.warmedHDDigests.remove(self.warmedHDOrder.removeFirst())
+                }
+            }
             self.lock.unlock()
+            if let onLanded { DispatchQueue.main.async { onLanded() } }
         }
         lock.lock()
         warmInFlight = (key.digest, ticket)

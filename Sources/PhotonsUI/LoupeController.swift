@@ -207,7 +207,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// one, so the white balance developed and the canvas never showed it — "改白平衡画面不变".
         let baseIdentity: String
         let viewport: ImageSize
-        let edit: EditModel
+        /// 344 — `var` so the low-resolution whole picture can render **this job's** document (the
+        /// backdrop's own derives from it) without a second parameter assembly. Every other field is
+        /// inherited by value, which is what makes 「预览 job 与画布 job 同源」 a property of the type
+        /// instead of a comment: a new snapshot field (340's `canvasRole`, `cropIsActive`, …) reaches
+        /// the backdrop without anyone remembering to copy it.
+        var edit: EditModel
         let state: LoupeViewState
         /// The rung this frame wants. `DecodeLadder.fullScale` for everything except a frame drawn
         /// while a 细节/降噪 slider is moving (派单 031): a detail change is a **new development**, so
@@ -1308,6 +1313,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     var clearsPresentedFrameOnPhotoSwitch = true
     /// Milliseconds from the photo change (cold open included) to the stand-in being installed.
     public private(set) var firstFramePlaceholderMilliseconds: Double = 0
+    /// 344 — the stand-in's **own** pixel size, so the acceptance can say "1920 on the long edge"
+    /// instead of inferring it from the canvas rectangle.
+    public var firstFramePlaceholderPixels: ImageSize? { firstFramePlaceholderPixelSize }
     /// `true` while the stand-in is on screen and no frame has replaced it.
     public var firstFramePlaceholderVisible: Bool { canvasView.isShowingFirstFramePlaceholder }
 
@@ -1583,6 +1591,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
             if revision != self.lastHandledRevision {
                 self.lastHandledRevision = revision
                 self.requestEditRender()
+                // 344 — **any** document write, from any door (裁切应用, 透视/拉直, ⌘Z, 粘贴, a preset,
+                // a history jump), moves what the whole picture is of. One call, coalesced by the
+                // 0.25 s window, so a drag costs nothing and a commit costs one render.
+                self.noteLowResFullFrameStale()
             } else {
                 // Leaving the loupe (or switching photo) is a cancellation: a development already
                 // running belongs to a picture nobody is looking at, and finishing the next one would
@@ -2431,7 +2443,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if !reached, let target, let texture, let presenter {
             let canvas = viewportPixels
             let drawn = backdropTexture(for: target)
-            let backdropWindow = target.onWholePicture(canvasPlacement)
+            let backdropWindow = backdropWindow(for: target, canvasPlacement)
             // 067: the held frame's own picture rect, read through the stop's window — so the
             // photograph lands where the *stop's* map puts it. This is the call that used to pass no
             // rect at all: 054's matte needs one, and without it the frame's `float4(0)` letterbox was
@@ -2504,7 +2516,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 058: the backdrop is the **whole picture**, the frame texture is one part of it — the frame's
         // window has to be read in the picture's coordinates before the backdrop is sampled through it.
         let placement = canvasPlacement
-        let backdropWindow = window.onWholePicture(placement)
+        let backdropWindow = backdropWindow(for: window, placement)
         // 067: the photograph's rect inside the held texture, read through **this frame's** window.
         // The quad therefore moves with the bridge: a zoom no longer draws the old matte at the old,
         // unscaled rect (the user's 「边缘 0f 的遮罩固定住，等渲染完了突然消失」).
@@ -4196,6 +4208,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // loupe without that observer (a headless render, a detached canvas) still gets the fill,
         // and the provider's key set makes the second call free.
         if applied { warmAnchorHDPreview() }
+        // 344 — 「每次裁切应用后都需要跟着更新 LowResFullFrame」. The commit above wrote the document
+        // (crop, and whatever 拉直/透视/比例 travelled with it), so the one door is told here as well
+        // as by the revision observer: a loupe without the session observer (a headless render, a
+        // detached canvas) still gets the new whole picture, and the window makes the second call
+        // free.
+        if applied { noteLowResFullFrameStale() }
         if outcome != .cancel { onTransformConfirmed?() }
         // 202 ① — the **mode** left, whichever door was used. Published after the mode and the camera,
         // so a listener that switches the panel cannot race a still-open tool (a workspace switch
@@ -5781,8 +5799,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let started = CACurrentMediaTime()
         guard let cache = session.thumbnailCache else { return }
         let provider = ThumbnailProvider.shared(for: cache)
+        // 344 — ask for **this document's** 1920 file now, before the cache read: a photo the user has
+        // just switched to usually has no HD file for the document it opens with, and nothing else on
+        // this path asks for one (`warmAnchorHDPreview` was a commit's door only). Whatever the read
+        // below finds — the 1024 fallback or nothing at all — the 1920 is already on its way.
+        upgradeStandIn(photo: identity, startedAt: started, image: nil)
         if let image = provider.cachedCanvasPlaceholder(for: asset, document: session.edit) {
             installFirstFramePlaceholder(image, photo: identity, startedAt: started)
+            // 344 — 1920 is the stand-in's **stable** size (308/311). A photo that has never been
+            // rendered at the document it opens with has no HD file yet, so the read above fell back
+            // to the 1024 preview; that fallback is transient only if someone asks for the 1920, and
+            // on a plain 切图 nobody does (`warmAnchorHDPreview` used to be called only by a commit).
+            // Ask now — one render + one encode, background, `prefetch` — and swap the stand-in the
+            // moment the file lands.
+            upgradeStandIn(photo: identity, startedAt: started, image: image)
             return
         }
         // Cache is cold (a library's first scan): ask for the cheap embedded preview. It shares the
@@ -5799,6 +5829,38 @@ public final class LoupeController: NSViewController, HeadroomSource {
             if self.firstFramePlaceholderPhoto == identity { self.firstFramePlaceholderToken = nil }
             guard let image else { return }
             self.installFirstFramePlaceholder(image, photo: identity, startedAt: started)
+        }
+    }
+
+    /// **344 reverse gate — never false in the app.** With it off, a 1024 fallback stays on the canvas
+    /// for the whole development (the pre-344 behaviour), which is what 验收 ④ must catch.
+    nonisolated(unsafe) static var armsColdStartUpgrade = true
+
+    /// 344 — the stand-in's 1024 fallback is a **transient**, not the answer.
+    ///
+    /// Called with the image the cache-only read produced. When it is already the HD family's own
+    /// size (1920 long edge) there is nothing to do; otherwise this asks for the 1920 file under the
+    /// document on screen and re-installs the stand-in when the warm lands, so the picture behind the
+    /// development is the resolution 308/311 promised. Bounded by the two rules the stand-in already
+    /// obeys: the photo must still be the one on screen, and a presented frame takes it down first
+    /// (`installFirstFramePlaceholder` refuses after `presentedPhoto == photo`).
+    private func upgradeStandIn(photo: String, startedAt: CFTimeInterval, image: CGImage?) {
+        guard Self.armsColdStartUpgrade else { return }
+        if let image {
+            let size = ImageSize(width: image.width, height: image.height)
+            if max(size.width, size.height) >= ThumbSpec.hdJPEG.longEdge { return }
+        }
+        guard let session, let asset = session.anchorAsset,
+              let cache = session.thumbnailCache else { return }
+        let provider = ThumbnailProvider.shared(for: cache)
+        let document = session.edit
+        provider.warmHDPreview(for: asset, fileURL: session.fileURL(for: asset),
+                               document: document) { [weak self] in
+            guard let self, self.firstFramePlaceholderPhoto == photo,
+                  self.presentedPhoto != photo else { return }
+            guard let upgraded = provider.cachedCanvasPlaceholder(for: asset, document: document)
+            else { return }
+            self.installFirstFramePlaceholder(upgraded, photo: photo, startedAt: startedAt)
         }
     }
 
@@ -6055,9 +6117,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// in the app sets it.
     var followsCropOverlayDuringBridge = true
 
+    /// **344 reverse gate — never true in the app.** With it set, the whole-picture key is built from
+    /// a keystone-free copy of the document (both halves: the digest *and* the spelled geometry), i.e.
+    /// the pre-344 key. A document that grows a keystone then keeps its key, `needsGeneration` is
+    /// false, the held texture is served — which is exactly 「应用透视后低清预览还是旧的那张」. It
+    /// exists so 验收 ①/② can be turned red on purpose, from a test, without editing the
+    /// implementation (the `CropGeometry.pre330SourceSpace` / `RenderKeyChain` discipline).
+    nonisolated(unsafe) static var backdropKeyIgnoresPerspective = false
+
     private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
         guard let photo = backdropPhotoKey else { return nil }
-        let edit = backdropEdit(edit)
+        var edit = backdropEdit(edit)
+        if Self.backdropKeyIgnoresPerspective {
+            edit.geometry.perspectiveVertical = 0
+            edit.geometry.perspectiveHorizontal = 0
+        }
         // 144: the digest names **what was rendered**, not just the document. A preview frame is a
         // real render of the target pair but not a settled document yet; giving it the document's own
         // digest would make the cache claim a picture it does not hold (and make the settled frame
@@ -6069,10 +6143,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the pixels at, and this texture is a rendered picture — so a ceiling change must retire it
         // exactly like an edit does, or the letterbox backdrop and the histogram's whole-picture
         // source keep the previous top.
+        //
+        // 344: the **geometry** is the fourth. It is `""` for a keystone-free, source-spaced document
+        // (`identity` then appends nothing, so the pre-344 key bytes hold) and spells `crop`/`rot`/
+        // `flip`/`q`/`pvy`/`phx`/`cs` as soon as a keystone or a canvas-spaced crop is in play — the
+        // two dimensions the low picture used to be blind to, now greppable in the key.
         return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
                                  digest: backdropPreviewTarget == nil
                                      ? digest : digest + Self.backdropPreviewMarker,
-                                 ceiling: HighlightCeiling.current)
+                                 ceiling: HighlightCeiling.current,
+                                 geometry: edit.geometryFingerprint)
     }
 
     /// The source half of a preview backdrop's digest (144). Internal so a test can say what it
@@ -6117,18 +6197,76 @@ public final class LoupeController: NSViewController, HeadroomSource {
         backdropWanted = true
     }
 
+    // MARK: - 344 · one door for "the whole picture is for another document now"
+
+    /// The 303 window, applied to the whole picture: **0.25 s, generation-guarded**.
+    ///
+    /// A slider tick bumps `editRevision` on every mouse move and one whole-picture render is ~35 ms
+    /// at 4096 px, so a document write only **arms** the window. A drag therefore renders nothing
+    /// (each tick restarts the window), a release renders **once**, and 验收 ⑤ measures exactly
+    /// 「≤ 1 个合并窗口 + 一次渲染」. Injected so a test can fire the window by hand instead of sleeping
+    /// — the door `EditThumbnailRefresher` opened for the three browsers.
+    var lowResRefreshWindow: TimeInterval = 0.25
+    var lowResRefreshScheduler: ((TimeInterval, @escaping () -> Void) -> Void) = { delay, action in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+    }
+    private var lowResRefreshGeneration = 0
+    /// `true` while a window is open and no rebuild has run for it yet.
+    private(set) var lowResRefreshArmed = false
+    /// Windows that reached `ensureLowResFullFrame` (a drag leaves this at 0, a release moves it by 1).
+    private(set) var lowResRefreshRuns = 0
+
+    /// **The** entry point for every document write that moves what the whole picture is *of*:
+    /// 裁切应用 (crop apply), 透视 松手/复位, 拉直 提交, ⌘Z / ⇧⌘Z, 粘贴设置, 切图, 换解码版本, 最高亮度.
+    ///
+    /// One door, so no trigger can be forgotten and no trigger needs its own render call: the caller
+    /// says "the document moved" and this decides whether anything is rendered at all (it usually is
+    /// not — the window swallows a drag, and a rebuild for the document already cached is a no-op).
+    func noteLowResFullFrameStale() {
+        guard presenter != nil, autoRenderEnabled else { return }
+        lowResRefreshGeneration &+= 1
+        let generation = lowResRefreshGeneration
+        lowResRefreshArmed = true
+        let scheduler = lowResRefreshScheduler
+        let delay = lowResRefreshWindow
+        scheduler(delay) { [weak self] in self?.closeLowResRefreshWindow(generation) }
+    }
+
+    /// The window closed: rebuild **one** generation for the document on screen.
+    private func closeLowResRefreshWindow(_ generation: Int) {
+        guard generation == lowResRefreshGeneration else { return }  // a later write superseded it
+        lowResRefreshArmed = false
+        guard presenter != nil, autoRenderEnabled, let key = backdropKey else { return }
+        // The whole picture is already this document's and nothing is in flight: nothing to do
+        // (idempotent — a commit that did not move the geometry costs nothing).
+        if backdrop.key == key, backdrop.inFlight != key { return }
+        // The held texture is another document's. Releasing it first is what makes a superseded
+        // render refuse to adopt (it carries the old serial) and what keeps `backdropTexture(for:)`
+        // from drawing the old picture behind the new frame.
+        invalidateBackdrop()
+        if ensureLowResFullFrame() {
+            lowResRefreshRuns += 1
+        } else {
+            // A render is still in flight for this photo: `present` serves the wanted one as soon as
+            // it lands, so this is one generation, not two.
+            backdropWanted = true
+        }
+    }
+
     /// ④ — the low-resolution whole picture is made from the **effective** edit, so when that edit
     /// moves (the draft's 拉直 / 裁切 / 翻转 in 裁切 mode) the cached texture is retired instead of
     /// drawn at the old angle. `backdropWanted` hands the replacement to the next landed frame
     /// (`serveWantedBackdrop`), which is the same path an open/photo switch already uses — one render,
     /// not one per slider tick: `ensureLowResFullFrame` refuses while another generation is running and
     /// the key comparison below is what makes a repeat call a no-op.
+    ///
+    /// 344 — it delegates to the one door above, so the crop overlay's own sync, the ceiling change
+    /// and a document commit cannot arm three different paths.
     private func noteBackdropKeyMoved() {
         guard presenter != nil else { return }
         guard let key = backdropKey else { return }
-        guard let held = backdrop.key, held != key else { return }
-        invalidateBackdrop()
-        backdropWanted = true
+        guard backdrop.key != key || backdrop.inFlight != nil else { return }
+        noteLowResFullFrameStale()
     }
 
     /// Release the texture and the histogram's snapshot together (144).
@@ -6158,9 +6296,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // A generation for this exact source is already on its way: it is the replacement.
         if backdrop.inFlight == key { return }
         guard backdrop.needsGeneration(for: key) else { return }
-        invalidateBackdrop()
-        backdropWanted = true
-        serveWantedBackdrop()
+        // 344 — one door. ⌘Z / ⇧⌘Z / ⌘V / a history jump are document writes like any other, so the
+        // rebuild goes through the same 0.25 s window the crop commit and the 透视 release use; no
+        // third spelling of "invalidate + arm + serve" can drift from it.
+        noteLowResFullFrameStale()
     }
 
     /// 144: a frame landed for another source than the cached backdrop names.
@@ -6194,15 +6333,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// Start the one render. Shared by the pointer-entry gate and the explicit request below, so the
     /// two cannot disagree about the key or about what a generation is.
+    ///
+    /// 344 — the job is the **canvas job**, not a second assembly: `template` carries every snapshot
+    /// field (`state`, `canvasRole`, `cropIsActive`, `mode`, `fitScale`, the revision) and only the
+    /// document is replaced with the one the key was built from. Before this the job was rebuilt from
+    /// a hand-written list of nine fields, so 340's `canvasRole`/`cropIsActive` (and anything added
+    /// later) silently defaulted here — the low-resolution picture was rendered as an `.export`
+    /// canvas at `fitScale 1` whatever the crop workspace was doing.
     private func requestLowResFullFrame(key: BackdropCache.Key, edit: EditModel,
                                         template: RenderJob) {
         // 144: the key may name a preview source, so the render must use the same edit the key was
         // built from. `backdropEdit` is that one function; a job built before a tick cannot drift.
-        let edit = backdropEdit(edit)
-        let job = RenderJob(kind: template.kind, url: template.url,
-                            baseIdentity: template.baseIdentity, viewport: template.viewport,
-                            edit: edit, state: template.state, target: template.target,
-                            generation: template.generation, changedAt: template.changedAt)
+        var job = template
+        job.edit = backdropEdit(edit)
         let serial = backdrop.begin(key)
         queue.async { [weak self] in self?.renderBackdrop(key: key, serial: serial, job: job) }
     }
@@ -6302,6 +6445,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var photoSwitchTime: CFTimeInterval?
     private var backdropWantedAt: CFTimeInterval?
 
+    /// **344 reverse gate — never true in the app.** With it set, the low-resolution whole picture is
+    /// drawn **spread over the viewport** (`PresentWindow.whole`) instead of where the frame is — 053's
+    /// bug, and exactly what 验收 ④ must catch. It exists so the placement check can be turned red on
+    /// purpose from a test.
+    nonisolated(unsafe) static var backdropSpreadsOverViewport = false
+
+    /// The window a backdrop is read through: the frame's own window, composed with where the frame
+    /// sits on the whole picture (058). **One function**, so the settled present, the bridge tick and
+    /// the bridge's stop cannot disagree — and so the reverse gate above has one place to act.
+    private func backdropWindow(for window: PresentWindow,
+                                _ placement: FramePlacement) -> PresentWindow {
+        Self.backdropSpreadsOverViewport ? .whole : window.onWholePicture(placement)
+    }
+
     /// 065b: serve the request an open or a switch armed, **after** the frame that brings the graph for
     /// that photo. Called from `present` — a landed frame is exactly the moment the render queue is free
     /// and the graph is the current photo's, so the generation is enqueued behind the picture and in
@@ -6395,6 +6552,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let t0 = CFAbsoluteTimeGetCurrent()
         do {
             let result = try graph.render(job.edit, options: RenderOptions(
+                // 344 — the canvas role the **canvas job** carries, not a defaulted `.export`: the
+                // backdrop is the same document seen at another scale, so it must be the same canvas.
+                canvasRole: job.canvasRole,
                 scale: scale,
                 display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom,
                                         highlightCeiling: HighlightCeiling.current),
@@ -6418,7 +6578,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 guard let self else { return }
                 let adopted = self.backdrop.finish(texture, key: key, content: content,
                                                    histogram: measured,
-                                                   milliseconds: milliseconds, serial: serial)
+                                                   milliseconds: milliseconds, serial: serial,
+                                                   scale: scale, rungScale: Float(rungScale))
                 if adopted { self.lastBackdropRenderedPhoto = photo }
                 if adopted, let at = self.backdropWantedAt {
                     self.backdropWantedAt = nil
@@ -7569,7 +7730,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // been read through, and the settled present is where `.whole` frame and picture windows coincide.
         let settledPlacement = framing(viewport: frame.canvas)
             .map { $0.framePlacement(of: $0.mapping(of: state)) } ?? .whole
-        let settledBackdropWindow = settledWindow.onWholePicture(settledPlacement)
+        let settledBackdropWindow = backdropWindow(for: settledWindow, settledPlacement)
         let drawn = backdropTexture(for: settledWindow)
         // 067: the photograph's rect inside the frame texture is the *only* geometry this present
         // supplies — the quad on the canvas follows from it and from the window. There is no optional

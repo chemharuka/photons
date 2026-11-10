@@ -700,7 +700,16 @@ public struct LoupeFraming: Equatable, Sendable {
     /// 188 — the picture's place **inside the expanded canvas**, in source pixels: `(0, 0)` at every
     /// right angle, `((canvas − crop)/2)` otherwise. The frozen canvas quad the loupe composes is the
     /// canvas (176), not the crop, so the placement's region has to be measured from here.
+    ///
+    /// **344 — a keystoned document has no inset.** Its canvas is the AABB of the *warped* picture
+    /// (`P → R`, 324/246), and S0 samples `p.c` from canvas pixel 0 there (`RenderGraph.plan`'s
+    /// `inset == 0` for `.export`), so the picture starts at the canvas' own origin. The
+    /// `(extent − crop)/2` half-margin is the answer for a **rotation**-expanded canvas only; applying
+    /// it to a keystone moved the whole picture's `region` 172 px left and 285 px up on a 4096 px
+    /// whole picture (0.042 / 0.09 of the canvas), which put the low picture under a frame it does not
+    /// belong to at 1:1 and 4×.
     public var canvasOriginPixels: (x: Double, y: Double) {
+        if perspective != nil { return (0, 0) }
         let extent = rotatedCropExtent
         return (cropOriginX - max(extent.width - cropWidthPixels, 0) / 2,
                 cropOriginY - max(extent.height - cropHeightPixels, 0) / 2)
