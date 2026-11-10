@@ -288,14 +288,18 @@ static inline float3 s1_toe(float3 x) {
 
 /// Blacks and whites on one pixel, `v` scene-linear and already through the gain.
 ///
-/// `kHybrid` is a compile-time flag (073C): S1's dispatch threshold `|blacks| > 50` is exactly the zero
-/// of `m`, so the two instantiations agree bit for bit where they meet and the default entry contains
-/// none of the level arithmetic — not "the arithmetic with a zero in it" (071's lesson: a runtime
-/// branch is still in the code, and the compiler is free to reorder around it). The local pass has no
-/// per-mask instantiation to spend, so it always calls `kHybrid = true`; `m` is exactly 0 for
-/// `|blacks| ≤ 50`, which is what makes the mask agree with S1's 073B entry in that whole range.
+/// `kHybrid` is a compile-time flag (073C): the default entry contains none of the level arithmetic —
+/// not "the arithmetic with a zero in it" (071's lesson: a runtime branch is still in the code, and the
+/// compiler is free to reorder around it). The local pass has no per-mask instantiation to spend, so it
+/// always calls `kHybrid = true`; **`m` is exactly 0 for `|k| ≤ 20`** (2026-10-29 moved the level's
+/// entry there from 50), which is what makes the mask agree with S1's 073B entry in that range.
 ///
-///     t = blacks/100, a = |t|, m = smoothstep(0.2, 1, a)          (2026-10-29: enters at 20)
+/// **346 does not change this file.** The slider is mapped into these units on the CPU
+/// (`LightGroup.blacksKernelValue`: slider 0…30 → 0…50, 30…100 → 50…100), so `blacks` here is always
+/// the kernel value: ±30 → ±50, ±100 → ±100, and S1 dispatches `kHybrid` from `|k| ≥ 50` — the curve
+/// old ±50 rendered.
+///
+///     t = blacks/100, a = |t|, m = smoothstep(0.2, 1, a)          (2026-10-29: enters at 20, kernel units)
 ///     EV:    v *= exp2(B_EV · t · wb)                             wb = the 7 EV toe
 ///     level: v  = toe(v + B_LEV · t · m · wl)                     wl = the −6…−1 EV window
 ///     342:   v  = toe(v + B_LEV·t·m·wl − B_LEV_CRUSH·a·m₅·wl₂)    m₅ = smoothstep(0.5, 1, a),
@@ -336,7 +340,8 @@ static inline float3 s1_end_points(float3 v, float blacks, float whites,
     // have no seam). `0 → 0`: pure multiplication never lifts black into grey.
     float wb = 1.0 - smoothstep(B_LO_EV, B_HI_EV, L);
     if (kHybrid) {
-        // 073C — the second half of the travel. `mb` is exactly 0 for |blacks| ≤ 50.
+        // 073C — the second half of the travel. `mb` is exactly 0 for |k| ≤ 20 (2026-10-29 moved it
+        // there from 50; 346 only changes which slider positions arrive here — see the function doc).
         // 2026-10-29 — 电平从 |blacks| = 20 就进场（旧版要等到 50），而且不再从增益里扣一半去抵消它。
         //
         // 旧版在 −100 时两件事同时发生：电平窗口只到 −4.4 EV（30 % 码值在 −3.8 EV 之外，一点不动），

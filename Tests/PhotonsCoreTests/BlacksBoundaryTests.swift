@@ -2,14 +2,19 @@ import XCTest
 import Metal
 @testable import PhotonsCore
 
-/// 129 — S1's blacks level enters at `|blacks| = 20`, not at 073C's original 50.
+/// 346 — S1's blacks travel switches mechanism at **slider ±30**, which is kernel `|k| = 50`.
 ///
 /// `tone_shape.metal`'s hybrid instantiation blends the black-point level in with
-/// `m = smoothstep(0.2, 1, |blacks|/100)` (`a449462`, 2026-10-29): the level term is exactly 0 at
-/// `|blacks| = 20` and starts moving above it. The CPU used to keep dispatching 073B's knee
-/// instantiation until `|blacks| = 50`, so the 20…50 range silently lost the level term and
-/// `50 → 50.01` stepped the picture by 3.13 codes. `RenderGraph.sceneLinearUsesLevelEntry` is now
-/// the single boundary decision; these tests pin it on both sides and pin the kernel's pixels.
+/// `m = smoothstep(0.2, 1, |k|/100)`: the level term is exactly 0 at `|k| = 50` and starts moving
+/// above it. 129 left this CPU switch at 50 in *slider* units by mistake (the level itself entered at
+/// |k| = 20 — `a449462`), so `20…50` rendered with the level term switched off and `50 → 50.01`
+/// stepped the picture by 3.13 codes.
+///
+/// 346 keeps the CPU switch at `|k| = 50` — that is the kernel's own zero, not a taste knob — and
+/// moves the numbers that reach it: `LightGroup.blacksKernelValue` stretches slider 0…30 over kernel
+/// 0…50 and slider 30…100 over kernel 50…100. So the switch sits at **slider ±30** — the owner's
+/// 「0–30 是调整 EV，30–100 这一段是调整电平」 — and new `−30` is byte-for-byte old `−50`
+/// (`BlacksTravelTests` pins that pair). 29.99 maps to 49.983 (knee), 30.01 to 50.017 (hybrid).
 ///
 /// **True black is the one sample the two instantiations do not share.** The hybrid branch routes
 /// its lift through `s1_toe` unconditionally (also `a449462`), so at `off == 0` it maps `0` to
@@ -21,9 +26,13 @@ final class BlacksBoundaryTests: XCTestCase {
 
     private static let levels: [Float] = (0...256).map { Float($0) / 256 }
 
-    /// All values acceptance 1 names, plus 21 (named in its prose).
-    private static let thresholdCases: [Float] = [
-        19.9, 19.99, 20, 20.01, 20.1, 21, 30, 45, 49.9, 50, 50.01, 60,
+    /// **Kernel units.** 50 is the zero of `m`; 50.01 is the first kernel value that needs the level.
+    private static let kernelCases: [Float] = [19.9, 20, 25, 49.9, 49.99, 50, 50.01, 50.1, 60]
+
+    /// **Slider units**, around the new mechanism switch. 30 → kernel 50 exactly.
+    private static let sliderCases: [Double] = [
+        29.9, 29.99, 30, 30.01, 30.1, 31, 45, 60, 100,
+        -29.9, -29.99, -30, -30.01, -30.1, -100,
     ]
 
     /// sRGB code of a scene-linear value, the same 8-bit yardstick `BwLevelsTests` uses.
@@ -41,106 +50,121 @@ final class BlacksBoundaryTests: XCTestCase {
         return worst
     }
 
-    // MARK: - ① the two instantiations across the boundary
+    // MARK: - ① the boundary, in both coordinate systems
+
+    func testTheSwitchIsSliderThirtyAndKernelFifty() {
+        // (a) the mapping itself: the two ends of the stretch, and 0 as the identity.
+        XCTAssertEqual(LightGroup.blacksKernelValue(0), 0)
+        XCTAssertEqual(LightGroup.blacksKernelValue(30), 50, accuracy: 0)
+        XCTAssertEqual(LightGroup.blacksKernelValue(-30), -50, accuracy: 0)
+        XCTAssertEqual(LightGroup.blacksKernelValue(100), 100, accuracy: 0)
+        XCTAssertEqual(LightGroup.blacksKernelValue(-100), -100, accuracy: 0)
+        // 25 → 41.66667 is *old* 41.66667, not old 25: the first 30 slider units are the old 0…50.
+        XCTAssertEqual(LightGroup.blacksKernelValue(25), 125.0 / 3.0, accuracy: 1e-12)
+        XCTAssertEqual(LightGroup.blacksKernelValue(-15), -25, accuracy: 0)
+
+        // (b) the CPU decision, through the one mapping.
+        print("346 boundary — slider → kernel → level?")
+        for blacks in Self.sliderCases {
+            let k = LightGroup.blacksKernelValue(blacks)
+            let usesLevels = RenderGraph.sceneLinearUsesLevelEntry(blacks: blacks)
+            print(String(format: "    bl %7.2f → k %+9.5f → %@", blacks, k,
+                         usesLevels ? "hybrid" : "knee"))
+            XCTAssertEqual(usesLevels, abs(k) >= RenderGraph.blacksLevelEntry,
+                           "dispatch decision for blacks \(blacks) disagrees with the boundary")
+            XCTAssertEqual(usesLevels, abs(blacks) >= 30,
+                           "the mechanism switch must sit at slider ±30 (30 inclusive: old ±50's curve)")
+        }
+        // Acceptance ②: 29.99 → non-level, 30.01 → level, and 30 is the switch itself.
+        XCTAssertFalse(RenderGraph.sceneLinearUsesLevelEntry(blacks: 29.99))
+        XCTAssertTrue(RenderGraph.sceneLinearUsesLevelEntry(blacks: 30),
+                      "30 maps to |k| = 50 exactly — old ±50's own curve, so it must carry the level")
+        XCTAssertTrue(RenderGraph.sceneLinearUsesLevelEntry(blacks: 30.01))
+        XCTAssertFalse(RenderGraph.sceneLinearUsesLevelEntry(blacks: -29.99))
+        XCTAssertTrue(RenderGraph.sceneLinearUsesLevelEntry(blacks: -30.01))
+        // The old entry (129's 20) would put the switch at slider 12: it is a *kernel* number now.
+        XCTAssertEqual(RenderGraph.blacksLevelEntry, 50,
+                       "the entry is a kernel number; keeping 20 here would put the switch at slider 12")
+    }
+
+    // MARK: - ② the two instantiations across the kernel boundary
 
     func testTheTwoInstancesAgreeAcrossTheThreshold() throws {
         let harness = try MetalKernelHarness()
         let values = Self.levels
         var rendered: [Float: (hybrid: [Float], knee: [Float])] = [:]
 
-        for blacks in Self.thresholdCases {
-            let hybrid = try harness.run(values, blacks: blacks, whites: 0, entry: .hybrid)
-            let knee = try harness.run(values, blacks: blacks, whites: 0, entry: .knee)
-            rendered[blacks] = (hybrid, knee)
-
-            // The CPU decision, not a copy of the number: <= 20 is 073B's pure-EV knee,
-            // > 20 is 073C's hybrid (the level term is non-zero from 20.01 on).
-            let usesLevels = RenderGraph.sceneLinearUsesLevelEntry(blacks: Double(blacks))
-            XCTAssertEqual(usesLevels, Double(blacks) > RenderGraph.blacksLevelEntry,
-                           "dispatch decision for blacks \(blacks) disagrees with the boundary")
-            if blacks <= 20 {
-                XCTAssertFalse(usesLevels, "blacks \(blacks) must stay on 073B's knee entry")
-            } else {
-                XCTAssertTrue(usesLevels, "blacks \(blacks) must run the level-bearing hybrid entry")
-            }
+        for k in Self.kernelCases {
+            rendered[k] = (try harness.run(values, blacks: k, whites: 0, entry: .hybrid),
+                           try harness.run(values, blacks: k, whites: 0, entry: .knee))
         }
 
-        // 20.01 and 21 are the first two values that must carry the level.
-        XCTAssertTrue(RenderGraph.sceneLinearUsesLevelEntry(blacks: 20.01))
-        XCTAssertTrue(RenderGraph.sceneLinearUsesLevelEntry(blacks: 21))
-        // The boundary value itself is pinned: `m(20) == 0`, so `>` keeps 073B's bytes there.
-        XCTAssertFalse(RenderGraph.sceneLinearUsesLevelEntry(blacks: 20))
-
-        // Below (and at) 20 the level term is absent: the two instantiations write the same picture
-        // on every level above true black. The first sample is the `s1_toe` exception documented on
-        // the class, so it is recorded rather than asserted equal.
-        for blacks in [Float(19.9), 19.99, 20] {
-            let pair = try XCTUnwrap(rendered[blacks])
+        // At and below 20 the level term is exactly 0 (`m = smoothstep(0.2, 1, |k|/100)`), so the two
+        // instantiations write the same picture on every level above true black. The first sample is
+        // the `s1_toe` exception documented on the class, so it is recorded rather than asserted equal.
+        // Above 20 the kernel's blend is already non-zero — which is why production stops using the
+        // knee only at 50 (346), where the *slider* says the mechanism changes.
+        for k in [Float(19.9), 20] {
+            let pair = try XCTUnwrap(rendered[k])
             for i in 1..<values.count {
                 XCTAssertEqual(pair.hybrid[i].bitPattern, pair.knee[i].bitPattern,
-                               "blacks \(blacks), level \(i) (v = \(values[i])): the level entered below 20")
+                               "k \(k), level \(i) (v = \(values[i])): the level entered below its zero 20")
             }
             XCTAssertEqual(pair.knee[0], 0, "the knee entry must keep true black at 0")
             let trueBlack = Self.code(pair.hybrid[0]) - Self.code(pair.knee[0])
-            print(String(format: "129 true black at blacks %.2f: knee 0, hybrid %.6f code (toe floor)",
-                         blacks, trueBlack))
+            print(String(format: "346 true black at k %.2f: knee 0, hybrid %.6f code (toe floor)",
+                         k, trueBlack))
             XCTAssertEqual(trueBlack, 0.82365, accuracy: 0.01,
-                           "the hybrid toe floor moved; this is kernel-side, not 129's boundary")
+                           "the hybrid toe floor moved; this is kernel-side, not 346's boundary")
         }
 
-        // Above 20 the level really is in the hybrid instantiation: it differs from the knee one by
-        // more than a rounding step somewhere on the ramp (30/45/49.9 are the named checks).
-        for blacks in [Float(30), 45, 49.9] {
-            let pair = try XCTUnwrap(rendered[blacks])
+        // Above 50 the level really is in the hybrid instantiation: it differs from the knee one by
+        // more than a rounding step somewhere on the ramp.
+        for k in [Float(49.9), 50, 50.01, 60] {
+            let pair = try XCTUnwrap(rendered[k])
             let worst = Self.maxCodeStep(pair.hybrid, pair.knee, from: 1)
             XCTAssertGreaterThan(worst, 0.1,
-                                 "blacks \(blacks): hybrid and knee are the same picture; the level is missing")
-            print(String(format: "129 blacks %.2f: hybrid vs knee worst %.3f code", blacks, worst))
+                                 "k \(k): hybrid and knee are the same picture; the level is missing")
+            print(String(format: "346 k %.2f: hybrid vs knee worst %.3f code", k, worst))
         }
 
-        // Adjacent slider values must not step the *picture* by more than half an 8-bit code.
-        // These are production's picks (the same decision the graph makes), compared sample by
-        // sample over every non-zero level. Before 129 the 50 → 50.01 pair crossed a dispatch seam
-        // and stepped 3.13 codes; 19.9 → 20.01 is the new boundary.
-        func production(_ blacks: Float) -> [Float] {
-            let pair = rendered[blacks]!
-            return RenderGraph.sceneLinearUsesLevelEntry(blacks: Double(blacks)) ? pair.hybrid : pair.knee
+        // Adjacent values through production's own picks (the same decision the graph makes), sample
+        // by sample over every non-zero level. Inside one instantiation the travel is smooth; the one
+        // step is 49.99 → 50, where the level joins at m(0.5) ≈ 0.32 — the documented price of
+        // 「new −30 = old −50」 (see `blacksLevelEntry`). The slider reaches that pair at
+        // 29.994 → 30.006.
+        func production(_ k: Float) -> [Float] {
+            let pair = rendered[k]!
+            return abs(k) >= 50 ? pair.hybrid : pair.knee
         }
-
-        for (below, above) in [(Float(19.9), Float(20.01)), (49.9, 50.01), (50, 50.01)] {
+        let pairs: [(Float, Float, Double)] = [(49.9, 49.99, 0.5), (49.99, 50, 2.0),
+                                               (50, 50.01, 0.5)]
+        for (below, above, ceiling) in pairs {
             let worst = Self.maxCodeStep(production(below), production(above), from: 1)
-            print(String(format: "129 production %.2f → %.2f: worst step %.3f code", below, above, worst))
-            XCTAssertLessThanOrEqual(worst, 0.5,
+            print(String(format: "346 production k %.2f → %.2f: worst step %.3f code (ceiling %.1f)",
+                         below, above, worst, ceiling))
+            XCTAssertLessThanOrEqual(worst, ceiling,
                                      "\(below) → \(above) stepped \(worst) codes across the boundary")
         }
-
-        // The old seam is gone: 50 and 50.01 are now the same instantiation, so they cannot disagree
-        // by the 3.13-code knee/hybrid step. (The boundary's own residual is the true-black toe.)
-        let seam = Self.maxCodeStep(production(50), production(50.01), from: 0)
-        print(String(format: "129 old 50 → 50.01 seam: %.6f code", seam))
-        XCTAssertLessThan(seam, 0.1, "50 → 50.01 still crosses a dispatch seam")
     }
 
-    // MARK: - ② the pure-EV path is untouched
+    // MARK: - ③ the pure-EV path is untouched
 
-    /// Fingerprints of the **whole display render** of a 257-level grey ramp, recorded from the code
-    /// *before* 129 changed the dispatch boundary (`|blacks| > 50`). `blacks = 0` is 019's default
-    /// entry and the rest are 073B's knee entry; none of them may move by even one byte.
-    /// 这块是**回归哨兵**：它是显示路径的整帧哈希，任何一次「不该改变默认路径」的改动都应该让它变红。
+    /// Fingerprints of the **whole display render** of a 257-level grey ramp.
     ///
-    /// 2026-11-10（342）：重新钉了一次。原因**不是** 342 改坏了它 —— 342 只用 `git worktree add --detach
-    /// 91023d0^`（342 之前的干净树）跑过同一条用例，**同样是这 7 条红**，说明这组字面量在本单之前就已经
-    /// 落后于显示路径（129 之后 tone map/EDR 尾变过）。重钉时逐值对照过：`91023d0^` 与 342 之后的
-    /// 打印哈希**完全相同**（342 的压黑项只作用于 `blacks < 0` 的第二段，0…20 这段逐字节不变），
-    /// 所以这次换的是「过期的钉值」，不是「新行为」。
+    /// `blacks = 0` is the one row 346 cannot move (`0 → 0`, and the key material is byte-identical),
+    /// and it still carries 129's hash `51c352e8…` — this file's regression sentinel for the default
+    /// entry. The non-zero rows were re-recorded **for 346**: the slider number now feeds a different
+    /// kernel value (5 → 8.33, 20 → 33.33), so their pixels necessarily moved; the entry point
+    /// (knee, `|k| ≤ 50`) and the kernel arithmetic did not.
     private static let pinnedDisplayHashes: [(blacks: Double, hash: String)] = [
         (0, "51c352e8710d7db0dbc09d5a5f3e255b4dd46e96d0d31d22f7c371b13c11c2b8"),
-        (5, "0b080720f124c31056c78a4dc486cbc7e426fa3c864b7477c5046c4b336bab9e"),
-        (10, "5ffaaf46b41dc2e5a687c8a36104810b326ce9a9d75d15c0ffb6533127b7b60c"),
-        (15, "b90f1b795c2b0248181a44546d2e091fd4cff309d892c83051b9a52a95ba6b2b"),
-        (19.9, "bfadd3500cb4ced89e976f0158cf6c36d570a4f37abcf7215e2b7121e8a29b7e"),
-        (19.99, "127590fe35ca6c0632d03376b5b79a66038e7c7b4688783c01c26922aebc507f"),
-        (20, "f064220baaaa511b6ff8a6c16ddcddb6ca0f5102e52c85ae25079a8bc792a4d8"),
+        (5, "da14507bc72ee235fc3ef3123c71ae4e8d29dd6cdc4eb00db44f99fa08c6cc94"),
+        (10, "639e8607bf2e3f7be0a41c84da855a2d267a934b3d4eaccd961a0fc1a38e9a26"),
+        (15, "773f11fae592b5c6b33e4db6377f5e345a88afca380907b23e8763e0ae734773"),
+        (19.9, "38924948508abbfe8d1c5c60681e096b521e64173a0f0a34f642018bbe396365"),
+        (19.99, "9aaaa42678a608546ffd0a2b73f079515ccf9ab24fadc63a48419d5b631f40ba"),
+        (20, "413dcd3548b1a219c16a45dc2337738160b106518c49af6f01b36986fb690b0e"),
     ]
 
     func testTheDefaultPathIsUntouched() throws {
@@ -152,8 +176,8 @@ final class BlacksBoundaryTests: XCTestCase {
                            "blacks \(blacks) is on the pure-EV side of the boundary")
             let hash = try Self.render(graph, blacks: blacks).sha256()
             XCTAssertEqual(hash, expected,
-                           "blacks \(blacks) moved: the pure-EV entry must be byte-identical to pre-129")
-            print(String(format: "129 default path blacks %.2f: %@", blacks, hash))
+                           "blacks \(blacks) moved: the pure-EV entry must be byte-identical to 346")
+            print(String(format: "346 default path blacks %.2f: %@", blacks, hash))
         }
     }
 

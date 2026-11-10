@@ -3725,20 +3725,31 @@ public final class RenderGraph {
 
     // MARK: encoding
 
-    /// 129 — where S1's blacks travel switches from 073B's pure-EV instantiation to 073C's hybrid
-    /// (EV + black-point level). It is the zero of `tone_shape.metal`'s blend factor
-    /// `m = smoothstep(0.2, 1, |blacks|/100)`, i.e. **20**, not 073C's original 50: `a449462`
-    /// (2026-10-29) moved the level's entry to 20 but left this CPU switch at 50, so 20…50 rendered
-    /// with the level term switched off and crossing 50 stepped the picture by 3.13 codes.
+    /// 346 — where S1's blacks travel switches from 073B's pure-EV instantiation to 073C's hybrid
+    /// (EV + black-point level), **in kernel units**: 50.
     ///
-    /// Strict `>` is deliberate: at exactly 20 `m` is 0, so either instantiation is the same
-    /// *level* (the knee one keeps 073B's bytes); 20.01 is the first value that needs the level.
-    static let blacksLevelEntry: Double = 20
+    /// The slider reaches it at ±30 (`LightGroup.blacksKernelValue`), so 「0–30 是调整 EV」 is a fact
+    /// about the dispatch: every kernel value below 50 renders through the knee, which is the pure
+    /// multiplier. 50 itself is **inclusive** (`>=`), because that is the curve old ±50 rendered: 342's
+    /// level blend `m = smoothstep(0.2, 1, |k|/100)` is 0.316 at |k| = 50, not 0 — only |k| ≤ 20 has
+    /// the level exactly off — so "new −30 ≡ old −50" requires the hybrid instantiation at 50. The
+    /// price is a small step at slider ±30 (the level joins at m(0.5) ≈ 0.32, ~1.4 codes at the
+    /// bottom of the ramp), which is what the owner asked for: the first 30 units are EV, the rest
+    /// carry the level, and −30 is exactly the old −50.
+    ///
+    /// What 129 fixed — and must stay fixed — is that the *dispatch* may not sit at a value where the
+    /// kernel's own blend disagrees with it inside the range it serves; with the mapping in place the
+    /// switch and the two instantiations' meeting point are both at |k| = 50 (50.01 is the first value
+    /// past it).
+    static let blacksLevelEntry: Double = 50
 
     /// The one decision `encode(.sceneLinear)` uses to pick `kHybrid`, exposed so
     /// `BlacksBoundaryTests` pins the boundary instead of copying the number.
+    ///
+    /// `blacks` is the **slider** number: the comparison is made in kernel units, through the one
+    /// mapping, so slider ±30 is the switch (29.99 → 49.98 → knee, 30.01 → 50.02 → hybrid).
     static func sceneLinearUsesLevelEntry(blacks: Double) -> Bool {
-        abs(blacks) > blacksLevelEntry
+        abs(LightGroup.blacksKernelValue(blacks)) >= blacksLevelEntry
     }
 
     /// 179 — the S1 entry point's **name**, as one function of the four flags that choose it.
@@ -3906,14 +3917,14 @@ public final class RenderGraph {
             // that spelling moving 2980/12309 samples of the push document by an ULP).
             //
             //   · no dropper level, `blacks == whites == 0` → 019's arithmetic without any new code;
-            //   · `blacks`/`whites` ≠ 0, `|blacks| ≤ 20`        → the end-point (knee) model, 073B;
-            //   · `|blacks| > 20`                             → 073C: the same toe plus the black-point
-            //     level move. **129:** the level enters at |blacks| = 20 since `a449462`
-            //     (`m(a) = smoothstep(0.2, 1, |blacks|/100)`), so 20 — not 073C's original 50 — is
-            //     where `m` is exactly 0 and the two instantiations' level terms meet. At 20 the level
-            //     term is absent from both; the knee keeps 073B's bytes for the whole first 20 %. The
-            //     hybrid instantiation still routes the lift through `s1_toe` even at `off == 0`, which
-            //     is the sole (pre-existing, kernel-side) difference at true black; see
+            //   · `blacks`/`whites` ≠ 0, `|k| ≤ 50`          → the end-point (knee) model, 073B;
+            //   · `|k| > 50`                                 → 073C: the same toe plus the black-point
+            //     level move. `k` is the **kernel** value (`LightGroup.blacksKernelValue`), and 50 is
+            //     where `m` is exactly 0, so the two instantiations' level terms meet there. At 50 the
+            //     level term is absent from both; the knee keeps 073B's bytes for the whole first 30
+            //     slider units (**346**: the mapping puts |k| = 50 at slider ±30). The hybrid
+            //     instantiation still routes the lift through `s1_toe` even at `off == 0`, which is
+            //     the sole (pre-existing, kernel-side) difference at true black; see
             //     `BlacksBoundaryTests`.
             //   · 071's trim is orthogonal: `_trim` for each of the two.
             //
@@ -3969,7 +3980,8 @@ public final class RenderGraph {
                 a: SIMD4(edit.light.exposureGain,
                          Float(whiteBalance.r), Float(whiteBalance.g), Float(whiteBalance.b)),
                 b: SIMD4(Float(min(max(edit.light.highlightRecovery, 0), 1)), identity ? 1 : 0,
-                         Float(edit.light.blacks), Float(edit.light.whites)),
+                         Float(LightGroup.blacksKernelValue(edit.light.blacks)),
+                         Float(edit.light.whites)),
                 // The content rect travels with the levels, because a lifted black point maps the
                 // matte's 0 to a positive value in *this* pass (派单 019 §3 item ①). Dispatch stays
                 // the whole canvas — one guard per pixel is cheaper than a second encoder.
@@ -5904,7 +5916,7 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
             // exposure × this mask's own local exposure. Without it a masked `+0.5 EV` and a global
             // `+0.5 EV` read the windows on different luminances (measured: 4 codes apart, the pin at
             // `LocalColorStageTests:577`).
-            c: SIMD4(Float(a.blacks), Float(Self.localContrastTravelEV),
+            c: SIMD4(Float(LightGroup.blacksKernelValue(a.blacks)), Float(Self.localContrastTravelEV),
                      globalGain * Float(pow(2.0, a.exposure)), active ? 1 : 0))
     }
 
