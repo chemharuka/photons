@@ -509,27 +509,42 @@ final class TransformPanelTests: XCTestCase {
             }
             + [(CropCardID.turn, angleCard), (CropCardID.mirror, angleCard)]
                 .compactMap { id, owner in panel.row(id).map { (id, $0, owner) } }
-            XCTAssertEqual(cardRows.count, 9,
-                           "\(width) pt：九行里少了（\(cardRows.map(\.0))）")
+            // 343 之后「不出像素」与「九宫格」同处一行；348 又给校正卡加了「引导线」。
+            // 行数由枚举自己算，别再写字面量 —— 每加一行都要改数字的钉值只会带来假红。
+            let expectedRows = 3 + CorrectionCardRow.allCases.count + 2
+            XCTAssertEqual(cardRows.count, expectedRows,
+                           "\(width) pt：\(expectedRows) 行里少了（\(cardRows.map(\.0))）")
             XCTAssertGreaterThan(correctionCard.minY, card.maxY,
                                  "\(width) pt：校正卡必须在裁切卡之后")
             XCTAssertGreaterThan(angleCard.minY, correctionCard.maxY,
                                  "\(width) pt：变换卡必须在最后")
 
-            // 每行都在自己的卡片里，而且有宽度。
-            for (id, frame, owner) in cardRows {
+            // 每行都在自己的卡片里，而且有宽度。九宫格是 343 并进「不出像素」那一行右侧的
+            // 控件（不是整行），宽度按控件算，不参与「整行 ≥60 pt」这条。
+            for (id, frame, owner) in cardRows where id != CropCardID.grid {
                 XCTAssertGreaterThan(frame.width, 60, "\(width) pt：\(id) 只剩 \(frame.width) pt")
                 XCTAssertGreaterThanOrEqual(frame.minX, owner.minX + WorkspaceLayout.cardInsetH - 0.5,
                                             "\(width) pt：\(id) 出了卡片左边（\(frame.minX) vs \(owner.minX)）")
                 XCTAssertLessThanOrEqual(frame.maxX, owner.maxX - WorkspaceLayout.cardInsetH + 0.5,
                                          "\(width) pt：\(id) 出了卡片右边（\(frame.maxX) vs \(owner.maxX)）")
             }
-            // 不重叠：同一张卡内按 y 排好之后，上面那一行的底不能压到下面那一行的顶。
+            // 不重叠：同一张卡内按 y 排好之后，上面那一**带**的底不能压到下面那一带的顶。
+            // 343 起「不出像素」与「九宫格」并排在同一带（同一行、左右分置），所以先把同一行
+            // 的行合成带，再检查带与带之间 —— 否则并排的两行会被当成上下重叠。
             for owner in [card, correctionCard, angleCard] {
                 let ordered = cardRows.filter { $0.2 == owner }.sorted { $0.1.minY < $1.1.minY }
-                for (a, b) in zip(ordered, ordered.dropFirst()) {
-                    XCTAssertLessThanOrEqual(a.1.maxY, b.1.minY + 0.5,
-                                             "\(width) pt：\(a.0) 与 \(b.0) 重叠（\(a.1) / \(b.1)）")
+                var bands: [(name: String, rect: CGRect)] = []
+                for (id, frame, _) in ordered {
+                    if let last = bands.last, frame.minY <= last.rect.maxY - 0.5 {
+                        bands[bands.count - 1].rect = last.rect.union(frame)
+                        bands[bands.count - 1].name += "|\(id)"
+                    } else {
+                        bands.append((id, frame))
+                    }
+                }
+                for (a, b) in zip(bands, bands.dropFirst()) {
+                    XCTAssertLessThanOrEqual(a.rect.maxY, b.rect.minY + 0.5,
+                                             "\(width) pt：\(a.name) 与 \(b.name) 重叠（\(a.rect) / \(b.rect)）")
                 }
                 let first = try XCTUnwrap(ordered.first?.1), last = try XCTUnwrap(ordered.last?.1)
                 XCTAssertLessThanOrEqual(last.maxY, owner.maxY - WorkspaceLayout.cardInsetV + 0.5,
