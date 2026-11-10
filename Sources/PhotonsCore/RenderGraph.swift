@@ -1872,12 +1872,13 @@ public final class RenderGraph {
         // the frame the renderer walks is the canvas itself (no separate inset). The continuous
         // extent is what normalizes the sampling map; the integer `ceil` is the texture size.
         let perspectiveMap = edit.geometry.perspective
-        let perspectiveCanvas: PerspectiveCanvas? = perspectiveMap.flatMap { map in
-            guard map.hasWarp else { return nil }
-            return CropMath.perspectiveCanvas(crop: crop, in: orientedSource,
-                                              straightenDegrees: edit.geometry.straightenDegrees,
-                                              perspective: map)
-        }
+        // 330 — **one reader.** `CropGeometry.exportPerspectiveCanvas` is the single owner of the
+        // export's pixel grid and of the composed `canvas-normalized → photo-normalized` matrix: it
+        // answers 246's `P → R → AABB` for a source-space crop and 330's *window on the document
+        // canvas* for a canvas-spaced one (`CropMath.canvasCrop`, the same `sampling` with one
+        // normalized affine multiplied on the right — no second map to drift).
+        let canvasGeometry = CropGeometry(geometry: edit.geometry, source: sourceSize)
+        let perspectiveCanvas: PerspectiveCanvas? = canvasGeometry.exportPerspectiveCanvas
         let cropPixels = CropMath.frameSize(crop, in: orientedSource,
                                             allowsOutsideSource: true,
                                             perspective: nil)
@@ -1991,6 +1992,7 @@ public final class RenderGraph {
             flipHorizontal: edit.geometry.flipHorizontal,
             flipVertical: edit.geometry.flipVertical,
             perspective: perspectiveMap,
+            cropSpace: edit.geometry.cropSpace,
             contentScale: scale,
             viewport: options.canvas,
             zoom: scale,
@@ -3837,13 +3839,11 @@ public final class RenderGraph {
             // origin are all baked into it on the CPU (`CropMath.perspectiveCanvas`). The kernel
             // only evaluates it — no second pass, no second texture.
             let perspective = edit.geometry.perspective
-            let perspectivePixels: PerspectiveCanvas? = perspective.flatMap { map in
-                guard map.hasWarp else { return nil }
-                let crop = edit.geometry.renderCrop(source: sourceSize)
-                return CropMath.perspectiveCanvas(
-                    crop: crop, in: edit.geometry.orientedSource(sourceSize),
-                    straightenDegrees: edit.geometry.straightenDegrees, perspective: map)
-            }
+            // 330 — the same one reader `plan` uses (and the same `sampling`): a canvas-spaced crop
+            // is a window on the document canvas, not a warp of its own rect.
+            let perspectivePixels: PerspectiveCanvas? = CropGeometry(geometry: edit.geometry,
+                                                                     source: sourceSize)
+                .exportPerspectiveCanvas
             let keystone = perspectivePixels.map {
                 RenderGraph.matrixRows($0.sampling, flag: 1)
             } ?? RenderGraph.keystoneMatrix(nil)

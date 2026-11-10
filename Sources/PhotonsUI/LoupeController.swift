@@ -7405,6 +7405,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // frame short edge; the renderer also converts on the fly for documents that never enter the
         // loupe (thumbnails, export, `photonsctl`).
         session?.migrateHealSpots(sourceSize: size)
+        // 330 — same door, one space over: a pre-330 crop is a rect of the photograph; on a keystoned
+        // document that rect's image on screen is a quadrilateral. The conversion needs the exact
+        // frame, so it happens here and not at decode.
+        session?.migrateCropToCanvasSpace(sourceSize: size)
     }
 
     /// 231 test seam — drive the **shipped** publication without a Metal present (the harness has no

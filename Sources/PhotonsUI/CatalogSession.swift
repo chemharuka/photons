@@ -1304,6 +1304,23 @@ public final class CatalogSession {
         return true
     }
 
+    /// 330 — convert a pre-330 crop (a rect of the **photograph**) to the equivalent rectangle of the
+    /// **document canvas** once the exact frame is known. The sibling of `migrateHealSpots`: a schema
+    /// migration, not an edit — no history row, and the stored document is rewritten (the marker is
+    /// the point). A keystone-free document returns `false` and its bytes do not move.
+    @discardableResult
+    public func migrateCropToCanvasSpace(sourceSize: ImageSize) -> Bool {
+        var next = edit
+        guard next.migrateCropToCanvasSpace(sourceSize: sourceSize) else { return false }
+        edit = next
+        editRevision &+= 1
+        lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+        history.migrateCropToCanvasSpace(sourceSize: sourceSize)
+        notifyEditObservers(assetID: editedAssetID)
+        persist()
+        return true
+    }
+
     public func recordCapabilities(_ c: DecoderCapabilities) {
         // Equality-guarded: every presented frame reports the same facts, and an unconditional write
         // would re-render the SwiftUI inspector once per slider frame for no information.

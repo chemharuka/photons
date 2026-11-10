@@ -120,14 +120,20 @@ public final class CropToolController {
         /// predicate and 应用 both see the picture the user is looking at.
         public var perspectiveVertical: Double = 0
         public var perspectiveHorizontal: Double = 0
+        /// 330 — the space `crop` is measured in. `.canvas` for any document that carries a keystone
+        /// (the crop is a rectangle of the document canvas); `.source` for everything else, which is
+        /// where the two spaces are the same picture anyway.
+        public var cropSpace: CropSpace = .source
 
         public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original,
-                    perspectiveVertical: Double = 0, perspectiveHorizontal: Double = 0) {
+                    perspectiveVertical: Double = 0, perspectiveHorizontal: Double = 0,
+                    cropSpace: CropSpace = .source) {
             self.crop = crop
             self.straighten = straighten
             self.lock = lock
             self.perspectiveVertical = perspectiveVertical
             self.perspectiveHorizontal = perspectiveHorizontal
+            self.cropSpace = cropSpace
         }
 
         public var perspective: PerspectiveMap? {
@@ -149,7 +155,8 @@ public final class CropToolController {
                           aspectLock: lock,
                           quarterTurns: document.quarterTurns,
                           perspectiveVertical: perspectiveVertical,
-                          perspectiveHorizontal: perspectiveHorizontal)
+                          perspectiveHorizontal: perspectiveHorizontal,
+                          cropSpace: cropSpace)
         }
 
         public init(geometry: GeometryGroup) {
@@ -159,7 +166,8 @@ public final class CropToolController {
                       straighten: geometry.straightenDegrees,
                       lock: geometry.aspectLock,
                       perspectiveVertical: geometry.perspectiveVertical,
-                      perspectiveHorizontal: geometry.perspectiveHorizontal)
+                      perspectiveHorizontal: geometry.perspectiveHorizontal,
+                      cropSpace: geometry.cropSpace)
         }
     }
 
@@ -515,6 +523,17 @@ public final class CropToolController {
         // The live document is the source of the keystone while the tool is open — the 变换 card can
         // move the knobs during a crop session, and the overlay must follow what is on screen.
         let perspective = session?.edit.geometry.perspective ?? draft.perspective
+        // 330 — a canvas-spaced frame's export canvas **is** the rect, so 「出照片」 is its four
+        // document corners against the photo **quad** (the same region the 勾选 clamp uses).
+        if liveCropSpace == .canvas {
+            let geometry = draftCropGeometry(source: src, perspective: perspective)
+            let region = DocumentRegion(geometry.photoQuad())
+            let e = geometry.photoQuadExtent
+            let rect = effectiveCrop(source: src, degrees: angle)
+            return ![(rect.left, rect.top), (rect.right, rect.top),
+                     (rect.right, rect.bottom), (rect.left, rect.bottom)]
+                .allSatisfy { region.inset(DocumentPoint($0.0 * e.width, $0.1 * e.height)) >= -1e-9 }
+        }
         return CropMath.frameExceedsPicture(effectiveCrop(source: src, degrees: angle),
                                             in: src, degrees: angle,
                                             perspective: perspective)
@@ -538,7 +557,15 @@ public final class CropToolController {
         let angle = CropTool.clampStraighten(draft.straighten)
         let current = draft.crop.clamped(allowsOutsideSource: true)
         let inscribed: CropRect
-        if let perspective = livePerspective, perspective.hasWarp {
+        if liveCropSpace == .canvas {
+            // 330 — the export canvas *is* the rect, so 「放得下」 is its four document corners against
+            // the photo quad. One-shot inscription, same law as 324's, in canvas coordinates.
+            guard frameExceedsPicture(source: src, degrees: angle) else {
+                return                          // 放得下：一毫米都不动
+            }
+            let geometry = draftCropGeometry(source: src, perspective: livePerspective)
+            inscribed = geometry.inscribedInPhotoQuad(current)
+        } else if let perspective = livePerspective, perspective.hasWarp {
             // 324 — a keystoned frame is a quadrilateral, so "can this frame be kept at all?" is the
             // export question (`frameSize == canvas`, 246): the frame's AABB must lie inside the
             // photo quad, or the file gets black corners. The one-shot inscription is the largest
@@ -574,6 +601,13 @@ public final class CropToolController {
     private func placedInsidePixels(_ rect: CropRect, source: ImageSize) -> CropRect {
         guard staysInsidePixelsStorage else { return rect }
         let angle = CropTool.clampStraighten(draft.straighten)
+        // 330 — a canvas-spaced rect: the photo quad's four half-planes, the frame's four axis-aligned
+        // corners (`documentQuad`), one translation. Covers the keystone-reset case too, where a
+        // canvas-spaced crop has no warp but is still measured on the canvas.
+        if liveCropSpace == .canvas {
+            let geometry = draftCropGeometry(source: source, perspective: livePerspective)
+            return geometry.translatedInsidePhotoQuad(rect, tolerance: 1e-9) ?? rect
+        }
         // 324 — a keystoned picture is a **quadrilateral**: the four half-planes are its edges, not a
         // turned rectangle's. One reader (`CropGeometry.photoQuad()`), one translation.
         if let perspective = livePerspective, perspective.hasWarp {
@@ -608,6 +642,17 @@ public final class CropToolController {
     public func begin() -> Bool {
         guard !isActive, let session else { return false }
         draft = Draft(geometry: session.edit.geometry)
+        // 330 — **a keystoned document is cropped on its canvas.** The stored rect may still be the
+        // pre-330 photo-space one (the file is migrated where its pixels are known); the draft must
+        // hold the *effective* rect so its numbers and its space agree from the first tick, or the
+        // overlay would draw a rectangle read from the wrong coordinates.
+        if session.edit.geometry.perspective?.hasWarp == true {
+            let effective = CropGeometry(geometry: session.edit.geometry, source: sourceSize)
+            // …and the rect itself is converted here (`canvasRect(fromSource:)` is the migration's own
+            // arithmetic), so the draft's numbers and its space agree from the first tick.
+            draft.crop = effective.canvasRect(fromSource: effective.crop)
+            draft.cropSpace = .canvas
+        }
         draftPhotoID = session.anchorID
         // 317 — 「重开工具保持」: the box is a preference, so it is read back here rather than
         // remembered twice. When it is on and the document's own crop cannot be held by any
@@ -1284,6 +1329,7 @@ public final class CropToolController {
                         showsGrid: showsGrid,
                         carry: carry,
                         quadRotationDegrees: quadRotation,
+                        cropSpace: liveCropSpace,
                         exceedsPicture: frameExceedsPicture(source: source))
     }
 
@@ -1420,6 +1466,7 @@ public final class CropToolController {
         let clamped = CropTool.clampToCanvas(rect, mapping: mapping, source: source,
                                              degrees: CropTool.clampStraighten(draft.straighten),
                                              perspective: livePerspective,
+                                             cropSpace: liveCropSpace,
                                              shrinkTicks: &ticks)
         canvasShrinkTicks = ticks
         return clamped
@@ -1434,6 +1481,16 @@ public final class CropToolController {
         return draft.perspective
     }
 
+    /// 330 — the space the draft's rect is measured in. **A keystoned document is always read on its
+    /// canvas** (that is the migration `CropGeometry.init` applies, so the two answers cannot differ);
+    /// without a keystone the stored marker is the answer, and every pre-330 document answers
+    /// `.source` — the branch it always took.
+    private var liveCropSpace: CropSpace {
+        if livePerspective?.hasWarp == true { return .canvas }
+        if let live = session?.edit.geometry { return live.cropSpace }
+        return draft.cropSpace
+    }
+
     /// 324 — the draft's geometry as the one `CropGeometry` (P → R), which is the owner of
     /// `photoQuad()` / `documentQuad(of:)`. Nothing else in this file re-derives a corner.
     private func draftCropGeometry(source: ImageSize,
@@ -1443,6 +1500,9 @@ public final class CropToolController {
         group.crop = draft.crop.clamped(allowsOutsideSource: true).normalizedRect
         group.perspectiveVertical = perspective?.vertical ?? 0
         group.perspectiveHorizontal = perspective?.horizontal ?? 0
+        // 330 — the draft's rect lives in the space the session draws it in: the canvas for a
+        // keystoned document, the photograph otherwise.
+        group.cropSpace = perspective?.hasWarp == true ? .canvas : draft.cropSpace
         return CropGeometry(geometry: group, source: source)
     }
 
@@ -1719,8 +1779,29 @@ public final class CropToolController {
     static func normalized(_ point: CGPoint, mapping: LoupeMapping, source: ImageSize,
                            pointScale: Double,
                            rotationDegrees: Double = 0,
-                           perspective: PerspectiveMap? = nil) -> NormalizedPoint? {
+                           perspective: PerspectiveMap? = nil,
+                           cropSpace: CropSpace = .source) -> NormalizedPoint? {
         let scale = pointScale > 0 ? pointScale : 1
+        // **330 — a canvas-spaced rect's inverse is the canvas' own grid.** View → document pixels
+        // (`LoupeMapping.documentPoint`) → `[0,1]²` of the canvas. No perspective is undone here: the
+        // crop never entered the picture's space, which is why a drag on a keystoned picture moves the
+        // edge under the hand *and* keeps the frame a rectangle.
+        if cropSpace == .canvas,
+           let document = mapping.documentPoint(viewX: Double(point.x) * scale,
+                                                viewY: Double(point.y) * scale) {
+            let geometry = CropGeometry(
+                geometry: GeometryGroup(crop: .full,
+                                        rotationDegrees: CropTool.clampStraighten(rotationDegrees),
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: perspective?.vertical ?? 0,
+                                        perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                        cropSpace: .canvas),
+                source: source)
+            let e = geometry.photoQuadExtent
+            guard e.width > 0, e.height > 0 else { return nil }
+            return NormalizedPoint(document.x / e.width, document.y / e.height)
+        }
         // **327 — the inverse of the keystone projection.** View → the document canvas' pixels →
         // `photoNormalized` (the exact inverse of `CropGeometry.documentPoint`, P → R undone in one
         // place). Without this branch a drag on a keystoned picture read the *un-warped* frame and the
