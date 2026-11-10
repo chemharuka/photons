@@ -133,27 +133,33 @@ final class ExportSheetLayout288Tests: XCTestCase {
 
     // MARK: - §3.1 one grid（288 五列 → 302 三列）
 
-    /// 每一行都报同一套三列 x：标签右沿 118、控件左沿 138、读数右沿 540（面板右 padding）。
-    /// 长边 / 百分比 / 原尺寸三种尺寸模式各自单独建一次视图，数值框仍落在同一根 x 上。
+    /// 每一行都报同一套两列 x：标签右沿 130、主列左沿 138、读数右沿 540（= 面板右 padding）。
+    ///
+    /// 335 —— 读数不再是第三列：只有带读数的行才有 `.readout` 探针，而且它贴主列右沿 540
+    /// （PPI 是唯一例外，见 `ExportSheetLayout335Tests`）。长边 / 百分比 / 原尺寸三种尺寸模式
+    /// 各自单独建一次视图。
     func testEveryRowSharesTheThreeColumnGrid() throws {
         let sheet = model()
         let hosted = try host(model: sheet)
         let rows = gridProbes(in: hosted.host).filter { $0.kind == .row }
         XCTAssertGreaterThanOrEqual(rows.count, 13, "三段展开后至少要有 13 行走同一栅格")
 
-        let kinds: [(ExportRowGridProbe.Kind, String, CGFloat)] = [
-            (.label, "标签右沿", ExportRowGrid.labelRight),
-            (.control, "控件左沿", ExportRowGrid.controlLeft),
-            (.readout, "读数右沿", ExportRowGrid.readoutRight)
+        let kinds: [(ExportRowGridProbe.Kind, String, CGFloat, Int)] = [
+            (.label, "标签右沿", ExportRowGrid.labelRight, rows.count),
+            (.control, "主列左沿", ExportRowGrid.controlLeft, rows.count),
+            // 335：只有值 / 单位真的存在的行才有读数探针（质量、尺寸、PPI、水印不透明度）。
+            (.readout, "读数右沿", ExportRowGrid.contentRight, 4)
         ]
-        for (kind, name, expected) in kinds {
+        for (kind, name, expected, minimum) in kinds {
             let probes = gridProbes(in: hosted.host).filter { $0.kind == kind }
-            XCTAssertGreaterThanOrEqual(probes.count, rows.count,
-                                        "\(name)：每行都要有占位探针")
+            XCTAssertGreaterThanOrEqual(probes.count, minimum,
+                                        "\(name)：探针数 \(probes.count)")
             for probe in probes {
+                // PPI 的读数是「主列内左起」的那种，不在这条线上（335）。
+                guard probe.rowID != "export.ppi" else { continue }
                 let x = edge(of: probe, in: hosted.host)
                 XCTAssertEqual(x, expected, accuracy: 0.5,
-                               "302 · \(probe.rowID) 的 \(name) x=\(x)，应为 \(expected)")
+                               "335 · \(probe.rowID) 的 \(name) x=\(x)，应为 \(expected)")
             }
         }
 
@@ -211,11 +217,12 @@ final class ExportSheetLayout288Tests: XCTestCase {
         XCTAssertGreaterThanOrEqual(rows.count, 13)
         let expected: [ExportRowGridProbe.Kind: CGFloat] = [.label: ExportRowGrid.labelRight,
                                                             .control: ExportRowGrid.controlLeft,
-                                                            .readout: ExportRowGrid.readoutRight]
+                                                            .readout: ExportRowGrid.contentRight]
         for (kind, anchor) in expected {
             for probe in gridProbes(in: host).filter({ $0.kind == kind }) {
+                guard probe.rowID != "export.ppi" else { continue }
                 XCTAssertEqual(edge(of: probe, in: host), anchor, accuracy: 0.5,
-                               "302 · \(probe.rowID) 的 \(kind.rawValue) 列越界")
+                               "335 · \(probe.rowID) 的 \(kind.rawValue) 列越界")
             }
         }
     }
@@ -277,10 +284,14 @@ final class ExportSheetLayout288Tests: XCTestCase {
         let o = frame(of: opacity, in: hosted.host)
         XCTAssertEqual(q.minX, o.minX, accuracy: 0.5, "两条轨道起点必须相同")
         XCTAssertEqual(q.width, o.width, accuracy: 0.5, "两条轨道终点必须相同")
-        // 302：滑杆贴控件块右沿（388），宽度仍是 140。
-        XCTAssertEqual(q.width, ExportRowGrid.sliderWidth, accuracy: 0.5)
-        XCTAssertEqual(q.maxX, ExportRowGrid.controlRight, accuracy: 0.5,
-                       "滑杆右沿必须落在控件块右沿")
+        // 335 —— 滑杆吃掉主列里读数留下的宽度：左沿 138、右沿 = 百分数左沿 − 8。
+        XCTAssertEqual(q.minX, ExportRowGrid.controlLeft, accuracy: 0.5, "滑杆左沿 = 主列起点")
+        XCTAssertGreaterThan(q.width, ExportRowGrid.sliderWidth, "滑杆比 140 宽（读数不再占一列）")
+        let qualityNumber = try XCTUnwrap(descendants(of: hosted.host)
+            .compactMap { $0 as? ExportSliderRowProbe }
+            .first { $0.kind == .number && $0.rowID == "export.quality" })
+        XCTAssertEqual(q.maxX, frame(of: qualityNumber, in: hosted.host).minX - 8, accuracy: 0.5,
+                       "滑杆右沿 = 百分数左沿 − 8")
 
         let text = try sourceText()
         XCTAssertEqual(ExportRowGrid.sliderTickMarks, 0, "质量 tick=0")
