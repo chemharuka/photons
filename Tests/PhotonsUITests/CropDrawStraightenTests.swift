@@ -470,11 +470,15 @@ final class CropDrawStraightenTests: XCTestCase {
 
         XCTAssertEqual(legacySourceTheta, 20, accuracy: 1e-9, "这条线在照片里就是 20°")
         XCTAssertEqual(legacy.applied, -20, accuracy: 0.001, "328 的源空间读数")
-        XCTAssertEqual(legacyResidual, 1.69, accuracy: 0.01, "源空间校正后屏幕上仍歪 1.69°")
-        XCTAssertEqual(shipped.applied, -21.698, accuracy: 0.001, "视图空间的读数")
+        // 338 — 「源空间校正后仍歪」 的量随锚点走：the map now moves both edges, so its displacement at
+        // this off-centre point is ~half of 183's, and the source-space reading's residual halves with
+        // it (1.687° → 0.732°). The *claim* is that it is visibly wrong while the view-space reading is
+        // flat, and 0.732° against 0.0013° is still 560×. The number is the measurement, not a bound.
+        XCTAssertEqual(legacyResidual, 0.732, accuracy: 0.01, "源空间校正后屏幕上仍歪 0.73°")
+        XCTAssertEqual(shipped.applied, -20.730, accuracy: 0.001, "视图空间的读数")
         // ≈0: what is left is the canvas's per-axis `1/extent` normalisation (the AABB is rounded to
-        // whole pixels, so the last ~1e−4 of shear survives) — 0.011° = 0.19 px, and 150× flatter than
-        // 328's 1.687°, which is the claim. Zero to `1e−9` would be a lie about integer canvases.
+        // whole pixels, so the last ~1e−4 of shear survives) — 0.0013° = 0.02 px, and 560× flatter than
+        // 328's 0.732°, which is the claim. Zero to `1e−9` would be a lie about integer canvases.
         XCTAssertLessThan(shippedResidual, 0.02, "视图空间校正后屏幕上就是平的")
         XCTAssertLessThan(shippedResidual * 50, legacyResidual, "而且比 328 平一个数量级以上")
         XCTAssertNotEqual(shipped.applied, legacy.applied, accuracy: 1e-6,

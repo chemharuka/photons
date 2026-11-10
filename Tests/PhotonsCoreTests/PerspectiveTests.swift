@@ -504,44 +504,66 @@ final class PerspectiveTests: XCTestCase {
                                        "M·M⁻¹ at (\(v), \(h)) [\(r)][\(c)]")
                     }
                 }
-                // The fixed corner is fixed.
-                let p = map.forward(x: 0, y: 1)
-                XCTAssertEqual(p.x, 0, accuracy: 1e-12)
-                XCTAssertEqual(p.y, 1, accuracy: 1e-12)
-                // …and so is the near edge's midpoint for each axis alone.
+                // 338 — the fixed **line** is the frame's mid-line, not the near edge: `(½, ½)` is the
+                // pair's fixed point, `y = ½` is fixed pointwise for the vertical knob alone and
+                // `x = ½` for the horizontal one. 183 pinned `(0, 1)` instead, and a one-sided anchor
+                // cannot be reflection-symmetric — that is exactly what 338 fixed (see
+                // `KeystoneSymmetry338Tests` for the `P(−v) = A·P(+v)·A` assertion).
+                let centre = map.forward(x: 0.5, y: 0.5)
+                XCTAssertEqual(centre.x, 0.5, accuracy: 1e-12)
+                XCTAssertEqual(centre.y, 0.5, accuracy: 1e-12)
                 if h == 0 {
-                    let mid = map.forward(x: 0.5, y: 1)
-                    XCTAssertEqual(mid.x, 0.5, accuracy: 1e-12)
-                    XCTAssertEqual(mid.y, 1, accuracy: 1e-12)
+                    for x in [0.0, 0.25, 0.75, 1.0] {
+                        let p = map.forward(x: x, y: 0.5)
+                        XCTAssertEqual(p.x, x, accuracy: 1e-12, "on the mid-line at \(v)")
+                        XCTAssertEqual(p.y, 0.5, accuracy: 1e-12, "mid-line y at \(v)")
+                    }
+                }
+                if v == 0 {
+                    for y in [0.0, 0.25, 0.75, 1.0] {
+                        let p = map.forward(x: 0.5, y: y)
+                        XCTAssertEqual(p.x, 0.5, accuracy: 1e-12, "mid-line x at \(h)")
+                        XCTAssertEqual(p.y, y, accuracy: 1e-12, "on the mid-line at \(h)")
+                    }
                 }
             }
         }
     }
 
-    /// **近端不动** — the map fixes the near (bottom) edge, so the photograph's bottom two corners
-    /// stay on the canvas' bottom edge at every slider value; only the AABB's horizontal offset
-    /// moves them sideways (the canvas is wider than the picture at the far end).
+    /// **中线不动** — the map fixes the frame's mid-line, so the photograph's mid-row stays a
+    /// horizontal row of its own width at every slider value; only the AABB's offset moves it up or
+    /// down inside the canvas (the canvas is taller than the picture at the far end).
     ///
-    /// Measured on the composed map, not on one row of pixels: with the new AABB a one-pixel `ceil`
-    /// can add a background row below the picture, so a row-index comparison would be comparing the
-    /// padding, not the near edge.
-    func testTheNearEdgeDoesNotMove() {
+    /// 338 replaced 183's 「近端不动」 here: pinning the near edge is the one-sided parametrisation the
+    /// symmetry fix removed (a map whose fixed line is one coherent edge cannot be the reflection of
+    /// itself at the other sign). The *claim* is the same kind — a line of the picture the knob does
+    /// not move — and it is now fixed **pointwise**, which the near edge never was (it only held its
+    /// y; the width at the near edge was the source's because the horizontal scale there was 1).
+    ///
+    /// Measured on the composed map (`perspectiveCanvas`'s `forward`, in canvas pixels), not on one
+    /// row of pixels: with the AABB a one-pixel `ceil` can add a background row, so a row-index
+    /// comparison would be comparing the padding, not the mid-line.
+    func testTheMidLineDoesNotMove() {
         let source = ImageSize(width: 2000, height: 2000)
         for slider in [0.01, 50.0, 100.0, -50.0] {
             let map = PerspectiveMap(vertical: slider, horizontal: 0)
             let pc = CropMath.perspectiveCanvas(crop: .full, in: source,
                                                 straightenDegrees: 0, perspective: map)
-            let quad = CropMath.perspectivePhotoQuad(crop: .full, canvas: pc)
-            // Photo order: TL, TR, BR, BL. P fixes (x, 1) for the vertical knob, so the bottom edge's
-            // y is the AABB's bottom edge (normalized 1).
-            XCTAssertEqual(quad[2].y, 1, accuracy: 1e-12, "bottom-right y at \(slider)")
-            XCTAssertEqual(quad[3].y, 1, accuracy: 1e-12, "bottom-left y at \(slider)")
-            // The bottom edge's width is the source's own: no horizontal warping at the near end.
-            let bottomWidth = abs(quad[2].x - quad[3].x) * pc.extent.width
-            XCTAssertEqual(bottomWidth, 2000, accuracy: 1e-6,
-                           "the near edge's pixel width changed at \(slider)")
-            print(String(format: "NEAR EDGE %+.2f · bottom y %.12f/%.12f · bottom width %.6f px",
-                         slider, quad[3].y, quad[2].y, bottomWidth))
+            func canvasPoint(_ x: Double, _ y: Double) -> (x: Double, y: Double) {
+                let p = PerspectiveMap.apply(pc.forward, x: x, y: y)
+                return (p.x * pc.extent.width, p.y * pc.extent.height)
+            }
+            let left = canvasPoint(0, 0.5), right = canvasPoint(1, 0.5)
+            let mid = canvasPoint(0.5, 0.5)
+            XCTAssertEqual(mid.x, (left.x + right.x) / 2, accuracy: 1e-9,
+                           "the mid-line's centre is not on the mid-row at \(slider)")
+            XCTAssertEqual(mid.y, left.y, accuracy: 1e-9, "mid-row y at \(slider)")
+            XCTAssertEqual(mid.y, right.y, accuracy: 1e-9, "the mid row is not horizontal at \(slider)")
+            // The mid-line's width is the source's own: `w = 1` there, so no horizontal warping.
+            XCTAssertEqual(abs(right.x - left.x), 2000, accuracy: 1e-6,
+                           "the mid-line's pixel width changed at \(slider)")
+            print(String(format: "MID LINE %+.2f · mid y %.9f px · width %.6f px",
+                         slider, mid.y, abs(right.x - left.x)))
         }
     }
 
@@ -577,12 +599,22 @@ final class PerspectiveTests: XCTestCase {
 
         // The order the other way (rotate the frame, then keystone it in the *unrotated* axes) is a
         // different picture: the two maps do not commute, which is why the order is written down.
+        //
+        // 338 — the far edge's displacement is now read off the map's own closed form, not a hard-coded
+        // −0.05: the anchor is the mid-line, so `y ↦ ½ + (y − ½)/w` sends the far edge to
+        // `½ − ½/(1 + v/2)` (at `vertical = 40`, `v = −0.084` → −0.0219; 183's one-sided map put it at
+        // `−0.0917`, twice as far, because only one edge moved). The claim this line makes — the far
+        // edge moves *away* from the mid-line, so a no-op order could not pass — is unchanged; the
+        // number is the map's, so it cannot drift from the parametrisation again.
         let m = PerspectiveMap(vertical: 40, horizontal: 0)
         let farMid = m.forward(x: 0.5, y: 0.0)
         XCTAssertEqual(farMid.x, 0.5, accuracy: 1e-12,
                        "the vertical knob is symmetric, so the far edge's *midpoint* may only move in y")
-        XCTAssertLessThan(farMid.y, -0.05,
-                          "the far edge must move away from the near one (a no-op order would not)")
+        let v = m.verticalStrength
+        XCTAssertEqual(farMid.y, 0.5 - 0.5 / (1 + v / 2), accuracy: 1e-12,
+                       "the far edge is not where the mid-line anchored map puts it")
+        XCTAssertLessThan(farMid.y, 0,
+                          "the far edge must move away from the mid-line (a no-op order would not)")
     }
 
     // MARK: - 6 · export ≡ display
@@ -643,15 +675,17 @@ final class PerspectiveTests: XCTestCase {
     /// divides.
     ///
     /// **272 — the crop is read in photo coordinates, not in the crop's own unit square.** 248 anchors
-    /// `P` on the whole photograph, so for `vertical = +100` (`vv = −0.21`) the warp fixes the near
-    /// (bottom) edge — photo `y = 1` stays at `y' = 1` — and puts `y' = 0` on the line
-    /// `y = −vv/(1−vv) = 0.17355`. The vertical map therefore spans exactly 1 over `[0.17355, 1]`,
-    /// and the horizontal extent factor at a height `y` is `1/(1 + vv·(1−y))`, which at that top
-    /// line is `1.21`. So the **normalized square of side `1/(1−vv) = 0.82645`**, anchored on the
-    /// bottom edge and centred horizontally, warps to exactly 2048×2000 in both axes (before the
-    /// canvas' single `ceil`). The pre-248 crop of `1/far = 0.79`, chosen for the old crop-frame
-    /// anchoring, only makes 1993×1990 under the photo anchoring — that 55×10 px gap was the debt
-    /// this test ticket removes.
+    /// `P` on the whole photograph, so the crop below is the map's **pre-image** of a 2048×2000
+    /// picture, not a fraction of it.
+    ///
+    /// **338** — the anchor is the photograph's mid-line (`w = 1 − v·(y − ½)`), and the crop follows
+    /// the same derivation as before with the new map: `u(Y) = Y/(1 − v·Y)` is the vertical map in
+    /// centred units (`Y = y − ½`), so the crop `[Y0, ½]` whose image spans exactly 1 is
+    /// `u(½) − u(Y0) = 1`, i.e. `Y0 = (a − 1)/(1 + v·(a − 1))` with `a = u(½)`. At `+100` the map
+    /// grows the far (top) end, so the crop's narrow row is its top one, and the crop's width is that
+    /// row's width factor `1 − v·Y0`. Both axes then land on 2048×2000 before the canvas' single
+    /// `ceil`. (Pre-338 the same idea read `1/(1 + s) = 0.82645` against the bottom edge; the anchor
+    /// moved, the arithmetic did not, and the two documents still have to be the same allocation.)
     func testKeystoneCostsNoMoreThanTwentyPercentAtFourMpx() throws {
         try requireMetal()
         let image = patternImage(width: 2048, height: 2000)
@@ -661,10 +695,13 @@ final class PerspectiveTests: XCTestCase {
         var plain = EditModel.neutral
         var keystoned = EditModel.neutral
         keystoned.geometry.perspectiveVertical = 100
-        let strength = -PerspectiveMap(vertical: 100, horizontal: 0).verticalStrength  // 0.21
-        let side = 1 / (1 + strength)                                                 // 0.82645
-        keystoned.geometry.crop = NormalizedRect(x: (1 - side) / 2, y: 1 - side,
-                                                 width: side, height: side)
+        let map = PerspectiveMap(vertical: 100, horizontal: 0)
+        let v = map.verticalStrength                                              // −0.21
+        let a = 0.5 / (1 - v * 0.5)                                              // u(½) = 0.45249
+        let y0 = (a - 1) / (1 + v * (a - 1))                                      // −0.49105
+        let side = 1 - v * y0                                                     // 0.89688
+        keystoned.geometry.crop = NormalizedRect(x: (1 - side) / 2, y: 0.5 + y0,
+                                                 width: side, height: 0.5 - y0)
         let baseSize = plain.geometry.outputPixels(in: source)
         let keystonedSize = keystoned.geometry.outputPixels(in: source)
         let baseMpx = Double(baseSize.width * baseSize.height) / 1e6
