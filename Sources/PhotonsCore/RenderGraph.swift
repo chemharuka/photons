@@ -3019,15 +3019,23 @@ public final class RenderGraph {
     ///
     /// `useCache: false` on purpose — the stage cache is keyed by canvas, so a thumbnail render's
     /// entries could only evict the frame's own; the pool still recycles every texture.
+    /// - ceiling: 320 — the **picture's** ceiling in linear light (`DisplayOptions.highlightCeiling`,
+    ///   `2^EV`). It is the one thing about this measurement that is a user setting: the bins are the
+    ///   picture's, and the picture stops where the user put its top. The default is the shipped
+    ///   +2.3 EV, so a caller that has no preference to hand keeps the card's number.
     public func measureHistogram(_ edit: EditModel, bins: Int = 256,
-                                 headroom: Double = 1) throws -> Histogram {
+                                 headroom: Double = 1,
+                                 ceiling: Double = HighlightCeiling.defaultLinear) throws -> Histogram {
         let cropPixels = edit.geometry.outputPixels(in: sourceSize)
         let picture = ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height)
         let options = RenderOptions(
             scale: Histogram.sampleScale(for: cropPixels),
             // `headroom` reaches the counters, not the pixels: S4's ceiling cannot move a bin any
-            // more, it only decides what `clippedCeiling` reports for this screen.
-            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: headroom),
+            // more, it only decides what `clippedCeiling` reports for this screen. 320's `ceiling`
+            // is the opposite case — it *is* the pixels, so it arrives as the display option the
+            // render clamps and measures with.
+            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: headroom,
+                                    highlightCeiling: ceiling),
             useCache: false, wantsPixels: false,
             collectHistogram: true, histogramBins: bins)
         let result = try render(edit, options: options)
@@ -4029,8 +4037,10 @@ public final class RenderGraph {
                 c: SIMD4(plan.origin.x, plan.origin.y,
                          Float(plan.content.width), Float(plan.content.height)),
                 // 306b: 高光's slope `k`. It is computed on the CPU (c solved from the tail promise);
-                // the kernel only evaluates the shoulder.
-                d: SIMD4(Float(S2Regions.highSlope(highlights: edit.light.highlights)), 0, 0, 0))
+                // the kernel only evaluates the shoulder. 320: `.y` is the picture's ceiling, in
+                // linear light — the same `DisplayOptions.highlightCeiling` the tail guards read.
+                d: SIMD4(Float(S2Regions.highSlope(highlights: edit.light.highlights)),
+                         Float(options.display.highlightCeiling), 0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<S2Params>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -4225,13 +4235,15 @@ public final class RenderGraph {
             // The two detail operators are chained in the order the panel names them (texture →
             // clarity), each writing the next texture: texture before clarity because the fine band is
             // a subset of the mid one. 去雾 is S1.9 now (117).
-            try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan, table: table)
+            try encodeDetailFX(cb: cb, into: out, from: src, edit: edit, plan: plan, table: table,
+                               ceiling: options.display.highlightCeiling)
 
         case .sharpen:
             // S3.10 — 自研锐化 (185). Encoded **only** when `sharpAmount > 0`
             // (`RenderStage.pipeline(hasSharpen:)`), so a document at 0 has no pass to be neutral in
             // and its frame, trace and key chain are the pre-185 ones byte for byte.
-            try encodeSharpen(cb: cb, into: out, from: src, edit: edit, plan: plan)
+            try encodeSharpen(cb: cb, into: out, from: src, edit: edit, plan: plan,
+                              ceiling: options.display.highlightCeiling)
 
         case .dehaze:
             // S1.9 — 117: 去雾 in the scene-linear domain. Encoded **only** when `effects.dehaze != 0`
@@ -4266,7 +4278,10 @@ public final class RenderGraph {
                 // Frame-relative, exactly like S3c: a 1:1 window must show the same grain in the same
                 // physical place as the whole frame, and the letterbox is never grained.
                 b: SIMD4(plan.frameSize.x, plan.frameSize.y, plan.frameOrigin.x, plan.frameOrigin.y),
-                c: SIMD4(identity ? 1 : 0, plan.origin.x, plan.origin.y, 0))
+                // 320 — `.w` is the picture's ceiling (linear): grain may not push a pixel past the
+                // top the user set, and `0` keeps the historical 4.0 for a caller that predates it.
+                c: SIMD4(identity ? 1 : 0, plan.origin.x, plan.origin.y,
+                         Float(options.display.highlightCeiling)))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<GrainParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -4438,7 +4453,7 @@ public final class RenderGraph {
     /// writes `out`. A document with one number set pays one chain, not two. 去雾 is S1.9 now.
     private func encodeDetailFX(cb: MTLCommandBuffer, into out: MTLTexture,
                                 from src: MTLTexture, edit: EditModel, plan: Plan,
-                                table: MaskTable?) throws {
+                                table: MaskTable?, ceiling: Double) throws {
         let w = plan.canvas.width, h = plan.canvas.height
         let q = RenderGraph.detailFXBlock
         let qW = max(1, (w + q - 1) / q), qH = max(1, (h + q - 1) / q)
@@ -4468,7 +4483,9 @@ public final class RenderGraph {
         var params = DetailFXParamsU(
             a: SIMD4(textureAmount, clarityAmount, 0, 0),
             luma: SIMD4(0.2126, 0.7152, 0.0722, 0),
-            d: SIMD4(0.0, 0, 0, 0),
+            // 320 — `.z` is the picture's ceiling (linear); the stage's apply pass clamps its
+            // output to it instead of the old literal 4.0.
+            d: SIMD4(0.0, 0, Float(ceiling), 0),
             // The gate's knee, in **luma per 1/q texel**: a 0.44 step is 0.11 per 4 px texel, a 0.1
             // step is 0.025, a sky gradient over 100 px is 0.001. 0.015…0.06 therefore passes every
             // gradual transition and stops every step — which is where an unsharp mask draws its halo.
@@ -4809,7 +4826,8 @@ public final class RenderGraph {
 
     /// The stage. Reads the display-referred image S3.9 produced and writes the sharpened one.
     private func encodeSharpen(cb: MTLCommandBuffer, into out: MTLTexture,
-                               from src: MTLTexture, edit: EditModel, plan: Plan) throws {
+                               from src: MTLTexture, edit: EditModel, plan: Plan,
+                               ceiling: Double) throws {
         let w = plan.canvas.width, h = plan.canvas.height
         let imageScale = plan.imageScale
         lastSharpenImageScale = imageScale
@@ -4861,7 +4879,10 @@ public final class RenderGraph {
             e: SIMD4(0.2126, 0.7152, 0.0722, Float(conversion.kneeLow)),
             // 8 codes: §3's 「amount = 100 时 4 px 边过冲 ≤ 8 码」 is this number, at full strength.
             // Codes are scale-free (they are a fraction of the displayed value), so `f.y` does not move.
-            f: SIMD4(Float(conversion.kneeHigh), 8, 0, 0))
+            // 320 — `.z` is the picture's ceiling (linear): this pass's output clamp used to be a
+            // literal 4.0, which is the +2 EV limit the user measured on every document (锐化 rests at
+            // amount 50, so the pass — and its clamp — has always been on).
+            f: SIMD4(Float(conversion.kneeHigh), 8, Float(ceiling), 0))
 
         let bounds = try scratch("sharpen-bounds", width: qW, height: qH, format: .rgba16Float)
         let lum = try scratch("sharpen-luma", width: hw, height: hh, format: .rgba16Float)

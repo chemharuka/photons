@@ -31,6 +31,7 @@ let valueFlags: Set<String> = [
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
     "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model", "--units",
+    "--ceiling",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -264,6 +265,12 @@ func displayOptions(_ a: Args) -> DisplayOptions {
     // The S4 ceiling by hand: the way to see the exponential tail and the display tick populated
     // without an EDR screen (the card itself always uses the screen's own headroom).
     if let h = a.value("--headroom").flatMap(Double.init) { d.headroom = min(max(h, 1), 16) }
+    // 320 — the picture's ceiling, in **EV above white** (the unit the inspector row shows):
+    // `--ceiling 4` is linear 16. Omitted = the shipped +2.3 EV, so every existing invocation renders
+    // what it rendered before.
+    if let ev = a.value("--ceiling").flatMap(Double.init) {
+        d.highlightCeiling = HighlightCeiling.linear(ev: ev)
+    }
     return d
 }
 
@@ -792,6 +799,7 @@ guard let cmd = argv.first else {
       --space          sRGB | displayP3      (default sRGB)
       --bits           8 | 16                (default 8; jpeg is always 8)
       --quality F      lossy quality 0…1     (default 0.95)
+      --ceiling EV     the picture's highest brightness, in EV above white (default +2.3)
       --trace-stages   print which stages executed and which came from the cache
       --golden         record | check        (baseline in --dir, default Tests/Golden)
       --tone-map       none | global         (default none; use global for measurement renders)

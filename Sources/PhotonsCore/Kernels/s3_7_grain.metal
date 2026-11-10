@@ -33,7 +33,8 @@ using namespace metal;
 struct GrainParams {
     float4 a;   // amount, size, roughness, seed
     float4 b;   // frameSize.xy, frameOrigin.xy (content pixels of the whole frame)
-    float4 c;   // identity, contentOrigin.x, contentOrigin.y, pad
+    // identity, contentOrigin.x, contentOrigin.y, 320's **picture ceiling** (linear)
+    float4 c;
 };
 
 // A 32-bit avalanche hash over (x, y, seed). Deterministic on every GPU the same way integer
@@ -110,6 +111,9 @@ kernel void s3_7_grain(texture2d<float, access::read> src [[texture(0)]],
     // 0.055 in 0…1 units is ~14 codes of an 8-bit output at amount 100 — the ceiling Lightroom's own
     // 100 sits at. Multiplied by `amount` so 0 is exactly 0 and the pass cannot invent noise.
     float sigma = amount * 0.055;
-    float3 grained = clamp(c.rgb + n * sigma, 0.0, 4.0);
+    // 320 — the upper bound is the picture's ceiling, not a literal 4.0: grain may not push a pixel
+    // past the top the user set. `0` = a caller that predates the field keeps the old 4.0.
+    float ceiling = p.c.w > 0.0 ? p.c.w : 4.0;
+    float3 grained = clamp(c.rgb + n * sigma, 0.0, ceiling);
     dst.write(float4(grained, c.a), gid);
 }

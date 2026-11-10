@@ -55,7 +55,8 @@ func cmdHistogram(_ a: Args) throws {
     // longer is). A `--roi` is refused rather than ignored.
     if a.has("--roi") { die("--roi 不再支持：直方图现在固定测整幅图（全图缩略渲染）") }
     let t0 = CFAbsoluteTimeGetCurrent()
-    let histogram = try graph.measureHistogram(edit, bins: bins, headroom: display.headroom)
+    let histogram = try graph.measureHistogram(edit, bins: bins, headroom: display.headroom,
+                                              ceiling: display.highlightCeiling)
     let measureMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
     let whole = ImageRect(x: 0, y: 0, width: histogram.canvas.width, height: histogram.canvas.height)
     let roiLabel = histogram.roi == whole ? "whole picture" : histogram.roi.keyString
@@ -184,7 +185,8 @@ func cmdHistogram(_ a: Args) throws {
         var oldWall: [Double] = []
         for _ in 0..<repeats {
             let t0 = CFAbsoluteTimeGetCurrent()
-            _ = try graph.measureHistogram(edit, bins: bins, headroom: display.headroom)
+            _ = try graph.measureHistogram(edit, bins: bins, headroom: display.headroom,
+                                           ceiling: display.highlightCeiling)
             oldWall.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
         }
         emit("shipped    \(stats(oldWall))  (\(repeats) warm measurements, each a thumbnail render)")

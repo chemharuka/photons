@@ -240,8 +240,12 @@ final class ToneMapTests: XCTestCase {
         ]
         let image = bands(ls.map { Float(pow(2.0, $0)) })
         let graph = try makeGraph(image, identity: "highlight-shoulder-table")
+        // 320: this table is the **tone map's** tail, read above the picture's ceiling on purpose
+        // (rows up to L = +8 EV, y up to +13.3 EV). The shipped ceiling is +2.3 EV, so the probe
+        // states its own — 1e6 is "no ceiling", which is what the linear exit used to be.
         let opts = RenderOptions(scale: 1,
-                                 display: DisplayOptions(headroom: 8, linearOutput: true),
+                                 display: DisplayOptions(headroom: 8, linearOutput: true,
+                                                         highlightCeiling: 1e6),
                                  useCache: false, wantsPixels: true)
 
         func output(highlights: Double) throws -> [Double] {
@@ -995,8 +999,12 @@ final class ToneMapTests: XCTestCase {
         // 299 — the high band is the HDR tail now. `hdrImage` puts 25 % of the samples at L = +2 EV;
         // a linear read makes the shoulder's travel visible (at headroom 1 it would all clamp to white).
         let hdrGraph = try makeGraph(hdrImage(), identity: "zone-high-hdr")
+        // 320: the HDR tail's travel is measured above the shipped ceiling (same reason as
+        // `testHighlightShoulderTableFromLinearOutput`: this is the tone map's maths, not the picture's
+        // top).
         let hdrOpts = RenderOptions(scale: 1,
-                                    display: DisplayOptions(headroom: 8, linearOutput: true),
+                                    display: DisplayOptions(headroom: 8, linearOutput: true,
+                                                            highlightCeiling: 1e6),
                                     useCache: false, wantsPixels: true)
         func hdrP99(highlights: Double) throws -> Double {
             var edit = unsharpened
@@ -1460,8 +1468,12 @@ private struct S2KernelHarness {
         XCTAssertEqual(MemoryLayout<Params>.stride, 48, "S2Params' mirror must be as wide as Metal's")
     }
 
+    /// - ceiling: 320 — the **picture's** ceiling, in linear light. This harness measures the tone
+    ///   map's own arithmetic (`L` up to +8 EV, `y` up to +13 EV), so it opens the ceiling by default;
+    ///   the shipped clamp is exercised by `HighlightCeilingTests`, not here.
     func run(_ values: [Float], highlights: Float = 0, midtones: Float = 0,
-             shadows: Float = 0, contrast: Float = 0) throws -> [Float] {
+             shadows: Float = 0, contrast: Float = 0,
+             ceiling: Float = 1e6) throws -> [Float] {
         // 098: contrast is S1.8 now; S2 has one entry point and reads no contrast number.
         let pso = pipeline
         let travel = S2Regions.travelEV(shadows: Double(shadows), midtones: Double(midtones),
@@ -1481,7 +1493,9 @@ private struct S2KernelHarness {
         }
         var p = Params(b: SIMD4(Float(travel.shadow), Float(travel.mid), Float(travel.high), 0),
                        c: SIMD4(0, 0, Float(w), Float(h)),
-                       d: SIMD4(Float(S2Regions.highSlope(highlights: Double(highlights))), 0, 0, 0))
+                       // `.y` is 320's ceiling (linear); `.x` is the 高光 slope.
+                       d: SIMD4(Float(S2Regions.highSlope(highlights: Double(highlights))),
+                                ceiling, 0, 0))
         let cb = try XCTUnwrap(queue.makeCommandBuffer())
         let enc = try XCTUnwrap(cb.makeComputeCommandEncoder())
         enc.setComputePipelineState(pso)

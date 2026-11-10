@@ -48,7 +48,8 @@ struct S2Params {
     float4 b;
     // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
     float4 c;
-    // 306b — `.x` is the 高光 slope `k` (1 = identity), from `S2Regions.highSlope`; the rest unused.
+    // 306b — `.x` is the 高光 slope `k` (1 = identity), from `S2Regions.highSlope`; `.y` is 320's
+    // **picture ceiling** (linear, `DisplayOptions.highlightCeiling`); `.zw` unused.
     // The struct grew from 32 to 48 bytes when 高光 entered the band term.
     float4 d;
 };
@@ -58,8 +59,14 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
                         constant S2Params &p [[buffer(0)]],
                         uint2 gid [[thread_position_in_grid]]) {
     float4 c = src.read(gid);
+    // 320 — the ceiling is applied on **both** branches. The copy branch is the identity document's
+    // byte-for-byte path and stays one for every value at or below the ceiling; light above it is
+    // what the display-referred tail guards used to clip at a hard 4.0 (`s3_10_sharpen.metal:402`),
+    // and the picture's own top is where that is decided now. `.y` is the linear ceiling; `0` means
+    // "caller predates 320" and keeps the historical 4.0 (a real ceiling is `2^0 = 1` at the lowest).
+    float ceiling = p.d.y > 0.0 ? p.d.y : 4.0;
     if (p.b.w > 0.5) {
-        dst.write(c, gid);
+        dst.write(float4(min(c.rgb, ceiling), c.a), gid);
         return;
     }
 
@@ -102,5 +109,10 @@ kernel void s2_tone_map(texture2d<float, access::read> src [[texture(0)]],
     // The clamp stays **here**, at the end of the tone map, and not one line earlier: a sub-black
     // value that a lift has pulled above zero is real picture by now and must survive; whatever is
     // still below zero is what the display would clip anyway.
-    dst.write(float4(max(v, 0.0), c.a), gid);
+    //
+    // 320 adds the **upper** half of the same sentence: this is where the picture's ceiling lives
+    // (`DisplayOptions.highlightCeiling`), so every document — with or without 锐化/纹理/颗粒 — stops at
+    // the same brightness, and the histogram and the pointer's readout (both measured after this
+    // pass) stop there too. The value is the user's, not a literal.
+    dst.write(float4(min(max(v, 0.0), ceiling), c.a), gid);
 }

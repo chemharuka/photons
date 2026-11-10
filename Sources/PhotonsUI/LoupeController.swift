@@ -1350,6 +1350,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         observeModel()
         observeScreenChanges()
         observeCanvasBackdrop()
+        observeHighlightCeiling()
         refreshDisplay()
         syncZoomSlider()
     }
@@ -1538,6 +1539,27 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 guard let self else { return }
                 self.container.layer?.backgroundColor = NSColor.canvasMatte.cgColor
                 self.rePresentFrozen()
+            })
+    }
+
+    /// 320 — **the picture's ceiling is a preference too.** Unlike the canvas colour this one is in
+    /// the render (S2 clamps at it) and in the histogram's cache key, so the change means: drop the
+    /// measured numbers, re-render the frame and re-arm the picture's measurement. `pointerExited` is
+    /// not called — the pointer row's reading is recomputed with the next frame, and this is one
+    /// document's setting, not a different picture.
+    private func observeHighlightCeiling() {
+        screenTokens.append(NotificationCenter.default.addObserver(
+            forName: .highlightCeilingDidChange, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.histogramLock.lock()
+                self.histogramCache.removeAll()
+                self.histogramCacheOrder.removeAll()
+                self.histogramFrameKey = nil
+                self.pictureArmedKey = nil
+                self.pictureLatestKey = nil
+                self.histogramLock.unlock()
+                self.histogramMeasuredKey = nil
+                self.scheduleRender()
             })
     }
 
@@ -6028,7 +6050,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         do {
             let result = try graph.render(job.edit, options: RenderOptions(
                 scale: scale,
-                display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom),
+                display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom,
+                                        highlightCeiling: HighlightCeiling.current),
                 useCache: false, wantsPixels: false,
                 // 070: the backdrop render is the whole picture, so it also produces the histogram
                 // the loupe needs when a **windowed** frame cannot measure one itself. The measurement
@@ -6379,7 +6402,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 contentRect: s.window,
                 canvas: viewport,
                 scale: s.scale,
-                display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling),
+                // 320 — the picture's ceiling travels with the frame's display options: it is part of
+                // the render (S2 clamps at it) and of the key, so moving the row re-renders instead of
+                // serving a cached frame with the old top.
+                display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling,
+                                        highlightCeiling: HighlightCeiling.current),
                 neverUpscalesContent: neverUpscales,
                 // 307 — one value for the pixels, the projection and the overlay.
                 canvasRole: cropTool.canvasRole)
@@ -7392,7 +7419,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func histogramKey(identity: String, digest: String, fallbackScale: Float) -> String {
         let rung = histogramRungScale(identity: identity, fallbackScale: fallbackScale)
         return Histogram.cacheKey(rungIdentity: "\(identity)-s\(rung)",
-                                  editDigest: digest, bins: 256)
+                                  editDigest: digest, bins: 256,
+                                  ceiling: HighlightCeiling.current)
     }
 
     /// The rung a picture's histogram is measured from — the biggest one the ladder has, or the frame's
@@ -7700,7 +7728,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                       latency: latency())
             }
             let histogram = try graph.measureHistogram(request.edit, bins: 256,
-                                                       headroom: request.ceiling)
+                                                       headroom: request.ceiling,
+                                                       ceiling: HighlightCeiling.current)
             histogramLock.lock()
             pictureRenderUses += 1
             histogramLock.unlock()
@@ -7831,7 +7860,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                                           whiteBalance: inputs.whiteBalance))
         }
         let histogram = try measurer.measureHistogram(edit, bins: bins,
-                                                     headroom: displayHeadroom.headroom)
+                                                     headroom: displayHeadroom.headroom,
+                                                     ceiling: HighlightCeiling.current)
         let key = histogramKey(identity: identity, digest: Histogram.editDigest(edit),
                                fallbackScale: outcome.rung.scale)
         store(histogram: histogram, for: key)

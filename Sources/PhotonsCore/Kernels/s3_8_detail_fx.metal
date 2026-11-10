@@ -61,7 +61,7 @@ struct DetailFXParams {
     float4 a;
     // luma weights (Rec.709), pad
     float4 luma;
-    // texture: epsilon · clarity: epsilon · pad · pad
+    // texture: epsilon · clarity: epsilon · 320's picture ceiling (linear) · pad
     float4 d;
     // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     float4 e;
@@ -410,7 +410,10 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
         // chroma ratios stay put and only the luma moves.
         if (amountNR > 0.0) { delta += amountNR * (slice.x / wsum - I); }
     }
-    float3 outRGB = clamp(rgb + delta, 0.0, 4.0);
+    // 320 — the upper bound is the picture's ceiling, not a literal 4.0: a halo may not lift a pixel
+    // past the top the user set. `0` = a caller that predates the field keeps the old 4.0.
+    float ceiling = p.d.z > 0.0 ? p.d.z : 4.0;
+    float3 outRGB = clamp(rgb + delta, 0.0, ceiling);
 
     // 171 — chroma denoise: mix OKLab a/b towards the grid's mean. A neutral pixel has C ≈ 1e-8 and
     // is skipped entirely, so a grey card cannot be tinted by the fold's rounding. A common Rec.709
@@ -429,7 +432,7 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
             float y0 = s3_8_luma(outRGB, p.luma.xyz);
             float y1 = s3_8_luma(reduced, p.luma.xyz);
             if (y1 > 1e-6) { reduced *= max(y0, 0.0) / y1; }
-            outRGB = clamp(reduced, 0.0, 4.0);
+            outRGB = clamp(reduced, 0.0, ceiling);
         }
     }
     dst.write(float4(outRGB, px.a), gid);
