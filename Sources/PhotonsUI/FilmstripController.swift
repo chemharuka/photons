@@ -740,6 +740,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     public private(set) var lastCenterAnimationDuration: TimeInterval = 0
     /// The anchor this strip last centred, so a metadata refresh of the same photo does not scroll.
     private var centredAnchorID: String?
+    /// 332b — 见 `deferCenterOnce()`：快照未落地时只推迟一次。
+    private var isDeferringCenter = false
 
     /// Put the anchor photo in the middle of the strip — ends flush, no blank space — animated.
     ///
@@ -751,11 +753,20 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     /// - Returns: `true` when there was an anchor and live geometry to work with (whether or not
     ///   the viewport had to move).
     @discardableResult
+    /// 332b — `layoutAttributesForItem` **抛异常**（不是返回 nil）当索引超出已装载的条目数时，
+    /// 而 `viewDidLoad` 里画面还没应用 diffable 快照（条目数 0）—— 之前这行让 App 一启动就
+    /// `NSApplication._crashOnException` 崩掉。所以先问条目数，再取 attributes；快照还没落地时
+    /// 推迟到下一个 runloop 再试一次（`isDeferringCenter` 防重入死循环）。
     public func centerAnchor() -> Bool {
         guard isViewLoaded, let session, let id = session.anchorID,
               let scroll = collectionView.enclosingScrollView,
-              let index = session.assets.firstIndex(where: { $0.id == id }),
-              let item = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
+              let index = session.assets.firstIndex(where: { $0.id == id })
+        else { return false }
+        guard collectionView.numberOfItems(inSection: 0) > index else {
+            deferCenterOnce()
+            return false
+        }
+        guard let item = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
         else { return false }
         let clip = scroll.contentView
         let visible = clip.bounds.width
@@ -779,6 +790,18 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private func centerAnchorIfChanged() {
         guard let id = session?.anchorID, id != centredAnchorID else { return }
         if centerAnchor() { centredAnchorID = id }
+    }
+
+    /// 332b — 快照还没落地时（`viewDidLoad` 第一次调用），把这次居中推迟到下一个 runloop，
+    /// 并且**只推一次**，避免条目永远为 0 时无限排队。
+    private func deferCenterOnce() {
+        guard !isDeferringCenter else { return }
+        isDeferringCenter = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isDeferringCenter = false
+            self.centerAnchorIfChanged()
+        }
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
