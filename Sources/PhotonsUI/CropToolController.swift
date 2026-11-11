@@ -2375,6 +2375,13 @@ public final class CropToolController {
     /// already inside the photograph).
     var translatesSizeDragsInsidePixels = false
 
+    /// **380 — the move's reverse gate.** `true` puts the **search** back on the `.inside` path
+    /// (`translatedInsidePhotoQuad`'s 8-direction probe + 60-sample bisection, run after the canvas
+    /// clamp). Only a test turns it on: with it on, the same outward trajectory re-picks a direction
+    /// and a distance every tick — the reported 「尺寸/位置乱跳」 — and ①②③ of
+    /// `CropMovePixelPress380Tests` must go red.
+    var searchesMoves380 = false
+
     /// **368 — one pointer read per tick.** Diagnostics only: every `cropBoxPoint` is one view →
     /// rect-space projection, so a drag tick must add exactly 1. A second `NormalizedPoint` →
     /// document → view round trip in the same tick would show up here.
@@ -2388,6 +2395,49 @@ public final class CropToolController {
     /// outside the canvas — the clamp that never ran, or a camera that moved under it).
     public private(set) var clampCalls = 0
     public private(set) var clampMoves = 0
+
+    /// **380 — the three answers a move's tick can have.** One projection decides between them; there
+    /// is no search, no iteration and no screen read anywhere in the decision.
+    ///
+    ///  · `follows` — the hand's frame is already inside 「画布 ∩ 照片」: write it **bit for bit**;
+    ///  · `pressed` — this is the tick that meets the boundary: write the projection, which stops
+    ///    *on* it (exactly, by construction — not `-1e-9`);
+    ///  · `held` — the frame is on the boundary and the hand is still pushing out: **write nothing**.
+    ///    The projection alone would slide the frame along the edge under a diagonal push (the foot of
+    ///    the perpendicular still moves when the hand's step has a tangential component), and a frame
+    ///    that creeps while the user is only pushing outward is the same 「乱跳」 in a smaller size.
+    ///    371's hold, in one place: pinned means frozen until the hand comes back in.
+    private enum MoveDecision380 {
+        case follows(CropRect)
+        case pressed(CropRect)
+        case held
+    }
+
+    /// **380 — one tick of a move**, as the projection of the hand's step onto the feasible
+    /// translations of the frame the hand holds.
+    ///
+    /// `nil` when the state cannot be expressed as a translation set (a `.source` rect of a keystoned
+    /// document, or a rect with no area): the caller then falls through to the old chain, which is
+    /// 371's behaviour for the size handles and for that unreachable state.
+    ///
+    /// The step is measured on the **held** frame (`base`), never on mouse-down: a clamp that
+    /// remembers an absolute position springs back every tick, which is exactly what 371 deleted.
+    private func projectedMove380(_ rect: CropRect, base: CropRect,
+                                  source: ImageSize) -> MoveDecision380? {
+        let geometry = draftCropGeometry(source: source, perspective: livePerspective)
+        guard let set = geometry.moveFeasibleSet380(of: base), !set.isEmpty else { return nil }
+        let t = (x: rect.left - base.left, y: rect.top - base.top)
+        guard let p = set.project(x: t.x, y: t.y) else { return nil }
+        // Idempotence, stated once: a feasible step comes back **unchanged**, so a tick that asks for
+        // nothing writes nothing new (`p == t` is an identity here, not a comparison with a tolerance).
+        if p.x == t.x, p.y == t.y { return .follows(rect) }
+        if dragPinned { return .held }
+        let width = rect.width, height = rect.height
+        let placed = CropRect(left: base.left + p.x, top: base.top + p.y,
+                              right: base.left + p.x + width, bottom: base.top + p.y + height)
+            .clamped(allowsOutsideSource: true)
+        return .pressed(placed)
+    }
 
     /// The largest rect the frame may occupy **right now**, in normalized frame coordinates.
     ///
@@ -2834,6 +2884,11 @@ public final class CropToolController {
         // Last tick ended on the boundary; this tick's candidate only repeats the same outward push
         // (or stands still). The frame already is the limit the hand asked for, so there is nothing
         // to write — keeping it byte-identical is what removes the per-tick «夹一次、抖一下».
+        //
+        // 380 — a **move** needs no second test here. 371's `movesInward` is written on *edges* (a
+        // size handle pulls one edge back while the opposite one stays put), and a translation moves
+        // both edges of an axis at once, so "any edge inward" is true for every tick of a move and
+        // would switch the hold off. The move's hold is the projection's own `held` answer below.
         if movingBase, dragPinned, let edges = drag.handle.draggedEdges,
            !movesInward(next, from: base.crop, edges: edges) {
             dragBase = CropToolDrag(handle: drag.handle, crop: base.crop, grab: normalized)
@@ -2857,6 +2912,53 @@ public final class CropToolController {
         var candidate = next
         if drag.handle == .inside, reshapesLockOnInsideDrag {
             candidate = reshapedForLock(next, units: units)
+        }
+        // **380 — a move's 「不出像素」 is ONE projection, not a search.**
+        //
+        // The size handles are pressed edge by edge (355/368: only the dragged edge moves) and are
+        // frozen once pinned (371). A move has no edge of its own, so its containment is the set of
+        // **translations** whose four corners stay inside 「画布 ∩ 照片」 — a convex polygon in the
+        // rect's own units — and the tick's answer is the nearest point of that set to the hand:
+        //
+        //   · inside  → the hand's rect, bit for bit (the frame follows the hand);
+        //   · outside → the projection, i.e. it stops *on* the boundary, exactly;
+        //   · pinned and still pushing out → nothing is written at all (371's 逐位冻结).
+        //
+        // `translatedInsidePhotoQuad`'s direction scan + bisection is what this replaces: it re-picked
+        // a direction and a distance (up to 2.5 region widths) on every tick, which is the reported
+        // 「尺寸/位置乱跳，还出界」. The old chain — canvas clamp first, then a translation into the
+        // quad — was two clamps in two spaces; the projection is their intersection, asked once.
+        if drag.handle == .inside, staysInsidePixelsStorage, !searchesMoves380,
+           let decision = projectedMove380(candidate, base: base.crop, source: source) {
+            clampCalls &+= 1
+            switch decision {
+            case .follows(let hand):
+                // The hand's frame is legal: it is written **bit for bit**, so a move inside the
+                // region is a pure translation of the hand — no clamp, no round-off, no re-centre.
+                draft.crop = hand
+                if movingBase {
+                    dragBase = CropToolDrag(handle: drag.handle, crop: hand, grab: normalized)
+                    dragPinned = false
+                }
+            case .pressed(let placed):
+                pixelPresses &+= 1
+                clampMoves &+= 1
+                draft.crop = placed
+                if movingBase {
+                    dragBase = CropToolDrag(handle: drag.handle, crop: placed, grab: normalized)
+                    dragPinned = true
+                }
+            case .held:
+                // Pinned, and the hand only pushes further out: nothing is written at all, so
+                // `draft.crop` keeps the same doubles (371's 逐位冻结, now on the move path). The grab
+                // still advances, or the next tick's delta would compound the whole outward travel.
+                pixelPresses &+= 1
+                if movingBase {
+                    dragBase = CropToolDrag(handle: drag.handle, crop: base.crop, grab: normalized)
+                }
+            }
+            straightenBaseCrop = nil
+            return
         }
         // 355 / 368 — **「不出像素」的每 tick 夹取，且在「框 ⊆ 画布」之**前**。** 317's one-shot
         // inscription is a discrete act and 310 forbids a *move* from resizing, so neither can stop a
