@@ -36,13 +36,20 @@ public enum BackdropScale {
         return max(minimumLongEdge, min(edge / 2, maximumLongEdge))
     }
 
-    /// The render scale that produces `previewLongEdge` for a picture whose own long edge is
+    /// The render scale that produces `previewLongEdge` for a render whose canvas long edge is
     /// `contentLongEdge` pixels.
     ///
-    /// `content` — the cropped picture — is what is rendered, so the scale is taken against **its**
-    /// long edge. The ceiling above is still the *original's* (`previewLongEdge(imageLongEdge:)`): a
-    /// crop can only be smaller than the frame it was cut from, so the result satisfies "≤ half the
-    /// original, ≤ 4096" either way, and a heavy crop does not render at 1:1 by accident.
+    /// `contentLongEdge` is the long edge of the canvas **this render is about to allocate** — the
+    /// crop frame for `.export`, the turned photograph's AABB for `.document` (`CropGeometry.canvas`),
+    /// never the crop rect on its own. 376: the denominator was the crop frame, while the renderer
+    /// multiplied a `.document` canvas (the whole picture's AABB) by it, so a small crop of a turned
+    /// or keystoned picture asked for `previewLongEdge × (canvas/frame)` — unbounded, and past Metal's
+    /// 16384 limit that is an `abort`, not a nil texture. Taking the ratio against the canvas the
+    /// renderer multiplies by makes “canvas × scale == previewLongEdge” hold for every role.
+    ///
+    /// The ceiling above is still the *original's* (`previewLongEdge(imageLongEdge:)`): a crop can
+    /// only be smaller than the frame it was cut from, so the result satisfies "≤ half the original,
+    /// ≤ 4096" either way, and a heavy crop does not render at 1:1 by accident.
     public static func renderScale(imageLongEdge: Int, contentLongEdge: Int) -> Double {
         Double(previewLongEdge(imageLongEdge: imageLongEdge)) / Double(max(contentLongEdge, 1))
     }

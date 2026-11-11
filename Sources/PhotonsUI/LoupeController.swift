@@ -6759,17 +6759,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return
         }
         let source = graph.sourceSize
-        let cropPixels = job.edit.geometry.outputPixels(in: source)
+        // 376 — the denominator is the canvas **this render will allocate**, not the crop frame.
+        // `plan` sizes a `.document` render to the turned photograph's AABB (`photoQuadExtent`), so a
+        // small crop of a strongly keystoned picture asked for `previewLongEdge × (canvas/frame)` —
+        // unbounded, and past Metal's 16384 it is an abort, not a nil texture. Taking the ratio
+        // against the same rectangle the renderer multiplies by makes `canvas × scale` the preview
+        // long edge for every role, crop and angle.
+        let canvas = CropGeometry(geometry: job.edit.geometry, source: source).canvas(job.canvasRole)
         // Two pixel grids are in play, and confusing them is a half-resolution bug: the graph renders
         // from the **decoded rung** (`graph.sourceSize` is that buffer's size), while the rule is
         // written against the **original** (`min(imageLongEdge / 2, 4096)`). The rung's scale is what
         // converts between them, so the ceiling is computed on the original and divided by the rung's
-        // own crop — without this, a 0.5 rung of a 9520 px file asks for 2380 px (half of the preview
+        // own canvas — without this, a 0.5 rung of a 9520 px file asks for 2380 px (half of the preview
         // the user asked for) instead of 4096.
         let rungScale = frameState.scale.isFinite && frameState.scale > 0 ? frameState.scale : 1
         let originalLongEdge = Int((Double(max(source.width, source.height)) / rungScale).rounded())
         let scale = BackdropScale.renderScale(imageLongEdge: originalLongEdge,
-                                              contentLongEdge: max(cropPixels.width, cropPixels.height))
+                                              contentLongEdge: max(canvas.width, canvas.height))
         // The same display space the frame textures are made in (`makeFrame` reads these two the same
         // way, on this queue): the pass samples the backdrop with the same linearise as the frame, so
         // a mismatch here would show as a colour step at the feather band.
