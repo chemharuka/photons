@@ -227,8 +227,26 @@ public final class CropToolController {
     /// 087 — the geometry the tool was entered with (Esc's target, see `cancel()`).
     private var entryGeometry: GeometryGroup?
     private var drag: CropToolDrag?
+    /// **371 — the frame the hand actually holds, as of the last accepted tick.**
+    ///
+    /// 368 reads every tick from the mouse-down rect (`drag`). In the middle that is the same
+    /// thing, but once a clamp has shrunk/moved the frame the next tick recomputes the
+    /// *unclamped* rect and clamps it again — the edge sawtooth the user still sees. This base
+    /// is the **written** frame from the previous tick plus the previous hand position, so a
+    /// tick is the hand's *delta* on the frame the user sees, not a fresh absolute reading.
+    /// Opposite `drag` (mouse-down) it is mutable, and `cancelDrag` still restores `drag.crop`.
+    private var dragBase: CropToolDrag?
+    /// **371 — the last tick ended against a clamp.** While the hand keeps pushing outward the
+    /// frame must not be re-clamped (the press is only deterministic per hand point, not per
+    /// ray): such a tick writes nothing, so `draft.crop` is bit-for-bit the frame it already had.
+    private var dragPinned = false
     private var rotating = false
     private var rotateStart: Double = 0
+
+    /// **371 — reverse gate.** `true` re-attaches 368's per-tick absolute read of the mouse-down
+    /// rect (and drops the pinned hold), which is exactly the behaviour ①/③ must reject. Only a
+    /// test turns it on; the app always uses the moving base.
+    var restartsSizeDragsFromMouseDown = false
 
     /// The 803aff6 "框必须内切于旋转后的照片" rule — **off since 307**, back on 132's contract.
     ///
@@ -2746,6 +2764,9 @@ public final class CropToolController {
         // mouse-down snapshot inside the document canvas.
         drag = CropToolDrag(handle: rotating ? .inside : handle,
                             crop: effectiveCrop(source: source).clamped(), grab: normalized)
+        // 371 — a new gesture starts from its own mouse-down rect; no base or pin survives it.
+        dragBase = nil
+        dragPinned = false
         isDragging = true
         // 356 — **mouse-down opens the session**, and nothing else does. From here to the matching
         // `endDrag` (mouse-up, Esc, a cancelled drag, the canvas going away) the document is the
@@ -2755,8 +2776,10 @@ public final class CropToolController {
         return true
     }
 
-    /// One tick. The rect comes from the mouse-down state every time (never from the last tick), so
-    /// a drag cannot drift and a clamped edge cannot ratchet.
+    /// One tick. **371** — the rect is the hand's delta on the frame the hand holds (`dragBase`,
+    /// the last written frame), not a fresh absolute reading of the mouse-down rect: a drag still
+    /// cannot drift, and a clamped edge no longer springs back to its unclamped position on the next
+    /// tick. The mouse-down `drag` remains the first tick's base and Esc's target.
     public func continueDrag(atViewPoint point: CGPoint,
                              mapping: LoupeMapping,
                              source: ImageSize? = nil,
@@ -2778,12 +2801,43 @@ public final class CropToolController {
         // 368 — **one space, one candidate.** The hand's rect is read in the rect's own space (the
         // document canvas for a `.canvas` rect, the turned photograph otherwise) and shaped by the
         // lock once, anchored on the dragged corner/edge. The canvas is a separate, later clamp.
-        let next = drag.crop(at: normalized, units: units, lock: draft.lock)
+        //
+        // 371 — **the candidate is the hand's delta on the frame the hand holds.** `drag.crop`
+        // (mouse-down) is only the base of the first tick. A `.outside` gesture draws from its
+        // anchor, so it keeps the mouse-down drag; every other handle moves the previous frame.
+        let movingBase = !restartsSizeDragsFromMouseDown
+            && !inscribesPixelsOnEveryTick     // 317/324 reverse gate: the old per-tick centre-shrink
+            && drag.handle != .outside
+        let base = (movingBase ? dragBase : nil) ?? drag
+        var hand = normalized
+        if movingBase, dragBase != nil, let edges = drag.handle.draggedEdges {
+            // A size handle reads the pointer's **absolute** coordinate (`right = max(point.x, …)`),
+            // so measure that coordinate from the held frame and the hand's own step. Without this
+            // the base would be ignored and the sawtooth would simply move to the other side.
+            let dx = normalized.x - base.grab.x, dy = normalized.y - base.grab.y
+            var x = hand.x, y = hand.y
+            if edges.contains(.left) { x = base.crop.left + dx }
+            if edges.contains(.right) { x = base.crop.right + dx }
+            if edges.contains(.top) { y = base.crop.top + dy }
+            if edges.contains(.bottom) { y = base.crop.bottom + dy }
+            hand = NormalizedPoint(x, y)
+        }
+        let next = base.crop(at: hand, units: units, lock: draft.lock)
         // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
         // shrinking (there is no size at that centre), and jumping it back to the middle from under the
         // hand would be worse than ignoring it: the last legal frame stands.
         if clampsToRotatedFrame, draft.straighten != 0,
            CropMath.rotatedFrameScale(next, in: source, degrees: draft.straighten) <= 0 {
+            return
+        }
+        // 371 — **the clamp is idempotent: it does not fire again while the hand pushes outward.**
+        // Last tick ended on the boundary; this tick's candidate only repeats the same outward push
+        // (or stands still). The frame already is the limit the hand asked for, so there is nothing
+        // to write — keeping it byte-identical is what removes the per-tick «夹一次、抖一下».
+        if movingBase, dragPinned, let edges = drag.handle.draggedEdges,
+           !movesInward(next, from: base.crop, edges: edges) {
+            dragBase = CropToolDrag(handle: drag.handle, crop: base.crop, grab: normalized)
+            straightenBaseCrop = nil
             return
         }
         // 224 补充契约 — clamp the candidate **before** the single write. `draft.crop` is inside
@@ -2822,12 +2876,48 @@ public final class CropToolController {
         // 368 — **one write.** A size drag's containment is the press above; 317's translation is
         // only for a gesture with no edges of its own (`.inside` / `.outside`), where there is no
         // dragged edge to press and 310's 「move never resizes」 still needs a home.
-        draft.crop = (drag.handle.draggedEdges == nil || translatesSizeDragsInsidePixels)
+        let written = (drag.handle.draggedEdges == nil || translatesSizeDragsInsidePixels)
             ? placedInsidePixels(clamped, source: source)
             : clamped
+        // 224 补充 §5 / 371 — a frame already pinned on the edge keeps the exact rect it has when
+        // this tick's clamp would only return it (up to round-off). Without this the *move*
+        // (`.inside`) path re-runs `placedInsidePixels` on the pinned rect every tick and shifts it
+        // by ~1e-11 pt, which is still a moving frame. The threshold is far below a visible step
+        // (~1e-6 normalized) and only applies after a clamped tick, never on a free one.
+        if movingBase, dragPinned, isNear(written, base.crop, tolerance: 1e-9) {
+            dragBase = CropToolDrag(handle: drag.handle, crop: base.crop, grab: normalized)
+            straightenBaseCrop = nil
+            return
+        }
+        draft.crop = written
+        // 371 — remember the frame just written and the hand that wrote it. The next tick moves
+        // *this* frame by the hand's delta, so a clamped edge has no unclamped position to spring
+        // back to. `dragPinned` records that this tick ended on either clamp.
+        if movingBase {
+            dragBase = CropToolDrag(handle: drag.handle, crop: written, grab: normalized)
+            dragPinned = (pressed != candidate) || (clamped != pressed)
+        }
         // 307 — a frame the user moved is the new base for any later straighten inscription; the
         // one they had at 0° is stale the moment they take manual control.
         straightenBaseCrop = nil
+    }
+
+    /// **371** — the four edges agree to `tolerance` (normalized document units).
+    private func isNear(_ a: CropRect, _ b: CropRect, tolerance: Double = 1e-9) -> Bool {
+        abs(a.left - b.left) <= tolerance && abs(a.top - b.top) <= tolerance
+            && abs(a.right - b.right) <= tolerance && abs(a.bottom - b.bottom) <= tolerance
+    }
+
+    /// **371** — does `candidate` pull any of the hand's dragged edges **back** from the held frame?
+    /// A tick that only pushes outward (or does not move) is the pinned hold of `continueDrag`;
+    /// the first tick with an inward component is the return, and it is honoured.
+    private func movesInward(_ candidate: CropRect, from base: CropRect, edges: CropEdges) -> Bool {
+        let e = 1e-12
+        if edges.contains(.left), candidate.left > base.left + e { return true }
+        if edges.contains(.right), candidate.right < base.right - e { return true }
+        if edges.contains(.top), candidate.top > base.top + e { return true }
+        if edges.contains(.bottom), candidate.bottom < base.bottom - e { return true }
+        return false
     }
 
     /// Mouse-up. The draft stays; the document is untouched until 应用.
@@ -2840,6 +2930,8 @@ public final class CropToolController {
     public func endDrag() {
         isDragging = false
         drag = nil
+        dragBase = nil
+        dragPinned = false
         rotating = false
         closeToolSession(label: "裁切与旋转")
     }
