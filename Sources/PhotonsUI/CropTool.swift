@@ -244,6 +244,11 @@ public struct CropCarry: Sendable, Equatable {
 ///     inverted by `photoNormalized`;
 ///   · `.frame` — the un-warped case: `R(−θ)` about the photograph's centre + the camera's frame map,
 ///     inverted by `framePoint` + `R(+θ)`.
+///
+/// **368 — the drag has no second map.** `layout` draws through this value and `cropBoxPoint` reads
+/// the pointer back through the same value; the branch above is the *document's* space (330's
+/// one-time decision), not a per-tick conversion. The tick's rect stays in that one space from the
+/// pointer read to the single `draft.crop` write.
 public struct CropToolProjection {
 
     /// Pixels per unit of the rect's own space, on each axis. `[0,1]²` of a `.source` rect is the
@@ -743,7 +748,7 @@ public enum CropTool {
                                  lock: AspectLock,
                                  units: CropUnits,
                                  anchor: CropToolAnchor,
-                                 bounds: CropRect = .full) -> CropRect {
+                                 bounds: CropRect? = .full) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
         guard let ratio = lock.ratio, let na = normalizedAspect(ratio, units: units) else {
             return c
@@ -773,9 +778,18 @@ public enum CropTool {
         case .center:
             left = c.centerX - w / 2; top = c.centerY - h / 2
         }
+        let span = minimumSpan(units: units)
+        // 368 — `nil` is the drag tick's **single-space** path: the hand's rect is only shaped by the
+        // lock here, and the canvas is a separate, later clamp (`CropTool.clampToCanvas`). Doing the
+        // canvas' position clamp inside the lock's reshape let the frame slide under the hand and the
+        // next tick's press read that moved edge (the jump 368 removes).
+        guard let bounds else {
+            let width = max(w, span.width)
+            let height = max(h, span.height)
+            return CropRect(left: left, top: top, right: left + width, bottom: top + height)
+        }
         // A rect that no longer fits the frame is *moved* into it, not resized: the ratio is the
         // rule the user chose, and a shift keeps it while a shrink would silently drop it.
-        let span = minimumSpan(units: units)
         let width = min(max(w, span.width), max(bounds.width, span.width))
         let height = min(max(h, span.height), max(bounds.height, span.height))
         let x = min(max(left, bounds.left), bounds.right - width)
@@ -950,10 +964,14 @@ public struct CropToolDrag: Sendable, Equatable {
 
     /// **362** — the same drag in the rect's own units. `units` is what the lock's ratio and the 32 px
     /// floor are converted with; for a `.canvas` rect it is the document canvas, not the photograph.
+    ///
+    /// **368** — `bounds` defaults to `nil` here: the drag tick's rect is shaped by the hand and the
+    /// lock only, and the document canvas is applied **once**, after the pixel press, by
+    /// `CropTool.clampToCanvas`. A non-`nil` value keeps the historical early move-into-bounds.
     public func crop(at point: NormalizedPoint,
                      units: CropUnits,
                      lock: AspectLock = .original,
-                     bounds: CropRect = .full) -> CropRect {
+                     bounds: CropRect? = nil) -> CropRect {
         let span = CropTool.minimumSpan(units: units)
         // 2026-11-02: the rect under the hand may sit in the black corners a straighten opens, so the
         // mouse-down snapshot is *not* pulled back inside the photograph. `bounds` (the document

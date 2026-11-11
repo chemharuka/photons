@@ -628,16 +628,18 @@ public final class CropToolController {
     /// and §3b leaves the out-of-bounds frame visible — the overlay paints it red through 307's
     /// `frameExceedsPicture`, no new colour and no backdrop change.
     ///
-    /// **355 — 「不出像素」的每 tick 夹取.** Only the edges the gesture is dragging, only against the
-    /// photograph's `photoQuad(document:)`, only shrinking, and idempotent (see
-    /// `CropPixelEdgeClamp355.swift`). `.inside` (a move) has no edges of its own: 310's translation
-    /// is `placedInsidePixels`'s job and a move never resizes.
+    /// **355/368 — 「不出像素」的每 tick 夹取.** Only the edges the gesture is dragging, only against
+    /// the photograph's `photoQuad(document:)`, and now **one** clamp: the dragged edge is scaled from
+    /// the fixed opposite edge until all four corners are inside the quad (see
+    /// `CropPixelEdgeClamp355.pressedToQuadScalingFromAnchor`). `.inside` (a move) has no edges of its
+    /// own: 310's translation is `placedInsidePixels`'s job and a move never resizes.
     ///
     /// This is the third of the three pixel laws and it does **not** replace the other two:
     ///
     ///   · `inscribeIntoPixelsIfNeeded` (317/324) — the discrete, one-shot inscription when the box is
     ///     ticked or the angle changes; unchanged;
-    ///   · `placedInsidePixels` (317) — translation, never a resize; unchanged;
+    ///   · `placedInsidePixels` (317) — translation, never a resize; only a gesture with no dragged
+    ///     edge (`.inside` / `.outside`) reaches it, because the press already contains a size drag;
     ///   · this one — the per-tick press of a **size** drag, which neither of the two could stop.
     private func pressedToPixels(_ rect: CropRect, handle: CropToolHandle,
                                  mapping: LoupeMapping, source: ImageSize) -> CropRect {
@@ -656,9 +658,11 @@ public final class CropToolController {
         // 362 — a `.source` rect is pressed against the **turned photograph** (355 only did the
         // `.canvas` case, so 「不出像素」 was a no-op on a straightened-but-unwarped document).
         if liveCropSpace != .canvas, !(livePerspective?.hasWarp ?? false) {
-            return geometry.pressedToTurnedPhotoQuad(rect, edges: edges)
+            return geometry.pressedToTurnedPhotoQuad(rect, edges: edges,
+                                                     bothEnds: pressesWithBothEndpoints)
         }
-        return geometry.pressedToPhotoQuad(rect, edges: edges)
+        return geometry.pressedToPhotoQuad(rect, edges: edges,
+                                           bothEnds: pressesWithBothEndpoints)
     }
 
     /// Gate ①'s body: the frame shrunk (about its centre) so its **screen** box fits the viewport. It
@@ -2342,6 +2346,22 @@ public final class CropToolController {
     /// tick. Only a test turns it on.
     var convertsTheLockInSourceUnits = false
 
+    /// **368 reverse gate** — `true` restores 355's press, whose legal limit re-samples the quad at
+    /// **both** ends of the moving edge (`scanLines(from:top,to:bottom)`). Only a test turns it on;
+    /// with it on the same small hand movement jumps the frame's size.
+    var pressesWithBothEndpoints = false
+
+    /// **368 reverse gate** — `true` re-attaches 317's whole-frame translation to a **size** drag.
+    /// Only a test turns it on; the shipped path presses the dragged edges and nothing else. The gate
+    /// proves the translation is a redundant second write once the press has run (the frame is
+    /// already inside the photograph).
+    var translatesSizeDragsInsidePixels = false
+
+    /// **368 — one pointer read per tick.** Diagnostics only: every `cropBoxPoint` is one view →
+    /// rect-space projection, so a drag tick must add exactly 1. A second `NormalizedPoint` →
+    /// document → view round trip in the same tick would show up here.
+    public private(set) var projectionRoundTrips = 0
+
     /// How many ticks the per-tick 「不出像素」 press actually moved an edge. Diagnostics only.
     public private(set) var pixelPresses = 0
 
@@ -2407,6 +2427,10 @@ public final class CropToolController {
     public func clampToView(mapping: LoupeMapping, source: ImageSize? = nil) -> Bool {
         clampCalls &+= 1
         guard isActive, clampsFrameToView else { return false }
+        // 368 — a drag tick is the **one** writer of `draft.crop`: the tick's own chain already
+        // applies the canvas and pixel laws, so the refresh that follows it must not reshape or
+        // translate the frame a second time. (This is the second write 368 deletes.)
+        guard !isDragging else { return false }
         // 327 — the 变换 card may have moved the knobs since the last refresh; the draft follows the
         // document before any geometry is asked of it.
         adoptDocumentKeystone()
@@ -2751,10 +2775,10 @@ public final class CropToolController {
             return
         }
         let units = lockUnits(source: source, mapping: mapping)
-        // 330 — a `.canvas` rect is measured on the document canvas, so its legal box is `[0,1]²` of
-        // that canvas; a `.source` rect keeps 224's turned-AABB box.
-        let bounds: CropRect = liveCropSpace == .canvas ? .full : canvasBounds(source: source)
-        let next = drag.crop(at: normalized, units: units, lock: draft.lock, bounds: bounds)
+        // 368 — **one space, one candidate.** The hand's rect is read in the rect's own space (the
+        // document canvas for a `.canvas` rect, the turned photograph otherwise) and shaped by the
+        // lock once, anchored on the dragged corner/edge. The canvas is a separate, later clamp.
+        let next = drag.crop(at: normalized, units: units, lock: draft.lock)
         // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
         // shrinking (there is no size at that centre), and jumping it back to the middle from under the
         // hand would be worse than ignoring it: the last legal frame stands.
@@ -2772,34 +2796,35 @@ public final class CropToolController {
             draft.crop = next
             return
         }
-        // 310 — a move is a translation, full stop: the tick's rect is the mouse-down size slid by the
-        // hand. `reshapedForLock` is the **sizing** law (a grip, a new frame, a preset), and running it
-        // on `.inside` is what made a locked frame shrink / change ratio as it approached the canvas
-        // (measured: 0.9000 × 0.8000 → 0.8000 × 0.8000 on the first tick). The switch re-attaches it
-        // for the reverse gate only.
-        let candidate = (drag.handle == .inside && !reshapesLockOnInsideDrag)
-            ? next
-            : reshapedForLock(next, units: units)
-        // 355 — **「不出像素」的每 tick 夹取，且在「框 ⊆ 画布」之**前**。** 317's one-shot inscription
-        // is a discrete act (勾选时 / 改角度后) and 310 forbids a *move* from resizing, so neither of
-        // them can stop a **size** drag from leaving the photograph. This presses only the edge the
-        // hand is on, in document space, against the photograph's quad — every tick, monotonically,
-        // and it never moves the opposite edge (so 310's 「拖动不改中心」 still holds).
+        // 310 / 368 — a move is a translation, full stop: the tick's rect is the mouse-down size slid
+        // by the hand. 368 deletes the per-tick `reshapedForLock` (a **second**, centre-anchored ratio
+        // law): the ratio is already applied once, anchored on the opposite corner/edge, by
+        // `CropToolDrag.crop` above. Only the reverse gate re-attaches the old reshape.
+        var candidate = next
+        if drag.handle == .inside, reshapesLockOnInsideDrag {
+            candidate = reshapedForLock(next, units: units)
+        }
+        // 355 / 368 — **「不出像素」的每 tick 夹取，且在「框 ⊆ 画布」之**前**。** 317's one-shot
+        // inscription is a discrete act and 310 forbids a *move* from resizing, so neither can stop a
+        // **size** drag from leaving the photograph. This presses only the edge the hand is on, in
+        // document space, against the photograph's quad — one clamp, reading the candidate and that
+        // edge alone (see `CropPixelEdgeClamp355.pressedToQuadScalingFromAnchor`).
         //
         // The order is load-bearing: the quad is *inside* the canvas' AABB, so pressing the dragged
-        // edges first leaves the canvas law nothing to do (a translation of an inside frame is the
-        // identity). The other way round the canvas would slide the frame up out from under the hand
-        // to keep its bottom inside, and the press would then shrink the width against the slanted
-        // top edge — measured as a 6.6 px wide frame (355 probe, 9° / +60).
+        // edges first leaves the canvas law nothing to do. The other way round the canvas would slide
+        // the frame up out from under the hand, and the press would then shrink the width against the
+        // slanted top edge.
         let pressed = pressedToPixels(candidate, handle: drag.handle, mapping: mapping, source: source)
         if pressed != candidate { pixelPresses &+= 1 }
         let clamped = clampToCanvas(pressed, mapping: mapping, source: source)
         clampCalls &+= 1
         if clamped != pressed { clampMoves &+= 1 }
-        // 317 — 「不出像素」: the tick's rect is **translated** into the turned photograph. The size
-        // is the mouse-down size either way (310), and a frame nothing can hold stays where it is
-        // instead of being shrunk by a move (§3b: the overlay paints it red).
-        draft.crop = placedInsidePixels(clamped, source: source)
+        // 368 — **one write.** A size drag's containment is the press above; 317's translation is
+        // only for a gesture with no edges of its own (`.inside` / `.outside`), where there is no
+        // dragged edge to press and 310's 「move never resizes」 still needs a home.
+        draft.crop = (drag.handle.draggedEdges == nil || translatesSizeDragsInsidePixels)
+            ? placedInsidePixels(clamped, source: source)
+            : clamped
         // 307 — a frame the user moved is the new base for any later straighten inscription; the
         // one they had at 0° is stale the moment they take manual control.
         straightenBaseCrop = nil
@@ -2844,6 +2869,7 @@ public final class CropToolController {
                       mapping: LoupeMapping,
                       source: ImageSize,
                       pointScale: Double = 1) -> NormalizedPoint? {
+        projectionRoundTrips &+= 1
         let scale = pointScale > 0 ? pointScale : 1
         // The reverse gate (②): read the pointer through the **frame** space while the overlay still
         // draws the canvas' — the two spaces the 355 report measured apart. Only a test turns it on.
