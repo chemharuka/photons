@@ -104,6 +104,39 @@ final class CropTurnFrameTests: XCTestCase {
         XCTAssertTrue(waitFor { loupe.editRenderCount > before }, "the entry frame never landed")
         XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "the entry zoom never finished")
         pump(0.15)
+        settlePresents(loupe)
+    }
+
+    /// 369 — the entry into 裁切 can still have a frame in flight when the zoom bridge ends: a
+    /// development for the 0.5 preview rung lands, its replacement frame is presented ~0.4 s later,
+    /// and that *late present* used to fall inside the first tick's 0.12 s pump — so the tick was
+    /// blamed for a hash the entry itself changed.
+    ///
+    /// The baseline must be taken after the canvas is **quiet**, not after a guessed delay: wait for
+    /// the ladder to finish, for the frame of the fullest rung to reach the layer, and then for the
+    /// present log to stop moving (a present that arrives resets the quiet window). No assertion
+    /// below is loosened — only the moment the baseline is read moves.
+    private func settlePresents(_ loupe: LoupeController) {
+        XCTAssertTrue(loupe.awaitPendingDevelopments(timeout: 60),
+                      "the crop entry never finished developing")
+        XCTAssertTrue(waitFor(120) {
+            loupe.lastFrame?.decodeScale == DecodeLadder.fullScale && !loupe.viewportRenderInFlight
+        }, "the full-rung frame never landed after the crop entry")
+        XCTAssertTrue(loupe.awaitPendingDevelopments(timeout: 60))
+
+        var seen = loupe.presentRecords.count
+        var stableSince = Date()
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            pump(0.02)
+            if loupe.presentRecords.count != seen {
+                seen = loupe.presentRecords.count
+                stableSince = Date()
+            } else if Date().timeIntervalSince(stableSince) >= 0.4 {
+                return
+            }
+        }
+        XCTFail("the canvas never stopped presenting after the crop entry")
     }
 
     private func corners(_ rect: CropRect, source: ImageSize) -> [(x: Double, y: Double)] {
