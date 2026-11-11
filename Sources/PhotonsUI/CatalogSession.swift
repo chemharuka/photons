@@ -857,9 +857,11 @@ public final class CatalogSession {
                 if let base = selectionBase, selection.contains(base) {
                     anchorID = base
                 } else {
-                    selectionBase = nil
+                    // 2026-11-11 主线修：锚被 ⌘ 关掉时，范围基点跟着落到新锚上，而不是变 nil ——
+                    // 否则用户紧接着按 ⇧ 会退化成「只选一张再重建基点」，白丢一次范围手势。
                     anchorID = selection.isEmpty
                         ? nil : assets.last(where: { selection.contains($0.id) })?.id
+                    selectionBase = anchorID
                 }
             }
             if rangeFocus == id { rangeFocus = anchorID }
