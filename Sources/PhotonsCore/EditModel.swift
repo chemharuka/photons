@@ -1374,22 +1374,39 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal)
     }
 
-    /// 344 — the geometry half of the **whole-picture** (low-resolution full frame) cache key,
-    /// spelled rather than hashed so a cache directory (or a test's report line) explains itself:
-    /// `crop=…;rot=…;flip=…;q=…;pvy=…;phx=…;cs=1`.
+    /// **The one geometry fingerprint** of the low-resolution whole picture — `344`'s key half and
+    /// `366`'s single source.
     ///
-    /// Empty for every document whose geometry is the pre-183 one — a source-spaced crop with no
-    /// 90° turn and no keystone — which is what makes the whole-picture key of such a document
-    /// **byte-identical** to the pre-344 one (`BackdropCache.Key.identity` appends nothing).
+    /// Spelled rather than hashed so a cache directory (or a test's report line) explains itself:
+    /// `crop=…;rot=…;flip=…;q=…;pvy=…;phx=…;cs=1`. It names **exactly the geometry the renderer
+    /// reads** — `crop`, `rot`, `flip`, `q`, `pvy`, `phx`, `cs` — because those are the fields
+    /// `GeometryGroup` hands S0 and the canvas. The crop used to be left out unless it was
+    /// canvas-spaced (`344` only had to name the two dimensions the low picture missed *then*), so a
+    /// plain, source-spaced crop moved the key through the opaque digest alone. `366` makes the
+    /// spelled half name it too: **any** non-neutral geometry spells all six, crop included.
     ///
-    /// Written only when the keystone or the crop's space is non-neutral — the two dimensions the
-    /// low-resolution whole picture used to miss — and then it spells *all six* geometry knobs, so
-    /// the keystoned case is greppable instead of being one more opaque digest.
+    /// Empty for a *neutral* geometry — full crop, no angle, no flip, no turn, no keystone,
+    /// source-spaced — which is what keeps that document's whole-picture key **byte-identical** to
+    /// the pre-344 one (`BackdropCache.Key.identity` appends nothing), and what keeps `344`'s
+    /// pinned literal and its reverse gate honest.
     public var geometryFingerprint: String {
-        guard perspectiveVertical != 0 || perspectiveHorizontal != 0 || cropSpace != .source else {
-            return ""
-        }
+        guard !hasNeutralGeometry else { return "" }
         return spelledGeometry
+    }
+
+    /// Is every one of the six dimensions the low picture's fingerprint names at its neutral
+    /// position? Computed over the **same** fields `spelledGeometry` prints and the renderer reads,
+    /// so "neutral" and "spells nothing" cannot drift apart.
+    ///
+    /// `aspectLock` and `guideLines` are deliberately **not** here: the lock's effect is already in
+    /// the render rect (`renderCrop`) and in the digest, and a guide line changes no pixel
+    /// (`354`'s rule). `crop` is compared with tolerance (`coversFrame`), so a full rect that came
+    /// back as `0.0000000001` does not split the pre-366 key.
+    var hasNeutralGeometry: Bool {
+        !flipHorizontal && !flipVertical
+            && straightenDegrees == 0 && quarterTurns == 0
+            && perspectiveVertical == 0 && perspectiveHorizontal == 0
+            && cropSpace == .source && cropRect.coversFrame
     }
 
     /// The six dimensions, in the order the key material spells them (`;q`/`;pvy`/`;phx`/`;cs` only
@@ -3182,13 +3199,14 @@ extension KeyedDecodingContainer where K == AnyCodingKey {
 // MARK: - 344 · the geometry half of a whole-picture key
 
 public extension EditModel {
-    /// The document's geometry as one spelled string, or `""` for the pre-183 geometry.
+    /// The document's geometry as one spelled string, or `""` for a **neutral** geometry.
     ///
     /// The low-resolution **whole picture** (`LowResFullFrame`) is cached by document, and the two
-    /// dimensions it used to be blind to are exactly the ones that are not in the picture's own
-    /// `renderCrop` — the **keystone** and the crop's **space**. `GeometryGroup.geometryFingerprint`
-    /// appends them (and, when it appends anything, spells the rest of the geometry too), so the
-    /// key can name what the pixels were rendered through. A keystone-free document answers `""`
-    /// and its key stays byte-identical to the pre-344 one.
+    /// dimensions it used to be blind to in `344` were the ones that are not in the picture's own
+    /// `renderCrop` — the **keystone** and the crop's **space**. `366` widened the half to **every**
+    /// dimension the renderer reads (`crop/rot/flip/q/pvy/phx/cs`), so a plain source-spaced crop is
+    /// named in the key too rather than only in the opaque digest. `GeometryGroup.geometryFingerprint`
+    /// is the one spelling, and a neutral document answers `""` — its key stays byte-identical to the
+    /// pre-344 one.
     var geometryFingerprint: String { geometry.geometryFingerprint }
 }

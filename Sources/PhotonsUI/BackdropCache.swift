@@ -128,9 +128,11 @@ public final class BackdropCache {
         /// Why it is a component of its own rather than "the digest already covers it": the digest is
         /// a 64-bit hash of the whole document, so it moves for any edit *and says nothing*. The low
         /// picture's failure mode was not "the digest is blind" but "a key that cannot name the
-        /// keystone is a key nobody can check", and a spelled token makes the two dimensions that
-        /// matter (`pvy`/`phx`, `cs=1`) visible in the string. It is appended only when non-empty, so
-        /// a keystone-free, source-spaced document keeps its pre-344 key byte for byte (验收 ②).
+        /// keystone is a key nobody can check", and a spelled token makes the dimensions that matter
+        /// visible in the string. 366 extended the naming from 「keystone / crop space」 to **every**
+        /// dimension the renderer reads — `crop` is in it for a plain source-spaced crop too. It is
+        /// appended only when the geometry is non-neutral, so a neutral document keeps its pre-344
+        /// key byte for byte (验收 ②).
         public let geometry: String
 
         public init(photo: String, develop: String, digest: String,
