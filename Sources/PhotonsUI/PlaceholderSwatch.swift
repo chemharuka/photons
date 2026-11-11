@@ -46,10 +46,71 @@ public enum PlaceholderSwatch {
 
 /// Shared text attributes for the placeholder cells (one allocation, not one per item).
 public enum PlaceholderStyle {
+    /// The filename caption's font — the grid card and the filmstrip cell draw at this size, and
+    /// `fitted(_:width:font:)` is measured with it so the two agree by construction.
+    public static let captionFont = NSFont.systemFont(ofSize: 10, weight: .medium)
+
+    /// 377 — a tail-truncating paragraph style for every caption.
+    ///
+    /// Without it `NSString.draw(in:withAttributes:)` falls back to **word wrapping**, which breaks
+    /// the name at a space or a `-` and then clips the second line away: no ellipsis, half the name
+    /// missing. `byTruncatingTail` makes the *draw* agree with the *measurement* below (a one-glyph
+    /// disagreement would otherwise be the only way the two could drift).
+    public static let captionParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        style.alignment = .left
+        return style
+    }()
+
     public static let captionAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+        .font: captionFont,
         .foregroundColor: NSColor.secondaryLabelColor,
+        .paragraphStyle: captionParagraphStyle,
     ]
+
+    /// 377 — **the** filename fit, shared by the grid card, the filmstrip cell and the browser row.
+    ///
+    /// The user's rule: keep the longest head that still fits, end it with `…`, and never let a
+    /// space or a `-` decide where the name stops. `MarqueeLayout.tailTruncated` already does
+    /// exactly that (character-by-character, ellipsis width included, trailing spaces dropped), so
+    /// this is a thin, named entry point rather than a second implementation — three call sites,
+    /// one algorithm. A name that fits comes back untouched, with no ellipsis.
+    ///
+    /// One refinement on top of the seed, because "longest" is judged by the width the string has
+    /// **as a whole** (`NSString.size`, which is what the line draws at) and that is up to a kerning
+    /// pair narrower than the sum of its characters: after the seed is found, characters from the
+    /// original name are appended while `head + next + …` still measures inside `width`. On the
+    /// acceptance name at 10 pt, 100 pt wide, that is exactly the one `-` the seed would drop
+    /// (99.88 pt with it, 100.06 pt by character sums) — the difference between "longest" in
+    /// principle and "longest" as a number.
+    public static func fitted(_ filename: String, width: CGFloat, font: NSFont) -> String {
+        let seed = MarqueeLayout.tailTruncated(filename, font: font, width: width,
+                                               color: .secondaryLabelColor)
+        guard seed != filename, seed.hasSuffix(MarqueeLayout.ellipsis) else { return seed }
+        guard width > 0, !filename.isEmpty else { return seed }
+
+        let characters = Array(filename)
+        // The seed's head is the character-sum answer; its count is therefore a safe lower bound
+        // for the whole-string answer (kerning can only make a string narrower, never wider).
+        let seedHeadCount = seed.dropLast().count
+        guard seedHeadCount < characters.count else { return seed }
+        var best = seedHeadCount
+        func rendered(_ n: Int) -> String {
+            var head = String(characters.prefix(n))
+            while head.last == " " { head.removeLast() }
+            return head + MarqueeLayout.ellipsis
+        }
+        // Scan every remaining prefix rather than stopping at the first overflow: the whole-string
+        // measure is not *provably* monotone (a kerning pair can shave a fraction of a point), and
+        // "longest" has to mean longest. ~60 characters, so the extra measurements are free.
+        for n in (seedHeadCount + 1)...characters.count {
+            if MarqueeLayout.width(of: rendered(n), font: font,
+                                   color: .secondaryLabelColor) <= width { best = n }
+        }
+        return rendered(best)
+    }
+
     public static let starsAttributes: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: 8, weight: .regular),
         .foregroundColor: NSColor.systemYellow,

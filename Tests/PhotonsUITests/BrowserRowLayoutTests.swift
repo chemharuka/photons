@@ -189,8 +189,10 @@ final class BrowserRowLayoutTests: XCTestCase {
         XCTAssertEqual(textBlock(a).midY, short / 2, accuracy: 0.5)
     }
 
-    /// 4 — a long name still truncates in the middle, in the column `layout()` reserves for it
-    /// (row width − 44 − 2), so the two ends of "day2-…-0001.dng" stay distinguishable.
+    /// 4 — a long name still truncates, in the column `layout()` reserves for it
+    /// (row width − 44 − 2). 377 changed **where** it truncates: the user's rule is the longest
+    /// head that fits plus `…` (tail), not AppKit's middle ellipsis — so the two ends of
+    /// "day2-…-0001.dng" are no longer both kept.
     func testALongNameStillTruncatesInTheColumnReservedForIt() {
         let long = String(repeating: "x", count: 56) + ".dng"
         XCTAssertEqual(long.count, 60)
@@ -199,7 +201,7 @@ final class BrowserRowLayoutTests: XCTestCase {
         XCTAssertEqual(p.name.minX, textX, accuracy: 0.01)
         XCTAssertEqual(p.name.width, rowWidth - textX - rightGutter, accuracy: 0.01,
                        "the name column is the row minus its 44 pt gutter and 2 pt margin")
-        XCTAssertEqual(p.nameBreakMode, .byTruncatingMiddle)
+        XCTAssertEqual(p.nameBreakMode, .byTruncatingTail)
         XCTAssertGreaterThan(p.nameUnclippedWidth, p.name.width,
                              "60 characters at 11 pt must not fit — otherwise nothing truncates")
         // A narrow row keeps a usable column rather than collapsing to zero.

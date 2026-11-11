@@ -208,6 +208,15 @@ public final class AssetCardView: NSView {
     /// What the last `draw` actually painted — set inside `draw`, so it is evidence and not intent.
     public private(set) var lastDrawnMissingLabel: String?
 
+    /// 377 — the filename string the caption strip actually painted, and the rect it was given.
+    ///
+    /// Recorded inside `drawForeground()`, not computed on demand: the acceptance is about *what
+    /// reached the graphics context*, and a probe that re-derives the answer could agree with
+    /// itself while the screen disagrees. `lastCaptionRect.width` is the width the fit was solved
+    /// for, so a test can state "at 100 pt the drawn string is `fitted(…, width: 100)`".
+    public private(set) var lastDrawnCaption: String?
+    public private(set) var lastCaptionRect: NSRect = .zero
+
     /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
     public var badgeSignature: String { asset.map { AssetBadges(asset: $0).signature } ?? "—" }
 
@@ -326,7 +335,16 @@ public final class AssetCardView: NSView {
 
         let captionRect = NSRect(x: 2, y: swatchRect.maxY + 4, width: bounds.width - 4,
                                  height: GridLayout.labelHeight - 6)
-        (asset.filename as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
+        // 377 — the name is fitted to the strip *before* it is drawn. `NSString.draw(in:)` alone
+        // word-wraps (at a space, then a `-`), and the second line falls below the 16 pt strip, so
+        // the user got "2026-10-27 day2-" and no ellipsis. `PlaceholderStyle.fitted` keeps the
+        // longest head that fits with its own `…`; the caption attributes' `byTruncatingTail`
+        // paragraph style is the second line of defence against a measurement/draw disagreement.
+        let drawnCaption = PlaceholderStyle.fitted(asset.filename, width: captionRect.width,
+                                                   font: PlaceholderStyle.captionFont)
+        (drawnCaption as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
+        lastDrawnCaption = drawnCaption
+        lastCaptionRect = captionRect
 
         // Stars / flag / colour label go *on* the thumbnail, in its corners — not in the caption
         // strip. The placeholder block stays underneath (006 §2), so a cell without a thumbnail
