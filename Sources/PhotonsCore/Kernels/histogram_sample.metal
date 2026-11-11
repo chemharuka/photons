@@ -26,7 +26,35 @@ using namespace metal;
 struct HistSampleParams {
     float4 a;   // origin.xy, size.xy — the rect of the source texture to sample, in texels
     float4 b;   // step.xy, dstSize.xy — source texels per output texel, and the grid to fill
+    // 372 — the photograph's coverage, as four half-planes on **canvas-normalised** coordinates:
+    // `dot(pN.xy, q) <= pN.z` for q in [0,1]². `c = (canvasSize.xy, enabled, 0)`; the planes are
+    // skipped entirely when `enabled < 0.5`, which is every document whose quad contains the canvas
+    // (so a neutral render executes the same arithmetic as before 372, bit for bit).
+    float4 c;
+    float4 p0;
+    float4 p1;
+    float4 p2;
+    float4 p3;
 };
+
+// 372 — excluded samples are written as this value and subtracted from bin 0 by the CPU (a value
+// that cannot be a photograph: S4 codes are ≥ 0 and scene-linear light is finite well above it).
+// It reads as black to the pointer's readout (`max(value, 0)`), which is what the matte was before.
+static inline float4 histogram_matte_sample() {
+    return float4(-65504.0, -65504.0, -65504.0, -65504.0);
+}
+
+// The four half-planes name the quadrilateral the photograph covers inside the canvas. A sample
+// whose **texel centre** falls outside it is not photograph: it must not enter any bin (307: the
+// `000000` corners a straighten/keystone opens were counted as bin 0, a false left-hand spike).
+static inline bool histogram_sample_covered(float2 px, constant HistSampleParams &p) {
+    if (p.c.z < 0.5) { return true; }
+    float2 q = px / max(p.c.xy, float2(1.0));
+    return dot(p.p0.xy, q) <= p.p0.z
+        && dot(p.p1.xy, q) <= p.p1.z
+        && dot(p.p2.xy, q) <= p.p2.z
+        && dot(p.p3.xy, q) <= p.p3.z;
+}
 
 // S4's own OETF (the measurement's code axis, and the one the shipped path derives per sample).
 static inline float srgb_encode_f(float v) {
@@ -61,6 +89,10 @@ kernel void histogram_sample_linear(texture2d<float, access::read> src [[texture
     uint2 texel = uint2(floor(f));
     uint2 last = uint2(p.a.zw) - 1u;
     texel = min(texel, last) + uint2(p.a.xy);
+    if (!histogram_sample_covered(float2(texel) + 0.5, p)) {
+        dst.write(histogram_matte_sample(), gid);
+        return;
+    }
     float4 c = src.read(texel);
     dst.write(float4(c.rgb, 1.0), gid);
 }
@@ -79,6 +111,10 @@ kernel void histogram_sample(texture2d<float, access::read> src [[texture(0)]],
     // edge) must sample the edge, not read outside the rect.
     uint2 last = uint2(p.a.zw) - 1u;
     texel = min(texel, last) + uint2(p.a.xy);
+    if (!histogram_sample_covered(float2(texel) + 0.5, p)) {
+        dst.write(histogram_matte_sample(), gid);
+        return;
+    }
     float4 c = src.read(texel);
     // **Alpha is not alpha here.** S4 writes 1.0 into it, and the fourth channel is the only place
     // this sample can carry the luma the CPU would otherwise have to derive from three codes — which

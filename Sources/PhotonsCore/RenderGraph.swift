@@ -725,6 +725,11 @@ public final class RenderResult {
     public let frameInCanvas: ImageSize
     public let frameOrigin: SIMD2<Float>
     public let expandedCanvas: ImageSize?
+    /// 372 — the photograph's four corners in this texture's pixels (top-left, clockwise from the
+    /// picture's own top-left), from the plan's own geometry. `measureFrameHistogram` takes this
+    /// as `photoQuad:` so a frame rendered with a straighten/keystone measures its picture, not the
+    /// `000000` corners. `nil` only when no quad was laid out (a degenerate document).
+    public let photoQuad: [CGPoint]?
     public let neverUpscalesContent: Bool
 
     init(canvas: ImageSize, content: ImageSize, drawnRect: ImageRect, canvasRect: ImageRect? = nil,
@@ -735,7 +740,8 @@ public final class RenderResult {
          histogramSample: LinearSample? = nil, histogramCost: HistogramCost = .zero,
          whiteBalanceGain: SIMD3<Double> = SIMD3(1, 1, 1),
          frameInCanvas: ImageSize? = nil, frameOrigin: SIMD2<Float> = .zero,
-         expandedCanvas: ImageSize? = nil, neverUpscalesContent: Bool = false) {
+         expandedCanvas: ImageSize? = nil, photoQuad: [CGPoint]? = nil,
+         neverUpscalesContent: Bool = false) {
         self.canvas = canvas
         self.content = content
         self.drawnRect = drawnRect
@@ -759,6 +765,7 @@ public final class RenderResult {
         self.frameInCanvas = frameInCanvas ?? content
         self.frameOrigin = frameOrigin
         self.expandedCanvas = expandedCanvas
+        self.photoQuad = photoQuad
         self.neverUpscalesContent = neverUpscalesContent
     }
 }
@@ -1173,10 +1180,128 @@ private struct HealStatU {
 }
 
 /// Mirror of `Kernels/histogram_sample.metal`, byte for byte: the picture's rect inside the frame
-/// (in texels) and the stride each output texel jumps.
+/// (in texels), the stride each output texel jumps, and 372's photograph coverage.
 private struct HistSampleParams {
     var a: SIMD4<Float>   // origin.xy, size.xy
     var b: SIMD4<Float>   // step.xy, dstSize.xy
+    var c: SIMD4<Float>   // canvasSize.xy, coverage enabled, 0
+    var p0: SIMD4<Float>  // nx, ny, offset, 0 — canvas-normalised half-plane
+    var p1: SIMD4<Float>
+    var p2: SIMD4<Float>
+    var p3: SIMD4<Float>
+}
+
+/// **372 — the reverse gate.** `true` restores the pre-372 behaviour (the coverage test is a constant
+/// true, i.e. every texel of the picture rect is counted), so the acceptance can show the bin-0 spike
+/// coming back rather than claiming it would. The app never touches it; it ships `false`.
+public enum HistogramMatte372 {
+    nonisolated(unsafe) public static var ignoresPhotoQuad = false
+}
+
+/// 372 — the photograph's coverage in the canvas the sample reads, as four half-planes.
+///
+/// The quad arrives in canvas **pixels** (the photograph's four corners, from the same
+/// `CropGeometry` walk that placed S0's picture: `Plan` maps them through the owner's forward map
+/// and the plan's integer placement). It is normalised here, once, and shipped to the kernel; the
+/// kernel evaluates `dot(n, q) <= offset` per sample.
+///
+/// `nil` means "nothing to exclude": no quad, a degenerate one, or one that contains the whole
+/// canvas. That last case is every neutral document — its quad *is* the canvas rect — and it is why
+/// the pre-372 arithmetic and bytes are untouched there.
+private struct HistogramCoverage {
+    /// A value no photograph can hold (see `histogram_matte_sample()` in the kernel).
+    static let excludedSample = Float16(-65504)
+
+    let canvas: SIMD2<Float>
+    let planes: [SIMD4<Float>]
+
+    init?(quad: [CGPoint]?, canvas: ImageSize) {
+        guard let quad, quad.count == 4, !HistogramMatte372.ignoresPhotoQuad else { return nil }
+        let w = Float(max(canvas.width, 1)), h = Float(max(canvas.height, 1))
+        let points = quad.map { SIMD2<Float>(Float($0.x) / w, Float($0.y) / h) }
+        // The quad is convex (a rectangle under a rotation and a homography), so it is the
+        // intersection of its four edges. The interior side is resolved from the centroid, which
+        // makes the winding irrelevant (a flip mirrors the order).
+        var cx: Float = 0, cy: Float = 0
+        for p in points { cx += p.x; cy += p.y }
+        let centre = SIMD2<Float>(cx / 4, cy / 4)
+        var built: [SIMD4<Float>] = []
+        for i in 0..<4 {
+            let a = points[i], b = points[(i + 1) % 4]
+            let ex = b.x - a.x, ey = b.y - a.y
+            let len = (ex * ex + ey * ey).squareRoot()
+            guard len > 1e-12 else { return nil }
+            var n = SIMD2<Float>(ey / len, -ex / len)
+            if n.x * (centre.x - a.x) + n.y * (centre.y - a.y) > 0 {
+                n = -n
+            }
+            // A millionth of the canvas is sub-pixel at every render size; it keeps a sample whose
+            // centre sits *on* the photograph's edge inside, so the boundary loses no pixels.
+            built.append(SIMD4<Float>(n.x, n.y, n.x * a.x + n.y * a.y + 1e-6, 0))
+        }
+        // If every corner of the canvas is inside, every sample is: the pre-372 path, exactly.
+        let canvasCorners = [SIMD2<Float>(0, 0), SIMD2<Float>(1, 0),
+                             SIMD2<Float>(1, 1), SIMD2<Float>(0, 1)]
+        let containsCanvas = canvasCorners.allSatisfy { c in
+            built.allSatisfy { c.x * $0.x + c.y * $0.y <= $0.z }
+        }
+        guard !containsCanvas else { return nil }
+        self.canvas = SIMD2<Float>(w, h)
+        self.planes = built
+    }
+
+    func params(origin: SIMD4<Float>, step: SIMD4<Float>) -> HistSampleParams {
+        HistSampleParams(a: origin, b: step,
+                         c: SIMD4<Float>(canvas.x, canvas.y, 1, 0),
+                         p0: planes[0], p1: planes[1], p2: planes[2], p3: planes[3])
+    }
+
+    /// The readback still contains the excluded texels (written as `excludedSample`, which lands in
+    /// bin 0 of every series and in `clippedLow`). Remove exactly those samples from the measured
+    /// counts, so the plot is the photograph's distribution and `sampleCount` is the number of
+    /// photograph samples — "not counted in any bin", not "counted as black".
+    ///
+    /// The sentinel is a value the photograph cannot produce, so it is counted from the bytes rather
+    /// than re-deriving the geometry on the CPU: the GPU's decision and this subtraction cannot
+    /// disagree by even one sample.
+    func removingExcludedSamples(from histogram: Histogram, rgba: [Float16],
+                                 width: Int, rect: ImageRect) -> Histogram {
+        var excluded = 0
+        for y in rect.y..<rect.maxY {
+            let row = y * width
+            for x in rect.x..<rect.maxX where rgba[(row + x) * 4] == Self.excludedSample {
+                excluded += 1
+            }
+        }
+        guard excluded > 0 else { return histogram }
+
+        let rawCount = Double(histogram.sampleCount)
+        let realCount = Double(max(histogram.sampleCount - excluded, 1))
+        func fixed(_ channel: HistogramChannel) -> HistogramChannel {
+            var bins = channel.bins
+            if !bins.isEmpty { bins[0] = max(0, bins[0] - excluded) }
+            let lowCount = (channel.clippedLow * rawCount).rounded() - Double(excluded)
+            return HistogramChannel(
+                bins: bins, hdrBins: channel.hdrBins,
+                clippedHigh: channel.clippedHigh * rawCount / realCount,
+                clippedCeiling: channel.clippedCeiling * rawCount / realCount,
+                clippedLow: max(0, lowCount) / realCount)
+        }
+        return Histogram(binCount: histogram.binCount,
+                         sampleCount: histogram.sampleCount - excluded,
+                         canvas: histogram.canvas, roi: histogram.roi,
+                         sampleSize: histogram.sampleSize, primaries: histogram.primaries,
+                         headroom: histogram.headroom,
+                         red: fixed(histogram.red), green: fixed(histogram.green),
+                         blue: fixed(histogram.blue), luma: fixed(histogram.luma))
+    }
+}
+
+/// The parameters of a sample with **no** coverage test — the pre-372 uniform, zero for the planes.
+private func uncoveredSampleParams(origin: SIMD4<Float>, step: SIMD4<Float>)
+    -> HistSampleParams {
+    HistSampleParams(a: origin, b: step, c: SIMD4<Float>(1, 1, 0, 0),
+                     p0: .zero, p1: .zero, p2: .zero, p3: .zero)
 }
 
 /// 080 — mirror of `CompareParams` in `s5_before_after.metal`, byte for byte.
@@ -1839,6 +1964,13 @@ public final class RenderGraph {
         /// result so a photo-switch trace can say "the first frame was 90 %, not the canvas" without
         /// re-deriving the plan.
         let expandedCanvas: ImageSize?
+        /// 372 — the **photograph's four corners in this canvas' pixels**, top-left, clockwise from
+        /// the picture's own top-left. They are the same four corners `CropGeometry.photoQuad()`
+        /// names, pushed through the geometry owner's own forward map and then through the plan's
+        /// integer placement — the numbers S0 is handed — so the sample kernel's coverage and the
+        /// pixels S0 drew cannot describe two different quadrilaterals. `nil` only on a degenerate
+        /// document (nothing was laid out).
+        let photoQuad: [CGPoint]?
 
         /// Seven stages, or nine when masks are active. Driven by the key set, so "does this
         /// document have masks" has exactly one answer on the whole render path.
@@ -2113,6 +2245,48 @@ public final class RenderGraph {
                "the picture's rect \(drawnRect) left the canvas \(canvas)")
         assert(canvas.width > 0 && canvas.height > 0, "a canvas with no pixels")
 
+        // 372 — the photograph's quad **in this canvas**, for the histogram's coverage test. The four
+        // corners of the picture S0 samples go through the transform's own S1 → S3 map, then through
+        // **the plan's integer placement** (`frameSize`, `origin`, `frameOrigin` — the same numbers
+        // S0 is handed), not through `sourceToView`'s continuous letterbox: the half-pixel rounding of
+        // the canvas origin is exactly where a continuous quad would leave a sliver of `000000`
+        // inside the photograph's edge (14 samples at 15° on a 1200×800 fixture).
+        //
+        // At a neutral document this is the canvas rect (the coverage test then disables itself),
+        // which is what keeps those bytes.
+        let exportGrid = canvasGeometry.canvas(.export)
+        let s3Inset = canvasGeometry.canvasInset(options.canvasRole)
+        let quadScaleX = Double(frameSize.x) / Double(max(exportGrid.width, 1))
+        let quadScaleY = Double(frameSize.y) / Double(max(exportGrid.height, 1))
+        let quadShift = SIMD2<Double>(Double(origin.x - frameOrigin.x),
+                                      Double(origin.y - frameOrigin.y))
+        let photoCorners = [(0.0, 0.0),
+                            (Double(orientedSource.width), 0.0),
+                            (Double(orientedSource.width), Double(orientedSource.height)),
+                            (0.0, Double(orientedSource.height))]
+        let photoQuad: [CGPoint]
+        if let pc = canvasGeometry.exportPerspectiveCanvas {
+            // 246's composed map is the one S0 evaluates with `p.h`: photo-normalised → canvas-
+            // normalised of the **export AABB**, whose extent is `pc.extent`. S0's `f.xy` is that
+            // extent at `plan.imageScale`, so the canvas pixels are one multiply, not the integer
+            // `ImageSize` the document role allocates.
+            let size = SIMD2<Double>(pc.extent.width, pc.extent.height)
+                * (scale * Double(kx))
+            photoQuad = photoCorners.map { corner in
+                let p = PerspectiveMap.apply(pc.forward,
+                                             x: corner.0 / Double(orientedSource.width),
+                                             y: corner.1 / Double(orientedSource.height))
+                return CGPoint(x: p.x * size.x + quadShift.x, y: p.y * size.y + quadShift.y)
+            }
+        } else {
+            photoQuad = photoCorners.map { corner in
+                let s3 = transform.s1ToS3 * SIMD3<Double>(corner.0, corner.1, 1)
+                let frameX = (s3.x - s3Inset.x) * quadScaleX
+                let frameY = (s3.y - s3Inset.y) * quadScaleY
+                return CGPoint(x: frameX + quadShift.x, y: frameY + quadShift.y)
+            }
+        }
+
         // 097: the lens profile is a **file** fact that changes which source pixel each channel
         // reads, so it belongs in S0's geometry link when — and only when — we are the ones warping.
         // The Apple path (one plane) and every pre-097 file append nothing, keeping their keys.
@@ -2162,7 +2336,7 @@ public final class RenderGraph {
                     s0PureCA: untransformed && caOn && !lensWarp,
                     s0PureTurn: s0PureTurn && !lensWarp,
                     s0LensWarp: lensWarp, drawnRect: drawnRect, canvasRect: canvasRect,
-                    expandedCanvas: expandedCanvas)
+                    expandedCanvas: expandedCanvas, photoQuad: photoQuad)
     }
 
     // MARK: - S1's key (073)
@@ -2770,6 +2944,9 @@ public final class RenderGraph {
         // frame that changes the picture.
         var sampleGrid: (texture: MTLTexture, size: ImageSize)?
         var histogramCost = HistogramCost.zero
+        // 372 — the photograph's coverage, computed once for this frame: the same quad both the
+        // sampling dispatch below and the CPU's sentinel subtraction use.
+        let histogramCoverage = HistogramCoverage(quad: plan.photoQuad, canvas: plan.canvas)
         let gridEncodeStart = DispatchTime.now().uptimeNanoseconds
         if options.histogramSampleLongEdge > 0,
            let source = histogramSource, !plan.drawnRect.isEmpty {
@@ -2788,12 +2965,13 @@ public final class RenderGraph {
             enc.setTexture(texture, index: 1)
             // The same arithmetic `measureFrameHistogram` uses for its grid, so the two sample the
             // same texel of the same rect: `(i + 0.5) · step`, origin added once.
-            var params = HistSampleParams(
-                a: SIMD4(Float(picture.x), Float(picture.y),
-                         Float(picture.width), Float(picture.height)),
-                b: SIMD4(Float(Double(picture.width) / Double(grid.width)),
-                         Float(Double(picture.height) / Double(grid.height)),
-                         Float(grid.width), Float(grid.height)))
+            let origin = SIMD4<Float>(Float(picture.x), Float(picture.y),
+                                      Float(picture.width), Float(picture.height))
+            let step = SIMD4<Float>(Float(Double(picture.width) / Double(grid.width)),
+                                    Float(Double(picture.height) / Double(grid.height)),
+                                    Float(grid.width), Float(grid.height))
+            var params = histogramCoverage?.params(origin: origin, step: step)
+                ?? uncoveredSampleParams(origin: origin, step: step)
             enc.setBytes(&params, length: MemoryLayout<HistSampleParams>.stride, index: 0)
             dispatch(enc, pipeline, grid)
             enc.endEncoding()
@@ -2875,9 +3053,14 @@ public final class RenderGraph {
                     let pixels = edit.geometry.outputPixels(in: sourceSize)
                     let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
                     let binStart = DispatchTime.now().uptimeNanoseconds
-                    histogramPayload = Histogram.compute(sample, bins: bins, rect: nil,
-                                                         headroom: options.display.headroom)
-                        .relabelled(canvas: pixels, roi: own)
+                    var measured = Histogram.compute(sample, bins: bins, rect: nil,
+                                                     headroom: options.display.headroom)
+                    if let coverage = histogramCoverage {
+                        measured = coverage.removingExcludedSamples(
+                            from: measured, rgba: sample.rgba, width: sample.width,
+                            rect: ImageRect(x: 0, y: 0, width: sample.width, height: sample.height))
+                    }
+                    histogramPayload = measured.relabelled(canvas: pixels, roi: own)
                     histogramCost.binningNanoseconds =
                         Int(DispatchTime.now().uptimeNanoseconds - binStart)
                     histogramMilliseconds = histogramCost.totalMilliseconds
@@ -2918,7 +3101,7 @@ public final class RenderGraph {
                                 histogramCost: histogramCost,
                                 whiteBalanceGain: appliedWhiteBalance,
                                 frameInCanvas: plan.frameInCanvas, frameOrigin: plan.frameOrigin,
-                                expandedCanvas: plan.expandedCanvas,
+                                expandedCanvas: plan.expandedCanvas, photoQuad: plan.photoQuad,
                                 neverUpscalesContent: options.neverUpscalesContent)
         }
         return RenderResult(canvas: plan.canvas, content: plan.content,
@@ -2932,7 +3115,7 @@ public final class RenderGraph {
                             histogramCost: histogramCost,
                             whiteBalanceGain: appliedWhiteBalance,
                             frameInCanvas: plan.frameInCanvas, frameOrigin: plan.frameOrigin,
-                            expandedCanvas: plan.expandedCanvas,
+                            expandedCanvas: plan.expandedCanvas, photoQuad: plan.photoQuad,
                             neverUpscalesContent: options.neverUpscalesContent)
     }
 
@@ -3195,6 +3378,10 @@ public final class RenderGraph {
     ///     clipped to it (`PixelRect.intersected(in:)`), and one that misses the texture entirely
     ///     measures nothing rather than crashing.
     ///   - sampleLongEdge: long edge of the sampled grid; the default is the 0.29 MB one.
+    ///   - photoQuad: 372 — the photograph's four corners **in this texture's pixels**
+    ///     (`RenderResult.photoQuad`), top-left first. A sample outside that quad is excluded from
+    ///     every bin (the `000000` matte a straighten/keystone opens, 307's leftover). `nil` keeps
+    ///     the pre-372 measurement — every texel of `content` is a sample.
     ///   - headroom / primaries: what the frame was rendered with (`RenderOptions.display`), so the
     ///     ceiling ratio and the colour space the codes are in are labelled truthfully.
     ///
@@ -3209,10 +3396,11 @@ public final class RenderGraph {
                                  content: ImageRect? = nil,
                                  sampleLongEdge: Int = Histogram.frameSampleLongEdge,
                                  primaries: OutputPrimaries = .sRGB,
-                                 headroom: Double = 1) throws -> Histogram {
+                                 headroom: Double = 1,
+                                 photoQuad: [CGPoint]? = nil) throws -> Histogram {
         try measureFrameHistogram(fromFrame: texture, edit: edit, bins: bins, content: content,
                                  sampleLongEdge: sampleLongEdge, primaries: primaries,
-                                 headroom: headroom).histogram
+                                 headroom: headroom, photoQuad: photoQuad).histogram
     }
 
     /// The same measurement, with the receipts (`cost`, and the bytes that were counted).
@@ -3221,7 +3409,8 @@ public final class RenderGraph {
                                       content: ImageRect? = nil,
                                       sampleLongEdge: Int = Histogram.frameSampleLongEdge,
                                       primaries: OutputPrimaries = .sRGB,
-                                      headroom: Double = 1) throws -> FrameMeasurement {
+                                      headroom: Double = 1,
+                                      photoQuad: [CGPoint]? = nil) throws -> FrameMeasurement {
         let tStart = CFAbsoluteTimeGetCurrent()
         let canvas = ImageSize(width: texture.width, height: texture.height)
         guard texture.pixelFormat == .rgba16Float else {
@@ -3253,6 +3442,9 @@ public final class RenderGraph {
 
         let sample = try pool.obtain(grid)
         defer { pool.recycle(sample) }
+        // 372 — the photograph's coverage in the texture, from the caller's quad (the render's own
+        // `RenderResult.photoQuad`). `nil` keeps the pre-372 measurement exactly.
+        let coverage = HistogramCoverage(quad: photoQuad, canvas: canvas)
 
         let pipeline = try kernels.pipeline(file: "histogram_sample", function: "histogram_sample")
         guard let cb = queue.makeCommandBuffer() else { throw RenderError.commandBufferFailed }
@@ -3262,11 +3454,13 @@ public final class RenderGraph {
         enc.setTexture(sample, index: 1)
         // The step is a ratio of integers taken through `double` and narrowed once: the same frame
         // and grid choose the same source texels in every process (see the note above).
-        var params = HistSampleParams(
-            a: SIMD4(Float(rect.x), Float(rect.y), Float(rect.width), Float(rect.height)),
-            b: SIMD4(Float(Double(rect.width) / Double(grid.width)),
-                     Float(Double(rect.height) / Double(grid.height)),
-                     Float(grid.width), Float(grid.height)))
+        let origin = SIMD4<Float>(Float(rect.x), Float(rect.y),
+                                  Float(rect.width), Float(rect.height))
+        let step = SIMD4<Float>(Float(Double(rect.width) / Double(grid.width)),
+                                Float(Double(rect.height) / Double(grid.height)),
+                                Float(grid.width), Float(grid.height))
+        var params = coverage?.params(origin: origin, step: step)
+            ?? uncoveredSampleParams(origin: origin, step: step)
         enc.setBytes(&params, length: MemoryLayout<HistSampleParams>.stride, index: 0)
         dispatch(enc, pipeline, grid)
         enc.endEncoding()
@@ -3299,10 +3493,16 @@ public final class RenderGraph {
         // `computeFrameSample`, not `computeEncoded`: the sample's fourth channel is the shipped
         // path's luma (`srgbEncode(Σw·linear)`), which is what keeps the luma series on the same axis
         // as the plot it will be swapped with.
-        let histogram = Histogram.computeFrameSample(display, bins: binCount, rect: counted,
-                                                     headroom: headroom)
-            .relabelled(canvas: cropPixels,
-                        roi: ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height))
+        let histogram = coverage.map { coverage in
+            coverage.removingExcludedSamples(
+                from: Histogram.computeFrameSample(display, bins: binCount, rect: counted,
+                                                   headroom: headroom),
+                rgba: rgba, width: grid.width, rect: counted)
+        } ?? Histogram.computeFrameSample(display, bins: binCount, rect: counted,
+                                          headroom: headroom)
+        let corrected = histogram.relabelled(
+            canvas: cropPixels,
+            roi: ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height))
         let cpu = (CFAbsoluteTimeGetCurrent() - tCpu) * 1000
 
         var cost = FrameHistogramCost()
@@ -3311,7 +3511,7 @@ public final class RenderGraph {
         cost.gpuMilliseconds = gpu
         cost.cpuMilliseconds = cpu
         cost.wallMilliseconds = (CFAbsoluteTimeGetCurrent() - tStart) * 1000
-        return FrameMeasurement(histogram: histogram, sample: display, rect: counted, cost: cost)
+        return FrameMeasurement(histogram: corrected, sample: display, rect: counted, cost: cost)
     }
 
     /// The picture's rect inside a frame, when the caller did not say where it is.
