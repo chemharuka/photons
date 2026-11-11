@@ -493,38 +493,43 @@ public extension CropGeometry {
         if hasKeystoneQuad, !cropIsCanvasSpaced { return nil }
         let c = crop.clamped(allowsOutsideSource: true)
         guard c.width > 0, c.height > 0 else { return nil }
-        // **The frame's four corners at `t = 0`, and what one unit of `t` moves them by.**
+        // **§6.3 — the two spaces are two different questions, and only one of them is rotated.**
         //
-        // There are exactly two honest spellings and they are not interchangeable — this is where
-        // §5.2's 「两张网格」 lives:
+        //   · `.canvas` — the frame *is* a rectangle of the canvas: its four corners are
+        //     `documentQuad(of:)`'s, i.e. **turned** by θ exactly like the picture. Both sides of
+        //     「框 ⊆ 画布 ∩ 照片」 are then read on one grid, so conjugating the two regions' edges by
+        //     the frame's own affine map is the whole law (this branch is right, and stays untouched).
+        //   · `.source` — the frame is a rectangle of the photograph's **own pixel grid**: the overlay
+        //     draws it axis-aligned in photo-normalized coordinates (`R(−θ)` is the picture's, not the
+        //     frame's), so its legality is literally `0 ≤ left+t.x`, `right+t.x ≤ 1`,
+        //     `0 ≤ top+t.y`, `bottom+t.y ≤ 1` — four axis-aligned rows, **no rotation, no
+        //     `documentOrigin`, no canvas AABB**.
         //
-        //   · `.canvas` — the frame *is* a rectangle of the canvas, so `documentQuad` (which is the one
-        //     owner of that walk) gives it axis-aligned: `c × photoQuadExtent`.
-        //   · `.source` — the frame is a rectangle of the photograph's own pixel grid: the overlay's
-        //     `R(−θ)` + camera branch draws it axis-aligned, i.e. it is **not** turned. `documentQuad`
-        //     on purpose answers the *picture inside the frame* for this space (P → R applied to the
-        //     rect's corners), so reading the frame through it would constrain a rotated rect — a
-        //     9°-turned shape for an 9°-turned picture. Measured cost of that mismatch: the projection
-        //     declares a frame legal while its corner sits **17.3 px** outside the picture
-        //     (`CropMovePixelPress380Tests`, 9°/v0/`.source`). The frame's corners are the rect itself,
-        //     shifted into canvas pixels by the document origin — the same shift the picture's quad got.
-        let corners: [DocumentPoint]
-        let mapX: (x: Double, y: Double)
-        let mapY: (x: Double, y: Double)
-        if cropIsCanvasSpaced {
-            let quad = documentQuad(of: c)
-            guard quad.count == 4 else { return nil }
-            corners = quad
-            mapX = (x: (quad[1].x - quad[0].x) / c.width, y: (quad[1].y - quad[0].y) / c.width)
-            mapY = (x: (quad[3].x - quad[0].x) / c.height, y: (quad[3].y - quad[0].y) / c.height)
-        } else {
-            let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
-            let o = documentOrigin
-            corners = [(c.left, c.top), (c.right, c.top), (c.right, c.bottom), (c.left, c.bottom)]
-                .map { DocumentPoint($0.0 * w - o.x, $0.1 * h - o.y) }
-            mapX = (x: w, y: 0)
-            mapY = (x: 0, y: h)
+        // Reading the `.source` frame's corners as turned (`documentQuad`, or photo pixels shifted by
+        // `documentOrigin`) compares an **un-turned** box with a **turned** region: at θ = 9° the
+        // projection calls a frame legal while it sits 0.0394 (normalized, ≈ 236 px) outside the
+        // photograph, and never once reaches the boundary, so nothing ever freezes
+        // (`CropMovePixelPress380Tests` ⑪⑫ — measured before this branch existed).
+        if !cropIsCanvasSpaced {
+            // 「不出像素」 on → the photograph itself; off → the document canvas, which in
+            // photo-normalized coordinates is `documentCanvasCropRect` (a superset of `[0,1]²` at
+            // θ ≠ 0, `[0,1]²` at every right angle — so the two answers agree where they must).
+            let legal: CropRect = insidePhotoPixels ? .full : documentCanvasCropRect
+            return TranslationFeasibleSet380(constraints: [
+                HalfPlane380(ax: -1, ay: 0, b: c.left - legal.left),
+                HalfPlane380(ax: 1, ay: 0, b: legal.right - c.right),
+                HalfPlane380(ax: 0, ay: -1, b: c.top - legal.top),
+                HalfPlane380(ax: 0, ay: 1, b: legal.bottom - c.bottom),
+            ])
         }
+        // **The frame's four corners at `t = 0`, and what one unit of `t` moves them by** — `.canvas`
+        // only: there the frame and the picture are the same turn, so `documentQuad` (the one owner of
+        // that walk) gives the corners and its two edge vectors give `mapX` / `mapY`.
+        let quad = documentQuad(of: c)
+        guard quad.count == 4 else { return nil }
+        let corners: [DocumentPoint] = quad
+        let mapX = (x: (quad[1].x - quad[0].x) / c.width, y: (quad[1].y - quad[0].y) / c.width)
+        let mapY = (x: (quad[3].x - quad[0].x) / c.height, y: (quad[3].y - quad[0].y) / c.height)
         let extent = photoQuadExtent
         var regions = [DocumentRegion.axisAligned(width: extent.width, height: extent.height)]
         if insidePhotoPixels {

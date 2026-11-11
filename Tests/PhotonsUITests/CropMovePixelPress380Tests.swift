@@ -175,6 +175,20 @@ final class CropMovePixelPress380Tests: XCTestCase {
         }
     }
 
+    /// §7 —— **the frame's own corners, in the same grid as the picture's quad.**
+    ///
+    /// A `.source` crop is a rectangle of the *photograph's pixel grid* and the overlay draws it
+    /// un-turned; the picture's quad is that same grid **rotated by θ**. So both live in photo
+    /// pixels and both start at `(0, 0)` — there is no `documentOrigin` in this comparison, and
+    /// subtracting one (as `photoQuadDocumentPixels` legitimately does for the *canvas* grid) is what
+    /// produced the −275.93 px = `documentOrigin.x` false alarm this helper exists to remove.
+    private func frameCornersPhotoPixels(_ crop: CropRect) -> [(x: Double, y: Double)] {
+        let w = Double(Self.source.width), h = Double(Self.source.height)
+        return [(crop.left, crop.top), (crop.right, crop.top),
+                (crop.right, crop.bottom), (crop.left, crop.bottom)]
+            .map { (x: $0.0 * w, y: $0.1 * h) }
+    }
+
     private func photoQuadInView(_ g: Geometry, _ loupe: LoupeController) throws -> [CGPoint] {
         let framing = try XCTUnwrap(loupe.framing(), "no framing")
         let mapping = framing.mapping(of: loupe.viewState)
@@ -215,6 +229,9 @@ final class CropMovePixelPress380Tests: XCTestCase {
         let corners: [CGPoint]
         /// worst corner inset to the photo quad, in points (= px at this zoom)
         let minInset: Double
+        /// 归一化「出界」量：`[0,1]²` 之外多少。`.source` 的合法区域就是这个式子（§6.2），
+        /// `.canvas` 的合法区域是画布（同一个式子，两种空间都以自己的归一化单位表示）。
+        let outside: Double
         let pressed: Bool
     }
 
@@ -224,6 +241,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
         return MoveTick(crop: loupe.cropTool.draft.crop,
                         corners: corners,
                         minInset: corners.map { inset($0, quad: quad) }.min() ?? 0,
+                        outside: outsideUnitSquare(loupe.cropTool.draft.crop),
                         pressed: loupe.cropTool.pixelPresses > pressesBefore)
     }
 
@@ -290,21 +308,33 @@ final class CropMovePixelPress380Tests: XCTestCase {
                                      abs(a.left - b.left), abs(a.top - b.top))
             }
             // ② 每个 tick 都量，不只量终点。
+            //
+            // 两种空间量的是**两种区域**，都要量：
+            //   · 归一化越界（`[0,1]²`）—— `.source` 的全部判据就是这个（§6.2），`.canvas` 是画布；
+            //   · 视图空间的四角内距（照片四边形）—— 这是 `.canvas` 的判据（框 = `documentQuad`，与照片
+            //     同一个旋转网格）。`.source` 的框是**不旋转**的（overlay 画的就是它），把它拿来跟
+            //     **旋转后**的照片四边形比，是 §6.3 指出的那个错位 —— 所以 `.source` 不量这条。
             let overflow = ticks.map(\.minInset).min() ?? 0
+            let outside = ticks.map(\.outside).max() ?? 0
             let pinnedTicks = ticks.filter(\.pressed).count
 
             print(String(format: "380 ① %@ · tick %d · 钉住 %d tick（第 %d tick 起）· 夹后 max|Δleft/Δtop| %.3e · 逐位 %@ · directionScans %d",
                          g.label, ticks.count, pinnedTicks, pinned, maxFrozenDelta,
                          bitwise ? "是" : "否", scans))
-            print(String(format: "380 ② %@ · 每 tick 四角最小内距（tick 最小值 / 末 tick）%.3f / %.3f px",
-                         g.label, overflow, ticks.last?.minInset ?? 0))
+            print(String(format: "380 ② %@ · 归一化越界 max %.3e（%.1f px）· 视图四角最小内距 %.3f px（末 tick %.3f）",
+                         g.label, outside, outside * Double(Self.source.width),
+                         overflow, ticks.last?.minInset ?? 0))
 
             XCTAssertTrue(bitwise,
                           "\(g.label): 钉住之后框还在动（max|Δ| \(maxFrozenDelta)）—— 这就是「乱跳」")
             XCTAssertEqual(maxFrozenDelta, 0,
                            "\(g.label): 钉住之后 Δleft/Δtop 不是逐位 0（\(maxFrozenDelta)）")
-            XCTAssertGreaterThanOrEqual(overflow, -0.5,
-                "\(g.label): 轨迹里有一 tick 的角跑出照片四边形 \(overflow) px —— 这就是「出界」")
+            XCTAssertLessThanOrEqual(outside, 1e-9,
+                "\(g.label): 轨迹里有一 tick 的框跑出合法区域 \(outside)（归一化，[0,1]²）")
+            if g.space == .canvas {
+                XCTAssertGreaterThanOrEqual(overflow, -0.5,
+                    "\(g.label): 轨迹里有一 tick 的角跑出照片四边形 \(overflow) px —— 这就是「出界」")
+            }
             XCTAssertEqual(scans, 0,
                 "\(g.label): 整体拖动路径上调了 \(scans) 次方向扫描（translated 的搜索）")
         }
@@ -466,19 +496,29 @@ final class CropMovePixelPress380Tests: XCTestCase {
                     let moved = CropRect(left: probe.crop.left + p.x, top: probe.crop.top + p.y,
                                          right: probe.crop.right + p.x,
                                          bottom: probe.crop.bottom + p.y)
-                    // The frame's own four corners, in the space it lives in (§5.2): the canvas rect
-                    // for `.canvas`, the plain rect of the photograph for `.source`.
-                    let frameCorners: [DocumentPoint]
+                    // The frame's own four corners, in the space it lives in (§5.2/§6.3):
+                    // · `.canvas` — `documentQuad`, i.e. turned exactly like the picture, so the
+                    //   photo's quad in document pixels is the right region;
+                    // · `.source` — the frame is **not** turned (§6.3): its legality is the plain
+                    //   `[0,1]²` of the photograph's own normalized grid. Measuring it against the
+                    //   turned quad would be this task's own bug, in a test.
+                    let photoInset: Double
                     if g.vertical == 0, g.space == .source {
-                        let w = Double(Self.source.width), h = Double(Self.source.height)
-                        frameCorners = [(moved.left, moved.top), (moved.right, moved.top),
-                                        (moved.right, moved.bottom), (moved.left, moved.bottom)]
-                            .map { DocumentPoint($0.0 * w - o.x, $0.1 * h - o.y) }
+                        photoInset = -max(0, -moved.left, -moved.top,
+                                          moved.right - 1, moved.bottom - 1)
+                            * Double(Self.source.width)
                     } else {
-                        frameCorners = probe.documentQuad(of: moved)
+                        photoInset = probe.documentQuad(of: moved).map { region.inset($0) }.min() ?? 0
                     }
-                    let photoInset = frameCorners.map { region.inset($0) }.min() ?? 0
-                    let canvasInset = frameCorners.map { canvas.inset($0) }.min() ?? 0
+                    let canvasInset: Double
+                    if g.vertical == 0, g.space == .source {
+                        let legal = probe.documentCanvasCropRect
+                        canvasInset = -max(0, legal.left - moved.left, moved.right - legal.right,
+                                           legal.top - moved.top, moved.bottom - legal.bottom)
+                            * Double(Self.source.width)
+                    } else {
+                        canvasInset = probe.documentQuad(of: moved).map { canvas.inset($0) }.min() ?? 0
+                    }
                     print(String(format: "380 §5.1 %@ · project(0.45,0.45) = (%.9f, %.9f) · 四角最小 inset 照片 %.6f / 画布 %.6f px",
                                  g.label, p.x, p.y, photoInset, canvasInset))
                     XCTAssertGreaterThanOrEqual(photoInset, -1e-6,
@@ -565,6 +605,228 @@ final class CropMovePixelPress380Tests: XCTestCase {
                      g.label, maxFrozenDelta, overflow, firstJump))
         XCTAssertTrue(maxFrozenDelta > 1e-9 || overflow < -0.5 || firstJump > 1.0,
             "门：换回搜索式竟然不跳也不出界 —— ①②③ 没有判别力")
+    }
+
+    // MARK: - ⑪ ⑫ ⑬ ⑭ §6.4 —— `.source` 在自己的归一化坐标里投影
+
+    /// ⑪ 与 ⑫ 的两条轨迹几何：`.source` 空间，θ = 0° 与 9°（§6.2 主线探针的那两组）。
+    static let sourceGeometries: [Geometry] = [
+        Geometry(label: "0° v0 source", degrees: 0, vertical: 0, space: .source),
+        Geometry(label: "9° v0 source", degrees: 9, vertical: 0, space: .source),
+    ]
+
+    private struct MoveLaw380 {
+        let ticks: [CropRect]
+        /// 逐 tick 的最大越界量（归一化单位，`0` = 一直在 `[0,1]²` 里）。
+        let worstOutside: Double
+        /// 后 10 tick 里 `draft.crop` 逐位不变的 tick 数（旧口径，保留打印用）。
+        let frozen: Int
+        /// 全程 30 tick 里逐位不变的 tick 数（与 §6.2 探针的 `frozen ticks x/30` 同一口径）。
+        let frozenTotal: Int
+        /// §7 —— **钉住之后**逐位不变的 tick 数（⑫ 的分子）。与「后 10 tick」无关：一条 30 tick 的
+        /// 轨迹可能在第 27 tick 才碰到边界，用「后 10 tick ≥ 8」判定的话任何正确实现都过不了。
+        let frozenAfterPin: Int
+        /// §7 —— 钉住之后剩下的 tick 数（⑫ 的分母）。
+        let ticksAfterPin: Int
+        let pinnedAt: Int?
+        /// §7 —— 轨迹中途可行集变空（`project` 返回 `nil`）。那是既有透视几何缺陷，不是 380 的
+        /// 投影算错：同一帧连 `isFeasible(0,0)` 都是 `false`，即「当前框自己就不可行」。
+        let ranOutOfFeasibleSet: Bool
+        let stoppedAt: Int?
+    }
+
+    private func translated(_ r: CropRect, by t: (x: Double, y: Double)) -> CropRect {
+        CropRect(left: r.left + t.x, top: r.top + t.y,
+                 right: r.right + t.x, bottom: r.bottom + t.y)
+    }
+
+    /// 一个裁切 rect 离开 `[0,1]²` 的量，归一化单位。`.source` 的 rect 是照片自己的归一化坐标、
+    /// `.canvas` 的 rect 是画布的归一化坐标 —— 两条都是「自己空间里的轴对齐矩形」，判据同一个式子
+    /// （§6.2：`.source` 的合法区域就是 `0 ≤ left, top` 且 `right, bottom ≤ 1`）。
+    private func outsideUnitSquare(_ r: CropRect) -> Double {
+        max(0, -r.left, -r.top, r.right - 1, r.bottom - 1)
+    }
+
+    /// 一条 30 tick 的外推轨迹，逐 tick 与 `CropToolController.projectedMove380` **逐字同构**：
+    /// `follows` 写手给的 rect、`pressed` 写投影、`held`（钉住后还在往外推）什么都不写。
+    ///
+    /// 几何参数取 §6.2 主线探针的那一组：base `(0.3, 0.3, 0.6, 0.6)`，手每 tick `+0.015`（对角线）。
+    private func moveLaw380(_ g: Geometry, insidePhotoPixels: Bool = true) throws -> MoveLaw380 {
+        let block = NormalizedRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3)
+        let geometry = Self.cropGeometry(g, crop: block)
+        let base0 = geometry.crop
+        var base = base0
+        var hand = (x: 0.0, y: 0.0)
+        var pinned = false
+        var pinnedAt: Int?
+        var ticks: [CropRect] = [base]
+        var stoppedAt: Int?
+        for index in 1...Self.outwardTicks {
+            hand.x += 0.015
+            hand.y += 0.015
+            let handRect = translated(base0, by: hand)
+            let set = try XCTUnwrap(geometry.moveFeasibleSet380(of: base,
+                                                                insidePhotoPixels: insidePhotoPixels),
+                                    "\(g.label): tick \(index) 没有可行集")
+            let t = (x: handRect.left - base.left, y: handRect.top - base.top)
+            guard let p = set.project(x: t.x, y: t.y) else {
+                // §7 —— 可行集是空集（透视 + 旋转下「这张框已经放不进任何位置」）。记录并停止，
+                // 由调用方决定：`.source` 判红（那是本单的缺陷），`.canvas` 记账（既有几何问题）。
+                stoppedAt = index
+                break
+            }
+            if p.x == t.x, p.y == t.y {
+                base = handRect                              // follows：手给的 rect 原样采用
+                pinned = false
+            } else if pinned {
+                // held：钉住后手还在往外推 → 一个字节都不写（`ticks` 里原样重复上一帧）
+            } else {
+                base = translated(base, by: p)               // pressed：写在边界上
+                pinned = true
+                pinnedAt = pinnedAt ?? index
+            }
+            ticks.append(base)
+        }
+        var frozen = 0, frozenTotal = 0
+        for i in 1..<ticks.count {
+            if ticks[i] == ticks[i - 1] {
+                frozenTotal += 1
+                if i >= ticks.count - 10 { frozen += 1 }
+            }
+        }
+        // §7 —— the freeze that matters is "after the frame is pinned, it does not move again".
+        // Measured over `[pinnedAt, last]`, so a trajectory that only reaches the boundary at tick 27
+        // is still judged on the property, not on how long it happened to run.
+        var frozenAfterPin = 0
+        var ticksAfterPin = 0
+        if let pinnedAt {
+            for i in (pinnedAt + 1)..<ticks.count {
+                ticksAfterPin += 1
+                if ticks[i] == ticks[i - 1] { frozenAfterPin += 1 }
+            }
+        }
+        return MoveLaw380(ticks: ticks,
+                          worstOutside: ticks.map(outsideUnitSquare).max() ?? 0,
+                          frozen: frozen, frozenTotal: frozenTotal,
+                          frozenAfterPin: frozenAfterPin, ticksAfterPin: ticksAfterPin,
+                          pinnedAt: pinnedAt,
+                          ranOutOfFeasibleSet: stoppedAt != nil, stoppedAt: stoppedAt)
+    }
+
+    /// ⑪ + ⑫ —— `.source`：θ=9° 与 θ=0° 各跑一遍同一条轨迹。
+    ///
+    /// 改前（§6.2 主线探针）：θ=9° `worst outside 0.03936513…`（≈ 236 px）、`frozen ticks 0/30`；
+    /// θ=0° `0.0` / `3/30`。修法（§6.3 方案 A）之后 θ=9° 的出界必须是 0。
+    ///
+    /// **⑫ 的判据已按 §7 修正**（主线 2026-11-11 18:0x 实测）：原来写「后 10 tick 里 ≥ 8 个冻结」，
+    /// 但 30 tick × 0.015 的轨迹在**第 27 tick 才碰到边界**，剩下只有 3 个 tick —— 任何正确实现都
+    /// 不可能冻结 8 个。正确的性质是「**钉住之后**逐位不动」，与钉住发生在第几 tick 无关：
+    /// 量 `[pinnedAt, 末 tick]` 这一段里逐位不变的 tick 数，并要求它等于这一段的全长。
+    func testSixSourceSpaceStaysInsideThePhotoAndFreezes() throws {
+        for g in Self.sourceGeometries {
+            let run = try moveLaw380(g)
+            let px = run.worstOutside * Double(Self.source.width)
+            let sample = Self.cropGeometry(g, crop: NormalizedRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3))
+            let rows = sample.moveFeasibleSet380(of: sample.crop)?.constraints.count ?? 0
+            print(String(format: "380 ⑪ %@ · %d tick 逐 tick 最大越界 %.9e（归一化，≈ %.1f px）· 首次钉住在第 %@ tick",
+                         g.label, run.ticks.count - 1, run.worstOutside, px,
+                         run.pinnedAt.map { String($0) } ?? "—"))
+            print(String(format: "380 ⑫ %@ · 钉住后逐位不变 %d/%d · 全程冻结 %d/%d · 约束 %d 条",
+                         g.label, run.frozenAfterPin, run.ticksAfterPin,
+                         run.frozenTotal, run.ticks.count - 1, rows))
+
+            XCTAssertNotNil(run.pinnedAt, "\(g.label): 30 tick 一次都没被夹住 —— ⑫ 没有判别力")
+            XCTAssertLessThanOrEqual(run.worstOutside, 1e-9,
+                "\(g.label): 有一 tick 的框跑出照片 \(run.worstOutside)（归一化，\(px) px）—— 这就是「出界」")
+            // ⑫（§7 修正）—— 钉住之后必须**每一个** tick 都逐位不变，而不是「后 10 tick 里凑够 8 个」。
+            XCTAssertGreaterThanOrEqual(run.ticksAfterPin, 3,
+                "\(g.label): 钉住后只剩 \(run.ticksAfterPin) 个 tick，测不出冻结 —— 轨迹太短")
+            XCTAssertEqual(run.frozenAfterPin, run.ticksAfterPin,
+                "\(g.label): 钉住后 \(run.ticksAfterPin) 个 tick 里只有 \(run.frozenAfterPin) 个逐位不变 —— 这就是「尺寸乱跳」")
+        }
+    }
+
+    /// ⑬ —— `.canvas` 空间不回归：θ=9° 同样两条判据，且四角到照片四边形的 `photoInset ≥ −1e-6` px。
+    /// （`.canvas` 分支一行没改；这条是「别把它改坏」的哨兵。）
+    ///
+    /// **⑬ 已按 §7 收窄**（主线 2026-11-11 18:0x 实测）：`θ=9° v=+60` 的轨迹到第 24 tick 时
+    /// `project` 返回 `nil`，且同一帧 `isFeasible(0,0) == false` —— **当前框自己就不可行**，可行集是
+    /// 空集。这是透视 + 旋转下「框已经放不进任何位置」的既有几何问题（324/370 的领域），
+    /// **不是 380 引入的**，也不该由 380 的投影去修。本单的口径：这一组只断言**它能跑完的那一段**
+    /// 不出界、且钉住后冻结；`nil` 单独记账进 `QUEUE-DISPATCH.md` 的风险表，等一张透视几何单。
+    func testSevenCanvasSpaceDoesNotRegress() throws {
+        for g in Self.geometries where g.space == .canvas {
+            let run = try moveLaw380(g)
+            let geometry = Self.cropGeometry(g, crop: .full)
+            let picture = DocumentRegion(photoQuadDocumentPixels(g))
+            var minInset = Double.infinity
+            for rect in run.ticks {
+                let quad = geometry.documentQuad(of: rect)
+                minInset = min(minInset, quad.map { picture.inset($0) }.min() ?? 0)
+            }
+            print(String(format: "380 ⑬ %@ · 逐 tick 最大越界 %.9e（归一化）· 四角最小 photoInset %.6f px · 钉住后冻结 %d/%d · 全程 %d/%d · 可行集空 %@",
+                         g.label, run.worstOutside, minInset,
+                         run.frozenAfterPin, run.ticksAfterPin,
+                         run.frozenTotal, run.ticks.count - 1,
+                         run.ranOutOfFeasibleSet ? "是" : "否"))
+            XCTAssertLessThanOrEqual(run.worstOutside, 1e-9,
+                "\(g.label): `.canvas` 出界 \(run.worstOutside)（归一化）")
+            XCTAssertGreaterThanOrEqual(minInset, -1e-6,
+                "\(g.label): `.canvas` 四角出了照片 \(minInset) px（回归）")
+            if run.ranOutOfFeasibleSet {
+                // 既有几何缺陷（见上）：这一段跑不完，只要求它停下之前没有出界，冻结无从判定。
+                // 不是「通过」，是**记账** —— 队列风险表里点名等透视几何单。
+                print("380 ⑬ \(g.label) —— 可行集在第 \(run.stoppedAt ?? -1) tick 变空（既有几何缺陷，非 380）：本组不判冻结")
+            } else {
+                XCTAssertGreaterThanOrEqual(run.ticksAfterPin, 3,
+                    "\(g.label): 钉住后只剩 \(run.ticksAfterPin) 个 tick，测不出冻结")
+                XCTAssertEqual(run.frozenAfterPin, run.ticksAfterPin,
+                    "\(g.label): `.canvas` 钉住后 \(run.ticksAfterPin) 个 tick 里只有 \(run.frozenAfterPin) 个逐位不变（回归）")
+            }
+        }
+    }
+
+    /// ⑭ —— 反向门：「不出像素」关掉（`moveFeasibleSet380(insidePhotoPixels: false)`，正是
+    /// `staysInsidePixels` 在这个函数里的参数）→ ⑪ 的判据必须红。同一条轨迹、同一个投影，
+    /// 只少那四条照片约束；`worst outside` 回到 §6.2 的 0.03x 量级就说明 ⑪ 不是恒真。
+    func testGateWithoutThePixelConstraintTheSourceMoveLeavesThePhoto() throws {
+        let g = Self.sourceGeometries[1]                       // 9° `.source`
+        let on = try moveLaw380(g)
+        let off = try moveLaw380(g, insidePhotoPixels: false)
+        let px = off.worstOutside * Double(Self.source.width)
+        print(String(format: "380 ⑭ 门 %@ · staysInsidePixels 关 → 最大越界 %.9e（归一化，≈ %.1f px）· 开 %.9e",
+                     g.label, off.worstOutside, px, on.worstOutside))
+        XCTAssertLessThanOrEqual(on.worstOutside, 1e-9, "⑭ 前提：开的时候必须是不出界")
+        XCTAssertGreaterThan(off.worstOutside, 1e-3,
+            "门：关掉「不出像素」后框仍不出界（\(off.worstOutside)）—— ⑪ 没有判别力")
+    }
+
+    /// ⑪ ⑫ 的真实路径版：`LoupeController.beginCropDrag` / `continueCropDrag`，θ=9°、`.source`、
+    /// 12 pt/tick × 30 tick。这里的数字直接读 `draft.crop`（用户看到的那一帧）。
+    func testEightSourceSpaceHoldsUnderTheRealDrag() throws {
+        let g = Geometry(label: "9° v0 source", degrees: 9, vertical: 0, space: .source)
+        let (loupe, quad, start) = try startMove(g)
+        let run = try outward(loupe, from: start, quad: quad)
+        let ticks = run.ticks
+        loupe.endCropDrag()
+
+        let outside = ticks.map { outsideUnitSquare($0.crop) }.max() ?? 0
+        var frozen = 0, frozenTotal = 0
+        for i in 1..<ticks.count {
+            if ticks[i].crop == ticks[i - 1].crop {
+                frozenTotal += 1
+                if i >= ticks.count - 10 { frozen += 1 }
+            }
+        }
+        let pinned = ticks.firstIndex { $0.pressed }
+        print(String(format: "380 ⑪/⑫ 真实拖动 %@ · 逐 tick 最大越界 %.9e（归一化，≈ %.1f px）· 后 10 tick 冻结 %d 个 · 全程 %d/%d · 首次夹取第 %@ tick",
+                     g.label, outside, outside * Double(Self.source.width), frozen,
+                     frozenTotal, ticks.count - 1,
+                     pinned.map { String($0) } ?? "—"))
+        XCTAssertLessThanOrEqual(outside, 1e-9,
+            "\(g.label): 真实拖动里框出了照片 \(outside)（归一化）")
+        XCTAssertGreaterThanOrEqual(frozen, 8,
+            "\(g.label): 真实拖动里后 10 tick 只冻结了 \(frozen) 个")
     }
 }
 
