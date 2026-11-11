@@ -220,6 +220,16 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// source-anchored).
     public var healSpots: [HealSpot]
 
+    /// 365 — **hidden prototype switch**: linear-domain (scene-referred) luminance denoise.
+    ///
+    /// `0` (the default, and every document on disk) is the pre-365 frame **byte for byte**: no pass
+    /// is encoded, no key token is appended and the field is not written by `encode(to:)`. A value
+    /// above zero (`0…1`, the same travel as S3.9's 去噪 amount) runs the `s1_65_denoise` prototype
+    /// between S1.6 and S1.7. The field is deliberately **not** Codable: it is a switch the A/B tests
+    /// and the prototype's caller set on a document in memory, not a user setting, and keeping it out
+    /// of the JSON is what makes "off is byte-identical" a structural fact rather than a promise.
+    public var linearDenoiseLuma: Double
+
     /// 205 — **the keys this build does not know**, kept for the save.
     ///
     /// Shape: one entry per *level* of the document that had unknown keys. A top-level unknown key
@@ -258,6 +268,7 @@ public struct EditModel: Sendable, Equatable, Codable {
                 masks: [Mask] = [],
                 showMaskID: String? = nil,
                 healSpots: [HealSpot] = [],
+                linearDenoiseLuma: Double = 0,
                 forwardExtras: JSONValue.Object? = nil,
                 forwardCompatVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
@@ -277,6 +288,7 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.masks = masks
         self.showMaskID = showMaskID
         self.healSpots = healSpots
+        self.linearDenoiseLuma = linearDenoiseLuma
         self.forwardExtras = forwardExtras
         self.forwardCompatVersion = forwardCompatVersion
     }
@@ -363,6 +375,9 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.showMaskID = nil
         // 2026-10-28 (078 P0-1): a repair is an edit like any other, so 「参数清零」 clears it too.
         v.healSpots = []
+        // 365: the prototype denoise is an edit too, so the cleared document renders the pre-365
+        // frame; the field is not part of the document's JSON either way.
+        v.linearDenoiseLuma = 0
         return v
     }
 
@@ -408,6 +423,11 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// 117: does S1.9 exist for this document? Judged **by value** — `effects.dehaze != 0`. It is a
     /// separate stage at the end of the linear chain, so it has its own link and its own condition.
     public var hasDehaze: Bool { effects.hasDehaze }
+
+    /// 365 — does the hidden linear-domain denoise prototype exist for this document? Judged **by
+    /// value**, the same rule every conditional stage follows: at 0 the pass is not encoded at all,
+    /// no `;lindn=` token enters the key and the frame is the pre-365 frame bit for bit.
+    public var hasLinearDenoise: Bool { linearDenoiseLuma > 0 }
 
     /// 098: does S1.8 exist for this document? Judged **by value** — `light.contrast != 0` — exactly
     /// the way `hasDetailFX` judges S3.9. A document with contrast 0 keeps the pre-098 stage list, key
@@ -734,6 +754,10 @@ public struct EditModel: Sendable, Equatable, Codable {
             }
         }
         if curve != old.curve { s.insert(.curve) }
+        // 365 — the hidden linear denoise prototype is arithmetic between S1.6 and S1.7, so it
+        // dirties the curve link (and everything the chain derives from it). At 0 on both sides this
+        // is one Double comparison and no stage is reported, exactly as before.
+        if linearDenoiseLuma != old.linearDenoiseLuma { s.insert(.curve) }
         // 076: the color group is two stages now — `bands` is S3.6's, `vibrance`/`saturation` are
         // S3's — so a band drag must not report `.color` (S3 would re-run and produce the same pixels)
         // and a saturation drag must not report `.hsl` (S3.6 would re-run for nothing).
@@ -985,7 +1009,14 @@ public struct EditModel: Sendable, Equatable, Codable {
             return "con=\(k(light.contrast))"
 
         case .curve:
-            return curve.keyString
+            // 365 — the hidden linear-domain denoise prototype runs between S1.6 and this stage, so
+            // its amount has to move this link: a frame cached by the curve is a frame computed from
+            // whatever luma S1.65 produced. Appended **only when non-zero** (the `boff`/`car`
+            // discipline), so a document that never opened the prototype keeps its curve material —
+            // and the whole chain — byte for byte.
+            var m = curve.keyString
+            if linearDenoiseLuma > 0 { m += ";lindn=\(k(min(max(linearDenoiseLuma, 0), 1)))" }
+            return m
 
         case .color:
             // 076: **vibrance and saturation only.** The eight bands left this stage for S3.6, where they
