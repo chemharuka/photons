@@ -6382,9 +6382,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard generation == lowResRefreshGeneration else { return }  // a later write superseded it
         lowResRefreshArmed = false
         guard presenter != nil, autoRenderEnabled, let key = backdropKey else { return }
-        // The whole picture is already this document's and nothing is in flight: nothing to do
-        // (idempotent — a commit that did not move the geometry costs nothing).
-        if backdrop.key == key, backdrop.inFlight != key { return }
+        // The whole picture is already this document's, or a generation for this exact source is
+        // already on its way: nothing to do (idempotent — a commit that did not move the geometry
+        // costs nothing, and a render that is already running is the answer). Without the second
+        // half, the command path's immediate rebuild would be cancelled by the edit observer's own
+        // window and replaced by a second render.
+        if backdrop.key == key || backdrop.inFlight == key { return }
         // The held texture is another document's. Releasing it first is what makes a superseded
         // render refuse to adopt (it carries the old serial) and what keeps `backdropTexture(for:)`
         // from drawing the old picture behind the new frame.
@@ -6427,8 +6430,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 165: a command (⌘V / ⌘Z / ⇧⌘Z / a history-row jump) moved the document outside the pointer
     /// path. 039's rule for an *edit* is "mark it stale, the next pointer entry pays"; a command is
     /// different — the user is already looking at the result and did not move the pointer — so the
-    /// bottom image for the document on screen is rebuilt now, in one generation, through the same
-    /// two steps 144's settle uses (`invalidateBackdrop` + `backdropWanted` + `serveWantedBackdrop`).
+    /// bottom image for the document on screen is rebuilt now, in one generation: the same
+    /// `invalidateBackdrop` + `ensureLowResFullFrame` the 344 window runs, with the window closed on
+    /// the command's own turn instead of 0.25 s later.
     ///
     /// Only the photo on screen qualifies. A paste onto unopened photos writes their rows and names
     /// them in `assetIDs`; their backdrops do not exist yet and are made when they are opened
@@ -6441,10 +6445,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // A generation for this exact source is already on its way: it is the replacement.
         if backdrop.inFlight == key { return }
         guard backdrop.needsGeneration(for: key) else { return }
-        // 344 — one door. ⌘Z / ⇧⌘Z / ⌘V / a history jump are document writes like any other, so the
-        // rebuild goes through the same 0.25 s window the crop commit and the 透视 release use; no
-        // third spelling of "invalidate + arm + serve" can drift from it.
-        noteLowResFullFrameStale()
+        // 165 — a paste / undo / redo / history jump is a **command**, not a slider tick: the user is
+        // looking at the result and no pointer entry will come. 344 folded this path into the 0.25 s
+        // coalescing window, which put the replacement ~250 ms after the command — past 165's 200 ms
+        // contract and, worse, after the edit frame had already retired the old texture. Close the
+        // window now: a discrete command has nothing to coalesce. The edit observer's own window (it
+        // fires in the same turn) is superseded by this generation bump and becomes a no-op.
+        lowResRefreshGeneration &+= 1
+        closeLowResRefreshWindow(lowResRefreshGeneration)
     }
 
     /// 144: a frame landed for another source than the cached backdrop names.
@@ -6688,6 +6696,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.backdrop.fail(key, error: "\(reason), not the requested decode")
+                self.backdropStaleGraphRefusals += 1
+                self.backdropWanted = true
+            }
+            return
+        }
+        // 369 — the **white balance** is a decode input since 194, so the same rule applies to it: a
+        // graph still built from the pre-settle buffer must not be painted through the settled
+        // document and filed under the settled key (the "says B, shows A" shape). A preview request is
+        // the one exception by construction: its whole point is the target pair drawn as an S1 gain on
+        // the resident buffer, so its key carries `|source=preview` and the buffer is deliberately old.
+        if !key.digest.hasSuffix(Self.backdropPreviewMarker),
+           graph.bufferWhiteBalance != requested.whiteBalance {
+            let reason = "the frame graph is still balanced at \(graph.bufferWhiteBalance)"
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.backdrop.fail(key, error: "\(reason), not the settled \(requested.whiteBalance)")
                 self.backdropStaleGraphRefusals += 1
                 self.backdropWanted = true
             }

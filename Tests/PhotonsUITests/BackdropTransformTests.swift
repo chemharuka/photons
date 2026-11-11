@@ -585,9 +585,10 @@ final class BackdropTransformTests: XCTestCase {
 
     // MARK: - ④ (058) outside the picture is the matte, and the seam still ramps
 
-    /// **H2**: with the picture at half the canvas, the canvas outside it is `#0F0F0F` — the canvas
-    /// colour, three channels equal — not the picture's edge column, which is what `saturate()` in the
-    /// shader produced from 037 to 053.
+    /// **H2**: with the picture at half the canvas, the canvas outside it is the canvas matte —
+    /// `CanvasBackdrop.current` (`#202020` at the default stop since 315; `#0F0F0F` was the pre-315
+    /// constant) — three channels equal, not the picture's edge column, which is what `saturate()` in
+    /// the shader produced from 037 to 053.
     ///
     /// The same render also carries the seam: the two pixels **inside** the picture's edge are a ramp
     /// from the backdrop to the frame (the feather stays inside, where 037 put it), so the photograph
@@ -613,16 +614,18 @@ final class BackdropTransformTests: XCTestCase {
                                        backdropWindow: backdropWindow, into: target, linearize: false),
                       presenter.lastFailure ?? "the present pass failed")
 
-        let matte = Float(15.0 / 255.0)
+        let matte = Float(CanvasPresenter.CanvasMatte.displayEncoded)
         for (x, y) in [(0, 0), (255, 255), (255, 0), (0, 255), (10, 128), (246, 128), (128, 10),
                        (128, 246), (63, 63), (193, 193)] {
             let px = Self.pixelAt(target, x, y)
             XCTAssertEqual(px[0], matte, accuracy: 1.0 / 255,
-                           "outside the picture at (\(x), \(y)) must be #0F0F0F, not the edge column")
+                           "outside the picture at (\(x), \(y)) must be the canvas matte, not the edge column")
             XCTAssertEqual(px[1], px[0], accuracy: 1.0 / 255, "the matte is grey: green at (\(x), \(y))")
             XCTAssertEqual(px[2], px[0], accuracy: 1.0 / 255, "the matte is grey: blue at (\(x), \(y))")
-            // …and it is *not* the picture's edge, which for this gradient is 0.1 (25.5/255).
-            XCTAssertGreaterThan(abs(px[0] - 0.1), 0.03,
+            // …and it is *not* the picture's edge, which for this gradient is 0.1 (25.5/255). The
+            // separation is now 6.5 code values (the 315 matte is #202020), so the threshold is half
+            // of it.
+            XCTAssertGreaterThan(abs(px[0] - 0.1), 0.02,
                                  "(\(x), \(y)) is the picture's edge colour — 037's clamp, not the matte")
         }
 

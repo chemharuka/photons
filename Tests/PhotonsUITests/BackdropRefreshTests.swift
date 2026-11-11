@@ -133,7 +133,15 @@ final class BackdropRefreshTests: XCTestCase {
         XCTAssertTrue(waitFor {
             !loupe.isWhiteBalancePreviewActive && (loupe.lastFrame?.editRevision ?? 0) >= revision
         }, "the settled frame never replaced the preview")
-        XCTAssertTrue(settleBackdrop(loupe))
+        // 369 — since 194 the settled pair is a **decode** input, so the frame carrying the new
+        // revision can land before its buffer does. The backdrop refuses that graph (it would paint
+        // the old balance under the new digest) and re-arms itself; wait for the generation that names
+        // the settled document, not merely for the queue to drain.
+        let settledDigest = Histogram.editDigest(edited)
+        XCTAssertTrue(waitFor(60) {
+            loupe.backdrop.isIdle && loupe.lowResFullFrame?.digest == settledDigest
+        }, "the settled backdrop never named the settled document "
+           + "(last error: \(loupe.backdrop.lastError ?? "—"))")
         pump(0.05)
     }
 
@@ -184,7 +192,38 @@ final class BackdropRefreshTests: XCTestCase {
         XCTAssertEqual(loupe.backdropDigestForTesting, settledDigest)
         XCTAssertFalse(settledFrame.digest.hasSuffix(LoupeController.backdropPreviewMarker))
         XCTAssertFalse(settledFrame.texture === previewTexture)
-        let rebuilt = LoupeController.hash(settledFrame.texture)
+
+        // The settle may still be waiting on the full rung of the same document: a rebuild taken
+        // before that lands compares two sources (the 0.5 preview rung and the 1.0 rung), not two
+        // renders of one. Wait for the ladder to reach `DecodeLadder.fullScale`, for its frame to
+        // reach the canvas, and for the present log to stop moving, then take the reference from the
+        // picture that is actually on screen.
+        XCTAssertTrue(loupe.awaitPendingDevelopments(timeout: 60),
+                      "the settled document never finished developing")
+        XCTAssertTrue(waitFor(60) {
+            loupe.lastFrame?.decodeScale == DecodeLadder.fullScale && !loupe.viewportRenderInFlight
+        }, "the full-rung frame never landed")
+        XCTAssertTrue(loupe.awaitPendingDevelopments(timeout: 60))
+        var seen = loupe.presentRecords.count
+        var stableSince = Date()
+        let quietDeadline = Date().addingTimeInterval(15)
+        while Date() < quietDeadline {
+            pump(0.02)
+            if loupe.presentRecords.count != seen {
+                seen = loupe.presentRecords.count
+                stableSince = Date()
+            } else if Date().timeIntervalSince(stableSince) >= 0.4 {
+                break
+            }
+        }
+        loupe.backdrop.invalidate()
+        XCTAssertTrue(loupe.ensureLowResFullFrame(), "a released backdrop is exactly what this is for")
+        XCTAssertTrue(settleBackdrop(loupe))
+        let reference = try XCTUnwrap(loupe.lowResFullFrame)
+        XCTAssertEqual(reference.digest, settledDigest)
+        XCTAssertEqual(loupe.backdrop.lastRungScale, DecodeLadder.fullScale,
+                       "the reference must be the full-rung frame, not the preview rung")
+        let rebuilt = LoupeController.hash(reference.texture)
 
         // Byte-for-byte what a second rebuild from the same settled frame produces.
         loupe.backdrop.invalidate()
