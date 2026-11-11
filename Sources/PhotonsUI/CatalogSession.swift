@@ -1935,6 +1935,91 @@ public final class CatalogSession {
         }
     }
 
+    /// Remove one folder subtree from the library — 「从照片库移除此文件夹…」 (379).
+    ///
+    /// Same order as `deleteAssets`: the anchor's successor is decided from the order the user saw
+    /// **before** the rows go, then the transaction, then `reload()`. The folder selection that
+    /// pointed into the removed subtree is pruned in the same breath — `reload()` would otherwise
+    /// narrow the grid to a prefix no row carries any more while the left column has no row to click
+    /// back from. Nothing on disk is touched (see `Catalog.removeFolder`).
+    @discardableResult
+    public func removeFolder(rootID: String, path: String) -> DeleteReport? {
+        guard let catalog else { return nil }
+        let folder = AssetFilter.normalizedFolderPath(path)
+        let ids = (try? catalog.assetIDs(rootID: rootID, folderPath: path)) ?? []
+        guard !ids.isEmpty else { return nil }
+        pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
+                                                                removing: Set(ids),
+                                                                anchor: anchorID)
+        do {
+            let report = try catalog.removeFolder(rootID: rootID, path: path, thumbnails: thumbnailCache)
+            lastAvailabilityError = nil
+            // Drop the dead rows from the selection *before* the reload, so the query it runs is the
+            // one the user will see. A selection that loses every row goes back to 全部照片 — which
+            // is `selectedFolders == []`, the same state the 全部照片 row stores. Selections from
+            // **other roots** are untouched: removing `rootA/day2` is not removing `rootB/x`.
+            selectedFolders = Self.selectedFolders(selectedFolders, removing: rootID, folder: folder)
+            reload()
+            return report
+        } catch {
+            pendingAnchorSuccessor = nil
+            lastAvailabilityError = "\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Remove a whole source root from the library (root row → 「从照片库移除此文件夹…」).
+    ///
+    /// The photos go with it (FK cascade) and so does the root's row in the left column; the originals
+    /// on disk stay. Selections naming that root are dropped — a root that no longer exists cannot be
+    /// a filter.
+    @discardableResult
+    public func removeSourceRoot(id: String) -> DeleteReport? {
+        guard let catalog else { return nil }
+        // Every id under the root, not just the ones the current filter shows: the successor rule is
+        // about the order the user saw, and the removal is about the whole root.
+        let ids = (try? catalog.assetIDs(rootID: id, folderPath: "")) ?? []
+        pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
+                                                                removing: Set(ids),
+                                                                anchor: anchorID)
+        do {
+            let report = try catalog.removeSourceRoot(id: id, thumbnails: thumbnailCache)
+            lastAvailabilityError = nil
+            selectedFolders = Self.selectedFolders(selectedFolders, removing: id, folder: nil)
+            reload()
+            return report
+        } catch {
+            pendingAnchorSuccessor = nil
+            lastAvailabilityError = "\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Keep the selections that do not point into the removed subtree. `removedPath` is the removed
+    /// folder's canonical path; `nil` means **every photo of that root went** (the root row, or a
+    /// folder removal with an empty path), so every selection of that root is dead.
+    ///
+    /// A sub-selection of the removed folder (`day2/sub` when `day2` went) is inside the subtree just
+    /// as much as the folder itself, so the test is prefix-based and segment-safe — `day2x` is not
+    /// `day2`. Selections naming a **different root** are neither, and stay. A selection of the root
+    /// itself survives a *subfolder* removal: the root still holds its other photos. Pure, so the
+    /// rule can be asserted without a library.
+    static func selectedFolders(_ folders: [FolderSelection], removing rootID: String,
+                                folder removedPath: String?) -> [FolderSelection] {
+        folders.filter { folder in
+            guard folder.rootId == rootID else { return true }
+            guard let removedPath else { return false }
+            guard let path = folder.normalizedPath else { return true }
+            return path != removedPath && !path.hasPrefix(removedPath + "/")
+        }
+    }
+
+    /// The count the confirmation sheet prints: one `COUNT(*)` over the folder subtree (or the root),
+    /// never a full id read — a ten-thousand-photo folder must open its dialog instantly.
+    public func folderAssetCount(rootID: String, path: String) -> Int {
+        (try? catalog?.folderAssetCount(rootID: rootID, folderPath: path)) ?? 0
+    }
+
     /// What 「移出并删除…」 did, in the user's terms.
     public struct RemovalOutcome: Sendable, Equatable {
         /// What the row transaction removed (table counts — the same shape `DeleteReport` always had).

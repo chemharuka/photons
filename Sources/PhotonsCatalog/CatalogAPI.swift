@@ -422,6 +422,46 @@ extension Catalog {
         return out
     }
 
+    /// The ids of every photo in one folder subtree — `rel_path == path` or `path/…` — in the order
+    /// the grid shows them (`capture_time DESC, id`).
+    ///
+    /// The path is **data**, never SQL text: `100%_raw` is a real folder name in the tests, so both
+    /// the equality and the prefix test are bound, and the prefix is the same segment-safe
+    /// `instr(rel_path, path || '/') = 1` the folder filter uses (it cannot swallow `day2x/` and
+    /// cannot be fooled by `_`/`%`). An empty path is the root itself: every row under that root,
+    /// which is also what `FolderSelection.normalizedPath == nil` means.
+    public func assetIDs(rootID: String, folderPath: String) throws -> [String] {
+        let (where_, args) = Self.folderPredicate(rootID: rootID, folderPath: folderPath)
+        return try dbQueue.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT id FROM assets WHERE \(where_) ORDER BY capture_time DESC, id
+                """, arguments: StatementArguments(args))
+        }
+    }
+
+    /// The same subtree as a number: one `COUNT(*)` — what the confirmation sheet prints **before**
+    /// anybody reads ten thousand ids off disk.
+    public func folderAssetCount(rootID: String, folderPath: String) throws -> Int {
+        let (where_, args) = Self.folderPredicate(rootID: rootID, folderPath: folderPath)
+        return try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM assets WHERE \(where_)",
+                             arguments: StatementArguments(args)) ?? 0
+        }
+    }
+
+    /// `(WHERE clause, bound values)` shared by the count and the id list, so the number the sheet
+    /// promised and the rows that get deleted cannot describe different sets. `deleted = 0` is the
+    /// same population `folders()` counts, so the number in the menu title equals the number on the
+    /// row the user right-clicked.
+    private static func folderPredicate(rootID: String, folderPath: String)
+        -> (sql: String, args: [any DatabaseValueConvertible]) {
+        guard let path = AssetFilter.normalizedFolderPath(folderPath) else {
+            return ("source_root_id = ? AND deleted = 0", [rootID])
+        }
+        return ("source_root_id = ? AND deleted = 0 AND (rel_path = ? OR instr(rel_path, ?) = 1)",
+                [rootID, path, path + "/"])
+    }
+
     /// Fold several roots' trees into one, summing equal paths. Only `folders(rootId: nil)` needs it.
     static func merge(_ grouped: [String: [FolderNode]]) -> [FolderNode] {
         var direct: [String: Int] = [:]

@@ -1354,6 +1354,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     /// The album row the menu is being opened on (`nil` = the section header or blank space).
     private var menuAlbumID: String?
+    /// 379 — the folder/root row the menu is being opened on (`nil` = 全部照片, an album, or blank space).
+    private var menuFolderTarget: FolderRemovalTarget?
+
+    /// The row a menu update should act on when there is no real click. AppKit owns `clickedRow`
+    /// and a headless test cannot set it, so the acceptance test pins the row here (379 ⑩).
+    public var menuRowOverride: Int?
+
+    /// The left column's right-click menu — the same object AppKit opens, exposed so a test can drive
+    /// `menuNeedsUpdate` instead of synthesising a right-click (379 ⑩).
+    public var sourceTreeMenu: NSMenu { albumSectionMenu }
 
     private func configureAlbumMenu() {
         sourcesOutline.menu = albumSectionMenu
@@ -1362,9 +1372,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === albumSectionMenu else { return }
         menu.removeAllItems()
-        let row = sourcesOutline.clickedRow
+        let row = menuRowOverride ?? sourcesOutline.clickedRow
         let item = row >= 0 ? sourcesOutline.item(atRow: row) as? FolderTreeItem : nil
         menuAlbumID = item?.isAlbum == true ? item?.albumID : nil
+        // 379: 文件夹行与根行是「磁盘上的一棵子树」，菜单里多一条移除；其它 kind 不出现。
+        menuFolderTarget = item.flatMap { node in
+            guard node.kind == .folder || node.kind == .root, let rootID = node.rootID else { return nil }
+            return FolderRemovalTarget(rootID: rootID,
+                                       path: node.kind == .root ? "" : node.path,
+                                       displayName: node.title)
+        }
 
         let new = NSMenuItem(title: "新建相册…", action: #selector(albumMenuNew), keyEquivalent: "")
         new.target = self
@@ -1396,6 +1413,110 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             remove.isEnabled = hasSelection
             menu.addItem(remove)
         }
+
+        if let target = menuFolderTarget {
+            menu.addItem(.separator())
+            // 张数用 COUNT(*)：一个上万张的子树也必须立刻弹出菜单，不能为了标题先捞一遍 id。
+            let count = session?.folderAssetCount(rootID: target.rootID, path: target.path) ?? 0
+            let remove = NSMenuItem(title: FolderRemovalText.menuTitle(name: target.displayName, count: count),
+                                    action: #selector(folderMenuRemove(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = target
+            remove.isEnabled = count > 0     // 空文件夹没有可移除的照片
+            menu.addItem(remove)
+        }
+    }
+
+    // MARK: 文件夹的右键菜单（379 「从照片库移除此文件夹…」）
+
+    /// The words this verb shows — one copy, so the menu title and the alert cannot disagree.
+    public enum FolderRemovalText {
+        public static let confirmButton = "移除"
+        public static let cancelButton = "取消"
+
+        public static func confirmTitle(name: String) -> String {
+            "从照片库移除「\(name)」？"
+        }
+
+        public static func confirmMessage(count: Int) -> String {
+            "\(grouped(count)) 张照片将从照片库移除。磁盘上的原文件不会被删除，\n该操作不能撤销（需要重新导入才能找回）。"
+        }
+
+        /// `从照片库移除「day2」（1,234 张）…` — the count is what the row shows, so the menu can be
+        /// trusted without opening it.
+        public static func menuTitle(name: String, count: Int) -> String {
+            "从照片库移除「\(name)」（\(grouped(count)) 张）…"
+        }
+
+        /// `1234` → `1,234`. Grouping by hand, not through `NumberFormatter`: the menu title is
+        /// asserted in tests and must not change with the machine's locale.
+        public static func grouped(_ count: Int) -> String {
+            let digits = String(abs(count))
+            var out = ""
+            for (i, ch) in digits.enumerated() {
+                if i > 0, (digits.count - i) % 3 == 0 { out.append(",") }
+                out.append(ch)
+            }
+            return count < 0 ? "-" + out : out
+        }
+    }
+
+    /// One folder/root subtree the menu can remove: identity is `(rootID, path)`, exactly the
+    /// `FolderSelection` identity the tree highlights with. `path == ""` is the root's own row.
+    public struct FolderRemovalTarget: Sendable, Equatable {
+        public var rootID: String
+        public var path: String
+        public var displayName: String
+        public init(rootID: String, path: String, displayName: String) {
+            self.rootID = rootID
+            self.path = path
+            self.displayName = displayName
+        }
+        /// The root row: removing it deletes `source_roots` (photos follow by FK cascade).
+        public var isRoot: Bool { path.isEmpty }
+    }
+
+    /// The alert 「从照片库移除…」 shows — built separately from running it, so the acceptance can
+    /// assert the default button and the sentence without a modal window (379 ⑪).
+    public func folderRemovalAlert(for target: FolderRemovalTarget, count: Int) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = FolderRemovalText.confirmTitle(name: target.displayName)
+        alert.informativeText = FolderRemovalText.confirmMessage(count: count)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: FolderRemovalText.confirmButton)
+        alert.addButton(withTitle: FolderRemovalText.cancelButton)
+        // 默认按钮是「取消」：回车不删除。The destructive verb is the one the user has to click.
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert
+    }
+
+    /// True only when the user pressed 移除. Cancelling (button, Escape, closing) changes nothing.
+    public func folderRemovalPrompt(_ target: FolderRemovalTarget, _ count: Int) -> Bool {
+        folderRemovalAlert(for: target, count: count).runModal() == .alertFirstButtonReturn
+    }
+
+    /// The verb itself, after the user has said yes: one transaction, then a redraw. Split out from
+    /// the menu action so the acceptance can drive the whole path (confirm → remove → redraw) with a
+    /// stubbed confirmation instead of a modal window.
+    @discardableResult
+    public func removeFolderFromLibrary(_ target: FolderRemovalTarget) -> DeleteReport? {
+        guard let session else { return nil }
+        let report = target.isRoot
+            ? session.removeSourceRoot(id: target.rootID)
+            : session.removeFolder(rootID: target.rootID, path: target.path)
+        refresh()
+        return report
+    }
+
+    @objc private func folderMenuRemove(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? FolderRemovalTarget, let session else { return }
+        // The confirmation's number is a `COUNT(*)`, read *once* and then used by the alert; the
+        // removal itself re-reads the ids only after the user has said yes.
+        let count = session.folderAssetCount(rootID: target.rootID, path: target.path)
+        guard count > 0 else { return }
+        guard folderRemovalPrompt(target, count) else { return }
+        removeFolderFromLibrary(target)
     }
 
     @objc private func albumMenuNew() {

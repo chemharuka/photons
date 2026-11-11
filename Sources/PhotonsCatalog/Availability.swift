@@ -335,9 +335,73 @@ extension Catalog {
     public func rowCount(_ table: String, assetIDs: [String], keyColumn: String = "asset_id") throws -> Int {
         guard !assetIDs.isEmpty else { return 0 }
         return try dbQueue.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table) WHERE \(keyColumn) IN (\(Self.marks(assetIDs.count)))",
-                             arguments: StatementArguments(assetIDs)) ?? 0
+            try Self.count(table, assetIDs: assetIDs, in: db, keyColumn: keyColumn)
         }
+    }
+
+    // MARK: folder / root removal (379)
+
+    /// Remove one folder **subtree** from the library: `day2` takes `day2` and `day2/sub/…` with it.
+    ///
+    /// The originals on disk are never touched — this is the same verb as 「移出照片库」
+    /// (`deleteAssets`), reached from a folder row instead of a photo selection. Everything the
+    /// cascade promises (history, metadata, keywords, album entries, quarantine rows, thumbnails) is
+    /// `deleteAssets`' job, deliberately **not** a second copy of that SQL: one implementation, one
+    /// place a future satellite table has to be added to.
+    ///
+    /// The folder row itself needs no bookkeeping: `folderNodes` scans `rel_path`, so with the photos
+    /// gone the row is not drawn any more.
+    @discardableResult
+    public func removeFolder(rootID: String, path: String, thumbnails: ThumbnailCache? = nil) throws -> DeleteReport {
+        let ids = try assetIDs(rootID: rootID, folderPath: path)
+        guard !ids.isEmpty else { return DeleteReport() }
+        return try deleteAssets(ids: ids, thumbnails: thumbnails)
+    }
+
+    /// Remove a whole source root: its `source_roots` row, and every photo under it **by FK cascade**
+    /// (`assets.source_root_id … ON DELETE CASCADE`), which in turn cascades the four satellite
+    /// tables. The originals on disk stay where they are, like every other removal in this file.
+    ///
+    /// The cascade reports no per-table count, so the report is read *before* the row goes: ids,
+    /// content hashes (the thumbnails are cleaned after the commit, from these) and the satellite
+    /// counts. `develop_quarantine` has no foreign key on purpose (evidence must survive a repair
+    /// pass), so its rows are deleted explicitly — the user said this entry is gone, which is the
+    /// same rule `deleteAssets` follows.
+    @discardableResult
+    public func removeSourceRoot(id: String, thumbnails: ThumbnailCache? = nil) throws -> DeleteReport {
+        var report = DeleteReport()
+        var doomed: [(contentHash: String, developJSON: String)] = []
+        try dbQueue.write { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, content_hash, develop_json FROM assets WHERE source_root_id = ?
+                """, arguments: [id])
+            let ids: [String] = rows.map { $0["id"] }
+            doomed = rows.map { ($0["content_hash"], $0["develop_json"]) }
+            report.assets = ids.count
+            if !ids.isEmpty {
+                report.history = try Self.count("asset_history", assetIDs: ids, in: db)
+                report.metadata = try Self.count("asset_metadata", assetIDs: ids, in: db)
+                report.keywords = try Self.count("photo_keywords", assetIDs: ids, in: db)
+                report.albumEntries = try Self.count("album_assets", assetIDs: ids, in: db)
+                report.quarantine = try Self.delete("develop_quarantine", assetIDs: ids, in: db)
+            }
+            try db.execute(sql: "DELETE FROM source_roots WHERE id = ?", arguments: [id])
+        }
+        if let thumbnails {
+            for row in doomed {
+                report.thumbnailFiles += thumbnails.removeAll(contentHash: row.contentHash,
+                                                             developJSONs: [row.developJSON, "{}"])
+            }
+        }
+        return report
+    }
+
+    private static func count(_ table: String, assetIDs: [String], in db: Database,
+                              keyColumn: String = "asset_id") throws -> Int {
+        guard !assetIDs.isEmpty else { return 0 }
+        return try Int.fetchOne(db, sql: """
+            SELECT COUNT(*) FROM \(table) WHERE \(keyColumn) IN (\(marks(assetIDs.count)))
+            """, arguments: StatementArguments(assetIDs)) ?? 0
     }
 
     private static func delete(_ table: String, assetIDs: [String], in db: Database,
