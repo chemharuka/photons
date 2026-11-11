@@ -608,6 +608,16 @@ public struct LoupeFraming: Equatable, Sendable {
     /// changes three numbers and nothing else: the fit extent, the canvas origin the window carries,
     /// and the `FrameTransform` the overlay is projected through.
     public var canvasRole: CanvasRole
+    /// 330 / 370 — **which space `crop` is measured in** (`CropSpace`).
+    ///
+    /// A keystoned document's crop is a rectangle of the **document canvas** (330). Every crop metric
+    /// below (origin, pixel size, the fit extent, the region `framePlacement` reports) has to be read
+    /// in that same space, otherwise the camera, the fit and the low-resolution backdrop describe a
+    /// rectangle of the photograph while the pixels are a window on the canvas. Before 370 this type
+    /// ignored the marker, so a `.canvas` crop was divided by the source size: on a rotated + keystoned
+    /// 20 % crop the backdrop's `region` came out `1.33…2.33` instead of `0…1`, i.e. the low-res
+    /// preview sampled past the picture and the matte no longer sat on the photograph's edge.
+    public var cropSpace: CropSpace
     /// 213 (D13, user 2026-11-01) — **the one fit margin.** Ordinary 适应 is this fraction of the
     /// viewport fit, and the crop workspace uses the same number (it no longer multiplies by a second
     /// 0.90 on entry, which produced 0.81). One constant, read by `fitZoom` and by
@@ -617,6 +627,15 @@ public struct LoupeFraming: Equatable, Sendable {
     /// 245 — test-only injection point for the 适应 margin. `nil` (every production path) is
     /// `Self.fitMargin`; the value is stored so `fitZoom` and the drawn frame read the same number.
     var fitMarginOverride: Double?
+
+    /// **370 reverse gate — never true in the app.** With it set, a `.canvas` crop is read with the
+    /// pre-370 arithmetic again (divided by the turned source size instead of the document canvas,
+    /// and handed to `FrameTransform` as `.source`). The transition's `region` then comes out outside
+    /// `0…1` on a keystoned crop and 验收 ①/③ must go red; the product never sets it.
+    nonisolated(unsafe) public static var readsCanvasCropAsSource = false
+
+    /// 370 — is this projection's crop measured on the document canvas?
+    private var usesCanvasSpace: Bool { cropSpace == .canvas && !Self.readsCanvasCropAsSource }
 
     /// Retained for call sites that ask "is this the crop workspace?"; **never a multiplier** since
     /// 213. `1` (the default, and every non-crop caller) is bit-for-bit the old projection.
@@ -631,11 +650,13 @@ public struct LoupeFraming: Equatable, Sendable {
                 flipH: Bool = false, flipV: Bool = false, fitScale: Double = 1,
                 perspective: PerspectiveMap? = nil,
                 decodeScale: Double = 1, quarterTurns: Int = 0,
-                fitMargin: Double? = nil, canvasRole: CanvasRole = .export) {
+                fitMargin: Double? = nil, canvasRole: CanvasRole = .export,
+                cropSpace: CropSpace = .source) {
         self.viewport = viewport
         self.sourceWidth = max(sourceWidth, 1)
         self.sourceHeight = max(sourceHeight, 1)
         self.crop = crop.clamped()
+        self.cropSpace = cropSpace
         self.straightenDegrees = min(max(straightenDegrees, -GeometryGroup.straightenLimit),
                                      GeometryGroup.straightenLimit)
         self.flipH = flipH
@@ -675,15 +696,70 @@ public struct LoupeFraming: Equatable, Sendable {
                   decodeScale: ds,
                   quarterTurns: edit.geometry.quarterTurns,
                   fitMargin: fitMargin,
-                  canvasRole: canvasRole)
+                  canvasRole: canvasRole,
+                  cropSpace: edit.geometry.cropSpace)
     }
 
     // MARK: crop metrics
 
-    public var cropWidthPixels: Double { crop.width * sourceWidth }
-    public var cropHeightPixels: Double { crop.height * sourceHeight }
-    public var cropOriginX: Double { crop.left * sourceWidth }
-    public var cropOriginY: Double { crop.top * sourceHeight }
+    /// 370 — the document canvas (the whole photograph after `P → R`) in source pixels, continuous.
+    ///
+    /// This is the space a `.canvas` crop is measured in (330), so the crop origin and the crop's pixel
+    /// size below have to be read against it — not against `sourceWidth`/`sourceHeight`, which are the
+    /// turned photograph's grid. One reader: `CropGeometry.photoQuadExtent` (through
+    /// `documentGeometry`), the same number the renderer's baseline and the crop clamp use.
+    private var documentCanvasExtent: (width: Double, height: Double) {
+        if let geometry = documentGeometry {
+            let e = geometry.photoQuadExtent
+            return (e.width, e.height)
+        }
+        return Self.rotatedExtent(width: sourceWidth, height: sourceHeight,
+                                  degrees: straightenDegrees)
+    }
+
+    /// 370 — the **export canvas'** whole-pixel size: the same `CropGeometry.canvas(.export)` the
+    /// renderer allocates (one `ceil`, in `CropGeometry`'s own arithmetic). The fit window is
+    /// `FrameTransform.canvasS3`, which is that integer; using the continuous extent here left a
+    /// half-pixel of `region` on a large picture, which is exactly what ①'s 0.5 px bound catches.
+    private var exportCanvasPixels: (width: Double, height: Double) {
+        var group = GeometryGroup(crop: crop.normalizedRect,
+                                  rotationDegrees: straightenDegrees,
+                                  aspectLock: .original,
+                                  quarterTurns: 0,
+                                  perspectiveVertical: perspective?.vertical ?? 0,
+                                  perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                  cropSpace: .canvas)
+        group.crop = crop.normalizedRect
+        let cg = CropGeometry(geometry: group, source: sourceSizeForPerspective)
+        let canvas = cg.canvas(.export)
+        return (Double(canvas.width), Double(canvas.height))
+    }
+
+    public var cropWidthPixels: Double {
+        guard usesCanvasSpace else { return crop.width * sourceWidth }
+        return canvasRole == .export ? exportCanvasPixels.width
+                                     : crop.width * documentCanvasExtent.width
+    }
+    public var cropHeightPixels: Double {
+        guard usesCanvasSpace else { return crop.height * sourceHeight }
+        return canvasRole == .export ? exportCanvasPixels.height
+                                     : crop.height * documentCanvasExtent.height
+    }
+    /// The crop's origin in the space the camera windows live in.
+    ///
+    /// · `.source` — the turned photograph's pixels (the pre-330 arithmetic).
+    /// · `.canvas` **document canvas** (`.document` role) — the crop's place in the canvas.
+    /// · `.canvas` **export canvas** (`.export` role) — the export canvas *is* the crop window, so its
+    ///   own origin is 0. Reading the crop's place in the document canvas here (the pre-370 spelling)
+    ///   put the fit window at `crop.left/crop.width` and the backdrop's `region` outside `0…1`.
+    public var cropOriginX: Double {
+        guard usesCanvasSpace else { return crop.left * sourceWidth }
+        return canvasRole == .export ? 0 : crop.left * documentCanvasExtent.width
+    }
+    public var cropOriginY: Double {
+        guard usesCanvasSpace else { return crop.top * sourceHeight }
+        return canvasRole == .export ? 0 : crop.top * documentCanvasExtent.height
+    }
 
     /// 132 — the axis-aligned bounding box of a `w × h` box turned by the document's angle, in
     /// pixels. At 0° the arithmetic is `w·1 + h·0` and `w·0 + h·1`, which is exactly `(w, h)`, so
@@ -709,6 +785,14 @@ public struct LoupeFraming: Equatable, Sendable {
     /// whole picture (0.042 / 0.09 of the canvas), which put the low picture under a frame it does not
     /// belong to at 1:1 and 4×.
     public var canvasOriginPixels: (x: Double, y: Double) {
+        if usesCanvasSpace {
+            // 370 — the export canvas **is** the crop window: the picture starts at its own origin,
+            // which is what makes the fit window `0…extent` and `framePlacement.region` `0…1`.
+            guard canvasRole == .document else { return (0, 0) }
+            let extent = rotatedCropExtent
+            return (cropOriginX - max(extent.width - cropWidthPixels, 0) / 2,
+                    cropOriginY - max(extent.height - cropHeightPixels, 0) / 2)
+        }
         if perspective != nil { return (0, 0) }
         let extent = rotatedCropExtent
         return (cropOriginX - max(extent.width - cropWidthPixels, 0) / 2,
@@ -774,6 +858,13 @@ public struct LoupeFraming: Equatable, Sendable {
         // and the box 适应 must fit — the same `rotatedSourceExtent` underneath, so the fit, the 0F
         // matte and the overlay cannot disagree about how big the canvas is.
         if canvasRole == .document { return rotatedSourceExtent }
+        if usesCanvasSpace {
+            // 370 — a canvas-spaced crop is a window on the document canvas, so the export canvas is
+            // the window's own extent. `CropMath.perspectiveCanvas(crop:in:…)` would read it as a
+            // rectangle of the *photograph* (the pre-330 walk); that is what made the fit and the
+            // backdrop's `region` disagree with the pixels after a crop was applied.
+            return (cropWidthPixels, cropHeightPixels)
+        }
         if let perspective {
             let pc = CropMath.perspectiveCanvas(crop: crop, in: sourceSizeForPerspective,
                                                 straightenDegrees: straightenDegrees,
@@ -1067,6 +1158,7 @@ public struct LoupeFraming: Equatable, Sendable {
             flipHorizontal: flipH,
             flipVertical: flipV,
             perspective: perspective,
+            cropSpace: usesCanvasSpace ? .canvas : .source,
             decodeScale: decodeScale,
             contentScale: zoom(of: state) / decodeScale,
             viewport: viewport,
