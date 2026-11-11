@@ -203,6 +203,10 @@ public final class AssetCardView: NSView {
     /// and not an inference from `asset.rating`.
     public private(set) var lastDrawnBadges: [String] = []
 
+    /// §382 — where the last `draw` put each capsule, in the thumbnail rect's coordinates. The
+    /// acceptance reads the corner geometry off the surface that painted it.
+    public private(set) var lastBadgeLayout = AssetBadges.Layout()
+
     /// The 「原文件已移动」 line this card would draw, or nil for a healthy file.
     ///
     /// Exposed as a *string* (not only as pixels) on purpose: the badge has to be assertable from a
@@ -223,8 +227,13 @@ public final class AssetCardView: NSView {
     public private(set) var lastCaptionRect: NSRect = .zero
 
     /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
-    public var badgeSignature: String {
-        asset.map { AssetBadges(asset: $0, stackCount: stackCount).signature } ?? "—"
+    public var badgeSignature: String { badges.signature }
+
+    /// §382 — one constructor, used by the caption (to know whether to prefix 「堆叠 」) and by the
+    /// corners, so the two can never disagree about whether this card is a stack.
+    private var badges: AssetBadges {
+        asset.map { AssetBadges(asset: $0, stackCount: stackCount) }
+            ?? AssetBadges(rating: 0, flag: nil, colorLabel: nil)
     }
 
     /// The decoded thumbnail for this asset, or nil while the placeholder is all we have.
@@ -347,7 +356,13 @@ public final class AssetCardView: NSView {
         // the user got "2026-10-27 day2-" and no ellipsis. `PlaceholderStyle.fitted` keeps the
         // longest head that fits with its own `…`; the caption attributes' `byTruncatingTail`
         // paragraph style is the second line of defence against a measurement/draw disagreement.
-        let drawnCaption = PlaceholderStyle.fitted(asset.filename, width: captionRect.width,
+        //
+        // §382 — a stack's 置顶 is named 「堆叠 XXX.dng」, and the fit is solved for the **joined**
+        // string: cutting the bare name first and pasting the prefix on would hand the eye one
+        // character more than the strip can hold.
+        let stack = self.badges
+        let name = StackText.displayName(asset.filename, isStack: stack.isStack)
+        let drawnCaption = PlaceholderStyle.fitted(name, width: captionRect.width,
                                                    font: PlaceholderStyle.captionFont)
         (drawnCaption as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
         lastDrawnCaption = drawnCaption
@@ -356,8 +371,7 @@ public final class AssetCardView: NSView {
         // Stars / flag / colour label go *on* the thumbnail, in its corners — not in the caption
         // strip. The placeholder block stays underneath (006 §2), so a cell without a thumbnail
         // still shows its rating.
-        let badges = AssetBadges(asset: asset, stackCount: stackCount)
-        badges.draw(in: swatchRect)
+        lastBadgeLayout = stack.draw(in: swatchRect)
 
         // 「原文件已移动」 is an overlay of its own, drawn last: it is the one thing on this card the
         // user has to act on, and it must never be covered by a star.
@@ -366,7 +380,7 @@ public final class AssetCardView: NSView {
             MissingFileBadge.draw(in: swatchRect)
             lastDrawnMissingLabel = missingLabel
         }
-        lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
+        lastDrawnBadges = missingLabel == nil ? stack.drawn : stack.drawn + ["missing"]
     }
 }
 
@@ -695,6 +709,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         isApplyingModel = false
         reloadCount += 1
+        // §382 — `apply(snapshot)` only re-runs the cell provider for items whose **identity** moved.
+        // A metadata write (a star, a colour label, a stack that just swallowed four siblings) keeps
+        // every id in place, so an on-screen card used to keep the copy it was born with: the badge
+        // said ★0 after the user pressed 3, and the 置顶 card said nothing after ⌘G. Re-configuring
+        // the cells that are *already on screen* is the missing repaint path — deliberately not a
+        // `reloadData()`, which would clear every thumbnail and flash the first screen.
+        reconfigureVisibleItems()
         filterBar.update(filter: session?.filter ?? .none,
                          cameraKeys: session?.allCameraKeys ?? [],
                          cameraLabels: session?.allCameraLabels ?? [:])
@@ -705,8 +726,26 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         DispatchQueue.main.async { [weak self] in
             self?.refreshVisibleThumbnails()
             self?.reconcileThumbnails(force: true)
+            // The diff may have moved cells after this turn; configure once more so the ones that
+            // landed on screen also carry the current model values.
+            self?.reconfigureVisibleItems()
         }
         if let session { lastSnapshot = modelSnapshot(session) }
+    }
+
+    /// §382 — re-run `configure` on the cells that are visible **right now**, matched by the photo
+    /// each cell is already showing rather than by index: a cell that is about to be moved by the
+    /// diff must not be fed another photo in the meantime. Same asset id ⇒ `configure` keeps the
+    /// bitmap (no flash); only the metadata (stars / flag / colour / stack count) is refreshed.
+    private func reconfigureVisibleItems() {
+        guard isViewLoaded, let session else { return }
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let cell = collectionView.item(at: path) as? AssetGridItem,
+                  let id = cell.cardView.asset?.id,
+                  let asset = assetsByID[id] else { continue }
+            cell.configure(asset: asset, isActive: session.anchorID == id,
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+        }
     }
 
     private func updateMetrics() {

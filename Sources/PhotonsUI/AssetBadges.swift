@@ -11,6 +11,10 @@ import PhotonsCatalog
 /// Everything is drawn *inside* the thumbnail rect, on top of the placeholder or the image: the
 /// placeholder block is never removed, so the badges are an overlay on top of whatever the cell
 /// already drew — a missing or failed thumbnail is "not yet", never a white hole.
+///
+/// §382 — the corners were re-divided so the stack count is the most visible of them; see
+/// `layout(in:)` for the table and the numbers. The same four corners are used by all three
+/// surfaces (grid card, filmstrip cell, photo-list row).
 public struct AssetBadges: Equatable {
 
     public let rating: Int
@@ -65,93 +69,207 @@ public struct AssetBadges: Equatable {
         return parts.isEmpty ? "—" : parts.joined(separator: " ")
     }
 
-    // MARK: drawing
+    // MARK: geometry (§382)
 
-    private static let pill = NSColor.black.withAlphaComponent(0.55)
-
-    /// Which corner the stack capsule takes. Every surface that draws these badges is **flipped**
-    /// (`AssetCardView`, `FilmstripCard`, and the sidebar row's badge overlay), so "top" is `minY`
-    /// — the same reading `drawStars`/`drawFlag`/`drawColorDot` already use.
+    /// The four corners, re-divided so that 「this card stands for N photos」 is the **first** thing
+    /// the eye lands on:
     ///
-    /// The grid card and the filmstrip cell use `.topTrailing`, 2 pt under the colour dot. The photo
-    /// list's 46 pt row uses `.bottomTrailing`: its square is only 34 pt and the top-right corner
-    /// belongs to the colour dot.
+    /// | corner | what |
+    /// |---|---|
+    /// | bottom-left | 「⧉ N」 stack capsule (13 pt, 9 pt semibold), stars 3 pt to its right |
+    /// | top-left | one capsule holding the flag glyph and the colour dot, 3 pt apart |
+    /// | top-right | nothing (the dot moved next to the flag — the user's 16:3x call) |
+    ///
+    /// All three surfaces are *flipped* (`AssetCardView`, `FilmstripCard`, `StackBadgeView`), so
+    /// `minY` is the top edge and `maxY` is the bottom edge — "bottom-left" is `minX + inset,
+    /// maxY − height − inset`.
+    ///
+    /// These numbers are the ticket's: inset 3, capsule 13 pt tall, 4 pt horizontal padding, 3 pt
+    /// between neighbours, 9 pt dot. They are pinned here (not derived) because the acceptance
+    /// quotes them, and one place is what keeps the three faces on the same geometry.
+    public enum BadgeMetrics {
+        public static let inset: CGFloat = 3
+        public static let pillHeight: CGFloat = 13
+        public static let padX: CGFloat = 4
+        public static let gap: CGFloat = 3
+        public static let dot: CGFloat = 9
+    }
+
+    /// Where a paint put the capsules, in the thumbnail rect's own coordinates.
+    ///
+    /// Returned by `layout(in:)` and recorded by each cell during its draw, so 「the capsule is 3 pt
+    /// from the bottom-left corner」 is a number a test can read off the surface that painted it
+    /// rather than a claim about the helper.
+    public struct Layout: Equatable {
+        public var stackPill: NSRect?
+        public var starsPill: NSRect?
+        public var flagPill: NSRect?
+        /// Where the flag glyph itself was painted, inside `flagPill` (the left half).
+        public var flagGlyphRect: NSRect?
+        /// Where the colour dot was painted, inside `flagPill` (the right half).
+        public var colorDotRect: NSRect?
+        public var stackText: String
+        public var starsText: String
+        public var flagText: String
+
+        public init(stackPill: NSRect? = nil, starsPill: NSRect? = nil, flagPill: NSRect? = nil,
+                    flagGlyphRect: NSRect? = nil, colorDotRect: NSRect? = nil,
+                    stackText: String = "", starsText: String = "", flagText: String = "") {
+            self.stackPill = stackPill
+            self.starsPill = starsPill
+            self.flagPill = flagPill
+            self.flagGlyphRect = flagGlyphRect
+            self.colorDotRect = colorDotRect
+            self.stackText = stackText
+            self.starsText = starsText
+            self.flagText = flagText
+        }
+    }
+
+    /// Which corner the stack capsule takes.
+    ///
+    /// Kept for source compatibility (the list's badge view still passes it): §382 pinned the
+    /// layout to *the same* four corners on all three surfaces, so the value no longer moves
+    /// anything. It is deliberately not read — a per-surface corner is exactly what made the
+    /// filmstrip and the list disagree with the grid.
     public enum Corner: Sendable {
         case topTrailing
         case bottomTrailing
     }
 
-    /// Draw into the thumbnail rect: stars bottom-left, flag top-left, colour dot top-right, and the
-    /// stack capsule top-right under the dot (or bottom-right, per `corner`).
-    public func draw(in swatchRect: NSRect, corner: Corner = .topTrailing) {
-        guard !isEmpty, swatchRect.width > 24, swatchRect.height > 16 else { return }
-        if rating > 0 { drawStars(in: swatchRect) }
-        if let flag { drawFlag(flag, in: swatchRect) }
-        if let colorLabel { drawColorDot(colorLabel, in: swatchRect) }
-        // Last, so the stack indicator is never covered by a dot it sits next to.
-        if isStack { drawStackPill(in: swatchRect, corner: corner) }
-    }
-
-    private func drawStars(in rect: NSRect) {
-        let text = String(repeating: "★", count: rating)
-        let size = (text as NSString).size(withAttributes: BadgeStyle.stars)
-        let pillRect = NSRect(x: rect.minX + 3,
-                              y: rect.maxY - size.height - 5,
-                              width: size.width + 8,
-                              height: size.height + 2)
-        Self.pill.setFill()
-        NSBezierPath(roundedRect: pillRect, xRadius: pillRect.height / 2,
-                     yRadius: pillRect.height / 2).fill()
-        (text as NSString).draw(at: NSPoint(x: pillRect.minX + 4, y: pillRect.minY + 1),
-                                withAttributes: BadgeStyle.stars)
-    }
-
-    private func drawFlag(_ flag: AssetFlag, in rect: NSRect) {
-        let glyph = flag.glyph as NSString
-        let size = glyph.size(withAttributes: BadgeStyle.flagGlyph)
-        let pillRect = NSRect(x: rect.minX + 3, y: rect.minY + 3,
-                              width: size.width + 8, height: size.height + 2)
-        let path = NSBezierPath(roundedRect: pillRect, xRadius: 3, yRadius: 3)
-        flag.color.withAlphaComponent(0.85).setFill()
-        path.fill()
-        glyph.draw(at: NSPoint(x: pillRect.minX + 4, y: pillRect.minY + 1),
-                   withAttributes: BadgeStyle.flagGlyph)
-    }
-
-    private func drawColorDot(_ label: ColorLabel, in rect: NSRect) {
-        let d: CGFloat = 9
-        let dot = NSRect(x: rect.maxX - d - 5, y: rect.minY + 5, width: d, height: d)
-        label.color.setFill()
-        NSBezierPath(ovalIn: dot).fill()
-        NSColor.white.withAlphaComponent(0.85).setStroke()
-        let ring = NSBezierPath(ovalIn: dot.insetBy(dx: 0.5, dy: 0.5))
-        ring.lineWidth = 1
-        ring.stroke()
-    }
-
-    /// 「⧉ N」 — a rounded black capsule, 11 pt tall, 3 pt padding, white 8 pt text.
+    /// The capsules this badge would paint in `rect` — the same function `draw` paints from.
     ///
-    /// The capsule height and the gap under the colour dot are pinned numbers: the dot occupies
-    /// `minY + 5 … minY + 14`, so `minY + 16` is exactly 2 pt below it. That gap is the spec's
-    /// "below the dot, 2 pt" and it is why this is a constant rather than computed from the dot.
-    private func drawStackPill(in rect: NSRect, corner: Corner) {
-        let text = "⧉ \(stackCount)" as NSString
-        let textSize = text.size(withAttributes: BadgeStyle.stack)
-        let height: CGFloat = 11
-        let padX: CGFloat = 3
-        let width = min(rect.width - 6, textSize.width + padX * 2)
-        let x = rect.maxX - width - 3
-        let y: CGFloat = switch corner {
-        case .topTrailing: rect.minY + 16
-        case .bottomTrailing: rect.maxY - height - 3
+    /// `drawsStars: false` is for the photo list's row: stars are already a text line of their own
+    /// there, so the square only carries the stack count and the flag/colour capsule. The `drawn`
+    /// vocabulary is unaffected — the row paints its stars as text.
+    public func layout(in rect: NSRect, drawsStars: Bool = true) -> Layout {
+        var out = Layout()
+        guard !isEmpty, rect.width > 24, rect.height > 16 else { return out }
+        let m = BadgeMetrics.self
+        let y = rect.maxY - m.pillHeight - m.inset     // flipped: the bottom row
+        var x = rect.minX + m.inset
+
+        if isStack {
+            let text = "⧉ \(stackCount)" as NSString
+            let width = min(rect.width - m.inset * 2,
+                            ceil(text.size(withAttributes: BadgeStyle.stack).width) + m.padX * 2)
+            out.stackPill = NSRect(x: x, y: y, width: width, height: m.pillHeight)
+            out.stackText = text as String
+            x = out.stackPill!.maxX + m.gap
         }
-        let pillRect = NSRect(x: x, y: y, width: width, height: height)
+        // The count is the most prominent badge, and the stars sit to its right on the same baseline.
+        // §382 rule for a surface too narrow to hold both: the count wins and the stars give way —
+        // never the other way round. (At the shipped sizes both fit: the 90 pt filmstrip cell and the
+        // ≥150 pt grid card; the 34 pt list square passes `drawsStars: false` and paints its stars as
+        // a text line instead.)
+        if drawsStars, rating > 0 {
+            let text = String(repeating: "★", count: rating) as NSString
+            let width = ceil(text.size(withAttributes: BadgeStyle.stars).width) + m.padX * 2
+            if x + width <= rect.maxX - m.inset {
+                out.starsPill = NSRect(x: x, y: y, width: width, height: m.pillHeight)
+                out.starsText = text as String
+            }
+        }
+        // Flag + colour label share one capsule in the top-left corner: both are small and their
+        // width is bounded, and the user asked for them side by side (2026-11-11 16:3x).
+        if flag != nil || colorLabel != nil {
+            let glyph = (flag?.glyph ?? "") as NSString
+            var inner = flag == nil ? 0 : ceil(glyph.size(withAttributes: BadgeStyle.flagGlyph).width)
+            if flag != nil, colorLabel != nil { inner += m.gap }
+            if colorLabel != nil { inner += m.dot }
+            let width = min(rect.width - m.inset * 2, inner + m.padX * 2)
+            out.flagPill = NSRect(x: rect.minX + m.inset, y: rect.minY + m.inset,
+                                  width: width, height: m.pillHeight)
+            out.flagText = glyph as String
+        }
+        return out
+    }
+
+    /// Draw into the thumbnail rect: 「⧉ N」 + stars bottom-left, flag + colour dot top-left.
+    ///
+    /// `corner` is accepted for source compatibility but no longer steers the layout — §382 fixed
+    /// the four corners for all three surfaces (see `Corner`). Returns the rects it painted, so the
+    /// surface can record them as evidence.
+    @discardableResult
+    public func draw(in swatchRect: NSRect, corner: Corner = .topTrailing,
+                     drawsStars: Bool = true) -> Layout {
+        let m = BadgeMetrics.self
+        let l = layout(in: swatchRect, drawsStars: drawsStars)
+
+        if let pillRect = l.stackPill {
+            drawPill(pillRect)
+            let text = l.stackText as NSString
+            let size = text.size(withAttributes: BadgeStyle.stack)
+            text.draw(at: NSPoint(x: pillRect.minX + m.padX,
+                                  y: pillRect.minY + (m.pillHeight - size.height) / 2),
+                      withAttributes: BadgeStyle.stack)
+        }
+        if let pillRect = l.starsPill {
+            drawPill(pillRect)
+            let text = l.starsText as NSString
+            let size = text.size(withAttributes: BadgeStyle.stars)
+            text.draw(at: NSPoint(x: pillRect.minX + m.padX,
+                                  y: pillRect.minY + (m.pillHeight - size.height) / 2),
+                      withAttributes: BadgeStyle.stars)
+        }
+        if let pillRect = l.flagPill {
+            drawPill(pillRect)
+            var x = pillRect.minX + m.padX
+            var out = l
+            if let flag, !l.flagText.isEmpty {
+                let glyph = l.flagText as NSString
+                let size = glyph.size(withAttributes: BadgeStyle.flagGlyph)
+                let glyphRect = NSRect(x: x, y: pillRect.minY + (m.pillHeight - size.height) / 2,
+                                       width: size.width, height: size.height)
+                glyph.draw(at: glyphRect.origin,
+                           withAttributes: BadgeStyle.flagAttributes(for: flag))
+                out.flagGlyphRect = glyphRect
+                x += size.width + (colorLabel == nil ? 0 : m.gap)
+            }
+            if let colorLabel {
+                let dot = NSRect(x: x,
+                                 y: pillRect.minY + (m.pillHeight - m.dot) / 2,
+                                 width: m.dot, height: m.dot)
+                colorLabel.color.setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                NSColor.white.withAlphaComponent(0.85).setStroke()
+                let ring = NSBezierPath(ovalIn: dot.insetBy(dx: 0.5, dy: 0.5))
+                ring.lineWidth = 1
+                ring.stroke()
+                out.colorDotRect = dot
+            }
+            return out
+        }
+        return l
+    }
+
+    private func drawPill(_ rect: NSRect) {
         Self.pill.setFill()
-        NSBezierPath(roundedRect: pillRect, xRadius: height / 2,
-                     yRadius: height / 2).fill()
-        let textY = pillRect.minY + (height - textSize.height) / 2
-        text.draw(at: NSPoint(x: pillRect.minX + padX, y: textY),
-                  withAttributes: BadgeStyle.stack)
+        NSBezierPath(roundedRect: rect, xRadius: rect.height / 2,
+                     yRadius: rect.height / 2).fill()
+    }
+
+    private static let pill = NSColor.black.withAlphaComponent(0.55)
+}
+
+/// §382 — the words a stack adds to the three surfaces, in **one** place.
+///
+/// Two strings, both display-only: the 置顶 photo's caption/name is 「堆叠 XXX.dng」, and the photo
+/// list's second line ends with 「堆叠5张」. Neither `asset.filename` nor anything on disk moves —
+/// the prefix is composed here and fitted afterwards (`PlaceholderStyle.fitted` on the *joined*
+/// string), so the truncation is solved for the string the eye actually sees.
+public enum StackText {
+    public static let prefix = "堆叠 "
+    public static let empty = ""
+
+    /// 「堆叠 XXX.dng」 for a stack's 置顶, the filename untouched otherwise.
+    public static func displayName(_ filename: String, isStack: Bool) -> String {
+        isStack ? prefix + filename : filename
+    }
+
+    /// 「堆叠5张」 — Arabic digits, as the user asked (16:2x).
+    public static func countLabel(_ count: Int) -> String {
+        "堆叠\(count)张"
     }
 }
 
@@ -166,9 +284,15 @@ public enum BadgeStyle {
         .font: NSFont.systemFont(ofSize: 9, weight: .bold),
         .foregroundColor: NSColor.white,
     ]
-    /// The stack capsule's text: 8 pt semibold white on the black pill.
+    /// §382 — the flag glyph in **its own colour**, inside the shared flag+colour capsule. The glyph
+    /// used to sit on a capsule filled with that colour; now the capsule is shared with the colour
+    /// dot, so the colour moves onto the glyph (and P/X still read apart at a glance).
+    public static func flagAttributes(for flag: AssetFlag) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: 9, weight: .bold), .foregroundColor: flag.color]
+    }
+    /// The stack capsule's text: 9 pt semibold white on the black pill (13 pt tall, §382).
     public static let stack: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 8, weight: .semibold),
+        .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
         .foregroundColor: NSColor.white,
     ]
 }

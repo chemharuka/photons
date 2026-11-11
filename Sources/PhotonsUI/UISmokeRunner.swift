@@ -1003,7 +1003,8 @@ public final class UISmokeRunner {
     ///   2. the cell draws the badge — `lastDrawnBadges` read back after a real `display()`, not
     ///      inferred from `asset.rating`;
     ///   3. five selected photos + one "P" is **one** transaction and five rows;
-    ///   4. ⌥3 writes a colour label, and the badge shows it next to the stars;
+    ///   4. ⌥3 writes a colour label, and the badge shows it next to the flag (§382 moved the dot
+    ///      into the shared top-left capsule, so it is no longer beside the stars);
     ///   5. "≥3 星" narrows the grid to exactly the rows the same query returns, with a chip;
     ///   6. clicking the chip clears that facet and the library comes back;
     ///   7. a rating is metadata, not an edit: history does not grow, `editRevision` does not move,
@@ -1073,7 +1074,7 @@ public final class UISmokeRunner {
         // corner where the dot is painted. A badge that is computed but invisible fails here.
         let dotPainted = firstCell.map { badgeDotPresent(in: $0.cardView, label: .yellow) } ?? false
         log("colour ⌥3              \(labelled)/\(batch.count) rows color_label=yellow, badge \(comboDrawn), dot painted=\(dotPainted)")
-        check("⌥3 给 \(batch.count) 张写色标 yellow（\(labelled) 行），角标画星级 + 旗标 + 色标（\(comboDrawn)，色点像素 \(dotPainted)）",
+        check("⌥3 给 \(batch.count) 张写色标 yellow（\(labelled) 行），角标画星级 + 旗标 + 色标（\(comboDrawn)，色点像素 \(dotPainted)，色点与旗标同一胶囊）",
               labelled == batch.count && comboDrawn.contains("color:yellow")
               && comboDrawn.contains("flag:pick") && dotPainted)
 
@@ -1144,10 +1145,12 @@ public final class UISmokeRunner {
     /// Render the card and look for the colour-label dot's own colour in the corner it is painted in.
     ///
     /// `lastDrawnBadges` proves the badge code ran; this proves a pixel changed. The search is
-    /// confined to the 22 × 20 pt box at the swatch's top-right where `AssetBadges.drawColorDot`
-    /// paints, so a yellowish photo underneath cannot pass for the dot. The match is in HSB, not
-    /// RGB: the card is rendered through the display's colour profile, so the dot's blue channel
-    /// comes back lifted (0.40 for a 0.20 dot) while its hue and saturation stay put.
+    /// confined to the box where `AssetBadges` paints the shared flag+colour capsule — §382 moved
+    /// the dot from the swatch's top-**right** corner to the top-**left** one, next to the flag
+    /// glyph (the user's 16:3x call) — so a yellowish photo underneath cannot pass for the dot. The
+    /// match is in HSB, not RGB: the card is rendered through the display's colour profile, so the
+    /// dot's blue channel comes back lifted (0.40 for a 0.20 dot) while its hue and saturation stay
+    /// put.
     private func badgeDotPresent(in card: AssetCardView, label: ColorLabel) -> Bool {
         let rect = card.bounds
         guard rect.width > 40, rect.height > 40,
@@ -1158,8 +1161,11 @@ public final class UISmokeRunner {
         targetColor.getHue(&tHue, saturation: &tSat, brightness: &tBri, alpha: &tAlpha)
         let sx = CGFloat(rep.pixelsWide) / max(1, rect.width)
         let sy = CGFloat(rep.pixelsHigh) / max(1, rect.height)
-        // The card is flipped, so `minY` is the top edge and the dot sits at (maxX - 14, minY + 5).
-        let box = NSRect(x: rect.maxX - 22, y: rect.minY + 1, width: 20, height: 18)
+        // §382 — the card is flipped, so `minY` is the top edge. The shared capsule starts at
+        // `(minX + 3, minY + 3)`; with a glyph **and** a dot it is 26 pt wide, the glyph occupying
+        // its left 11 pt and the 9 pt dot its right half. The box is the dot's half only, so neither
+        // the green/red flag glyph nor the photo underneath can be mistaken for the label colour.
+        let box = NSRect(x: rect.minX + 13, y: rect.minY + 2, width: 14, height: 16)
         guard box.maxX <= rect.width, box.maxY <= rect.height else { return false }
         for py in Int(box.minY * sy)..<Int(box.maxY * sy) {
             for px in Int(box.minX * sx)..<Int(box.maxX * sx) {
