@@ -6124,11 +6124,36 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// 258 — a canvas resize while the stand-in is up re-places it on the same content rect.
+    ///
+    /// 373 — **the stand-in is only ever placed for the photo it is of.** The photo change reaches the
+    /// loupe through a dispatched observation, and AppKit can run a canvas layout in between: the old
+    /// (landscape) thumbnail was then re-projected through the new (portrait) photo's upright aspect,
+    /// which is exactly the 「先出现被放大成竖幅的横拍照片」 the user reported. When the owner has moved,
+    /// withdraw it in this pass — cover first, so the previous drawable never shows — and arm the new
+    /// photo's stand-in through the same synchronous, cache-only path the switch uses.
     private func refreshFirstFramePlaceholderGeometry() {
         guard canvasView.isShowingFirstFramePlaceholder else { return }
+        if Self.reclaimsStandInOnPhotoChange, let photo = backdropPhotoKey,
+           firstFramePlaceholderPhoto != photo, session?.mode == .loupe, frameSource == nil {
+            canvasView.beginPhotoSwitchCover()
+            canvasView.hideFirstFramePlaceholder()
+            firstFramePlaceholderToken?.cancel()
+            firstFramePlaceholderToken = nil
+            firstFramePlaceholderPhoto = nil
+            firstFramePlaceholderPixelSize = nil
+            firstFramePlaceholderOrientation = nil
+            armFirstFramePlaceholder()
+            return
+        }
         canvasView.setFirstFramePlaceholderContentRect(
             firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize))
     }
+
+    /// **373 reverse gate — never false in the app.** With it off, a layout pass between the photo
+    /// change and the observation that re-arms the stand-in re-places the previous photo's bitmap
+    /// through the new photo's aspect — the 「被放大成竖幅的横拍照片」. It exists so 验收 ⑥ can turn the
+    /// invariant red on purpose.
+    nonisolated(unsafe) static var reclaimsStandInOnPhotoChange = true
 
     /// Developments the queue has run, requests it has folded into one, deliveries it made and
     /// results it dropped. Diagnostics: the pan budget is a timing, the decode *count* is this.
@@ -7434,6 +7459,32 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// read-only because a test cannot read a `framebufferOnly` drawable back, and "the gain reached
     /// the pass" is a fact about this value, not about the drawing.
     public private(set) var lastPresentRequest: PresentRequest?
+
+    /// 373 — **which texture** each present sampled, next to the geometry it was laid out for.
+    ///
+    /// `PresentRecord` says where the picture went, and `lastFrame` says what the newest render was
+    /// of, but neither names the pixels the layer actually read. A switch defect is exactly a pairing
+    /// of two facts — the previous photo's texture with the new photo's framing — so the probe needs
+    /// them from the same present. Append-only, capped, like `presentRecords`.
+    public struct PresentTrace: Equatable, Sendable {
+        public let texture: ObjectIdentifier
+        public let frameCanvas: ImageSize
+        public let pictureQuad: ImageRect
+        public let canvas: ImageSize
+    }
+    public private(set) var presentTrace: [PresentTrace] = []
+    private static let presentTraceLimit = 256
+
+    private func recordPresentTrace(_ texture: MTLTexture, frameCanvas: ImageSize,
+                                    pictureQuad: ImageRect, canvas: ImageSize) {
+        presentTrace.append(PresentTrace(texture: ObjectIdentifier(texture),
+                                         frameCanvas: frameCanvas,
+                                         pictureQuad: pictureQuad, canvas: canvas))
+        if presentTrace.count > Self.presentTraceLimit {
+            presentTrace.removeFirst(presentTrace.count - Self.presentTraceLimit)
+        }
+    }
+
     /// Where the photograph sits on the canvas, in drawable pixels, as the layer was last given it.
     public var presentedPictureQuad: ImageRect? { lastPresented?.pictureQuad }
 
@@ -7478,6 +7529,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                     pictureQuad: request.pictureQuad,
                                     backdropQuad: request.backdropQuad, zoom: zoom,
                                     frozen: frozen))
+        recordPresentTrace(texture, frameCanvas: frameCanvas,
+                           pictureQuad: request.pictureQuad, canvas: canvas)
         // 068: the canvas the layer is now showing something for. A frozen draw is skipped when this is
         // already the canvas on screen — a gesture that stopped moving must stop drawing.
         lastPresentCanvas = canvas
