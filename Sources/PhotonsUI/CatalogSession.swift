@@ -29,6 +29,17 @@ public final class CatalogSession {
     public private(set) var libraryURL: URL?
     public private(set) var roots: [SourceRoot] = []
     public private(set) var assets: [Asset] = []
+    /// The stacks the visible rows represent, keyed by their 置顶 asset id (§378).
+    ///
+    /// `assets` is the **projection**: one row per stack (its 置顶), plus every photo that is in no
+    /// stack. This dictionary is the other half of that fact — a row's full membership, which is
+    /// what the 「⧉ N」 badge counts and what 设为置顶 lists. A photo in no stack leaves no entry,
+    /// so `stacksByTopID[asset.id] == nil` is the whole test for "draw no indicator".
+    ///
+    /// Rebuilt in `reload()` from the same query pass, never patched in place: the projection and
+    /// this table can then never disagree about which row is a top, and nobody has to remember to
+    /// update two things after a stack write.
+    public private(set) var stacksByTopID: [String: StackSummary] = [:]
     public private(set) var stats: CatalogStats?
     public private(set) var loadError: String?
 
@@ -494,6 +505,11 @@ public final class CatalogSession {
             assets = sortOrder.sorted(try c.assets(f.assetFilter(limit: 200_000,
                                                                  folders: selectedFolders,
                                                                  albumIds: albumScope)))
+            // §378 — the other half of the projection: which stacks the visible rows stand for.
+            // One query for every stack id on screen (not one per row), and only stacks whose
+            // **top** survived the filter get an entry — a stack only a hidden member would match
+            // is not in `assets` and must not be in this table either.
+            stacksByTopID = Self.stacksByTop(assets, catalog: c)
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -511,6 +527,7 @@ public final class CatalogSession {
             loadError = error.localizedDescription
             assets = []
             roots = []
+            stacksByTopID = [:]
         }
         // Drop selections that no longer exist (a reload can follow an import).
         let ids = Set(assets.map(\.id))
@@ -553,6 +570,180 @@ public final class CatalogSession {
         reload()
         guard let hit = ids.first(where: { id in assets.contains { $0.id == id } }) else { return }
         selectOnly(hit)
+    }
+
+    // MARK: photo stacks (§378) — 库属性，不是编辑
+    //
+    // A stack is目录元数据: it lives in `assets.stack_id` / `assets.stack_rank`, so nothing in this
+    // section touches `edit`, `history`, `develop_json` or `editRevision` — ⌘Z never walks a stack
+    // back. Every verb is one transaction and **one** `metadataRevision` bump (the same signal a
+    // rating uses), then one `reload()`: the projection (`assets` = tops only) and
+    // `stacksByTopID` are recomputed together, so a card can never lose its 「⧉ N」 while the row
+    // it counts is still hidden, or the other way round.
+
+    /// Why the last stack command did nothing, or nil. Reported, never swallowed (same contract as
+    /// `lastMetadataAffectedRows` / `lastAvailabilityError`).
+    public private(set) var lastStackError: String?
+
+    /// Rows the last stack statement changed.
+    public private(set) var lastStackAffectedRows = 0
+
+    /// The stack a displayed row stands for, or nil. `stacksByTopID` is keyed by the top id, and
+    /// only tops are ever in `assets`, so this is the one lookup a cell needs.
+    public func stackSummary(forAssetID id: String) -> StackSummary? {
+        stacksByTopID[id]
+    }
+
+    /// Members of the stack behind a displayed row, in display order (top included). Asked when the
+    /// right-click submenu opens, not on every paint.
+    public func stackMembers(topID: String) -> [Asset] {
+        guard let summary = stacksByTopID[topID], let catalog else { return [] }
+        return (try? catalog.stackMembers(stackID: summary.id)) ?? []
+    }
+
+    /// Members of the stack an asset **belongs to** — the same list whether the id is the top or a
+    /// hidden member. Nil when the id is in no stack.
+    public func stackMembers(ofAssetID id: String) -> [Asset]? {
+        guard let catalog else { return nil }
+        if let summary = stacksByTopID[id] {
+            return (try? catalog.stackMembers(stackID: summary.id)) ?? []
+        }
+        guard let found = (try? catalog.stackID(ofAsset: id)) ?? nil else { return nil }
+        return try? catalog.stackMembers(stackID: found)
+    }
+
+    /// 堆叠所选照片 (⌘G): the selection, **in display order**, becomes one new stack whose first
+    /// member is 置顶.
+    ///
+    /// Fewer than two photos is a no-op with an error, not a stack of one: one photo is already a
+    /// stack's worth of nothing, and a "stack" of one would hide its own badge rule (≥ 2).
+    /// Cross-album and cross-filter selections are allowed on purpose — the members need not be
+    /// visible together, and the path is not validated at all.
+    @discardableResult
+    public func stackSelection() -> StackSummary? {
+        guard let catalog else {
+            lastStackError = "未打开库"
+            return nil
+        }
+        let ids = selectedAssets.map(\.id)
+        guard ids.count >= 2 else {
+            lastStackError = "堆叠至少需要选中两张照片"
+            return nil
+        }
+        do {
+            guard let summary = try catalog.makeStack(assetIDs: ids) else {
+                lastStackError = "选中的照片已经不在库里"
+                return nil
+            }
+            lastStackError = nil
+            lastStackAffectedRows = summary.count
+            metadataWriteCount += 1
+            lastMetadataAffectedRows = summary.count
+            metadataRevision &+= 1
+            reload()
+            // The other members just left the projection: the selection follows to the 置顶 only.
+            if assets.contains(where: { $0.id == summary.topID }) { selectOnly(summary.topID) }
+            return summary
+        } catch {
+            lastStackError = "\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// 取消堆叠 (⇧⌘G): every stack the selection (or the anchor) touches dissolves — all of its
+    /// members return to `stack_id = NULL, stack_rank = 0`.
+    ///
+    /// Returns the number of photos that came back. Zero with no stack in the selection is not an
+    /// error condition worth an alert; `lastStackError` stays nil (the user sees nothing happen
+    /// because nothing was stacked).
+    @discardableResult
+    public func ungroupSelection() -> Int {
+        guard let catalog else {
+            lastStackError = "未打开库"
+            return 0
+        }
+        let ids = metadataTargetIDs
+        guard !ids.isEmpty else { return 0 }
+        // The members that come back are what the user selected the *stack* for; select them again
+        // after the reload so ⇧⌘G visibly restores the row group.
+        var returning: [String] = []
+        for id in ids {
+            if let summary = stacksByTopID[id] { returning.append(contentsOf: summary.memberIDs) }
+        }
+        do {
+            let affected = try catalog.ungroup(assetIDs: ids)
+            guard affected > 0 else {
+                lastStackError = nil
+                return 0
+            }
+            lastStackError = nil
+            lastStackAffectedRows = affected
+            metadataWriteCount += 1
+            lastMetadataAffectedRows = affected
+            metadataRevision &+= 1
+            reload()
+            let visible = returning.filter { id in assets.contains { $0.id == id } }
+            if !visible.isEmpty {
+                setSelection(Set(visible), anchor: visible.first)
+            }
+            return affected
+        } catch {
+            lastStackError = "\(error.localizedDescription)"
+            return 0
+        }
+    }
+
+    /// 设为置顶: the chosen member becomes the stack's top, and the previous top takes its old rank
+    /// (a swap, not a re-sort).
+    ///
+    /// The row in `assets` is **replaced** by the new top on the next projection, and the selection
+    /// follows it — that is what "click the second member and the card becomes that photo" means.
+    @discardableResult
+    public func setStackTop(assetID: String) -> Bool {
+        guard let catalog else {
+            lastStackError = "未打开库"
+            return false
+        }
+        let stackID = stacksByTopID.values.first(where: { $0.memberIDs.contains(assetID) })?.id
+            ?? (try? catalog.stackID(ofAsset: assetID)).flatMap { $0 }
+        guard let stackID else {
+            lastStackError = "这张照片不在任何堆叠里"
+            return false
+        }
+        do {
+            let changed = try catalog.setStackTop(stackID: stackID, assetID: assetID)
+            lastStackError = nil
+            guard changed else { return false }        // already 置顶: no write, no revision
+            lastStackAffectedRows = 3                 // chosen, old top, and the stack row they share
+            metadataWriteCount += 1
+            lastMetadataAffectedRows = 2
+            metadataRevision &+= 1
+            reload()
+            if assets.contains(where: { $0.id == assetID }) { selectOnly(assetID) }
+            return true
+        } catch {
+            lastStackError = "\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.
+    ///
+    /// Only stack ids present in `visible` are asked for, so a filter that hides every member of a
+    /// stack costs nothing. A stack whose top is missing from the query (a soft-deleted top, a row
+    /// whose rank was moved) contributes no entry at all: the dictionary is keyed by top, and the
+    /// contract is 「no entry = draw no indicator」.
+    static func stacksByTop(_ visible: [Asset], catalog: Catalog) -> [String: StackSummary] {
+        let stackIDs = Set(visible.compactMap(\.stackId))
+        guard !stackIDs.isEmpty else { return [:] }
+        guard let members = try? catalog.stackMembers(stackIDs: Array(stackIDs)) else { return [:] }
+        var out: [String: StackSummary] = [:]
+        for (id, rows) in members {
+            guard let top = rows.first(where: { $0.stackRank == 0 }) else { continue }
+            guard visible.contains(where: { $0.id == top.id }) else { continue }
+            out[top.id] = StackSummary(id: id, memberIDs: rows.map(\.id), topID: top.id)
+        }
+        return out
     }
 
     // MARK: sort order (view state: one value, three views)
@@ -627,8 +818,7 @@ public final class CatalogSession {
     }
 
     /// One click in the folder tree: root + subtree prefix, one reload.
-    public func selectFolder(rootID: String?, path: String) {
-        selectFolders([FolderSelection(rootId: rootID, path: path)])
+    public func selectFolder(rootID: String?, path: String) {        selectFolders([FolderSelection(rootId: rootID, path: path)])
     }
 
     /// The whole selection at once — what a ⌘-click, a ⇧-range or a "clicked the empty area" hands

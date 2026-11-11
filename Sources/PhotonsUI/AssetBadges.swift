@@ -1,7 +1,7 @@
 import AppKit
 import PhotonsCatalog
 
-/// The corner badges on a grid cell: stars, flag, colour label.
+/// The corner badges on a grid cell: stars, flag, colour label, and the stack indicator.
 ///
 /// Kept as a value computed from `Asset` rather than as view state, for two reasons: the cell can
 /// be recycled at any moment (so the badge must be re-derived, never carried over), and the smoke
@@ -17,24 +17,41 @@ public struct AssetBadges: Equatable {
     public let flag: AssetFlag?
     public let colorLabel: ColorLabel?
 
-    public init(rating: Int, flag: String?, colorLabel: String?) {
+    /// How many photos the stack this card represents holds, or `0`/`1` when it is not a stack.
+    ///
+    /// §378: the three browsers only ever show the 置顶 photo, so the count is what tells the eye
+    /// that this single card stands for more than one picture. It is passed in by the controller
+    /// (from `CatalogSession.stacksByTopID`), not read from `Asset` — the row itself only knows its
+    /// own `stack_id`, never how many siblings share it.
+    public let stackCount: Int
+
+    public init(rating: Int, flag: String?, colorLabel: String?, stackCount: Int = 0) {
         self.rating = max(0, min(5, rating))
         self.flag = AssetFlag.normalized(flag)
         self.colorLabel = ColorLabel.normalized(colorLabel)
+        self.stackCount = max(0, stackCount)
     }
 
-    public init(asset: Asset) {
-        self.init(rating: asset.rating, flag: asset.flag, colorLabel: asset.colorLabel)
+    public init(asset: Asset, stackCount: Int = 0) {
+        self.init(rating: asset.rating, flag: asset.flag, colorLabel: asset.colorLabel,
+                  stackCount: stackCount)
     }
 
-    public var isEmpty: Bool { rating == 0 && flag == nil && colorLabel == nil }
+    /// A stack of one is not a stack (the catalog dissolves those), so the indicator needs ≥ 2.
+    public var isStack: Bool { stackCount >= 2 }
 
-    /// What the cell painted, in a form the smoke can compare ("stars:3", "flag:pick", "color:red").
+    public var isEmpty: Bool {
+        rating == 0 && flag == nil && colorLabel == nil && !isStack
+    }
+
+    /// What the cell painted, in a form the smoke can compare ("stars:3", "flag:pick", "color:red",
+    /// "stack:5").
     public var drawn: [String] {
         var out: [String] = []
         if rating > 0 { out.append("stars:\(rating)") }
         if let flag { out.append("flag:\(flag.rawValue)") }
         if let colorLabel { out.append("color:\(colorLabel.rawValue)") }
+        if isStack { out.append("stack:\(stackCount)") }
         return out
     }
 
@@ -44,6 +61,7 @@ public struct AssetBadges: Equatable {
         if rating > 0 { parts.append("★\(rating)") }
         if let flag { parts.append(flag.glyph) }
         if let colorLabel { parts.append(colorLabel.displayName) }
+        if isStack { parts.append("⧉\(stackCount)") }
         return parts.isEmpty ? "—" : parts.joined(separator: " ")
     }
 
@@ -51,12 +69,27 @@ public struct AssetBadges: Equatable {
 
     private static let pill = NSColor.black.withAlphaComponent(0.55)
 
-    /// Draw into the thumbnail rect: stars bottom-left, flag top-left, colour dot top-right.
-    public func draw(in swatchRect: NSRect) {
+    /// Which corner the stack capsule takes. Every surface that draws these badges is **flipped**
+    /// (`AssetCardView`, `FilmstripCard`, and the sidebar row's badge overlay), so "top" is `minY`
+    /// — the same reading `drawStars`/`drawFlag`/`drawColorDot` already use.
+    ///
+    /// The grid card and the filmstrip cell use `.topTrailing`, 2 pt under the colour dot. The photo
+    /// list's 46 pt row uses `.bottomTrailing`: its square is only 34 pt and the top-right corner
+    /// belongs to the colour dot.
+    public enum Corner: Sendable {
+        case topTrailing
+        case bottomTrailing
+    }
+
+    /// Draw into the thumbnail rect: stars bottom-left, flag top-left, colour dot top-right, and the
+    /// stack capsule top-right under the dot (or bottom-right, per `corner`).
+    public func draw(in swatchRect: NSRect, corner: Corner = .topTrailing) {
         guard !isEmpty, swatchRect.width > 24, swatchRect.height > 16 else { return }
         if rating > 0 { drawStars(in: swatchRect) }
         if let flag { drawFlag(flag, in: swatchRect) }
         if let colorLabel { drawColorDot(colorLabel, in: swatchRect) }
+        // Last, so the stack indicator is never covered by a dot it sits next to.
+        if isStack { drawStackPill(in: swatchRect, corner: corner) }
     }
 
     private func drawStars(in rect: NSRect) {
@@ -95,6 +128,31 @@ public struct AssetBadges: Equatable {
         ring.lineWidth = 1
         ring.stroke()
     }
+
+    /// 「⧉ N」 — a rounded black capsule, 11 pt tall, 3 pt padding, white 8 pt text.
+    ///
+    /// The capsule height and the gap under the colour dot are pinned numbers: the dot occupies
+    /// `minY + 5 … minY + 14`, so `minY + 16` is exactly 2 pt below it. That gap is the spec's
+    /// "below the dot, 2 pt" and it is why this is a constant rather than computed from the dot.
+    private func drawStackPill(in rect: NSRect, corner: Corner) {
+        let text = "⧉ \(stackCount)" as NSString
+        let textSize = text.size(withAttributes: BadgeStyle.stack)
+        let height: CGFloat = 11
+        let padX: CGFloat = 3
+        let width = min(rect.width - 6, textSize.width + padX * 2)
+        let x = rect.maxX - width - 3
+        let y: CGFloat = switch corner {
+        case .topTrailing: rect.minY + 16
+        case .bottomTrailing: rect.maxY - height - 3
+        }
+        let pillRect = NSRect(x: x, y: y, width: width, height: height)
+        Self.pill.setFill()
+        NSBezierPath(roundedRect: pillRect, xRadius: height / 2,
+                     yRadius: height / 2).fill()
+        let textY = pillRect.minY + (height - textSize.height) / 2
+        text.draw(at: NSPoint(x: pillRect.minX + padX, y: textY),
+                  withAttributes: BadgeStyle.stack)
+    }
 }
 
 /// One set of attributes for every cell (the original stars code did the same, for the same reason:
@@ -106,6 +164,11 @@ public enum BadgeStyle {
     ]
     public static let flagGlyph: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+        .foregroundColor: NSColor.white,
+    ]
+    /// The stack capsule's text: 8 pt semibold white on the black pill.
+    public static let stack: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 8, weight: .semibold),
         .foregroundColor: NSColor.white,
     ]
 }

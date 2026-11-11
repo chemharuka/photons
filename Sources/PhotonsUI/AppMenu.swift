@@ -123,6 +123,17 @@ public enum MainMenu {
                                     action: #selector(EditorWindowController.clearColorLabelAction(_:)),
                                     keyEquivalent: "0")
         noLabel.keyEquivalentModifierMask = [.option]
+        // §378 — 堆叠. ⌘G / ⇧⌘G are the pair every photo app puts on "group / ungroup"; they write
+        // catalog metadata (`stack_id`/`stack_rank`), so ⌘Z never walks one back. Grey rules live in
+        // `validateMenuItem`: 堆叠 needs ≥ 2 selected photos, 取消堆叠 needs a stack in the selection.
+        photo.addItem(.separator())
+        photo.addItem(withTitle: "堆叠所选照片",
+                      action: #selector(EditorWindowController.stackSelectionAction(_:)),
+                      keyEquivalent: "g")
+        let ungroup = photo.addItem(withTitle: "取消堆叠",
+                                    action: #selector(EditorWindowController.ungroupSelectionAction(_:)),
+                                    keyEquivalent: "g")
+        ungroup.keyEquivalentModifierMask = [.command, .shift]
 
         // 变换 — **before 显影** (072 §F). Everything that moves the picture's geometry lives under
         // this title: it changes where the pixels come from, not what colour they are.

@@ -354,7 +354,8 @@ final class MissingFilesTests: XCTestCase {
         try queue.close()
 
         let catalog = try Catalog.open(at: pkg)
-        XCTAssertEqual(catalog.schemaVersionApplied, 5)
+        XCTAssertEqual(catalog.schemaVersionApplied, Schema.version,
+                       "v4 → every later step (v5 missing, v6 stacks) ran")
         let asset = try XCTUnwrap(try catalog.asset(id: "a1"))
         XCTAssertFalse(asset.isMissing, "an old row reads as present — pre-v5 behaviour")
         let columns = try catalog.dbQueue.read { db in

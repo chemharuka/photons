@@ -245,6 +245,12 @@ extension Catalog {
         if !filter.includeDeleted { clauses.append("a.deleted = 0") }
         func isKept(_ d: FilterDimension) -> Bool { d != dimension }
 
+        // §378 — the stack projection, in the **one** place every query (`assets`, the facet lists)
+        // goes through: only a stack's 置顶 is a row the interface knows about. Putting it here
+        // rather than in `assets()` is what keeps a facet popup from offering a value that only a
+        // hidden member carries — the bar and the grid would then disagree about which values exist.
+        clauses.append("(a.stack_id IS NULL OR a.stack_rank = 0)")
+
         if let r = filter.ratingAtLeast, isKept(.rating) { clauses.append("a.rating >= ?"); args.append(r) }
         if let c = filter.cameraKey, isKept(.camera) {
             clauses.append("a.camera_key = ?"); args.append(c.lowercased())

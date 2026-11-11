@@ -442,6 +442,28 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func clearColorLabelAction(_ sender: Any?) { clearColorLabel() }
 
+    // MARK: photo stacks (§378) — 目录元数据，不是编辑
+    //
+    // ⌘G / ⇧⌘G. Both go through the session's one stack path (one transaction, one
+    // `metadataRevision`), and neither touches `edit`, `history`, `develop_json` or `editRevision`:
+    // a stack is a library fact, so ⌘Z must not walk it back.
+
+    /// ⌘G — 堆叠所选照片.
+    @discardableResult
+    public func stackSelection() -> Bool {
+        session.stackSelection() != nil
+    }
+
+    /// ⇧⌘G — 取消堆叠. Returns whether anything came back.
+    @discardableResult
+    public func ungroupSelection() -> Bool {
+        session.ungroupSelection() > 0
+    }
+
+    @objc public func stackSelectionAction(_ sender: Any?) { stackSelection() }
+
+    @objc public func ungroupSelectionAction(_ sender: Any?) { ungroupSelection() }
+
     // MARK: menu validation
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -570,6 +592,18 @@ public final class EditorWindowController: NSWindowController {
             // and the six label rows already show which colour the selection holds.
             return !session.metadataTargetIDs.isEmpty
                 && session.selectedAssets.contains { $0.colorLabel != nil }
+        case #selector(stackSelectionAction(_:)):
+            // ≥ 2 selected photos: a "stack" of one would hide its own badge rule (the capsule needs
+            // two) and is exactly the state the catalog refuses to create.
+            item.title = session.metadataTargetIDs.count > 2
+                ? "堆叠所选 \(session.metadataTargetIDs.count) 张"
+                : "堆叠所选照片"
+            return session.metadataTargetIDs.count >= 2
+        case #selector(ungroupSelectionAction(_:)):
+            // Grey unless the selection (or the anchor) touches a stack — a 取消堆叠 with nothing to
+            // ungroup would be a command that visibly does nothing.
+            return session.metadataTargetIDs.contains { session.stacksByTopID[$0] != nil
+                || (session.stackMembers(ofAssetID: $0)?.count ?? 0) >= 2 }
         case #selector(exportAction(_:)):
             // Nothing selected = nothing to export: grey, not a sheet that says "将导出 0 张".
             item.title = session.selection.count > 1

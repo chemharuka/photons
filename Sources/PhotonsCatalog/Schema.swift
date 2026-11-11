@@ -11,6 +11,7 @@ import GRDB
 /// | v3 | `assets.edit_time` + `develop_quarantine` — the develop document actually lands |
 /// | v4 | `presets` — named partial documents for M5's preset panel |
 /// | v5 | `assets.missing` — the row whose original file moved away (reference roots only) |
+/// | v6 | `assets.stack_id` + `assets.stack_rank` — photo stacks (§378) |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -20,7 +21,7 @@ import GRDB
 /// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 5
+    public static let version = 6
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -45,6 +46,7 @@ public enum Schema {
         Step(name: "v3") { db in try db.execute(sql: v3) },
         Step(name: "v4") { db in try db.execute(sql: v4) },
         Step(name: "v5") { db in try addMissingColumnIfAbsent(db) },
+        Step(name: "v6") { db in try addStackColumnsIfAbsent(db) },
     ]
 
     static var migrator: DatabaseMigrator {
@@ -94,6 +96,74 @@ public enum Schema {
         let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(assets)").map { $0["name"] as String }
         guard !columns.contains("missing") else { return }   // replayable: already applied
         try db.execute(sql: "ALTER TABLE assets ADD COLUMN missing INTEGER NOT NULL DEFAULT 0")
+    }
+
+    // MARK: - v6
+
+    /// Photo stacks (§378): two columns on `assets`, no `stacks` table.
+    ///
+    /// A stack's whole truth is "which assets share a `stack_id`, and which one is rank 0" — so the
+    /// facts live where the photos do. Deleting the last member deletes the stack, with no cascade
+    /// to remember and no empty shell to clean up later.
+    ///
+    /// - **`stack_id` is a fresh UUID**, never an asset id: swapping the top must not change the
+    ///   stack's identity.
+    /// - **`stack_rank = 0` is 置顶**, and "exactly one" is enforced by a *partial* unique index —
+    ///   the same shape `presets.is_default` uses (v4). `setStackTop` still moves the old top inside
+    ///   the same transaction, because a constraint violation is a worse error than a swap.
+    /// - **Replayable**: both `ALTER`s are guarded by `PRAGMA table_info`, and the index is
+    ///   `IF NOT EXISTS`. A library whose `user_version` stamp was lost migrates again as a no-op.
+    private static func addStackColumnsIfAbsent(_ db: Database) throws {
+        let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(assets)").map { $0["name"] as String }
+        if !columns.contains("stack_id") {
+            try db.execute(sql: "ALTER TABLE assets ADD COLUMN stack_id TEXT")
+        }
+        if !columns.contains("stack_rank") {
+            try db.execute(sql: "ALTER TABLE assets ADD COLUMN stack_rank INTEGER NOT NULL DEFAULT 0")
+        }
+        try db.execute(sql: """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_stack_top
+                ON assets(stack_id) WHERE stack_rank = 0
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS idx_assets_stack_members
+                ON assets(stack_id, stack_rank)
+            """)
+        // Deleting the 置顶 must promote the next member **in the same transaction** — not on the
+        // next launch. `Catalog.deleteAssets` is not the only path to a `DELETE` (a future feature,
+        // a CLI, a hand-run `sqlite3`), so the rule lives where every path meets it: a trigger.
+        //
+        // The two statements are the two rules of §4/⑤:
+        //   1. a stack left with **one** member is a residue nobody asked for → dissolve it;
+        //   2. a stack that lost its 置顶 while still holding ≥ 2 members → the first member in
+        //      display order (`capture_time DESC`, undated last, then filename, then id — the same
+        //      order `Stacks.swift` uses) becomes rank 0.
+        // Zero members left needs no statement: the stack is gone by construction.
+        //
+        // No `deleted = 0` in these counts: the partial unique index sees every row that holds a
+        // `stack_id`, so the trigger must reason about the same set. `setDeleted` clears the stack
+        // before it sets the flag (see `CatalogAPI.setDeleted`), so a soft-deleted row never keeps
+        // a rank — it leaves through the same door a hard delete does.
+        try db.execute(sql: """
+            CREATE TRIGGER IF NOT EXISTS trg_assets_stack_after_delete
+            AFTER DELETE ON assets
+            WHEN OLD.stack_id IS NOT NULL
+            BEGIN
+                UPDATE assets SET stack_id = NULL, stack_rank = 0
+                 WHERE stack_id = OLD.stack_id
+                   AND (SELECT COUNT(*) FROM assets WHERE stack_id = OLD.stack_id) = 1;
+
+                UPDATE assets SET stack_rank = 0
+                 WHERE id = (
+                        SELECT id FROM assets
+                         WHERE stack_id = OLD.stack_id
+                         ORDER BY (capture_time IS NULL), capture_time DESC, filename, id
+                         LIMIT 1)
+                   AND (SELECT COUNT(*) FROM assets WHERE stack_id = OLD.stack_id) > 1
+                   AND NOT EXISTS (SELECT 1 FROM assets
+                                    WHERE stack_id = OLD.stack_id AND stack_rank = 0);
+            END;
+            """)
     }
 
     private static let v1 = """
