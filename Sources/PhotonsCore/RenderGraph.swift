@@ -270,14 +270,15 @@ public struct RenderOptions: Sendable {
     /// `DehazeLinearTests`' halo counterproof. Never set by the app, never part of a key.
     public var legacyDehazeBlockVeil: Bool
 
-    /// **Tests only.** Disable S1.9's **symmetric fade about the airlight** (the `2σ … k·2σ` lower-side
-    /// resolution window). It reads `DehazeParamsU.l.w`; `t`, `D`, `A` and 280's upper edge are the same
-    /// in both renders, so the difference between them is the lower-side participation and nothing
-    /// else. The `J/I ≥ 0.97` acceptance needs it twice: as the counterproof (the unbounded recovery is
-    /// the 20 % sky darkening) and as the only place the *stage's own* `t` can be read back — the
-    /// acceptance's bands are §4.2's `t < 0.15` / `t ∈ 0.3…0.6`, and inverting the bounded render
-    /// would report 1 wherever the fade reaches (the correction is zero there, so `t` has nothing to
-    /// invert). Never set by the app, never part of a key.
+    /// **Tests only.** Render S1.9's participation with the **pre-374** curve,
+    /// `w = 1 − smoothstep(A, A+2σ, L)` instead of the C¹ log band. It reads `DehazeParamsU.l.w`;
+    /// `t`, `D` and `A` are the same in both renders, so the difference between them is the
+    /// participation and nothing else. The `J/I ≥ 0.97` acceptance needs it twice: as the
+    /// counterproof (the unbounded recovery is the 20 % sky darkening) and as the only place the
+    /// *stage's own* `t` can be read back — the acceptance's bands are §4.2's `t < 0.15` /
+    /// `t ∈ 0.3…0.6`, and inverting the bounded render would report 1 wherever the fade reaches
+    /// (the correction is zero there, so `t` has nothing to invert). Never set by the app, never
+    /// part of a key.
     public var legacyDehazeUnboundedRecovery: Bool
 
     /// **Internal (160).** A caller that renders the upstream chain at a different rung but asks for
@@ -1135,9 +1136,9 @@ private struct DehazeParamsU {
     var b: SIMD4<Float>   // canvas content rect: origin x, origin y, width, height (letterbox guard)
     var c: SIMD4<Int32>   // proxyW, proxyH, qProxy (block size on the proxy), proxyQW
     var d: SIMD4<Int32>   // proxyQH, box axis (0 = h, 1 = v), box segment length, box radius in blocks
-    var e: SIMD4<Float>   // 130: k (2A fade edge), legacy switch, 135: κ (A cap), 141: S1 exposure gain g
+    var e: SIMD4<Float>   // 130: k (2σ, legacy participation only), legacy switch, 135: κ (A cap), 141: g
     var j: SIMD4<Int32>   // sourceSize.xy, quarterTurns, pad
-    var l: SIMD4<Float>   // the knee, tests-only legacy block-min t, pad, pad
+    var l: SIMD4<Float>   // the knee, legacy block-min t, pad, pre-374 participation switch
     // 160 — apply's picture map: frameOrigin.xy, contentOrigin.xy. `imgPx = px + ½ − zw + xy`.
     var m: SIMD4<Float>
     // 160 — the picture's own grid in content pixels: frameSize.xy, pad, pad.

@@ -31,7 +31,13 @@ final class DehazeHighlightGainTests: XCTestCase {
                               probe: Bool = false) throws -> DisplayImage {
         let display = DisplayOptions(primaries: .rec2020, bitDepth: 16, headroom: 1,
                                      linearOutput: true)
-        let result = try graph.render(edit, options: RenderOptions(
+        // 329/374: 锐化's resting 50 rides in every frame and its unsharp halo is what the
+        // p99-band `max gain` measures (measured: 1.097 at `dehaze = 100` before any S1.9
+        // change). The subject here is the participation curve, so the fixture turns it off —
+        // exactly as `DehazeLinearTests.linearRender` does.
+        var doc = edit
+        doc.sharpen = SharpenGroup(amount: 0)
+        let result = try graph.render(doc, options: RenderOptions(
             scale: 1, display: display, useCache: false, wantsPixels: true,
             probesDehazeAirlight: probe))
         if let t = result.output { graph.recycle(output: t) }
