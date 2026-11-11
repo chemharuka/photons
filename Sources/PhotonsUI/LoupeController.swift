@@ -6166,7 +6166,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard let key = backdropKey else { return }
         guard backdrop.shouldGenerate(onPointerEnter: key) else { return }
         guard let job = makeJob(kind: .scheduled) else { return }
-        requestLowResFullFrame(key: key, edit: job.edit, template: job)
+        requestLowResFullFrame(edit: job.edit, template: job)
     }
 
     /// What the cached texture is of: the photo, plus the develop key and the edit digest.
@@ -6252,12 +6252,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// implementation (the `CropGeometry.pre330SourceSpace` / `RenderKeyChain` discipline).
     nonisolated(unsafe) static var backdropKeyIgnoresPerspective = false
 
+    /// **366 reverse gate — never true in the app.** The same shape, one dimension over: the key is
+    /// built from a **full-crop** copy of the document, so the crop is gone from both halves — the
+    /// spelled geometry *and* the digest that names the rect. That is what "the fingerprint without
+    /// its crop" has to mean for the gate to prove anything: `Histogram.editDigest` hashes the whole
+    /// document, so a gate that only dropped `crop=…` from the string would leave the digest moving
+    /// and the old texture would still be retired. With it set, a plain crop keeps the previous
+    /// key, `needsGeneration` is false and the stale whole picture is served — 验收 ④/① red.
+    nonisolated(unsafe) static var backdropKeyIgnoresCrop = false
+
     private func backdropKey(edit: EditModel) -> BackdropCache.Key? {
         guard let photo = backdropPhotoKey else { return nil }
         var edit = backdropEdit(edit)
         if Self.backdropKeyIgnoresPerspective {
             edit.geometry.perspectiveVertical = 0
             edit.geometry.perspectiveHorizontal = 0
+        }
+        if Self.backdropKeyIgnoresCrop {
+            edit.geometry.crop = .full
+            edit.geometry.aspectLock = .original
         }
         // 144: the digest names **what was rendered**, not just the document. A preview frame is a
         // real render of the target pair but not a settled document yet; giving it the document's own
@@ -6271,10 +6284,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // exactly like an edit does, or the letterbox backdrop and the histogram's whole-picture
         // source keep the previous top.
         //
-        // 344: the **geometry** is the fourth. It is `""` for a keystone-free, source-spaced document
-        // (`identity` then appends nothing, so the pre-344 key bytes hold) and spells `crop`/`rot`/
-        // `flip`/`q`/`pvy`/`phx`/`cs` as soon as a keystone or a canvas-spaced crop is in play — the
-        // two dimensions the low picture used to be blind to, now greppable in the key.
+        // 344: the **geometry** is the fourth. It is `""` only for a *neutral* geometry (full crop,
+        // no angle, no flip, no turn, no keystone, source-spaced: `identity` then appends nothing, so
+        // the pre-344 key bytes hold) and otherwise spells `crop`/`rot`/`flip`/`q`/`pvy`/`phx`/`cs`.
+        //
+        // 366: the crop is part of that fingerprint **always**, not only when it is canvas-spaced.
+        // A plain source-spaced crop used to move the key through the opaque digest alone; the
+        // spelled half — the only half a human (or a cache directory) can read — said nothing about
+        // it. `EditModel.geometryFingerprint` is now the one function that names every dimension the
+        // render consumes, and `requestLowResFullFrame` computes it from the very value it renders.
         return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
                                  digest: backdropPreviewTarget == nil
                                      ? digest : digest + Self.backdropPreviewMarker,
@@ -6467,14 +6485,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// a hand-written list of nine fields, so 340's `canvasRole`/`cropIsActive` (and anything added
     /// later) silently defaulted here — the low-resolution picture was rendered as an `.export`
     /// canvas at `fitScale 1` whatever the crop workspace was doing.
-    private func requestLowResFullFrame(key: BackdropCache.Key, edit: EditModel,
-                                        template: RenderJob) {
+    ///
+    /// **366 — one source.** The key is computed from `job.edit` *after* it has been resolved
+    /// (`backdropEdit`), not from an edit that travelled beside it. There is therefore no way for the
+    /// file to be rendered from one geometry and filed under another: the digest **and**
+    /// `edit.geometryFingerprint` (which names `crop/rot/flip/q/pvy/phx/cs`) are taken from exactly
+    /// the value `graph.render` receives.
+    @discardableResult
+    private func requestLowResFullFrame(edit: EditModel, template: RenderJob) -> Bool {
         // 144: the key may name a preview source, so the render must use the same edit the key was
         // built from. `backdropEdit` is that one function; a job built before a tick cannot drift.
         var job = template
         job.edit = backdropEdit(edit)
+        guard let key = backdropKey(edit: job.edit) else { return false }
         let serial = backdrop.begin(key)
         queue.async { [weak self] in self?.renderBackdrop(key: key, serial: serial, job: job) }
+        return true
     }
 
     // MARK: the read-only accessor (for the histogram's whole-picture source)
@@ -6549,8 +6575,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard let edit = edit ?? currentEdit, let key = backdropKey(edit: edit) else { return false }
         guard backdrop.needsGeneration(for: key), backdrop.isIdle else { return false }
         guard let job = makeJob(kind: .scheduled) else { return false }
-        requestLowResFullFrame(key: key, edit: edit, template: job)
-        return true
+        return requestLowResFullFrame(edit: edit, template: job)
     }
 
     /// 065: the diagnostics the photo switch is asserted from.
@@ -6578,12 +6603,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// purpose from a test.
     nonisolated(unsafe) static var backdropSpreadsOverViewport = false
 
+    /// **366 reverse gate — never true in the app.** With it set, the frame's window is handed to the
+    /// backdrop pass **in its own coordinates** instead of being composed with the placement, i.e. the
+    /// crop frame is ignored (053's pre-058 reading). On a cropped document the transition then
+    /// samples the wrong part of the low picture — the 「过渡帧」 and the settled frame disagree — which
+    /// is what the display-side half of 验收 ④ has to catch.
+    nonisolated(unsafe) static var backdropPlacementIgnoresCrop = false
+
     /// The window a backdrop is read through: the frame's own window, composed with where the frame
     /// sits on the whole picture (058). **One function**, so the settled present, the bridge tick and
-    /// the bridge's stop cannot disagree — and so the reverse gate above has one place to act.
+    /// the bridge's stop cannot disagree — and so the reverse gates above have one place to act.
     private func backdropWindow(for window: PresentWindow,
                                 _ placement: FramePlacement) -> PresentWindow {
-        Self.backdropSpreadsOverViewport ? .whole : window.onWholePicture(placement)
+        if Self.backdropSpreadsOverViewport { return .whole }
+        if Self.backdropPlacementIgnoresCrop { return window }
+        return window.onWholePicture(placement)
     }
 
     /// 065b: serve the request an open or a switch armed, **after** the frame that brings the graph for
