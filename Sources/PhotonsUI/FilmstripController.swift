@@ -527,11 +527,15 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
 
-    /// The live document for the anchor photo, the stored one for every other row (218 key input).
-    /// 363 — the committed document, always (see the grid's twin): the preview shows what `persist()`
-    /// saved, never the live document of an uncommitted drag.
+    /// The live document for the photo on screen, the stored one for every other row (218's key
+    /// input) — 363: the cell's *pixels* stay committed (nothing is blanked, an older delivery is
+    /// dropped), but the cell must still **ask** for the document the user is looking at, or the
+    /// pause (326/§4) has nothing to refuse and nothing to hold. See the grid's twin for the full
+    /// argument, including why a cached key is a file switch the pause allows.
     private func document(for asset: Asset) -> EditModel {
-        ThumbnailProvider.document(from: asset)
+        guard let session else { return .neutral }
+        if asset.id == session.loadedEditAssetID { return session.edit }
+        return ThumbnailProvider.document(from: asset)
     }
 
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,

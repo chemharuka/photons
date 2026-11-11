@@ -744,16 +744,27 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     // MARK: thumbnails
 
-    /// 363 — **the committed document, always.**
+    /// The document a cell **asks** for: the live one for the photo on screen, the stored one for
+    /// every other row (218's key input).
     ///
-    /// The row's `develop_json` is what `persist()` wrote, what a reload would serve, and therefore
-    /// what the preview must show. `session.edit` is the *live* document of the loaded photo: it
-    /// moves on every slider tick while nothing is saved. Deriving a cell's key from it meant a
-    /// mid-drag tick asked for a 1920 render nobody would ever see (one per 250 ms window), and that
-    /// render then landed on a cell that had already moved on — the waste *and* the repaint both come
-    /// from here. The loupe still renders the live document; the browsers show the saved one.
+    /// 363 — this is the line between *asking* and *rendering*, and it is the whole fix for the
+    /// pause that had been swallowed a level up. The cell's **pixels** are still the committed ones:
+    /// the swap goes old picture → new picture (`applyThumbnail` keeps the previous bitmap up, and
+    /// `ThumbnailEDRView` never hides a frame it is showing), and a delivery for an older document
+    /// is dropped (`thumbnailDidLoad`). What must **not** happen is skipping the ask altogether: with
+    /// the committed row as the key, a drag asked for nothing at all, so 326's pause had nothing to
+    /// refuse and nothing to hold — a cell that is not re-`configure`d (the loupe has no cell) waits
+    /// for a refresh that may never come.
+    ///
+    /// Asking for the live document is safe *because of the pause*, in exactly the two ways §4/326
+    /// define it: a key whose file is missing is refused and held for the release (no render while
+    /// the hand is down, and one replay instead of twenty), and a key whose file is already on disk
+    /// is a **file switch** the pause allows (it starts no producer run). Deriving the key from
+    /// `session.edit` is therefore what makes the pause observable at all.
     private func document(for asset: Asset) -> EditModel {
-        ThumbnailProvider.document(from: asset)
+        guard let session else { return .neutral }
+        if asset.id == session.loadedEditAssetID { return session.edit }
+        return ThumbnailProvider.document(from: asset)
     }
 
     private var backingScale: CGFloat {

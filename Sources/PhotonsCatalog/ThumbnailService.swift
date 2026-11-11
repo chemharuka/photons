@@ -350,6 +350,10 @@ public final class ThumbnailService: @unchecked Sendable {
         var finished = false
         var enqueuedAt = DispatchTime.now()
         var producerMilliseconds = 0.0
+        /// 363 — admitted while the service was paused, and only because this key's file was already
+        /// on disk. Such a job may deliver (one read), but it may **not** fall through to the
+        /// producer: the pause means no render while the interaction is on. See `requestBatch`.
+        var servesFromDiskOnly = false
 
         init(key: ThumbKey, source: URL, sequence: Int64, generation: Int, priority: ThumbPriority) {
             self.key = key
@@ -418,10 +422,14 @@ public final class ThumbnailService: @unchecked Sendable {
     /// 326 — what a pause does with a request depends on whether anybody is waiting for it:
     /// * `.isBackgroundWarm` (the loupe's 311 warm) is **queued**, not refused: its whole purpose is
     ///   the frame after the interaction, and in the loupe nothing else ever asks for that key;
+    /// * a request whose file is **already on disk** is admitted (363): switching to a picture the
+    ///   user has already seen costs one read and starts no producer run, so freezing it would be
+    ///   freezing the preview, not protecting the frame — `Job.servesFromDiskOnly` makes sure it can
+    ///   never turn into a render if the file goes away;
     /// * every other request is refused **and retained** — `resumeHeld` re-admits it the moment the
     ///   interaction ends, so a visible cell whose ask landed mid-drag is served without waiting for
     ///   the next `configure` (the user-visible half of this bug: the small previews stalled too).
-    /// `rejectedWhilePaused` still moves for the second kind, which is how the report proves the
+    /// `rejectedWhilePaused` still moves for the last kind, which is how the report proves the
     /// pause was not simply switched off.
     public var isPaused: Bool {
         get { lock.lock(); defer { lock.unlock() }; return paused }
@@ -501,6 +509,17 @@ public final class ThumbnailService: @unchecked Sendable {
         tickets.reserveCapacity(specs.count)
         var toDispatch: [Job] = []
 
+        // 363 — **a cached file is a switch, not a render** (see the comment at the pause branch
+        // below). The stat is done here, before the lock, and only while the service is paused: a
+        // paused drag is the only case that needs to know, and `cache.exists` is a `stat`, not a
+        // read. Doing it outside the lock keeps a filesystem call off the service's critical path.
+        var onDiskWhilePaused: Set<String> = []
+        if isPaused {
+            for spec in specs where !spec.isBackgroundWarm && cache.exists(spec.key) {
+                onDiskWhilePaused.insert(spec.key.digest)
+            }
+        }
+
         lock.lock()
         let gen = generation ?? currentGeneration
         for spec in specs {
@@ -513,6 +532,21 @@ public final class ThumbnailService: @unchecked Sendable {
                 // §4 `isInteracting`: not admitted while the frame is being composited — but kept
                 // (326), so the visible cell is served when the interaction ends instead of waiting
                 // for its next `configure` (which, in the loupe, never comes).
+                //
+                // 363 — **one exception, and it is not a render.** An ask whose file is already on
+                // disk is a *switch* of a picture the user has already seen (dragging back over a
+                // value renders nothing), so it is admitted and dispatched even now; `execute` still
+                // checks the cache first and `servesFromDiskOnly` stops it from ever reaching the
+                // producer. Everything else — anything that would have to be rendered — is refused
+                // and held exactly as 326 says.
+                if onDiskWhilePaused.contains(spec.key.digest) {
+                    if let job = admitLocked(spec, ticket: ticket, priority: priority,
+                                             generation: gen, completion: completion) {
+                        job.servesFromDiskOnly = true
+                        toDispatch.append(job)
+                    }
+                    continue
+                }
                 counters.rejectedWhilePaused += 1
                 holdLocked(spec, priority: priority, generation: gen, completion: completion,
                            ticket: ticket)
@@ -532,7 +566,9 @@ public final class ThumbnailService: @unchecked Sendable {
                 toDispatch.append(job)
             }
         }
-        let shouldDispatch = !toDispatch.isEmpty && !paused
+        // A job that only ever reads a file may start during the pause (363); anything that would
+        // have to render waits — `takeNextLocked` enforces that, so this call is safe either way.
+        let shouldDispatch = !toDispatch.isEmpty
         lock.unlock()
 
         if shouldDispatch { pump() }
@@ -743,7 +779,11 @@ public final class ThumbnailService: @unchecked Sendable {
     }
 
     private func takeNextLocked() -> Job? {
-        guard let best = pending.max(by: { a, b in
+        // 363 — while the interaction is on, the only entries that may start are the ones that are
+        // pure file switches (`servesFromDiskOnly`); a warm that is *queued* during the pause and an
+        // ordinary job must stay put, which is what "no render while dragging" means.
+        let runnable = paused ? pending.filter { $0.servesFromDiskOnly } : pending
+        guard let best = runnable.max(by: { a, b in
             a.priority == b.priority ? a.sequence > b.sequence : a.priority < b.priority
         }) else { return nil }
         pending.removeAll { $0 === best }
@@ -764,6 +804,14 @@ public final class ThumbnailService: @unchecked Sendable {
         // Cache first: a duplicate request for an already-present key is a hit, not a render.
         if let data = cache.data(for: job.key) {
             finish(job, origin: .hit, data: data, payload: nil, error: nil)
+            return
+        }
+
+        // 363 — a job admitted under the pause was admitted **only** because its file was on disk.
+        // If it has gone (a prune, an eviction, another photo's retention) this must not become the
+        // render the pause forbids: finish it empty and let the release (or a later ask) do the work.
+        if job.servesFromDiskOnly {
+            finish(job, origin: .cancelled, data: nil, payload: nil, error: nil)
             return
         }
 
