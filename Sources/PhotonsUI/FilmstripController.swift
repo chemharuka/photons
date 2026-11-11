@@ -232,6 +232,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.onMouseDown = { [weak self] event in
             guard let self else { return false }
             let point = self.collectionView.convert(event.locationInWindow, from: nil)
+            // ⇧/⌘ are the session's range gesture, not AppKit's "extend from the last clicked
+            // row" — resolving them here keeps the anchor/base fixed while the range moves.
+            if self.handleSelectionClick(at: point, modifiers: event.modifierFlags) { return true }
             return self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date()) == .swallow
         }
         clickGuard.onCenter = { [weak self] id in self?.performDeferredCenter(anchorID: id) }
@@ -751,15 +754,47 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     private func writeSelectionToModel(_ collectionView: NSCollectionView) {
         guard let session else { return }
-        let ids = collectionView.selectionIndexPaths.compactMap { session.assets[safe: $0.item]?.id }
-        let anchor = collectionView.selectionIndexPaths
-            .compactMap { session.assets[safe: $0.item]?.id }
-            .first { session.anchorID == $0 } ?? ids.first
-        session.setSelection(Set(ids), anchor: anchor)
+        // AppKit's selection is only the trigger; the session owns the anchor and the range base.
+        // Never guess the anchor from `ids.first` here.
+        let ids = Set(collectionView.selectionIndexPaths.compactMap { session.assets[safe: $0.item]?.id })
+        if ids.isEmpty {
+            if !session.selection.isEmpty { session.setSelection([]) }
+        } else if ids.count == 1, let id = ids.first {
+            if session.selection != ids || session.anchorID != id { session.selectOnly(id) }
+        } else if ids != session.selection {
+            let anchor = [session.anchorID, session.selectionBase]
+                .compactMap { $0 }
+                .first { ids.contains($0) }
+                ?? session.assets.last { ids.contains($0.id) }?.id
+            session.setSelection(ids, anchor: anchor)
+        }
         updateSelectionAndActive()
         // The new anchor is priority ① for the next reconcile.
         scheduleThumbnailReconcile()
         centerAnchorIfChanged()
+    }
+
+    /// Resolve a ⇧/⌘ press against the session. Plain presses return `false` and reach AppKit,
+    /// which reports the hit row through the delegate door above.
+    @discardableResult
+    public func handleSelectionClick(at point: NSPoint,
+                                     modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard let session,
+              let indexPath = collectionView.indexPathForItem(at: point),
+              let asset = session.assets[safe: indexPath.item] else { return false }
+        let shift = modifiers.contains(.shift)
+        let command = modifiers.contains(.command)
+        guard shift || command else { return false }
+        if shift {
+            session.selectRange(to: asset.id, adding: command)
+        } else {
+            session.toggle(asset.id)
+        }
+        collectionView.window?.makeFirstResponder(collectionView)
+        updateSelectionAndActive()
+        scheduleThumbnailReconcile()
+        centerAnchorIfChanged()
+        return true
     }
 
     public func applySelectionFromModel() {
@@ -905,14 +940,23 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     /// Split out so the acceptance tests press real points at real timestamps without synthesising
     /// window events; the decision itself is the shipping `clickGuard.mouseDown`.
     @discardableResult
-    public func handleMouseDown(at point: NSPoint, now: Date = Date()) -> BrowserClickGuard.Decision {
+    public func handleMouseDown(at point: NSPoint, now: Date = Date(),
+                                modifiers: NSEvent.ModifierFlags = []) -> BrowserClickGuard.Decision {
         let decision = clickGuard.mouseDown(hit: hit(at: point), now: now)
         guard decision == .forward,
-              let indexPath = collectionView.indexPathForItem(at: point) else { return decision }
-        isApplyingModel = true
-        collectionView.selectionIndexPaths = [indexPath]
-        isApplyingModel = false
-        writeSelectionToModel(collectionView)
+              let session,
+              let indexPath = collectionView.indexPathForItem(at: point),
+              let asset = session.assets[safe: indexPath.item] else { return decision }
+        if modifiers.contains(.shift) {
+            session.selectRange(to: asset.id, adding: modifiers.contains(.command))
+        } else if modifiers.contains(.command) {
+            session.toggle(asset.id)
+        } else {
+            session.selectOnly(asset.id)
+        }
+        updateSelectionAndActive()
+        scheduleThumbnailReconcile()
+        centerAnchorIfChanged()
         return decision
     }
 

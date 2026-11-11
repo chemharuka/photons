@@ -466,6 +466,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         collectionView.delegate = self
         collectionView.register(AssetGridItem.self, forItemWithIdentifier: AssetGridItem.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
+        // ⇧/⌘ clicks are resolved here, against the session's range base — AppKit only knows the
+        // last clicked row, which is exactly the anchor that must not move during a ⇧ gesture.
+        collectionView.onMouseDown = { [weak self] event in
+            guard let self, event.window != nil else { return false }
+            let point = self.collectionView.convert(event.locationInWindow, from: nil)
+            return self.handleSelectionClick(at: point, modifiers: event.modifierFlags)
+        }
 
         // Context menu: attach the shared menu, resolve the clicked cell here (only this view knows
         // where the event landed), and let the verbs run through the session.
@@ -1078,14 +1085,46 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     private func writeSelectionToModel(_ collectionView: NSCollectionView) {
         guard let session else { return }
-        let ids = collectionView.selectionIndexPaths.compactMap { session.assets[safe: $0.item]?.id }
-        let anchor = collectionView.selectionIndexPaths
-            .compactMap { session.assets[safe: $0.item]?.id }
-            .first { session.anchorID == $0 } ?? ids.first
-        session.setSelection(Set(ids), anchor: anchor)
+        // AppKit's selection is only the trigger; the session owns the anchor and the range base.
+        // A multi-row native selection must never manufacture an anchor from `ids.first` — that is
+        // what used to drag the thick ring away from the original photo.
+        let ids = Set(collectionView.selectionIndexPaths.compactMap { session.assets[safe: $0.item]?.id })
+        if ids.isEmpty {
+            if !session.selection.isEmpty { session.setSelection([]) }
+        } else if ids.count == 1, let id = ids.first {
+            if session.selection != ids || session.anchorID != id { session.selectOnly(id) }
+        } else if ids != session.selection {
+            let anchor = [session.anchorID, session.selectionBase]
+                .compactMap { $0 }
+                .first { ids.contains($0) }
+                ?? session.assets.last { ids.contains($0.id) }?.id
+            session.setSelection(ids, anchor: anchor)
+        }
         // Active ring must follow the anchor even when the selection set did not change. In place:
         // a `reloadData()` here would recycle every cell and clear its thumbnail for no reason.
         updateSelectionAndActive()
+    }
+
+    /// Resolve a ⇧/⌘ press against the session. Plain presses return `false` and reach AppKit,
+    /// which reports the single hit row through the delegate door above.
+    @discardableResult
+    public func handleSelectionClick(at point: NSPoint,
+                                     modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard let session,
+              let indexPath = collectionView.indexPathForItem(at: point),
+              let asset = session.assets[safe: indexPath.item] else { return false }
+        let shift = modifiers.contains(.shift)
+        let command = modifiers.contains(.command)
+        guard shift || command else { return false }
+        if shift {
+            session.selectRange(to: asset.id, adding: command)
+        } else {
+            session.toggle(asset.id)
+        }
+        collectionView.window?.makeFirstResponder(collectionView)
+        updateSelectionAndActive()
+        scheduleThumbnailReconcile()
+        return true
     }
 
     public func applySelectionFromModel() {
