@@ -169,10 +169,17 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
     case notEnoughLines
     /// A fifth line (or a third on one axis): §2b.1's 2 + 2 ceiling.
     case tooManyLines
-    /// The lines are parallel already (< 0.2° apart) — no information about a vanishing point.
+    /// The lines are parallel already (< 0.2° apart) — kept as public API for callers that name it,
+    /// but **367 no longer produces it from `fit`**: a near-parallel pair is exactly what the keystone
+    /// can solve to a small value (0.02° → v = 0.41, 0.1° → v = 1.75, 0° → v = 0.00), and the user
+    /// asked for 「角度很小也直接走校正，也不需要提示」.
     case nearParallel
     /// The lines disagree: no `(v, h)` brings every pair inside 0.05°.
     case inconsistent
+    /// 367 — two same-axis lines whose residuals the fit could not move at all: the arithmetic has no
+    /// answer (e.g. a pair 30°/34° off the axis), so the line is **kept** and the card says why
+    /// instead of withdrawing it.
+    case linesTooFarFromAxis
     /// The fit is rank-deficient: the new line repeats what the others already said.
     case degenerate
     /// The answer exists but is outside the slider's own `PerspectiveMap.limit` (347: ±200).
@@ -196,9 +203,12 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
         case .notEnoughLines: return "再画一条（需 2 条）"
         case .tooManyLines: return "每个方向最多 2 条"
         case .nearParallel: return "两条线几乎平行，没有信息"
+        case .linesTooFarFromAxis:
+            guard let measured, measured.isFinite else { return "这两条线偏轴太多，校正不了（先记下）" }
+            return String(format: "这两条线偏轴 %.1f°，校正不了（先记下）", measured)
         case .inconsistent:
             guard let measured, measured.isFinite else { return "这些线互相矛盾，未应用" }
-            return String(format: "线间相差 %.1f°，无法同时平行", measured)
+            return String(format: "这些线互相矛盾（差 %.1f°），未应用", measured)
         case .degenerate: return "新线与已有线重复，未应用"
         case .outOfRange:
             let limit = Int(PerspectiveMap.limit)
@@ -312,6 +322,45 @@ public struct GuideLineFit: Equatable, Sendable {
     public static func rejected(_ failure: GuideLineFailure,
                                measured: Double? = nil) -> GuideLineFit {
         GuideLineFit(failure: failure, measuredWorstPairwise: measured)
+    }
+}
+
+// MARK: - 367: the pair's verdict, and the 2 × 2 assignment search
+
+/// What **two** lines mean — the rule of 2026-11-10 (see the task's §0):
+///
+///   · same axis → always try to correct, however small the angle (0.02°, even 0°, are corrections
+///     the fit answers with a small value); the card shows the ordinary readout, not a warning;
+///   · one vertical + one horizontal → `insufficient`: **accept, write nothing**, no red, no error.
+///     Two lines can only name one direction each; that is information, not a contradiction;
+///   · same axis but the arithmetic cannot move the residual at all → `unsolvable`: keep the line and
+///     say 「偏轴 X°，校正不了」. The line is not withdrawn.
+///   · anything else (the travel's end, a rank-deficient pair) is reported as the fit reported it.
+public enum GuideLinePairOutcome: Equatable, Sendable {
+    case corrected(GuideLineSolution)
+    case insufficient
+    case unsolvable(measured: Double)
+    case rejected(GuideLineFailure, measured: Double?)
+}
+
+/// What a 3/4-line set resolved to, including the axis assignment the search picked.
+public struct GuideLineGroupFit: Equatable, Sendable {
+    /// The lines with the chosen axes written back (for an offending line: the ones that remain).
+    public var lines: [GuideLine]
+    public var solution: GuideLineSolution?
+    public var failure: GuideLineFailure?
+    public var measuredWorstPairwise: Double?
+    /// The index, in the caller's array, of the line whose removal made the rest solvable.
+    public var offendingIndex: Int?
+
+    public init(lines: [GuideLine], solution: GuideLineSolution? = nil,
+                failure: GuideLineFailure? = nil, measuredWorstPairwise: Double? = nil,
+                offendingIndex: Int? = nil) {
+        self.lines = lines
+        self.solution = solution
+        self.failure = failure
+        self.measuredWorstPairwise = measuredWorstPairwise
+        self.offendingIndex = offendingIndex
     }
 }
 
@@ -513,7 +562,6 @@ public enum GuideLinesSolve {
                            maxIterations: Int = GuideLinesSolve.maxIterations) -> GuideLineFit {
         guard lines.count >= 2 else { return .rejected(.notEnoughLines) }
         guard lines.count <= maxLines else { return .rejected(.tooManyLines) }
-        if hasNoInformation(lines) { return .rejected(.nearParallel) }
 
         let axes = constrainedAxes(of: lines)
         guard !axes.isEmpty else { return .rejected(.notEnoughLines) }
@@ -678,6 +726,211 @@ public enum GuideLinesSolve {
                                          smallestSingularValue: sigmaMin,
                                          lineCount: lines.count,
                                          previousStraighten: previousStraighten))
+    }
+
+    // MARK: - 367: two lines, then 2 × 2
+
+    /// 367 §2.2 — what a pair means. Same axis → correct it (near-parallel included); one of each →
+    /// accept without writing; same axis but no movable residual → keep the line and say so.
+    public static func pairOutcome(_ lines: [GuideLine],
+                                   current: PerspectiveMap,
+                                   source: ImageSize,
+                                   straightenDegrees: Double,
+                                   tolerance: Double = GuideLinesSolve.toleranceDegrees)
+        -> GuideLinePairOutcome {
+        guard lines.count == 2 else { return .insufficient }
+        guard lines[0].axis == lines[1].axis else { return .insufficient }
+        let fit = fit(lines: lines, current: current, source: source,
+                      straightenDegrees: straightenDegrees, tolerance: tolerance)
+        if let solution = fit.solution { return .corrected(solution) }
+        let measured = fit.measuredWorstPairwise ?? 0
+        let input = abs(fold(lines[0].sourceAngle - lines[1].sourceAngle))
+        // 「校正不动」 is the one case where the fit's measured angle is *exactly* the input angle:
+        // the parameters moved nothing. No empirical 20°/45° threshold — the residual's own answer.
+        if fit.failure == .inconsistent, abs(measured - input) < 0.05 {
+            return .unsolvable(measured: measured)
+        }
+        return .rejected(fit.failure ?? .inconsistent, measured: fit.measuredWorstPairwise)
+    }
+
+    /// 367 §2.3 — 「2 横 2 竖」 is the only target the card accepts. For three lines there are six
+    /// assignments (which two share an axis × two axes); for four, three 2+2 partitions × two axes.
+    /// Each assignment is fitted, the successful one with the smallest worst pair-angle wins, and the
+    /// chosen axes are written back into the returned lines.
+    ///
+    /// A successful assignment must also be **2 横 2 竖 in spirit**: the two groups have to be nearly
+    /// perpendicular (`isMixedDirection`). Without that, a 45° stroke would pass as a lone horizontal
+    /// line next to a vertical pair (a lone line contributes no pair residual), which is exactly the
+    /// 「异常线」 the user asked to be named. When every assignment fails, each line is dropped in turn;
+    /// if dropping one makes the rest solvable, that is the offending line.
+    public static func groupFit(_ lines: [GuideLine],
+                                current: PerspectiveMap,
+                                source: ImageSize,
+                                straightenDegrees: Double,
+                                tolerance: Double = GuideLinesSolve.toleranceDegrees)
+        -> GuideLineGroupFit {
+        guard lines.count >= 2 else {
+            return GuideLineGroupFit(lines: lines, failure: .notEnoughLines)
+        }
+        guard lines.count <= maxLines else {
+            return GuideLineGroupFit(lines: lines, failure: .tooManyLines)
+        }
+        guard lines.count >= 3 else {
+            switch pairOutcome(lines, current: current, source: source,                               straightenDegrees: straightenDegrees, tolerance: tolerance) {
+            case .corrected(let solution):
+                return GuideLineGroupFit(lines: lines, solution: solution,
+                                         measuredWorstPairwise: solution.worstResidual)
+            case .insufficient:
+                return GuideLineGroupFit(lines: lines, failure: .notEnoughLines)
+            case .unsolvable(let measured):
+                return GuideLineGroupFit(lines: lines, failure: .linesTooFarFromAxis,
+                                         measuredWorstPairwise: measured)
+            case .rejected(let failure, let measured):
+                return GuideLineGroupFit(lines: lines, failure: failure,
+                                         measuredWorstPairwise: measured)
+            }
+        }
+
+        if let best = bestAssignment(lines, current: current, source: source,
+                                     straightenDegrees: straightenDegrees, tolerance: tolerance) {
+            return GuideLineGroupFit(lines: best.lines, solution: best.solution,
+                                     measuredWorstPairwise: best.solution.worstResidual)
+        }
+
+        // All assignments failed: find the one line whose absence makes the rest solvable.
+        var offender: (index: Int, lines: [GuideLine], solution: GuideLineSolution)?
+        for index in lines.indices {
+            var remaining = lines
+            remaining.remove(at: index)
+            guard let best = bestAssignment(remaining, current: current, source: source,
+                                            straightenDegrees: straightenDegrees,
+                                            tolerance: tolerance) else { continue }
+            if offender == nil
+                || best.solution.worstResidual < offender!.solution.worstResidual {
+                offender = (index, best.lines, best.solution)
+            }
+        }
+        if let offender {
+            return GuideLineGroupFit(lines: offender.lines, solution: offender.solution,
+                                     failure: .inconsistent,
+                                     measuredWorstPairwise: offender.solution.worstResidual,
+                                     offendingIndex: offender.index)
+        }
+
+        // No single line to blame: the groups contradict each other. Say by how much, from the lines
+        // as they were drawn (the caller keeps its previous valid set and withdraws only the new one).
+        return GuideLineGroupFit(lines: lines, failure: .inconsistent,
+                                 measuredWorstPairwise: worstPairwiseAngle(of: lines))
+    }
+
+    /// The six assignments §2.3 enumerates, as an axis per line in the caller's order.
+    public static func axisAssignments(count: Int) -> [[GuideLineAxis]] {
+        func flipped(_ axis: GuideLineAxis) -> GuideLineAxis {
+            axis == .vertical ? .horizontal : .vertical
+        }
+        var out: [[GuideLineAxis]] = []
+        switch count {
+        case 3:
+            for axis in GuideLineAxis.allCases {
+                for i in 0..<3 {
+                    for j in (i + 1)..<3 {
+                        var assignment = [flipped(axis), flipped(axis), flipped(axis)]
+                        assignment[i] = axis
+                        assignment[j] = axis
+                        out.append(assignment)
+                    }
+                }
+            }
+        case 4:
+            let partitions = [[[0, 1], [2, 3]], [[0, 2], [1, 3]], [[0, 3], [1, 2]]]
+            for partition in partitions {
+                for axis in GuideLineAxis.allCases {
+                    var assignment = [flipped(axis), flipped(axis), flipped(axis), flipped(axis)]
+                    for index in partition[0] { assignment[index] = axis }
+                    for index in partition[1] { assignment[index] = flipped(axis) }
+                    out.append(assignment)
+                }
+            }
+        default:
+            break
+        }
+        return out
+    }
+
+    /// The best successful assignment, or `nil`. A solution counts only when the assigned groups are
+    /// nearly perpendicular — the 「2 横 2 竖」 the user is asking for.
+    static func bestAssignment(_ lines: [GuideLine],
+                               current: PerspectiveMap,
+                               source: ImageSize,
+                               straightenDegrees: Double,
+                               tolerance: Double)
+        -> (lines: [GuideLine], solution: GuideLineSolution)? {
+        guard lines.count >= 3 else {
+            guard lines.count == 2 else { return nil }
+            switch pairOutcome(lines, current: current, source: source,
+                               straightenDegrees: straightenDegrees, tolerance: tolerance) {
+            case .corrected(let solution): return (lines, solution)
+            case .insufficient, .unsolvable, .rejected: return nil
+            }
+        }
+        var best: (lines: [GuideLine], solution: GuideLineSolution)?
+        for assignment in axisAssignments(count: lines.count) {
+            var assigned = lines
+            for index in assigned.indices { assigned[index].axis = assignment[index] }
+            let fit = fit(lines: assigned, current: current, source: source,
+                          straightenDegrees: straightenDegrees, tolerance: tolerance)
+            guard let solution = fit.solution else { continue }
+            // For three lines one group is a lone stroke; 「剩下一个垂直」 is a real condition, or a
+            // 45° diagonal would pass as a lone horizontal line (it contributes no pair row). The
+            // relative angle is measured in the **mapped** plane at the solution, not in the source:
+            // the current keystone bends the drawn lines, which is the whole reason they are solved.
+            if assigned.count == 3,
+               !isNearlyPerpendicular(assigned, solution: solution, source: source,
+                                      straightenDegrees: straightenDegrees) {
+                continue
+            }
+            if best == nil
+                || solution.worstResidual < best!.solution.worstResidual {
+                best = (assigned, solution)
+            }
+        }
+        return best
+    }
+
+    /// The two groups' common directions are ~90° apart **after** the keystone. A lone line that is
+    /// 45° off the pair is the 「异常线」 the user asked to be named; a lone line that is roughly
+    /// perpendicular is the third stroke of a 2 + 1 set.
+    static func isNearlyPerpendicular(_ lines: [GuideLine], solution: GuideLineSolution,
+                                      source: ImageSize,
+                                      straightenDegrees: Double) -> Bool {
+        let byAxis = Dictionary(grouping: lines, by: \.axis)
+        guard let vertical = byAxis[.vertical], let horizontal = byAxis[.horizontal],
+              !vertical.isEmpty, !horizontal.isEmpty else { return true }
+        func meanOffAxis(_ group: [GuideLine], target: Double) -> Double {
+            group.map {
+                abs(fold(mappedAngle(of: $0, source: source,
+                                     vertical: solution.vertical,
+                                     horizontal: solution.horizontal,
+                                     straightenDegrees: straightenDegrees) - target))
+            }.reduce(0, +) / Double(group.count)
+        }
+        let off = meanOffAxis(vertical, target: 90) + meanOffAxis(horizontal, target: 0)
+        return off <= mixedDirectionDegrees
+    }
+
+    /// The largest within-group pair angle of the lines **as they stand** — the number the card prints
+    /// when the whole set is contradictory and no single line can be blamed.
+    static func worstPairwiseAngle(of lines: [GuideLine]) -> Double {
+        var worst = 0.0
+        let byAxis = Dictionary(grouping: lines, by: \.axis)
+        for (_, group) in byAxis {
+            for i in group.indices {
+                for j in group.indices where j > i {
+                    worst = max(worst, abs(fold(group[i].sourceAngle - group[j].sourceAngle)))
+                }
+            }
+        }
+        return worst
     }
 
     /// The Jacobian at an answer, and its smallest singular value (§2b.2's rank test).
