@@ -2414,11 +2414,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let wasBridging = zoomBridge != nil
         let serial = zoomBridgeArmedCount
         let texture = canvasTexture?.texture
-        let target = zoomBridge.flatMap { bridge -> PresentWindow? in
-            guard let texture else { return nil }
-            return bridge.window(atProgress: 1,
-                                 textureSize: ImageSize(width: texture.width, height: texture.height))
-        }
         let reached = zoomBridgeFrames.last(where: { $0.serial == serial }).map { $0.progress >= 0.999 }
             ?? false
         zoomBridge = nil
@@ -2440,10 +2435,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         // Nothing waiting: sit on the stop. (The ticker normally got there already; this covers Reduce
         // Motion and a bridge that ended between two ticks.)
-        if !reached, let target, let texture, let presenter {
+        if !reached, let texture, let presenter {
             let canvas = viewportPixels
-            let drawn = backdropTexture(for: target)
-            let backdropWindow = backdropWindow(for: target, canvasPlacement)
+            // 370 ③ — the stop is drawn with the **settled** frame's own geometry, not with the
+            // bridge's `p = 1` window. `.whole` over the canvas-sized texture the settle path presents
+            // (with the `stretched` correction a frame for another canvas gets) is the same call that
+            // produced the settled rect — the same `canvasRect(of:texture:canvas:)`, with the texture and
+            // the canvas the same size — so the last frame of the transition and the frame that settles
+            // are the same rect, bit for bit, instead of two walks that differ where a `.rounded()` meets
+            // `n + 0.5`.
+            let heldCanvas = canvasPicture?.canvas ?? canvas
+            let window = heldCanvas == canvas
+                ? PresentWindow.whole
+                : PresentWindow.whole.stretched(to: canvas, from: heldCanvas)
+            let drawn = backdropTexture(for: window)
+            let backdropWindow = backdropWindow(for: window, canvasPlacement)
             // 067: the held frame's own picture rect, read through the stop's window — so the
             // photograph lands where the *stop's* map puts it. This is the call that used to pass no
             // rect at all: 054's matte needs one, and without it the frame's `float4(0)` letterbox was
@@ -2452,11 +2458,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 ?? ImageRect(x: 0, y: 0, width: texture.width, height: texture.height)
             presentCanvas(presenter, texture: texture, photoRect: picture,
                           pictureRect: canvasPicture?.picture ?? picture,
-                          frameCanvas: canvasPicture?.canvas ?? canvas, window: target,
+                          frameCanvas: heldCanvas, window: window,
                           placement: canvasPlacement, backdrop: drawn,
                           backdropWindow: backdropWindow, canvas: canvas, serial: serial,
                           zoom: lastFrame?.zoom ?? 0)
-            recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: target,
+            recordZoomBridgeFrame(ZoomBridgeFrame(serial: serial, progress: 1, window: window,
                                                   drawable: canvas, canvas: canvas,
                                                   source: ObjectIdentifier(texture)))
         }
@@ -2506,6 +2512,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func presentZoomBridgeFrame(progress: Double, bridge: LoupeZoomBridge, texture: MTLTexture,
                                         serial: Int) {
         guard let presenter, zoomBridgePresentsInFlight < 2 else { return }
+        // 370 ③ — **the transition's end is the identity, so it is not drawn here.** At `p = 1`
+        // `bridge.window(atProgress:)` is a *second* walk to the point the settled present already
+        // stands on: it divides the photograph's rect by **this texture's** size and rounds each edge,
+        // so a picture whose letterbox edge is exactly `n + 0.5` lands on `n + 1` here and on `n` in the
+        // settled frame — whose texture *is* the canvas (ratio 1, rect exact). One pixel of the matte,
+        // permanently, at the instant the transition lands (`370 app · end … y:133 · settled … y:132`).
+        // The stop is therefore left to the settled path — the pending frame the render delivers, or
+        // `finishZoomBridge`'s stop below — which presents the frame through `.whole` and is therefore
+        // bit-identical to it by construction rather than by tolerance.
+        if progress >= 1 { return }
         let canvas = viewportPixels
         let window = bridge.window(atProgress: progress,
                                    textureSize: ImageSize(width: texture.width, height: texture.height))

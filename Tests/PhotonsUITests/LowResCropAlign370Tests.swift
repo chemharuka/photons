@@ -461,6 +461,7 @@ final class LowResCropAlign370Tests: XCTestCase {
         let framesBefore = loupe.zoomBridgeFrames.count
         loupe.zoomToFit()
         let bridge = try XCTUnwrap(loupe.zoomBridge, "no bridge")
+        XCTAssertNotNil(bridge, "the crossing must be bridged")
         XCTAssertTrue(waitFor { loupe.zoomBridge == nil }, "bridge never ended")
         pump(0.05)
         let serial = loupe.zoomBridgeArmedCount
@@ -476,23 +477,36 @@ final class LowResCropAlign370Tests: XCTestCase {
             XCTAssertEqual(first.placement.region.bottom, actualPlacement.region.bottom, accuracy: 1e-6)
         }
 
-        // ③ — the bridge's end geometry is the settled fit frame's, **value for value**. No tolerance:
-        // the `1.0 px` this used to allow was a rounding difference between two walks of the same
-        // point, and ③ asks for the bit-identical rect, not a close one. Both sides are the
-        // **product's** own derivation (`PresentRequest`), so no hand rounding of a normalised rect
-        // can manufacture a pixel of difference.
-        if let low = loupe.lowResFullFrame {
-            let endWindow = bridge.window(atProgress: 1, textureSize: actualTexture)
-            let back = endWindow.onWholePicture(actualPlacement)
-            let end = PresentRequest(picture: low.texture, photoRect: low.content,
-                                     window: back, canvas: loupe.viewportPixels).pictureQuad
-            note(String(format: "370 app · end %@ · settled %@ · exact %@",
-                        "\(end)", "\(fitQuad)",
-                        end == fitQuad ? "equal" : "NOT equal"))
-            XCTAssertEqual(end.x, fitQuad.x, "the transition's end left edge")
-            XCTAssertEqual(end.y, fitQuad.y, "the transition's end top edge")
-            XCTAssertEqual(end.width, fitQuad.width, "the transition's end width")
-            XCTAssertEqual(end.height, fitQuad.height, "the transition's end height")
-        }
+        // ③ — **the frame the transition lands on is the settled frame**, value for value. No
+        // tolerance: the `1.0 px` this used to allow was a rounding difference between two walks of
+        // the same point, and ③ asks for the bit-identical rect, not a close one.
+        //
+        // 370's last inch: the bridge no longer draws `progress >= 1`. That frame came out of
+        // `bridge.window(atProgress: 1)` — the photograph's rect divided by **the held texture's**
+        // size, each edge `.rounded()` — while the settled frame's rect is the render's own receipt on
+        // a texture that *is* the canvas, so its ratio is 1 and its rect exact. On a letterbox edge of
+        // exactly `n + 0.5` the two walks land on opposite sides of the pixel (`end y:133` vs
+        // `settled y:132`), and no amount of care inside `canvasRect` can fix it: the denominators are
+        // different textures. The endpoint is therefore the settled present itself — the same call,
+        // the same geometry objects, `PresentWindow.whole` over the receipt — and what this measures
+        // is the **product's own last present** for the crossing against the settled fit frame, both
+        // sides `PresentRequest`'s derivation, with no second walk left for the test to invent.
+        XCTAssertNotNil(loupe.lowResFullFrame, "no low-res frame to land the transition on")
+        let end = try XCTUnwrap(loupe.lastPresented, "the transition presented no frame")
+        let endRequest = try XCTUnwrap(loupe.lastPresentRequest)
+        note(String(format: "370 app · end %@ · settled %@ · exact %@",
+                    "\(end.pictureQuad)", "\(fitQuad)",
+                    end.pictureQuad == fitQuad ? "equal" : "NOT equal"))
+        XCTAssertEqual(end.pictureQuad.x, fitQuad.x, "the transition's end left edge")
+        XCTAssertEqual(end.pictureQuad.y, fitQuad.y, "the transition's end top edge")
+        XCTAssertEqual(end.pictureQuad.width, fitQuad.width, "the transition's end width")
+        XCTAssertEqual(end.pictureQuad.height, fitQuad.height, "the transition's end height")
+        // …and it is drawn through the **identity window**: the settled frame's own geometry, not a
+        // bridge map that happens to land on the same pixels. This is what the skipped `p >= 1`
+        // present buys, and it is the part that would go red if a bridge window came back as the end.
+        XCTAssertEqual(endRequest.window, PresentWindow.whole,
+                       "the transition's end was not presented through the settled window")
+        XCTAssertEqual(end.frameCanvas, actualTexture,
+                       "the transition's end frame was rendered for another canvas")
     }
 }
