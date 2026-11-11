@@ -37,6 +37,13 @@ let outcome = try service.merge(frames) { line in print(line) }
 - 默认 `bits = 16`、`headroom = 4`：容器上限 = 4 × 输入白电平，16 位里输入标尺逐位不变，顶上多出
   2 档高光（`WhiteLevel = 65535`）。要浮点精度就设 `bits = 32`（ImageIO 读 float CFA DNG 会拒收，
   这种给 darktable / RawTherapee 用）。
+- **`compress = true` 用 SOF3 无损 JPEG**（`Compression = 7`，256×256 分块）：60 MP 一帧
+  121.2 MB → **49.9 MB**，像素逐位不变。三个坑（与我们 `DNG/` 那套完全同源）写在
+  `Vendor/hdrmerge-swift/Sources/HDRMergeCore/LosslessJPEGEncoder.swift` 顶部：
+  SOS 选择子是 `Td << 4 | Ta`（写错则 libraw 能解、Core Image 全黑且报成功）、
+  马赛克要拆成两个列交错分量（同一预测器只比同色样本）、边缘 tile 用重复行列而非补零。
+  `bits = 32` 与压缩互斥——SOF3 只装整数样本，浮点 DNG 一律不压缩。
+  Deflate（`Compression = 8`）更小但 Core Image 直接拒收，所以没有提供。
 - **本模块不入库**。合并完调用 `onOutput` 把 URL 交回来，由持有 `PhotonsCatalog` 的一侧走
   `ImportService`（或用户手动导入）。这样 `HDR/` 保持零核心依赖，CLI、测试、未来的面板都能直接用。
 - **合成靠外部可执行文件**：`hdrmerge-swift`（GPLv3，源码在 `Vendor/`）作为独立子进程运行，路径解析顺序为

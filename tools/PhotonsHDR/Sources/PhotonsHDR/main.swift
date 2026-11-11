@@ -23,6 +23,7 @@ func usage() -> String {
         --bits 16|32        bits per sample (default 16)
         --headroom N        container top = N× input white (default 4 = +2 stops, bit-exact)
         --feather N         mask feather radius (default 3)
+        --compress          SOF3 lossless JPEG (121 MB → ~50 MB on 60 MP, bit-exact)
         --no-import         only write the file (default is also no-import: no library here)
         --json              print one JSON object on stdout
       photons-hdr capabilities [--json]
@@ -101,6 +102,8 @@ case "merge":
             service.headroom = Double(argv[i + 1]) ?? 4; i += 2
         case "--feather":
             service.featherRadius = Int(argv[i + 1]) ?? 3; i += 2
+        case "--compress":
+            service.compress = true; i += 1
         case "--no-import":
             i += 1
         case "--json":
@@ -127,6 +130,7 @@ case "merge":
                 "output": outcome.output.path, "bytes": outcome.bytes,
                 "width": outcome.width, "height": outcome.height,
                 "frames": outcome.frameCount, "whiteLevel": outcome.whiteLevel,
+                "compressed": service.compress,
                 "metadataFrom": outcome.metadataFrom.path, "report": outcome.report,
             ]
             let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])

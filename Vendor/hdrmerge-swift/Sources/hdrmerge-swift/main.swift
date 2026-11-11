@@ -31,6 +31,8 @@ func usage() -> String {
     options for merge:
       -o PATH             output DNG (written atomically)
       -b 16|32            bits per sample (default 16; 32 = float DNG)
+      --compress          store samples as SOF3 lossless JPEG (Compression = 7).
+                          ~121 MB → ~57 MB on a 60 MP frame. Incompatible with -b 32.
       --headroom N        reserve N× input white as the top of the container
                           (16-bit: 4 keeps the input scale bit-exact, +2 stops)
       --feather N         mask feather radius (default 3)
@@ -54,6 +56,7 @@ struct Parsed {
     var progress = false
     var out = ""
     var bits = 16
+    var compress = false
     var headroom = 1.0
     var feather = 3
     var white: Int?
@@ -82,6 +85,8 @@ func parse(_ argv: [String]) throws -> Parsed {
             literal = true; i += 1
         case "--json":
             p.json = true; i += 1
+        case "--compress":
+            p.compress = true; i += 1
         case "--progress":
             p.progress = true; i += 1
         case "-o":
@@ -178,8 +183,9 @@ func runMerge(_ p: Parsed, _ progress: ProgressReporter) throws -> Response {
         meta = frames.min { $0.exposureTime * $0.iso < $1.exposureTime * $1.iso } ?? frames[0]
     }
 
-    progress.event("encode", ["bits": p.bits])
-    let data = try DNGWriter.render(merged, source: meta, bits: p.bits)
+    progress.event("encode", ["bits": p.bits, "compressed": p.compress])
+    let compression: DNGWriter.Compression = p.compress ? .lossless : .uncompressed
+    let data = try DNGWriter.render(merged, source: meta, bits: p.bits, compression: compression)
     let outURL = URL(fileURLWithPath: p.out)
     do {
         try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(),
@@ -197,6 +203,7 @@ func runMerge(_ p: Parsed, _ progress: ProgressReporter) throws -> Response {
         "height": merged.height,
         "frames": frames.count,
         "bits": p.bits,
+        "compressed": p.compress,
         "headroom": p.headroom,
         "whiteLevel": merged.white,
         "blackLevel": merged.black,

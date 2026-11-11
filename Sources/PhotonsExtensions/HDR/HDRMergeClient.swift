@@ -24,6 +24,9 @@ public struct HDRMergeOptions: Sendable, Equatable {
     public var whiteLevel: Int?
     /// Take EXIF/DNG metadata from this frame instead of the least exposed one.
     public var metadataFrom: URL?
+    /// Store the mosaic as SOF3 lossless JPEG (`Compression = 7`): 121 MB → ~50 MB on a 60 MP
+    /// frame, bit-exact, and the only compressed form Core Image accepts (it refuses Deflate).
+    public var compress: Bool = false
 
     public init() {}
 }
@@ -203,6 +206,7 @@ public struct HDRMergeClient: Sendable {
                     "--feather", String(options.featherRadius)]
         if let white = options.whiteLevel { args += ["--white", String(white)] }
         if let meta = options.metadataFrom { args += ["--metadata-from", meta.path] }
+        if options.compress { args.append("--compress") }
         args.append("--")
         args += urls.map(\.path)
 

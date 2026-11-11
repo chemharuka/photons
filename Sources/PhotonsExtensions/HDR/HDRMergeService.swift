@@ -106,6 +106,10 @@ public final class HDRMergeService: @unchecked Sendable {
     /// 16-bit container and leaves +2 stops of recovered highlight room (WhiteLevel 65535).
     public var headroom = 4.0
     public var featherRadius = 3
+    /// SOF3 lossless JPEG. 121 MB → ~50 MB on a 60 MP frame, pixels bit-exact, and the only
+    /// compressed form the system decoder accepts (Core Image rejects Deflate outright).
+    /// Off by default so existing callers keep byte-for-byte behaviour.
+    public var compress = false
 
     private let clientOverride: HDRMergeClient?
 
@@ -159,6 +163,7 @@ public final class HDRMergeService: @unchecked Sendable {
         options.bits = bits
         options.headroom = headroom
         options.featherRadius = featherRadius
+        options.compress = compress
 
         // Merge into a hidden temp name, then move: a crash mid-write must not leave a DNG the
         // catalog could pick up on the next scan.

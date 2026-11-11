@@ -21,6 +21,7 @@ this port keeps the same license and the same algorithm structure.
 | DNG / TIFF reader (CFA plane, tags, strips + tiles) | works |
 | Lossless JPEG (Compression = 7, 1…4 components, 1×1 sampling) | works |
 | Uncompressed (Compression = 1) | works |
+| **SOF3 write (Compression = 7)** | works — 121 MB → 49.9 MB on 60 MP, bit-exact |
 | Deflate (Compression = 8), JPEG XL, BigTIFF, CR3/NEF/ARW/RAF | not yet |
 | Ward MTB alignment (6-level pyramid) | works |
 | Exposure-ratio estimation, saturation mask, feather + compose | works |

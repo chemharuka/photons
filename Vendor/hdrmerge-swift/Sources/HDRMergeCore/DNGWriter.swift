@@ -84,8 +84,13 @@ final class TIFFBuilder {
         add(tag, .byte, values, count: values.count)
     }
 
-    /// Serialise: header + main IFD + any number of pointer IFDs (Exif, GPS) + pixel data.
-    func build(pixelData: [UInt8], extras: [(pointerTag: UInt16, builder: TIFFBuilder)]) -> Data {
+    /// Serialise: header + main IFD + any number of pointer IFDs (Exif, GPS) + pixel chunks.
+    ///
+    /// Returns the file bytes **and** the byte offset of every chunk, aligned to 4, so a caller
+    /// that has to write `TileOffsets`/`StripOffsets` can fill the table without guessing (the
+    /// denoise writer upstream learned this the hard way: an extra 4-byte pad shifted every tile).
+    func build(pixelChunks: [[UInt8]],
+               extras: [(pointerTag: UInt16, builder: TIFFBuilder)]) -> (data: Data, chunkOffsets: [Int]) {
         var main = entries
         for extra in extras {
             main.append(TIFFWriteEntry(tag: extra.pointerTag, type: 4, count: 1,
@@ -152,36 +157,65 @@ final class TIFFBuilder {
             writeIFD(o.entries, at: o.ifd, valuesAt: o.values)
         }
 
-        out.append(contentsOf: pixelData)
-        return Data(out)
+        var chunkOffsets: [Int] = []
+        chunkOffsets.reserveCapacity(pixelChunks.count)
+        for chunk in pixelChunks {
+            chunkOffsets.append(out.count)
+            out.append(contentsOf: chunk)
+            while out.count % 4 != 0 { out.append(0) }
+        }
+        return (Data(out), chunkOffsets)
+    }
+}
+
+public enum DNGWriteError: Error, CustomStringConvertible {
+    case incompatibleOptions(String)
+
+    public var description: String {
+        switch self {
+        case .incompatibleOptions(let s): return s
+        }
     }
 }
 
 public enum DNGWriter {
+
+    /// How the merged samples are stored.
+    ///
+    /// `uncompressed` is 121 MB for a 60 MP frame. `losslessJPEG` is the only *compressed* form
+    /// the system decoder accepts: Core Image refuses `Compression = 8` (Deflate) —
+    /// `CIRAWFilter.nativeSize` comes back `0×0` and `outputImage` is nil — so the choice is
+    /// "uncompressed or SOF3", not "which of the three".
+    public enum Compression: Sendable, Equatable {
+        case uncompressed
+        case losslessJPEG(tileWidth: Int = 256, tileHeight: Int = 256, sampleTilesForTables: Int = 12)
+
+        public static let lossless = Compression.losslessJPEG()
+    }
+
     /// `bits`: 16 (integer) or 32 (float).
     /// Encode the merged mosaic into DNG bytes. Hosts write the result
     /// atomically; `write(...)` is the convenience wrapper.
-    public static func render(_ merged: MergedImage, source: RawFrame, bits: Int) throws -> Data {
+    public static func render(_ merged: MergedImage, source: RawFrame, bits: Int,
+                              compression: Compression = .uncompressed) throws -> Data {
         let w = merged.width, h = merged.height
-        var pixelData: [UInt8]
-        let bytesPerSample = bits == 32 ? 4 : 2
-        pixelData = [UInt8](repeating: 0, count: w * h * bytesPerSample)
 
+        // 32-bit float has no SOF3 encoding (SOF3 carries integer samples), so the two knobs
+        // cannot be combined; say so instead of silently writing a 4×-too-large file.
+        if bits == 32, case .losslessJPEG = compression {
+            throw DNGWriteError.incompatibleOptions("float32 samples cannot be SOF3-compressed; use bits = 16")
+        }
+
+        // Integer samples, row-major, in the merged canvas' order.
+        var samples = [UInt16](repeating: 0, count: w * h)
         if bits == 32 {
             for i in 0..<(w * h) {
-                let v = merged.values[i]
-                let bits32 = v.bitPattern
-                pixelData[4 * i] = UInt8(bits32 & 0xFF)
-                pixelData[4 * i + 1] = UInt8((bits32 >> 8) & 0xFF)
-                pixelData[4 * i + 2] = UInt8((bits32 >> 16) & 0xFF)
-                pixelData[4 * i + 3] = UInt8((bits32 >> 24) & 0xFF)
+                samples[i] = UInt16(truncatingIfNeeded: merged.values[i].bitPattern)
             }
         } else {
-            let maxCode = Double(merged.white)
+            let maxCode = Float(merged.white)
             for i in 0..<(w * h) {
-                let v = UInt16(min(max(Double(merged.values[i]).rounded(), 0), maxCode))
-                pixelData[2 * i] = UInt8(v & 0xFF)
-                pixelData[2 * i + 1] = UInt8(v >> 8)
+                samples[i] = UInt16(min(max(merged.values[i].rounded(), 0), maxCode))
             }
         }
 
@@ -195,9 +229,6 @@ public enum DNGWriter {
         main.addShorts(277, [1])
         main.addShorts(284, [1])
         main.addShorts(339, [bits == 32 ? 3 : 1])                // SampleFormat
-        main.addLongs(273, [0])                                  // StripOffsets, patched below
-        main.addLongs(278, [UInt32(h)])
-        main.addLongs(279, [UInt32(pixelData.count)])
         main.addShorts(33421, [UInt16(merged.cfaRows), UInt16(merged.cfaCols)])
         main.addBytes(33422, merged.cfaPattern)
         main.addBytes(50710, [0, 1, 2])
@@ -263,29 +294,130 @@ public enum DNGWriter {
         for e in source.gpsTags {
             gps.addRaw(e.tag, type: e.type, count: e.count, data: e.data)
         }
+        // Layout tags depend on the chosen storage, so they are added after the decision.
+        let chunks: [[UInt8]]
+        switch compression {
+        case .uncompressed:
+            var bytes = [UInt8](repeating: 0, count: w * h * (bits == 32 ? 4 : 2))
+            if bits == 32 {
+                for i in 0..<(w * h) {
+                    let v = merged.values[i].bitPattern
+                    bytes[4 * i] = UInt8(v & 0xFF)
+                    bytes[4 * i + 1] = UInt8((v >> 8) & 0xFF)
+                    bytes[4 * i + 2] = UInt8((v >> 16) & 0xFF)
+                    bytes[4 * i + 3] = UInt8((v >> 24) & 0xFF)
+                }
+            } else {
+                for i in 0..<(w * h) {
+                    bytes[2 * i] = UInt8(samples[i] & 0xFF)
+                    bytes[2 * i + 1] = UInt8(samples[i] >> 8)
+                }
+            }
+            chunks = [bytes]
+            main.addShorts(259, [1])                             // Compression: none
+            main.addLongs(273, [0])                              // StripOffsets, patched below
+            main.addLongs(278, [UInt32(h)])
+            main.addLongs(279, [UInt32(bytes.count)])
+
+        case .losslessJPEG(let tileWidth, let tileHeight, let sampleTiles):
+            let tiles = try encodeTiles(samples: samples, width: w, height: h,
+                                        tileWidth: tileWidth, tileHeight: tileHeight,
+                                        sampleTiles: sampleTiles)
+            chunks = tiles
+            main.addShorts(259, [7])                             // Compression: lossless JPEG
+            main.addLongs(322, [UInt32(tileWidth)])
+            main.addLongs(323, [UInt32(tileHeight)])
+            main.addLongs(324, [UInt32](repeating: 0, count: tiles.count))   // patched below
+            main.addLongs(325, tiles.map { UInt32($0.count) })
+        }
+
         var extras: [(pointerTag: UInt16, builder: TIFFBuilder)] = [(34665, exif)]
         if !source.gpsTags.isEmpty { extras.append((34853, gps)) }
-        var data = main.build(pixelData: pixelData, extras: extras)
+        var built = main.build(pixelChunks: chunks, extras: extras)
+        var data = built.data
 
-        // Patch StripOffsets: the pixel block starts right after the IFD data,
-        // i.e. at (fileSize - pixelData.count).
-        let pixelOffset = UInt32(data.count - pixelData.count)
+        // Back-fill the offset table. `build` aligned every chunk to 4 bytes, so the table it
+        // returned is authoritative — patch it in rather than recomputing from the file size.
+        let offsetTag: UInt16 = {
+            if case .uncompressed = compression { return 273 }
+            return 324
+        }()
+        let offsets = built.chunkOffsets
         let entryCount = Int(data[8]) | Int(data[9]) << 8
         for i in 0..<entryCount {
             let p = 10 + i * 12
             let tag = UInt16(data[p]) | UInt16(data[p + 1]) << 8
-            if tag == 273 {
-                data[p + 8] = UInt8(pixelOffset & 0xFF)
-                data[p + 9] = UInt8((pixelOffset >> 8) & 0xFF)
-                data[p + 10] = UInt8((pixelOffset >> 16) & 0xFF)
-                data[p + 11] = UInt8((pixelOffset >> 24) & 0xFF)
+            guard tag == offsetTag else { continue }
+            // Values longer than 4 bytes live out of line; `addLongs` gave us that pointer.
+            let type = UInt16(data[p + 2]) | UInt16(data[p + 3]) << 8
+            let count = Int(data[p + 4]) | Int(data[p + 5]) << 8
+                | Int(data[p + 6]) << 16 | Int(data[p + 7]) << 24
+            let pointsOutOfLine = type == 4 && count > 1
+            let base = pointsOutOfLine
+                ? Int(data[p + 8]) | Int(data[p + 9]) << 8
+                    | Int(data[p + 10]) << 16 | Int(data[p + 11]) << 24
+                : p + 8
+            for (k, off) in offsets.enumerated() where k < count {
+                let v = UInt32(off)
+                let q = base + 4 * k
+                data[q] = UInt8(v & 0xFF)
+                data[q + 1] = UInt8((v >> 8) & 0xFF)
+                data[q + 2] = UInt8((v >> 16) & 0xFF)
+                data[q + 3] = UInt8((v >> 24) & 0xFF)
             }
         }
+        built.data = data
         return data
     }
 
+    // MARK: - SOF3 tiling
+
+    static func encodeTiles(samples: [UInt16], width: Int, height: Int,
+                            tileWidth: Int, tileHeight: Int,
+                            sampleTiles: Int) throws -> [[UInt8]] {
+        guard tileWidth > 0, tileHeight > 0 else {
+            throw DNGWriteError.incompatibleOptions("tile size must be positive")
+        }
+        // SOF3 with two components predicts within a colour, so a tile must be even in width.
+        let tw = tileWidth % 2 == 0 ? tileWidth : tileWidth + 1
+        let nx = (width + tw - 1) / tw
+        let ny = (height + tileHeight - 1) / tileHeight
+
+        var tiles: [[UInt16]] = []
+        tiles.reserveCapacity(nx * ny)
+        for ty in 0..<ny {
+            for tx in 0..<nx {
+                var tile = [UInt16](repeating: 0, count: tw * tileHeight)
+                for y in 0..<tileHeight {
+                    let sy = min(ty * tileHeight + y, height - 1)
+                    let srcRow = sy * width
+                    let dstRow = y * tw
+                    for x in 0..<tw {
+                        // Edge tiles repeat the last row/column instead of zero-filling: the
+                        // decoder crops them away via ActiveArea/DefaultCrop, and repeating keeps
+                        // the difference histogram representative.
+                        tile[dstRow + x] = samples[srcRow + min(tx * tw + x, width - 1)]
+                    }
+                }
+                tiles.append(tile)
+            }
+        }
+
+        let sampled = Array(tiles.prefix(max(1, sampleTiles)))
+        let tables = LosslessJPEGEncoder.buildTables(sampled, width: tw, height: tileHeight,
+                                                    components: 2)
+        var blobs: [[UInt8]] = []
+        blobs.reserveCapacity(tiles.count)
+        for tile in tiles {
+            blobs.append(try LosslessJPEGEncoder.encode(tile, width: tw, height: tileHeight,
+                                                        components: 2, tables: tables))
+        }
+        return blobs
+    }
+
     public static func write(_ merged: MergedImage, source: RawFrame,
-                             bits: Int, to url: URL) throws {
-        try render(merged, source: source, bits: bits).write(to: url)
+                             bits: Int, compression: Compression = .uncompressed,
+                             to url: URL) throws {
+        try render(merged, source: source, bits: bits, compression: compression).write(to: url)
     }
 }
