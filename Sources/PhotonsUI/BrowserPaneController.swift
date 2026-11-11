@@ -33,6 +33,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private let photosTable = PhotoListTableView()
     /// 右键：从库中删除… / 查找丢失的文件… — one menu object, the same verbs as the grid.
     public let contextMenu = AssetContextMenu()
+    /// §378 — the verbs behind the 「堆叠 ▸」 submenu.
+    private lazy var stackMenuTarget = StackMenuTarget(session: session)
     private let sourcesScroll = NSScrollView()
     private let photosScroll = NSScrollView()
     private let matte = NSVisualEffectView()
@@ -778,6 +780,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         }
         contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
                            missingIDs: session.missingAssets.map(\.id))
+        // §378 — the same builder the grid and the strip use, so the three menus are one grammar.
+        StackMenuBuilder.attach(to: contextMenu.menu, session: session, target: stackMenuTarget,
+                                selectedIDs: session.selectedAssets.map(\.id))
     }
 
     /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
@@ -1080,7 +1085,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let session, let asset = session.assets[safe: row] else { return nil }
         let cell = PhotoRowCell.reuse(in: tableView, owner: self)
-        cell.configure(asset: asset, isActive: session.anchorID == asset.id)
+        cell.configure(asset: asset, isActive: session.anchorID == asset.id,
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
         applyThumbnail(to: cell, row: row, asset: asset)
         return cell
     }
@@ -1648,6 +1654,17 @@ final class PhotoRowCell: NSTableCellView {
     private let stars = NSTextField(labelWithString: "")
     /// 「原文件已移动」, over the thumbnail square. Hidden unless the row's original moved.
     private let pill = MissingFilePillView()
+    /// §378 — 「⧉ N」 in the square's bottom-right corner.
+    ///
+    /// A view of its own (like `pill`) because AppKit draws a cell *before* its subviews: a capsule
+    /// painted in the cell's own `draw` would be covered by the thumbnail square the moment the row
+    /// has an image — the exact row the indicator matters on.
+    ///
+    /// It calls **the same** `AssetBadges.draw` the grid card and the strip cell call, with only the
+    /// stack dimension filled in: this row already draws its stars as text beside the square and its
+    /// 「原文件已移动」 as an orange pill, so feeding the routine the other corner badges here would
+    /// be a second drawing of the same facts in a 34 pt box.
+    private let stackBadge = StackBadgeView()
 
     /// Which asset this row is currently showing. A recycled row must never accept an image that was
     /// requested for the photo it used to hold.
@@ -1670,6 +1687,14 @@ final class PhotoRowCell: NSTableCellView {
     /// label carries the **fitted** string (head + `…`) and the probe still has to be able to say
     /// which photo the row is about.
     private(set) var filename = ""
+
+
+    /// §378 — how many photos the stack this row stands for holds (0/1 = not a stack).
+    private(set) var stackCount = 0
+
+    /// What the stack badge painted, in the same vocabulary the grid card and the strip use
+    /// (`["stack:5"]`). Empty for a photo in no stack — the assertion the acceptance reads.
+    var lastDrawnBadges: [String] { stackBadge.drawn }
 
     // MARK: text block metrics
 
@@ -1760,11 +1785,12 @@ final class PhotoRowCell: NSTableCellView {
         stars.textColor = .systemYellow
         for v in [swatch, name, meta, stars] { addSubview(v) }
         addSubview(pill)   // last: the badge sits on top of the thumbnail square
+        addSubview(stackBadge)  // and the stack capsule on top of that, in the corner
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
-    func configure(asset: Asset, isActive: Bool) {
+    func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
         // A recycled row must not show a *different* photo for one frame; the same asset keeps its
         // bitmap (a filter/metadata refresh is not a pixel change).
         if assetID != asset.id {
@@ -1772,6 +1798,8 @@ final class PhotoRowCell: NSTableCellView {
             thumbnailTier = nil
         }
         assetID = asset.id
+        self.stackCount = stackCount
+        stackBadge.update(stackCount: stackCount)
         // The placeholder stays underneath the image (006 §2): a row is never a white hole, and a
         // failure looks like "not yet", not like "broken".
         swatch.layer?.backgroundColor = PlaceholderSwatch.color(for: asset.contentHash).cgColor
@@ -1880,6 +1908,52 @@ final class PhotoRowCell: NSTableCellView {
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)
+        // The stack capsule takes the square's **bottom-right** corner: the top-right belongs to the
+        // colour dot on the larger surfaces, and this row's square is only 34 pt. `NSView` here is
+        // unflipped, so the capsule's own frame is the square minus its height and a 3 pt inset.
+        stackBadge.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.minY,
+                                  width: swatch.frame.width, height: 14)
+    }
+}
+
+/// The 「⧉ N」 capsule over a photo row's 34 pt square.
+///
+/// It is a view rather than a line in the cell's `draw` for the reason `MissingFilePillView` gives:
+/// AppKit paints a cell before its subviews, so a badge drawn in the cell would sit *under* the
+/// `ThumbnailEDRView` the moment the row has an image. The drawing itself is not a second
+/// implementation — it builds one `AssetBadges` carrying only the stack dimension and calls the same
+/// `draw(in:corner:)` the grid card and the strip cell call.
+///
+/// Coordinates: this view is inside an **unflipped** `NSTableCellView` and is itself unflipped, so
+/// `.bottomTrailing` in `AssetBadges`'s flipped vocabulary means "the square's visual bottom-right".
+/// The view is pinned to the square's own frame, so the capsule's 3 pt inset is measured from the
+/// square's edge, not the row's.
+final class StackBadgeView: NSView {
+    private(set) var stackCount = 0
+
+    /// What the badge painted (`["stack:5"]`), read back by the acceptance and the smoke.
+    var drawn: [String] {
+        AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: stackCount).drawn
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(stackCount: Int) {
+        guard stackCount != self.stackCount else {
+            needsDisplay = true
+            return
+        }
+        self.stackCount = stackCount
+        isHidden = stackCount < 2
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard stackCount >= 2 else { return }
+        AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: stackCount)
+            .draw(in: bounds, corner: .bottomTrailing)
     }
 }
 

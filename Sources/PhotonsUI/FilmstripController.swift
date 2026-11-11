@@ -26,7 +26,7 @@ public final class FilmstripCell: NSCollectionViewItem {
 
     public override var isSelected: Bool { didSet { card.isPicked = isSelected } }
 
-    public func configure(asset: Asset, isActive: Bool) {
+    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -36,6 +36,7 @@ public final class FilmstripCell: NSCollectionViewItem {
         card.asset = asset
         card.isActive = isActive
         card.isPicked = isSelected
+        card.stackCount = stackCount
         view.toolTip = asset.filename
     }
 }
@@ -44,6 +45,9 @@ public final class FilmstripCard: NSView {
     public var asset: Asset? { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     public var isActive = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     public var isPicked = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    /// §378 — member count of the stack this cell represents (0/1 = not a stack). Set by the
+    /// controller from `CatalogSession.stacksByTopID`.
+    public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
     /// The decoded thumbnail, or nil while the hash-derived placeholder is all we have.
     public var thumbnail: CGImage? {
         didSet {
@@ -104,6 +108,16 @@ public final class FilmstripCard: NSView {
     public private(set) var lastDrawnCaption: String?
     public private(set) var lastCaptionRect: NSRect = .zero
 
+    /// What the last `draw` painted in the corners ("stars:3", "stack:5"), read back by the smoke and
+    /// the §378 acceptance exactly like the grid card's. The strip draws **the same**
+    /// `AssetBadges.draw`, so the two surfaces cannot disagree about what a stack looks like.
+    public private(set) var lastDrawnBadges: [String] = []
+
+    /// The badge this cell would draw — the same string the grid card reports.
+    public var badgeSignature: String {
+        asset.map { AssetBadges(asset: $0, stackCount: stackCount).signature } ?? "—"
+    }
+
     public override var isFlipped: Bool { true }
 
     private var thumbRect: NSRect {
@@ -143,6 +157,13 @@ public final class FilmstripCard: NSView {
             ring.stroke()
         }
 
+        // Stars / flag / colour label / stack indicator: the same `AssetBadges` the grid card draws,
+        // so the two surfaces can never disagree about what a badge means. Drawn before the missing
+        // scrim so 「原文件已移动」 stays on top of everything.
+        let badges = AssetBadges(asset: asset, stackCount: stackCount)
+        badges.draw(in: thumb)
+        lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
+
         // The badge is drawn *outside* the clip so its pill is never cut by the rounded corner, and
         // last, so no selection ring sits on top of the words the user has to read.
         lastDrawnMissingLabel = nil
@@ -174,6 +195,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     public let collectionView = AssetCollectionView()
     /// 右键：从库中删除… / 查找丢失的文件… — the same menu object the grid uses.
     public let contextMenu = AssetContextMenu()
+    /// §378 — the verbs behind the 「堆叠 ▸」 submenu.
+    private lazy var stackMenuTarget = StackMenuTarget(session: session)
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
 
@@ -308,7 +331,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                 let item = collectionView.makeItem(withIdentifier: FilmstripCell.reuseIdentifier,
                                                    for: indexPath)
                 guard let cell = item as? FilmstripCell else { return item }
-                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id)
+                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
+                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -438,7 +462,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         guard let cell = item as? FilmstripCell, let session, let asset = session.assets[safe: indexPath.item] else {
             return item
         }
-        cell.configure(asset: asset, isActive: session.anchorID == asset.id)
+        cell.configure(asset: asset, isActive: session.anchorID == asset.id,
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }
@@ -474,6 +499,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         }
         contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
                            missingIDs: session.missingAssets.map(\.id))
+        StackMenuBuilder.attach(to: contextMenu.menu, session: session, target: stackMenuTarget,
+                                selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 

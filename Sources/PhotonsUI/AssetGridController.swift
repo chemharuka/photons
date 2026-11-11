@@ -188,6 +188,11 @@ public final class AssetCardView: NSView {
     public var isActive: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     public var isPicked: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
 
+    /// §378 — how many photos the stack this card represents holds (0/1 = not a stack). Set by the
+    /// controller from `CatalogSession.stacksByTopID`, never derived here: the row only knows its
+    /// own `stack_id`, and a count is a property of the stack, not of the photo.
+    public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
+
     /// 223 — the image lives in its own layer so it can be an EDR surface (float contents); the
     /// placeholder, ring, caption and badges stay in ordinary `draw` above/below it.
     private let thumbnailView = ThumbnailEDRView(cornerRadius: WorkspaceLayout.cardCornerRadius)
@@ -218,7 +223,9 @@ public final class AssetCardView: NSView {
     public private(set) var lastCaptionRect: NSRect = .zero
 
     /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
-    public var badgeSignature: String { asset.map { AssetBadges(asset: $0).signature } ?? "—" }
+    public var badgeSignature: String {
+        asset.map { AssetBadges(asset: $0, stackCount: stackCount).signature } ?? "—"
+    }
 
     /// The decoded thumbnail for this asset, or nil while the placeholder is all we have.
     public var thumbnail: CGImage? {
@@ -349,7 +356,7 @@ public final class AssetCardView: NSView {
         // Stars / flag / colour label go *on* the thumbnail, in its corners — not in the caption
         // strip. The placeholder block stays underneath (006 §2), so a cell without a thumbnail
         // still shows its rating.
-        let badges = AssetBadges(asset: asset)
+        let badges = AssetBadges(asset: asset, stackCount: stackCount)
         badges.draw(in: swatchRect)
 
         // 「原文件已移动」 is an overlay of its own, drawn last: it is the one thing on this card the
@@ -383,7 +390,7 @@ public final class AssetGridItem: NSCollectionViewItem {
         didSet { card.needsDisplay = true }
     }
 
-    public func configure(asset: Asset, isActive: Bool) {
+    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -393,6 +400,7 @@ public final class AssetGridItem: NSCollectionViewItem {
         card.asset = asset
         card.isActive = isActive
         card.isPicked = isSelected
+        card.stackCount = stackCount
         view.toolTip = asset.filename
     }
 }
@@ -406,6 +414,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     public let filterBar = FilterBarView()
     /// 右键：从库中删除… / 查找丢失的文件… — shared code, one instance per browser.
     public let contextMenu = AssetContextMenu()
+    /// §378 — the verbs behind the 「堆叠 ▸」 submenu the shared menu carries.
+    private lazy var stackMenuTarget = StackMenuTarget(session: session)
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
@@ -582,7 +592,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                 let item = collectionView.makeItem(withIdentifier: AssetGridItem.reuseIdentifier,
                                                    for: indexPath)
                 guard let cell = item as? AssetGridItem else { return item }
-                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id)
+                cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
+                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -726,7 +737,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             return item
         }
         let asset = session.assets[indexPath.item]
-        cell.configure(asset: asset, isActive: session.anchorID == asset.id)
+        cell.configure(asset: asset, isActive: session.anchorID == asset.id,
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }
@@ -1059,6 +1071,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         contextMenu.update(selectedIDs: session.selectedAssets.map(\.id),
                            missingIDs: session.missingAssets.map(\.id))
+        // §378 — 「堆叠」 lives on the same shared menu, rebuilt from the session on every open.
+        StackMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                target: stackMenuTarget,
+                                selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 
@@ -1229,6 +1245,134 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 final class FlippedCanvasView: NSView {
     override var isFlipped: Bool { true }
 }
+
+// MARK: - the stack submenu (one builder, three browsers)
+
+/// 右键 ▸「堆叠 ▸」 — built once and attached by all three browsers.
+///
+/// The menu is **derived from the session**, never from what the card happened to draw: the members
+/// and the current 置顶 come from `CatalogSession.stacksByTopID` / `stackMembers(topID:)`, the same
+/// values the badge counts. That is what keeps the menu honest when a stack changed since the cell
+/// was configured — a menu that listed the cell's stale copy is how "设为置顶" could name a row that
+/// no longer exists.
+///
+/// It is attached as one extra item on the shared `AssetContextMenu`'s menu (the three browsers own
+/// their own menu object), refreshed **in place** on every open: rebuilding the whole menu would
+/// throw away the album section's identity and its `menuNeedsUpdate` wiring.
+@MainActor
+public final class StackMenuTarget: NSObject {
+    public weak var session: CatalogSession?
+
+    public init(session: CatalogSession?) {
+        self.session = session
+        super.init()
+    }
+
+    @objc func stackSelectionPressed(_ sender: Any?) {
+        session?.stackSelection()
+    }
+
+    @objc func ungroupPressed(_ sender: Any?) {
+        session?.ungroupSelection()
+    }
+
+    @objc func setTopPressed(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        session?.setStackTop(assetID: id)
+    }
+}
+
+/// The builder. `menu` returns the 「堆叠」 submenu for the current selection, or nil when there is
+/// nothing stack-related to offer (an empty selection, or a single photo in no stack with nothing
+/// else selected).
+///
+/// The grammar is the task's table, nothing more:
+///   · **堆叠所选照片** — present whenever ≥ 2 photos are selected (⌘G's menu twin);
+///   · **取消堆叠** — present when the selection touches a stack (⇧⌘G's twin);
+///   · **设为置顶 ▸** — one row per member, in display order, the current top ticked.
+/// 「移入堆叠」/ 展开/收起/堆叠内排序 are deliberately absent (leave 379).
+@MainActor
+public enum StackMenuBuilder {
+
+    public static let title = "堆叠"
+    public static let makeTitle = "堆叠所选照片"
+    public static let ungroupTitle = "取消堆叠"
+    public static let setTopTitle = "设为置顶"
+
+    public static func menu(session: CatalogSession?, target: StackMenuTarget,
+                            selectedIDs: [String]) -> NSMenu? {
+        guard let session else { return nil }
+        let selection = selectedIDs
+        let stacks = selection.compactMap { session.stacksByTopID[$0] }
+        let canMake = selection.count >= 2
+        let canUngroup = !stacks.isEmpty
+        guard canMake || canUngroup else { return nil }
+
+        let menu = NSMenu(title: title)
+
+        if canMake {
+            let make = NSMenuItem(title: makeTitle,
+                                  action: #selector(StackMenuTarget.stackSelectionPressed(_:)),
+                                  keyEquivalent: "")
+            make.target = target
+            menu.addItem(make)
+        }
+        if canMake && canUngroup { menu.addItem(.separator()) }
+
+        if canUngroup {
+            let ungroup = NSMenuItem(title: ungroupTitle,
+                                     action: #selector(StackMenuTarget.ungroupPressed(_:)),
+                                     keyEquivalent: "")
+            ungroup.target = target
+            menu.addItem(ungroup)
+
+            // A lone stack card: the members are the menu, in the stack's own display order.
+            if let stack = stacks.first {
+                menu.addItem(.separator())
+                let holder = NSMenuItem(title: setTopTitle, action: nil, keyEquivalent: "")
+                let members = NSMenu(title: setTopTitle)
+                for asset in session.stackMembers(topID: stack.topID) {
+                    let item = NSMenuItem(title: asset.filename,
+                                          action: #selector(StackMenuTarget.setTopPressed(_:)),
+                                          keyEquivalent: "")
+                    item.target = target
+                    item.representedObject = asset.id
+                    item.state = asset.id == stack.topID ? .on : .off
+                    members.addItem(item)
+                }
+                holder.submenu = members
+                menu.addItem(holder)
+            }
+        }
+        return menu
+    }
+
+    /// Put the 「堆叠」 submenu on a browser's shared menu, replacing the one from the previous open.
+    ///
+    /// The item is rebuilt on every open rather than kept and refreshed: `NSMenuItem.submenu` is not
+    /// re-read while the menu is tracking, and the members (and which one is ticked) can have changed
+    /// since the last right-click. Removal is by title, because the submenu item carries no action —
+    /// that is what distinguishes it from the verbs, and it is why `selectedIDs` has to be the list
+    /// the menu is about, not "whatever is selected now".
+    public static func attach(to menu: NSMenu, session: CatalogSession?, target: StackMenuTarget,
+                              selectedIDs: [String]) {
+        for (index, item) in menu.items.enumerated().reversed() where item.title == title {
+            // Drop the title row and the separator `attach` put right after it.
+            if index + 1 < menu.items.count, menu.items[index + 1].isSeparatorItem {
+                menu.removeItem(at: index + 1)
+            }
+            menu.removeItem(at: index)
+        }
+        guard let stackMenu = StackMenuBuilder.menu(session: session, target: target,
+                                                   selectedIDs: selectedIDs)
+        else { return }
+        let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        holder.submenu = stackMenu
+        menu.insertItem(holder, at: 0)
+        menu.insertItem(.separator(), at: 1)
+    }
+}
+
 
 extension Array {
     /// Bounds-safe read: a reload race must not crash the UI thread.
