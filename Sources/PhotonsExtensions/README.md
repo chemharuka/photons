@@ -14,7 +14,7 @@
 | 目录 | 职责 |
 |---|---|
 | `HDR/` | 包围曝光合成：`HDRMergeClient.swift`（驱动外部 `hdrmerge-swift` 子进程）、`HDRMergeService.swift`（多帧 → 一张 CFA DNG，含命名/预检/错误词表） |
-| `DNG/` | 把像素写回一个合法的 DNG（AI 降噪那条路）——`RawLosslessJPEG.swift`（SOF3 编码）、`DNGRawWriter.swift`（容器写入，tag 全量复制）、`SourceDNG.swift` / `SourceDNGDecode.swift`。**这些文件在 `~/photons-wt/raw-dng` 分支里，尚未合并到本工作区**，所以 `Package.swift` 目前只编 `HDR/`。 |
+| `Denoise/` | 把像素写回一个合法的 DNG（AI 降噪那条路）——`RawLosslessJPEG.swift`（SOF3 编码）、`DNGRawWriter.swift`（容器写入，tag 全量复制）、`SourceDNG.swift` / `SourceDNGDecode.swift`。详见下面「Denoise/」一节。 |
 
 ## HDR/ — 多帧包围曝光 → 一张 Bayer DNG
 
@@ -54,7 +54,7 @@ let outcome = try service.merge(frames) { line in print(line) }
   单独 `swift build` 出可执行文件。工具缺失时 `isAvailable == false`，调用方据此把入口置灰。
   见 `VENDOR-hdrmerge-swift.md` 与 `~/Documents/GitHub/hdrmerge-swift/LICENSE-SCOPE.md`。
 
-## DNG/ — 把像素写回一个合法的 DNG
+## Denoise/ — 把像素写回一个合法的 DNG
 
 | 文件 | 职责 |
 |---|---|
@@ -89,7 +89,7 @@ let result = try DNGRawWriter.write(
 ```bash
 swift build --build-tests
 /Applications/Xcode.app/Contents/Developer/usr/bin/xctest \
-  .build/out/Products/Debug/PhotonsExtensionsTests.xctest
+  -XCTest PhotonsExtensionsTests .build/out/Products/Debug/PhotonsExtensionsTests.xctest
 ```
 
 > `swift test --filter` 在这台机器上会 `signal code 5` 崩溃并**执行 0 个测试**
@@ -98,6 +98,6 @@ swift build --build-tests
 - `HDRMergeServiceTests` — 真跑 `hdrmerge-swift` 合成三帧 60 MP 包围曝光：产物是 CFA DNG、白电平 65535、
   RGGB 相位不变、ImageIO 可解、命名 `<最暗帧>-merged.dng`、取消不留半截文件、错误码稳定。
   工具或样例不在时跳过（不是失败）。
-- `DNG/` 那三个测试（`RawLosslessJPEGTests` / `DNGRawWriterTests` / `DNGRawWriterFullSizeTests`）
-  随 `DNG/` 一起在 `raw-dng` 分支里。它们的 fixture 元数据全部取自真实 Leica SL3 文件
+- `Denoise/` 那三个测试（`RawLosslessJPEGTests` / `DNGRawWriterTests` / `DNGRawWriterFullSizeTests`）。
+  它们的 fixture 元数据全部取自真实 Leica SL3 文件
   （真 XMP、真 OpcodeList2/3），只有像素与几何是合成的——手写的假 XMP 会让 Core Image 直接拒收整个文件。

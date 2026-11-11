@@ -1,6 +1,7 @@
 # Third-party notices
 
-Photons is MIT-licensed (see `LICENSE`). It links exactly **one** third-party package.
+Photons is MIT-licensed (see `LICENSE`). It links exactly **one** third-party package, and uses
+one third-party model (not vendored, not linked) in the optional `PhotonsExtensions` denoise plugin.
 
 ## GRDB.swift
 
@@ -44,6 +45,60 @@ Verified at `swift package resolve` time on 2026-10-25: **1 pin** in `Package.re
 
 SQLite is in the **public domain** (https://sqlite.org/copyright.html). GRDB compiles it in;
 no separate license obligations apply.
+
+## nonlocal-matchfilter (AI denoise model)
+
+- Upstream: https://github.com/MIA-UIB/nonlocal-matchfilter (arXiv:2604.17453)
+- License: **MIT** — Copyright (c) 2026 Marco Sánchez Beeckman
+- Used by: `PhotonsExtensions` — the denoise *plugin* runs the released
+  `rawnoise_25_15_9nbr` network weights (RAW-to-RAW: 8 input channels = 4 CFA sites + 4 noise-σ
+  maps, 4 CFA channels out) and writes the result back as a DNG.
+- What we ship vs. what we wrote:
+  - **Not vendored.** The model runs in the Python/PyTorch reference implementation outside this
+    repository; this target only consumes *samples* and writes the DNG. No line of their C++/CUDA
+    or Python is copied into Photons.
+  - The two operators the reference implementation ships as CUDA extensions are replaced with
+    Metal-backed equivalents in our port: `deform_neighbourhood` → `F.grid_sample`
+    (verified equivalent to 4.2 × 10⁻⁶ against a literal numpy transcription of their kernel), and
+    `patch_match` is unused (only the `Cherel*` ablation models call it; the released weights are
+    `SimpleBlockMatchingUNet`, deform only).
+  - `RawLosslessJPEG` / `DNGRawWriter` / `SourceDNG` / `SourceDNGDecode` are our own
+    implementation against the TIFF 6.0 / DNG 1.7 / JPEG (SOF3) specifications.
+- Attribution is kept anyway: the network architecture and the released weights are theirs, and the
+  MIT notice travels with them.
+
+Copyright notice as required by the MIT license:
+
+```
+MIT License
+
+Copyright (c) 2026 Marco Sánchez Beeckman
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+The same author's two helper packages are MIT as well: `deform-neighbourhood-sampling`
+(Copyright (c) 2024) and `patchmatch` (Copyright (c) 2025) — neither is linked by Photons; the first
+is replaced by `grid_sample` and the second is unused.
+
+The **training data** and the **weights' own terms** are a separate question from the code licence.
+Their README states the datasets are public; if this plugin is ever shipped commercially, confirm the
+weights' terms with the authors before bundling them rather than shipping the download.
 
 ## Deliberately *not* linked
 
