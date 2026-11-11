@@ -42,6 +42,15 @@ public final class CatalogSession {
     public private(set) var selection: Set<String> = []
     /// The "active" photo: the one the loupe shows and the inspector edits.
     public private(set) var anchorID: String?
+    /// The ⇧ range base: the photo a range starts from.
+    ///
+    /// Deliberately separate from `anchorID`: the anchor is the thick blue ring / the photo the
+    /// loupe shows, and it must stay put for the whole ⇧ gesture, while the base is what the next
+    /// ⇧ click measures from. The first ⇧ click establishes it; further ⇧ clicks/arrows keep it.
+    public private(set) var selectionBase: String?
+    /// The far end of the current ⇧ range (the cursor ⇧+arrows advance). Not part of the
+    /// selection itself; any non-⇧ selection change resets it to the clicked photo.
+    private var rangeFocus: String?
 
     /// Set by `deleteAssets` just before the rows go away: the photo the anchor should hand over to
     /// when it is the anchor that got deleted. `reload()` consumes it exactly once, so a later
@@ -506,6 +515,9 @@ public final class CatalogSession {
         // Drop selections that no longer exist (a reload can follow an import).
         let ids = Set(assets.map(\.id))
         selection.formIntersection(ids)
+        // The range base and cursor follow the same rule: an id that is gone cannot anchor a ⇧.
+        if let base = selectionBase, !ids.contains(base) { selectionBase = nil }
+        if let focus = rangeFocus, !ids.contains(focus) { rangeFocus = nil }
         let successor = pendingAnchorSuccessor
         pendingAnchorSuccessor = nil
         if let a = anchorID, !ids.contains(a) {
@@ -813,42 +825,100 @@ public final class CatalogSession {
         } else {
             anchorID = ids.isEmpty ? nil : assets.last(where: { ids.contains($0.id) })?.id
         }
+        // A programmatic selection that dropped the base no longer has a range to extend.
+        if let base = selectionBase, !ids.contains(base) { selectionBase = nil }
+        if let focus = rangeFocus, !ids.contains(focus) { rangeFocus = nil }
         loadEditForAnchor()
     }
 
+    /// A plain click / non-⇧ keyboard landing: this photo is the selection, the anchor **and** the
+    /// range base, so the next ⇧ click starts here.
     public func selectOnly(_ id: String) {
-        setSelection([id], anchor: id)
+        selection = [id]
+        anchorID = id
+        selectionBase = id
+        rangeFocus = id
+        loadEditForAnchor()
     }
 
     /// Grid/filmstrip click with modifiers already resolved by the control.
+    ///
+    /// ⌘ adds/removes one photo. Adding makes it the anchor and the new range base (the next ⇧
+    /// starts from what the user just picked); removing a non-anchor leaves both where they were,
+    /// and removing the anchor hands the anchor back to the range base (or, with no base left, to
+    /// the last remaining photo in display order).
     public func toggle(_ id: String) {
-        var next = selection
-        if next.contains(id) {
-            next.remove(id)
-            if anchorID == id { anchorID = next.isEmpty ? nil : assets.last(where: { next.contains($0.id) })?.id }
+        if selection.contains(id) {
+            selection.remove(id)
+            if selectionBase == id {
+                selectionBase = anchorID.flatMap { selection.contains($0) ? $0 : nil }
+            }
+            if anchorID == id {
+                if let base = selectionBase, selection.contains(base) {
+                    anchorID = base
+                } else {
+                    // 2026-11-11 主线修：锚被 ⌘ 关掉时，范围基点跟着落到新锚上，而不是变 nil ——
+                    // 否则用户紧接着按 ⇧ 会退化成「只选一张再重建基点」，白丢一次范围手势。
+                    anchorID = selection.isEmpty
+                        ? nil : assets.last(where: { selection.contains($0.id) })?.id
+                    selectionBase = anchorID
+                }
+            }
+            if rangeFocus == id { rangeFocus = anchorID }
         } else {
-            next.insert(id)
+            selection.insert(id)
             anchorID = id
+            selectionBase = id
+            rangeFocus = id
         }
-        setSelection(next, anchor: anchorID)
+        loadEditForAnchor()
     }
 
-    /// Arrow/Home/End/Page navigation: move the anchor by `delta` library rows and select only it.
+    /// ⇧ click: select the **closed range in display order** (`assets`, not id order) between the
+    /// range base and `id`, replacing the current selection. `adding` is ⇧⌘ (union instead of
+    /// replace). The anchor and the base do not move — that is the whole point of the gesture.
+    public func selectRange(to id: String, adding: Bool = false) {
+        guard let base = selectionBase else {
+            // No base yet (first ⇧ after a programmatic selection): a plain selection is the only
+            // honest answer, and it establishes the base.
+            selectOnly(id)
+            return
+        }
+        guard let baseIndex = assets.firstIndex(where: { $0.id == base }),
+              let targetIndex = assets.firstIndex(where: { $0.id == id }) else {
+            selectOnly(id)
+            return
+        }
+        let lo = min(baseIndex, targetIndex)
+        let hi = max(baseIndex, targetIndex)
+        let range = Set(assets[lo ... hi].map(\.id))
+        selection = adding ? selection.union(range) : range
+        rangeFocus = id
+        loadEditForAnchor()
+    }
+
+    /// Arrow/Home/End/Page navigation. Without ⇧ the landing photo becomes the anchor and the
+    /// base; with ⇧ the **cursor** moves from the previous range end, the range is recomputed from
+    /// the unchanged base, and the anchor stays put (thick ring stays on the original photo).
     @discardableResult
     public func moveAnchor(by delta: Int, extend: Bool = false) -> Bool {
         guard !assets.isEmpty else { return false }
+        if extend {
+            let base = selectionBase ?? anchorID ?? assets.first?.id
+            guard let base, assets.contains(where: { $0.id == base }),
+                  let cursorID = rangeFocus ?? anchorID,
+                  let cursor = assets.firstIndex(where: { $0.id == cursorID }) else { return false }
+            let target = min(max(0, cursor + delta), assets.count - 1)
+            guard target != cursor else { return false }
+            selectionBase = base
+            rangeFocus = assets[target].id
+            selectRange(to: assets[target].id)
+            return true
+        }
         let current = anchorIndex ?? 0
         let target = min(max(0, current + delta), assets.count - 1)
         guard target != current || anchorID == nil else { return false }
-        let id = assets[target].id
-        if extend {
-            var next = selection
-            next.insert(id)
-            anchorID = id
-            setSelection(next)
-        } else {
-            selectOnly(id)
-        }
+        selectOnly(assets[target].id)
         return true
     }
 
