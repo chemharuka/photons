@@ -1107,6 +1107,15 @@ private struct DenoiseParamsU {
     var n: SIMD4<Float>      // luma amount, chroma amount, pad, pad
 }
 
+/// 365 — mirror of `Kernels/s1_65_denoise.metal`, byte for byte. `fit` is the **output** of
+/// `s1_65_noise_model` and the input of `s1_65_apply`; the CPU never invents its four numbers.
+private struct S1_65ParamsU {
+    var canvas: SIMD4<Int32> // w, h, cell, zBins
+    var grid: SIMD4<Int32>   // gW, gH, pass, pad
+    var n: SIMD4<Float>      // amount, eps, logLo, logHi
+    var fit: SIMD4<Float>    // a, b, residual, clamped ratio (written by the model pass)
+}
+
 /// Mirror of `Kernels/s1_9_dehaze.metal`, byte for byte (117 / 2026-10-31 / 160).
 ///
 /// 160 — the statistics moved to a **fixed 512-long-edge proxy of the whole picture**, so `c`, `d`
@@ -2585,6 +2594,24 @@ public final class RenderGraph {
                 current = hit.texture
                 currentIsTransient = false
                 continue
+            }
+
+            // 365 — the hidden **linear-domain denoise prototype**, at its specified place: after
+            // S1.6 and before S1.7 (the curve). It is intentionally not a `RenderStage`: the
+            // ticket's file whitelist does not include `Stage.swift`, and at amount 0 it does not
+            // exist at all — no enum case, no link, no pass, no key. Its material rides on the curve
+            // link (`EditModel.material(.curve)` adds `;lindn=` only when active), so a cached curve
+            // frame is only served for the same denoise amount, and the pass runs exactly when the
+            // curve will miss. `decodeOnly` never visits the curve, so the 原图 path is untouched.
+            if stage == .curve, edit.hasLinearDenoise {
+                let out = try pool.obtain(plan.canvas)
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
+                try encodeLinearDenoise(cb: cb, into: out, from: current, edit: edit, plan: plan)
+                if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                if !recyclesEachStage { transient.append(out) }
+                current = out
+                currentIsTransient = true
             }
 
             // The histogram reads what S4 is about to read: scene-linear RGB after S2/S3, before the
@@ -4462,6 +4489,91 @@ public final class RenderGraph {
     /// 171 — the bilateral grid's cell edge (pixels per grid texel) and z-axis resolution (luma bins).
     private static let denoiseCell = 8
     private static let denoiseZBins = 40
+
+    /// 365 — the **linear-domain** prototype's grid. Same 8 px cell / 40 z bins the ticket names;
+    /// `eps = 2^-16` is the log2 floor and the slice's noise model clamps a correction to 3σ.
+    private static let linearDenoiseCell = 8
+    private static let linearDenoiseZBins = 40
+    private static let linearDenoiseEps: Float = 1.0 / 65536.0
+    private static let linearDenoiseLogLo: Float = -16
+    private static let linearDenoiseLogHi: Float = 4
+
+    /// 365 — the hidden linear-domain prototype: noise model → splat → blur → slice.
+    ///
+    /// Four passes on the working-space, scene-linear buffer S1.6 produced. The model's 1×1 texture
+    /// is the only hand-off between the estimate and the slice; the two 40-layer grids are
+    /// `rgba16f` because a 60 Mpx frame at 8 px cells is already 301 MB each at that size.
+    private func encodeLinearDenoise(cb: MTLCommandBuffer, into out: MTLTexture,
+                                     from src: MTLTexture, edit: EditModel,
+                                     plan: Plan) throws {
+        let w = plan.canvas.width, h = plan.canvas.height
+        let cell = RenderGraph.linearDenoiseCell
+        let zBins = RenderGraph.linearDenoiseZBins
+        let gW = max(1, (w + cell - 1) / cell)
+        let gH = max(1, (h + cell - 1) / cell)
+
+        var p = S1_65ParamsU(
+            canvas: SIMD4(Int32(w), Int32(h), Int32(cell), Int32(zBins)),
+            grid: SIMD4(Int32(gW), Int32(gH), 0, 0),
+            n: SIMD4(Float(min(max(edit.linearDenoiseLuma, 0), 1)),
+                     RenderGraph.linearDenoiseEps,
+                     RenderGraph.linearDenoiseLogLo,
+                     RenderGraph.linearDenoiseLogHi),
+            fit: .zero)
+
+        let model = try scratch("s1.65-nr-model", width: 1, height: 1, format: .rgba32Float)
+        let gridA = try scratch3D("s1.65-nr-grid-a", width: gW, height: gH, depth: zBins,
+                                  format: .rgba16Float)
+        let gridB = try scratch3D("s1.65-nr-grid-b", width: gW, height: gH, depth: zBins,
+                                  format: .rgba16Float)
+
+        // P0 — the full-frame σ² = a·I + b fit, and the entry-clamp census.
+        let fit = try kernels.pipeline(file: "s1_65_denoise", function: "s1_65_noise_model")
+        guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e0.setComputePipelineState(fit)
+        e0.setTexture(src, index: 0)
+        e0.setTexture(model, index: 1)
+        e0.setBytes(&p, length: MemoryLayout<S1_65ParamsU>.stride, index: 0)
+        e0.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        e0.endEncoding()
+
+        // P1 — splat into the log2-z grid (the z five-tap is in the same threadgroup).
+        let splat = try kernels.pipeline(file: "s1_65_denoise", function: "s1_65_splat")
+        guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e1.setComputePipelineState(splat)
+        e1.setTexture(src, index: 0)
+        e1.setTexture(model, index: 1)
+        e1.setTexture(gridA, index: 2)
+        e1.setBytes(&p, length: MemoryLayout<S1_65ParamsU>.stride, index: 0)
+        e1.dispatchThreadgroups(MTLSize(width: gW, height: gH, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: cell, height: cell, depth: 1))
+        e1.endEncoding()
+
+        // P2 — x and y five-taps in one tiled pass.
+        let blur = try kernels.pipeline(file: "s1_65_denoise", function: "s1_65_blur_xy")
+        guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e2.setComputePipelineState(blur)
+        e2.setTexture(gridA, index: 0)
+        e2.setTexture(gridB, index: 1)
+        e2.setBytes(&p, length: MemoryLayout<S1_65ParamsU>.stride, index: 0)
+        e2.dispatchThreadgroups(MTLSize(width: (gW + 15) / 16, height: (gH + 15) / 16,
+                                        depth: zBins),
+                                threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        e2.endEncoding()
+
+        // P3 — slice back to full resolution and apply one log-domain gain per pixel.
+        let apply = try kernels.pipeline(file: "s1_65_denoise", function: "s1_65_apply")
+        guard let e3 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
+        e3.setComputePipelineState(apply)
+        e3.setTexture(src, index: 0)
+        e3.setTexture(model, index: 1)
+        e3.setTexture(gridB, index: 2)
+        e3.setTexture(out, index: 3)
+        e3.setBytes(&p, length: MemoryLayout<S1_65ParamsU>.stride, index: 0)
+        dispatch(e3, apply, plan.canvas)
+        e3.endEncoding()
+    }
 
     /// The stage: up to two chains, in the panel's order (纹理 → 清晰度).
     ///
