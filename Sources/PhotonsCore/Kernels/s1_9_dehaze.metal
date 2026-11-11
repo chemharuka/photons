@@ -86,6 +86,21 @@ using namespace metal;
 // airlight. A different owner (the `A` estimate itself) would be a separate change; this one only
 // narrows who counts as fully participating.
 //
+// **374 — the edge has to span the SDR/HDR seam.** 280's upper edge (`A + 2σ`) put `w = 0` at
+// `L ≈ A`, and `A = 0.95·p99(L)` sits at or below the SDR white on almost every frame, so the
+// correction ended *inside* the SDR range: everything below it was darkened, everything above it
+// (`L > 1.0`, the HDR highlights) was untouched, and the step between the two is the "断层" the
+// user reported. The inversion is continuous at `L = A` (`J(A) = A`); the step was the participation
+// function's, not the model's. The fade is now a **C¹ band in log2 luminance, `[0.75·A, 1.33·A]`**
+// with a low shoulder at `A` (`w(A) = 0.04`): 1 below `0.75·A` (the deep fog keeps its recovery), 0
+// above `1.33·A` (280's HDR contract, and the widest edge that still leaves every measured `p99.9`
+// outside the band), and smooth log ramps on both halves of `A`, so `w` and `dw/dL` are continuous
+// across `1.0` when `A` is near the SDR white. The shoulder keeps `p99 = A/0.95 = 1.05·A` at
+// `w ≈ 0.035`, so 280's p99-band ceiling is met while the curve above it continues to zero. The
+// lower edge is wide (`0.75·A`, not `0.92·A`) because a narrow fade *just* below `A` adds its own
+// `dw/dL` to the recovery's `1/t`; spreading it keeps the sky band's light (0.981 on `_1263309`,
+// against 0.978 before) and removes the 15× adjacent-level step. See `s1_9_dehaze_apply`.
+//
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
 //
 // **Twelve passes (117's three, 135's bound, the veil's seven, and 160's proxy upsample):**
@@ -151,12 +166,14 @@ struct DehazeParams {
     int4 c;
     // proxyQH, box axis (0 = horizontal, 1 = vertical), box segment length, box radius in blocks
     int4 d;
-    // 130: k (the `2A` fade-out edge), legacy per-channel recovery switch, 135: κ (A's cap in
-    // units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is taken on)
+    // 130/374: k (`2σ`, the pre-374 participation only), legacy per-channel recovery switch,
+    // 135: κ (A's cap in units of p99(L)), 141: `g` (S1's exposure gain, the scale every estimate is
+    // taken on)
     float4 e;
     // sourceSize.xy, quarterTurns, pad
     int4 j;
-    // the knee (the `tSmooth`/`tPixel` blend width), tests-only legacy block-min `t`, pad, pad
+    // the knee (the `tSmooth`/`tPixel` blend width), legacy block-min `t`, pad,
+    // pre-374 participation switch
     float4 l;
     // 160 — apply's picture map: frameOrigin.xy, contentOrigin.xy (`imgPx = px + ½ − zw + xy`)
     float4 m;
@@ -457,9 +474,9 @@ kernel void s1_9_dehaze_veil_upsample(texture2d<float, access::sample> proxyVeil
 }
 
 /// The recovery: (2026-10-31) the knee-blended `t` from the guided veil and the pixel's own dark
-/// channel, then (130) the He inversion on **luminance only** with the `w = 1 − smoothstep(A, kA, L)`
-/// fog-amount fade and one common gain on all three channels; `out = mix(I, J, amount)`. Negative
-/// amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
+/// channel, then (130) the He inversion on **luminance only**; (374) the participation is a C¹ band
+/// in log2 luminance (`[0.75·A, 1.33·A]`) and one common gain on all three channels;
+/// `out = mix(I, J, amount)`. Negative amount adds the veil back (`hazy = 0.6·I + 0.4·A`), unchanged.
 /// **135** reads the capped airlight from `limited` (texture 2). No upper clamp:
 /// `J ≤ I/t0` is the physical bound, and S4's headroom decides how much of that tail is written.
 /// **141** runs the whole recovery in the unexposed space `I/g` and multiplies the result back by
@@ -553,35 +570,60 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         } else {
             // 130: recover luminance, scale all three channels by one gain (hue/chroma invariant),
             // and let the correction fade out where the veil cannot be a meaningful part of the
-            // pixel: `w = 0` outside the airlight estimate's own resolution.
+            // pixel.
             //
-            // The fade is 2026-10-31's, narrowed by 280. It used to be only the upper one — full
-            // participation at or below `A` — and at or below `A` the veil's *whole* evidence is
-            // `A − L`, which the recovery then multiplies by `1/t`. At the sky `t ≈ 0.12`, so the
-            // 3 % by which the airlight estimate sits above the sky (`L/A = 0.971` on `_1263309`)
-            // came out as a 20 % darkening (`J/I = 0.797`). `A` is a measurement, not a constant:
-            // over this frame's sky band it spreads 0.405…0.438, i.e. ±4 % of `A`, so a 3 % offset
-            // is inside the estimator's own error bar. A correction whose evidence is smaller than
-            // the estimator's resolution is not evidence, so participation fades in over
-            // `2σ … k·2σ` of `A` (`σ = sqrt(kDehazeAirEpsRel)·A = 2 %·A`, the guided filter's own
-            // regularization — one number, two readers). The fade is **symmetric**: a pixel a few
-            // percent *above* the airlight is not lifted either.
+            // 374 — **the fade is a band in log luminance that spans the SDR/HDR seam.** 280 left
+            // `w = 0` for every `L ≥ A` (a `[A−4σ, A+2σ]` dead zone, `σ = 2 %·A`), so a frame whose
+            // airlight is near the SDR white (`A = 0.95·p99`) darkened the SDR pixels and then cut
+            // the correction to zero at `A ≈ 1.0`: the discontinuity the user reported. The physics
+            // does not do that — `J = (L − A(1−t))/t` is continuous at `L = A` (`J(A) = A`) — the cut
+            // was the participation function's.
             //
-            // 280: the upper edge is the same resolution, not 130's `2A`. `A … 2A` used to keep the
-            // full `1/t` (up to 10×) while the symmetric fade had already ended; on `L1030433` at
-            // `dehaze = 20` that lifted the p99.9–p100 band by 1.20× (max 1.23×) and at 100 by
-            // 2.00× (max 2.17×). With `w = 0` from `A + 2σ` on, the upper edge is the estimator's
-            // error bar and `L ≥ A` is left alone. Below `A` the expression is unchanged, so the fog
-            // the slider is for keeps exactly the recovery it had.
+            // The band is `[0.75·A, 1.33·A]` in **log2 luminance**, with a low shoulder at `A`
+            // (`w(A) = 0.04`): `smoothstep` on each half, so `w` and `dw/dL` are continuous
+            // everywhere (`dw/dL` vanishes at `0.75·A`, `A` and `1.33·A`). Below `0.75·A` the
+            // participation is exactly 1, so the deep fog keeps its recovery bit for bit; above
+            // `1.33·A` it is exactly 0, so the HDR tail is still left alone — 280's contract. The
+            // upper edge is not `2A`: 433/437/428 measure `p99.9/A = 1.26/1.48/1.36`, and a band
+            // reaching `2A` would lift exactly the band 280 pinned (measured: 428's p99.9–p100
+            // would gain 8 %). `1.33·A` is the widest edge that keeps every measured `p99.9` outside
+            // the band, which is ③.
+            //
+            // The lower edge is wide on purpose. The old fade ended `0.08·A` below `A`, where the
+            // recovery's own slope is `1/t` (≈ 7.7× at `t = 0.13` on the ramp): over that short
+            // span the correction goes from full to zero and the *change* in `w` adds to `1/t`, which
+            // is the 15× adjacent-level step the user saw. Moving the transition to where `J ≈ L`
+            // (`L → A`) removes that term, but it also takes the light out of the sky band (`J/I`
+            // 0.978 → 0.924 on `_1263309`). Spreading the same fade down to `0.75·A` keeps the sky
+            // (measured 0.981, *above* the old 0.978) and brings the ramp's worst adjacent step down
+            // to ≈ `1/t`; the near-`A` fog band is deliberately a little less darkened, which is the
+            // seam fix itself. The shoulder keeps `p99 = A/0.95 = 1.05·A` at `w ≈ 0.035`, inside
+            // 280's ≤ 2 % / 5 % ceilings (on every 135-capped frame `p99` sits at exactly `1.05·A`,
+            // so a larger shoulder would lift the p99 band).
             float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
             float k = max(p.e.x, 1.0);
             float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
-            float w = 1.0 - smoothstep(A, A + res, L);
-            // Tests only (`legacyDehazeUnboundedRecovery`): disable the symmetric lower-side fade, so
-            // the counterproof can measure the darkening this test exists to prevent.
-            if (p.l.w < 0.5) {
-                w *= smoothstep(res, k * res, fabs(L - A));      // …full again at 8 %
+            float w;
+            if (p.l.w > 0.5) {
+                // Tests only (`legacyDehazeUnboundedRecovery`): the pre-374 participation, kept
+                // byte for byte so the acceptance can invert `t` from the linear render. Below `A`
+                // it is 1, which is the identity `t = (L − A)/(J − A)` DehazeLinearTests relies on.
+                w = 1.0 - smoothstep(A, A + res, L);
+            } else {
+                constexpr float lo = 0.75;     // full participation at or below this · A
+                constexpr float knee = 0.04;   // participation at L = A
+                constexpr float hi = 1.33;     // no participation at or above this · A
+                float logL = log2(max(L, 1e-6));
+                float logA = log2(A);
+                if (L <= A) {
+                    float x = clamp((logL - log2(lo * A)) / max(logA - log2(lo * A), 1e-6),
+                                    0.0, 1.0);
+                    w = knee + (1.0 - knee) * (1.0 - smoothstep(0.0, 1.0, x));
+                } else {
+                    float x = clamp((logL - logA) / max(log2(hi * A) - logA, 1e-6), 0.0, 1.0);
+                    w = knee * (1.0 - smoothstep(0.0, 1.0, x));
+                }
             }
             float Lout = mix(L, recovered, w);
             float gain = max(Lout, 0.0) / max(L, 1e-6);

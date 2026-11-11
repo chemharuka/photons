@@ -86,7 +86,12 @@ final class DehazeExposureTests: XCTestCase {
     private func linearRender(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
         let display = DisplayOptions(primaries: .rec2020, bitDepth: 16, headroom: 1,
                                      linearOutput: true)
-        let result = try graph.render(edit, options: RenderOptions(
+        // 329/374: the resting 锐化 (50) is a spatial pass that does not commute with the exposure
+        // gain and rides in the 1-ULP comparison below. The subject is 141's scale equivariance, so
+        // the fixture turns it off, as `DehazeLinearTests.linearRender` does.
+        var doc = edit
+        doc.sharpen = SharpenGroup(amount: 0)
+        let result = try graph.render(doc, options: RenderOptions(
             scale: 1, display: display, useCache: false, wantsPixels: true))
         if let t = result.output { graph.recycle(output: t) }
         return try XCTUnwrap(result.display)
@@ -213,7 +218,11 @@ final class DehazeExposureTests: XCTestCase {
                         let windowNormal = ev >= 0 || windowMin >= normalFloor
                         for c in 0..<3 {
                             let b = Float(base.rgba[i + c])
-                            let expected = b * g
+                            // 320 — S2 clamps the frame at the picture's highlight ceiling (the
+                            // `DisplayOptions` default, +2.3 EV = 4.9246 linear). At `E = +2` a base
+                            // above 1.23 linear would otherwise compare against light the pipeline
+                            // deliberately does not write; clamp the expectation the same way.
+                            let expected = min(b * g, Float(HighlightCeiling.defaultLinear))
                             let expectedHalf = Float16(expected)
                             let tol = Float(expectedHalf.ulp)
                             let actual = Float(exposed.rgba[i + c])
@@ -265,17 +274,25 @@ final class DehazeExposureTests: XCTestCase {
     /// uses the measured `A`. The **chroma** frame is 100×48, i.e. already at the canonical grid, and
     /// all ten hashes are unchanged to the digit: the evidence that 160 moved the *estimator's grid*
     /// and not the recovery's arithmetic.
+    ///
+    /// 374 — the **positive** entries moved again by design: `w` is no longer zero for `L ≥ A`, so the
+    /// recovery that the amount mixes in is a different function. The four **negative** entries are
+    /// still the pre-2026-10-31 bytes to the digit, which is the evidence that 374 touched the
+    /// positive branch's participation and nothing else. (The fixture also turns 314's resting 锐化
+    /// off; without that the 1-ULP commute test below cannot hold in any version — an unsharp mask is
+    /// spatial, not scale-equivariant. Re-disabling it is what restores the four negative hashes to
+    /// their recorded values.)
     private static let e0SHA: [String: String] = [
         "foggy·-100": "9fe53cdc43f873c012e920e18a1fcdba7c481c70aee0acafa9db5a4d09ca6abd",
         "foggy·-60": "90fe67a2b12a33a39440134ff42f8ed40320a744e6241d4934585fdabaa5965b",
-        "foggy·20": "bf02cfd545665eb5d989a1fb5abd5c29a08e0b335a3b2ed655697a60382ca439",
-        "foggy·60": "70d77788264550464750ba382a4136d0f2271c9319d0327af601861573588f94",
-        "foggy·100": "3211033044ff7f526fbadd0f621595b0073442e4a6f302879dca3406347b3e57",
+        "foggy·20": "57aae5c2829309ab3f3ccfd00d49bc064d5eac22107d96e0d81704f3c9ae361e",
+        "foggy·60": "beca67142e9c93cadde32e9a138fdb1c76031dfd93514ee7d405ecbf711e7b3d",
+        "foggy·100": "829b79e9f033523334a67f73d0fd70d34f09b1373220a6648b7fb28e88b9cb63",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
-        "chroma·20": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
-        "chroma·60": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
-        "chroma·100": "9934a7b9ca07261bad02cf203c434a6a7c79ceb987acfc362122ac2bd851d9ef",
+        "chroma·20": "04d7253f8b7eb8d51582b896020153208c178562222cf1267ad5cf39b65e1303",
+        "chroma·60": "cb08f3cd9d00f579d2978694fb8ca1a4fcdd7ac112d597fdccdf7a6b9198aa0b",
+        "chroma·100": "617ab69e69e44229cfcd05e3bb2b8e55ef1745ea4ee2a5ec78d23a01d74b2587",
     ]
 
     func testZeroExposureKeepsTheStageByteIdentical() throws {
