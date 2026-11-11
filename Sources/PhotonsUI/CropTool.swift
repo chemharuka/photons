@@ -225,6 +225,105 @@ public struct CropCarry: Sendable, Equatable {
     }
 }
 
+// MARK: - 362: the one projection (drawn with it, read back with it)
+
+/// **The one map between a crop rect's own normalized space and view points.**
+///
+/// The overlay draws every corner, grip and grid line with `view(u, v)`; a pointer is read back with
+/// `normalized(viewX:viewY:)`, which is this same value's exact inverse. Before 362 the drawing had a
+/// private `view` closure inside `CropTool.layout` and the drag had `CropToolController.cropBoxPoint`
+/// — its own chain of branches over `liveCropSpace` / `livePerspective`. Two spellings of one map,
+/// each free to pick a different walk: that is the class of bug 355 could not see, because its
+/// acceptance compared the *input* map with the *input* map.
+///
+/// One struct, one branch decision, and the walk every reader already trusts:
+///
+///   · `.canvas` (330) — a rectangle of the document canvas: `documentView(u·W, v·H)` with
+///     `(W, H) = photoQuadExtent`, and its inverse `documentPoint ÷ (W, H)`;
+///   · `.keystone` — a rectangle of the photograph on a warped document: `P → R → documentView`,
+///     inverted by `photoNormalized`;
+///   · `.frame` — the un-warped case: `R(−θ)` about the photograph's centre + the camera's frame map,
+///     inverted by `framePoint` + `R(+θ)`.
+public struct CropToolProjection {
+
+    /// Pixels per unit of the rect's own space, on each axis. `[0,1]²` of a `.source` rect is the
+    /// photograph; of a `.canvas` rect it is the document canvas (`photoQuadExtent`) — which is why a
+    /// size law (a ratio lock, the minimum span) must ask this instead of the source size.
+    public let units: CropUnits
+
+    enum Space {
+        case canvas(CropGeometry, LoupeMapping)
+        case keystone(CropGeometry, LoupeMapping)
+        case frame(CropGeometry.RotationMatrix, LoupeMapping, width: Double, height: Double)
+    }
+
+    let space: Space
+    let scale: Double
+    let carry: CropCarry
+
+    /// The rect's own space → view points (y down). The one exit the overlay draws through.
+    public func view(_ u: Double, _ v: Double) -> CGPoint {
+        let drawn: CGPoint
+        switch space {
+        case .canvas(let geometry, let mapping):
+            let e = geometry.photoQuadExtent
+            guard let p = mapping.documentView(DocumentPoint(u * e.width, v * e.height)) else {
+                return .zero
+            }
+            drawn = p
+        case .keystone(let geometry, let mapping):
+            guard let p = mapping.documentView(geometry.documentPointInCanvas(normalizedX: u, v)) else {
+                return .zero
+            }
+            drawn = p
+        case .frame(let rotation, let mapping, let width, let height):
+            let dx = u * width - width / 2, dy = v * height - height / 2
+            let turned = rotation.invert(x: dx, y: dy)
+            let q = mapping.frameView(frameX: width / 2 + turned.x, frameY: height / 2 + turned.y)
+            drawn = CGPoint(x: q.x, y: q.y)
+        }
+        return CGPoint(x: carry.applyX(Double(drawn.x)) / scale,
+                       y: carry.applyY(Double(drawn.y)) / scale)
+    }
+
+    /// View points → the rect's own space. **The inverse of `view`**, branch for branch.
+    public func normalized(viewX: Double, viewY: Double) -> NormalizedPoint? {
+        let x = (viewX * scale - carry.offsetX) / (carry.scale == 0 ? 1 : carry.scale)
+        let y = (viewY * scale - carry.offsetY) / (carry.scale == 0 ? 1 : carry.scale)
+        switch space {
+        case .canvas(let geometry, let mapping):
+            guard let document = mapping.documentPoint(viewX: x, viewY: y) else { return nil }
+            let e = geometry.photoQuadExtent
+            guard e.width > 0, e.height > 0 else { return nil }
+            return NormalizedPoint(document.x / e.width, document.y / e.height)
+        case .keystone(let geometry, let mapping):
+            guard let document = mapping.documentPoint(viewX: x, viewY: y) else { return nil }
+            return geometry.photoNormalized(documentX: document.x, document.y)
+        case .frame(let rotation, let mapping, let width, let height):
+            let p = mapping.framePoint(viewX: x, viewY: y)
+            guard p.x.isFinite, p.y.isFinite else { return nil }
+            let turned = rotation.apply(x: p.x - width / 2, y: p.y - height / 2)
+            return NormalizedPoint((width / 2 + turned.x) / width, (height / 2 + turned.y) / height)
+        }
+    }
+}
+
+/// Pixels per unit of a crop rect's own space — the unit a **size** law has to convert with.
+public struct CropUnits: Sendable, Equatable {
+    public var width: Double
+    public var height: Double
+
+    public init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+    }
+
+    /// The photograph's own grid — every `.source` rect.
+    public init(_ source: ImageSize) {
+        self.init(width: Double(max(source.width, 1)), height: Double(max(source.height, 1)))
+    }
+}
+
 // MARK: - the tool
 
 public enum CropTool {
@@ -280,92 +379,26 @@ public enum CropTool {
                               quadRotationDegrees: Double = 0,
                               cropSpace: CropSpace = .source,
                               exceedsPicture: Bool = false) -> CropToolLayout {
-        let scale = pointScale > 0 ? pointScale : 1
+        // 362 — the layout and the pointer read are the **same** projection: this entry only decides
+        // the three inputs of it (space, angle, keystone) and hands the drawing to it.
+        let projection = projection(source: source, mapping: mapping,
+                                    angle: quadRotationDegrees,
+                                    cropSpace: cropSpace,
+                                    perspective: mapping.transform?.perspective,
+                                    pointScale: pointScale,
+                                    carry: carry)
+        return layout(crop: crop, projection: projection, showsGrid: showsGrid,
+                      exceedsPicture: exceedsPicture)
+    }
+
+    /// **362 — the one layout.** Corner for corner a function of `projection.view`, so what the overlay
+    /// draws and what a pointer is read through cannot be two different maps.
+    public static func layout(crop: CropRect,
+                              projection: CropToolProjection,
+                              showsGrid: Bool = true,
+                              exceedsPicture: Bool = false) -> CropToolLayout {
         let c = crop.clamped(allowsOutsideSource: true)
-        let centreX = Double(max(source.width, 1)) / 2
-        let centreY = Double(max(source.height, 1)) / 2
-        let rotation = CropGeometry.RotationMatrix(degrees: quadRotationDegrees.isFinite ? quadRotationDegrees : 0)
-        func imagePoint(_ u: Double, _ v: Double) -> (x: Double, y: Double) {
-            let dx = u * Double(source.width) - centreX
-            let dy = v * Double(source.height) - centreY
-            // R(−θ): the image is shown un-turned, so the rectangle (axis-aligned in the turned space)
-            // reads as a quad turned the other way. The matrix lives in `CropGeometry` (123), so this
-            // file no longer carries a second `cos`/`sin`.
-            let turned = rotation.invert(x: dx, y: dy)
-            return (centreX + turned.x, centreY + turned.y)
-        }
-        // **327 — a keystoned frame is a quadrilateral, and it is drawn through `P → R`.**
-        //
-        // The straighten-only walk below (`R(−θ)` + the frame's axis-aligned screen map) assumes the
-        // picture's placement is a similarity, which a keystone makes false: `P` is projective, so the
-        // frame a user set — a rectangle of the *photograph* — lands as a quad, and 324's TODO («
-        // overlay 仍走旋转投影 ») was exactly this rectangle being drawn on top of a warped picture.
-        //
-        // The one map is `CropGeometry.documentPointInCanvas` (P → R, the same walk `photoQuad()` and the
-        // renderer's `M = R · P` are built from) followed by `LoupeMapping.documentView` (the camera).
-        // Nothing here re-derives a corner, and the no-keystone path is untouched bit for bit.
-        let keystone = mapping.transform?.perspective
-        let keystoneGeometry: CropGeometry? = keystone.flatMap { map in
-            guard map.hasWarp else { return nil }
-            return CropGeometry(
-                geometry: GeometryGroup(crop: c.normalizedRect,
-                                        rotationDegrees: CropTool.clampStraighten(quadRotationDegrees),
-                                        aspectLock: .original,
-                                        quarterTurns: 0,
-                                        perspectiveVertical: map.vertical,
-                                        perspectiveHorizontal: map.horizontal,
-                                        cropSpace: cropSpace),
-                source: source)
-        }
-        // **330 — a canvas-spaced frame is drawn as a rectangle of the document canvas.**
-        //
-        // The four edges are the rect scaled by the canvas' extent, in document pixels, and the only
-        // map applied is the camera (`LoupeMapping.documentView`) — which is a similarity, so the
-        // frame comes out axis-aligned whatever the keystone did to the picture *inside* it. That is
-        // exactly the user's sentence: 被透视的是框里的画面，不是框。
-        //
-        // **355 — the extent is a *document* quantity, so it carries the framing's own angle too.**
-        // It used to be built from `quadRotationDegrees` alone, which is the draft-vs-document
-        // **delta** (088). On a 旋转 + 透视 document the delta is 0 while the picture is turned by the
-        // document's angle, so the frame was scaled by the AABB at 0° and the canvas it claimed to be
-        // a window on was not the canvas the renderer allocates (9° / +60: 6403×4016 vs 6578×4909 —
-        // the frame sat 2.7 % / 22 % off the picture, and every drag inherited the skew). The total is
-        // `framing angle + quad rotation`, the same total 088's own comment names.
-        let framingAngle = mapping.transform?.straightenDegrees ?? 0
-        let canvasTurn = CropTool.clampStraighten(framingAngle) + quadRotationDegrees
-        let canvasGeometry: CropGeometry? = cropSpace == .canvas
-            ? CropGeometry(
-                geometry: GeometryGroup(crop: c.normalizedRect,
-                                        rotationDegrees: CropTool.clampStraighten(canvasTurn),
-                                        aspectLock: .original,
-                                        quarterTurns: 0,
-                                        perspectiveVertical: keystone?.vertical ?? 0,
-                                        perspectiveHorizontal: keystone?.horizontal ?? 0,
-                                        cropSpace: .canvas),
-                source: source)
-            : nil
-        func view(_ u: Double, _ v: Double) -> CGPoint {
-            if let canvasGeometry {
-                let e = canvasGeometry.photoQuadExtent
-                let p = DocumentPoint(u * e.width, v * e.height)
-                if let drawn = mapping.documentView(p) {
-                    return CGPoint(x: carry.applyX(drawn.x) / scale, y: carry.applyY(drawn.y) / scale)
-                }
-            }
-            if let keystoneGeometry {
-                let p = keystoneGeometry.documentPointInCanvas(normalizedX: u, v)
-                if let drawn = mapping.documentView(p) {
-                    return CGPoint(x: carry.applyX(drawn.x) / scale, y: carry.applyY(drawn.y) / scale)
-                }
-            }
-            // **Frame space, not source space** (see `LoupeMapping.frameView`): the crop rect is a
-            // rectangle of the *straightened* frame, so its four sides stay axis-aligned on screen and
-            // a straightened picture turns under a still frame. The quad is turned in image space
-            // first (088), then projected by the document's framing — never re-fitted per angle.
-            let q = imagePoint(u, v)
-            let p = mapping.frameView(frameX: q.x, frameY: q.y)
-            return CGPoint(x: carry.applyX(p.x) / scale, y: carry.applyY(p.y) / scale)
-        }
+        func view(_ u: Double, _ v: Double) -> CGPoint { projection.view(u, v) }
 
         let corners = [view(c.left, c.top), view(c.right, c.top),
                        view(c.right, c.bottom), view(c.left, c.bottom)]
@@ -396,6 +429,62 @@ public enum CropTool {
             layout.grid = lines
         }
         return layout
+    }
+
+    // MARK: 362 — the projection, built once
+
+    /// The projection the frame is drawn with and the pointer is read through.
+    ///
+    /// The three branches are 330's, 327's and 088's, spelled **once**:
+    ///
+    ///   · `cropSpace == .canvas` — the frame is a rectangle of the document canvas. Its `(W, H)` is
+    ///     `photoQuadExtent` of a geometry turned by **the framing's angle plus the quad's own** (355's
+    ///     correction: the draft-vs-document delta alone is 0 at rest, and the canvas it claimed to be
+    ///     a window on was then the 0° AABB — 6403×4016 for a 6578×4909 canvas at 9°/+60).
+    ///   · a keystone on a `.source` rect — `P → R` then the camera (327).
+    ///   · neither — `R(−θ)` about the photograph's centre plus the camera's frame map (088).
+    public static func projection(source: ImageSize,
+                                  mapping: LoupeMapping,
+                                  angle: Double,
+                                  cropSpace: CropSpace,
+                                  perspective: PerspectiveMap?,
+                                  pointScale: Double = 1,
+                                  carry: CropCarry = .identity) -> CropToolProjection {
+        let scale = pointScale > 0 ? pointScale : 1
+        let clamped = clampStraighten(angle)
+        if cropSpace == .canvas {
+            // 355 — the canvas' angle is the **total** turn: the framing's own plus the quad's delta.
+            let framing = mapping.transform?.straightenDegrees ?? 0
+            let geometry = CropGeometry(
+                geometry: GeometryGroup(crop: .full,
+                                        rotationDegrees: clampStraighten(framing + clamped),
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: perspective?.vertical ?? 0,
+                                        perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                        cropSpace: .canvas),
+                source: source)
+            let e = geometry.photoQuadExtent
+            return CropToolProjection(units: CropUnits(width: e.width, height: e.height),
+                                      space: .canvas(geometry, mapping), scale: scale, carry: carry)
+        }
+        if let perspective, perspective.hasWarp {
+            let geometry = CropGeometry(
+                geometry: GeometryGroup(crop: .full,
+                                        rotationDegrees: clamped,
+                                        aspectLock: .original,
+                                        quarterTurns: 0,
+                                        perspectiveVertical: perspective.vertical,
+                                        perspectiveHorizontal: perspective.horizontal),
+                source: source)
+            return CropToolProjection(units: CropUnits(source),
+                                      space: .keystone(geometry, mapping), scale: scale, carry: carry)
+        }
+        return CropToolProjection(units: CropUnits(source),
+                                  space: .frame(CropGeometry.RotationMatrix(degrees: clamped), mapping,
+                                                width: Double(max(source.width, 1)),
+                                                height: Double(max(source.height, 1))),
+                                  scale: scale, carry: carry)
     }
 
     // MARK: the document-canvas clamp (224 → 2026-11-02)
@@ -598,7 +687,13 @@ public enum CropTool {
 
     /// The smallest normalized width/height a drag may leave, in the frame's own units.
     public static func minimumSpan(source: ImageSize) -> (width: Double, height: Double) {
-        let w = Double(max(1, source.width)), h = Double(max(1, source.height))
+        minimumSpan(units: CropUnits(source))
+    }
+
+    /// **362** — the same floor in the **rect's own** units: `32 px` of the grid the rect is measured
+    /// in (the photograph, or the document canvas for a `.canvas` rect).
+    public static func minimumSpan(units: CropUnits) -> (width: Double, height: Double) {
+        let w = max(units.width, 1), h = max(units.height, 1)
         return (min(1, minimumSpanPixels / w), min(1, minimumSpanPixels / h))
     }
 
@@ -610,8 +705,16 @@ public enum CropTool {
     /// conversion `CropMath.fittedCrop` makes, spelled once here so a drag and a preset switch
     /// cannot disagree.
     public static func normalizedAspect(_ ratio: Double, source: ImageSize) -> Double? {
+        normalizedAspect(ratio, units: CropUnits(source))
+    }
+
+    /// **362** — the lock's ratio in the units the rect is **actually measured in**. For a `.canvas`
+    /// rect that is the document canvas (`photoQuadExtent`), not the photograph: at 9°/+60 they differ
+    /// by 6553/4909 = 1.335 against the photograph's 6000/4000 = 1.5, so reading the source here
+    /// re-cut a locked frame ~11 % on every tick — the 「框的大小经常跳变」 of the report.
+    public static func normalizedAspect(_ ratio: Double, units: CropUnits) -> Double? {
         guard ratio.isFinite, ratio > 0 else { return nil }
-        let value = ratio * Double(max(source.height, 1)) / Double(max(source.width, 1))
+        let value = ratio * max(units.height, 1) / max(units.width, 1)
         return (value.isFinite && value > 0) ? value : nil
     }
 
@@ -630,8 +733,19 @@ public enum CropTool {
                                  source: ImageSize,
                                  anchor: CropToolAnchor,
                                  bounds: CropRect = .full) -> CropRect {
+        constrain(rect, lock: lock, units: CropUnits(source), anchor: anchor, bounds: bounds)
+    }
+
+    /// **362** — `constrain` in the rect's **own** units (the photograph, or the document canvas for a
+    /// `.canvas` rect). The ratio and the 32 px floor are pixel facts, so they have to be converted
+    /// with the grid the rect is measured in.
+    public static func constrain(_ rect: CropRect,
+                                 lock: AspectLock,
+                                 units: CropUnits,
+                                 anchor: CropToolAnchor,
+                                 bounds: CropRect = .full) -> CropRect {
         let c = rect.clamped(allowsOutsideSource: true)
-        guard let ratio = lock.ratio, let na = normalizedAspect(ratio, source: source) else {
+        guard let ratio = lock.ratio, let na = normalizedAspect(ratio, units: units) else {
             return c
         }
         var w = c.width, h = c.height
@@ -661,7 +775,7 @@ public enum CropTool {
         }
         // A rect that no longer fits the frame is *moved* into it, not resized: the ratio is the
         // rule the user chose, and a shift keeps it while a shrink would silently drop it.
-        let span = minimumSpan(source: source)
+        let span = minimumSpan(units: units)
         let width = min(max(w, span.width), max(bounds.width, span.width))
         let height = min(max(h, span.height), max(bounds.height, span.height))
         let x = min(max(left, bounds.left), bounds.right - width)
@@ -831,7 +945,16 @@ public struct CropToolDrag: Sendable, Equatable {
                      source: ImageSize,
                      lock: AspectLock = .original,
                      bounds: CropRect = .full) -> CropRect {
-        let span = CropTool.minimumSpan(source: source)
+        crop(at: point, units: CropUnits(source), lock: lock, bounds: bounds)
+    }
+
+    /// **362** — the same drag in the rect's own units. `units` is what the lock's ratio and the 32 px
+    /// floor are converted with; for a `.canvas` rect it is the document canvas, not the photograph.
+    public func crop(at point: NormalizedPoint,
+                     units: CropUnits,
+                     lock: AspectLock = .original,
+                     bounds: CropRect = .full) -> CropRect {
+        let span = CropTool.minimumSpan(units: units)
         // 2026-11-02: the rect under the hand may sit in the black corners a straighten opens, so the
         // mouse-down snapshot is *not* pulled back inside the photograph. `bounds` (the document
         // canvas) is what the caller clamps against afterwards.
@@ -881,7 +1004,7 @@ public struct CropToolDrag: Sendable, Equatable {
         let free = CropRect(left: left, top: top, right: right, bottom: bottom)
             .clamped(allowsOutsideSource: true)
         guard lock.ratio != nil else { return free }
-        return CropTool.constrain(free, lock: lock, source: source, anchor: handle.anchor,
+        return CropTool.constrain(free, lock: lock, units: units, anchor: handle.anchor,
                                   bounds: bounds)
     }
 }
