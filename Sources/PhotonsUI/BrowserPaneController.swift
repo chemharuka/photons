@@ -1428,7 +1428,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                                     action: #selector(folderMenuRemove(_:)), keyEquivalent: "")
             remove.target = self
             remove.representedObject = target
-            remove.isEnabled = count > 0     // 空文件夹没有可移除的照片
+            // 381: 空文件夹也可以移除。唯一会以「0 张」留在树里的行是**根行**（`source_roots` 不随
+            // 照片消失），所以要移的正是那一行；非根文件夹没有照片时已从树里消失了（`folderNodes`
+            // 由 `rel_path` 扫出），不存在「要移除的空行」，不需要一个「隐藏文件夹」状态。
+            remove.isEnabled = true
             menu.addItem(remove)
         }
     }
@@ -1444,14 +1447,23 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             "从照片库移除「\(name)」？"
         }
 
-        public static func confirmMessage(count: Int) -> String {
-            "\(grouped(count)) 张照片将从照片库移除。磁盘上的原文件不会被删除，\n该操作不能撤销（需要重新导入才能找回）。"
+        public static func confirmMessage(name: String, count: Int) -> String {
+            // 381: 0 张不是「删 0 张照片」，而是「移除一个空行」——措辞必须说清盘上的文件夹还在，
+            // 否则用户会以为点什么都没发生。`count > 0` 的那句一字未改（379 的断言原文）。
+            guard count > 0 else {
+                return "「\(name)」下没有照片，只会把它从左栏移除。磁盘上的文件夹不会被删除。"
+            }
+            return "\(grouped(count)) 张照片将从照片库移除。磁盘上的原文件不会被删除，\n该操作不能撤销（需要重新导入才能找回）。"
         }
 
         /// `从照片库移除「day2」（1,234 张）…` — the count is what the row shows, so the menu can be
-        /// trusted without opening it.
+        /// trusted without opening it. A 0-count row (381: a root whose photos are all gone) says
+        /// 「（空文件夹）」 instead of 「（0 张）」: there are no photos to promise.
         public static func menuTitle(name: String, count: Int) -> String {
-            "从照片库移除「\(name)」（\(grouped(count)) 张）…"
+            guard count > 0 else {
+                return "从照片库移除「\(name)」（空文件夹）…"
+            }
+            return "从照片库移除「\(name)」（\(grouped(count)) 张）…"
         }
 
         /// `1234` → `1,234`. Grouping by hand, not through `NumberFormatter`: the menu title is
@@ -1487,7 +1499,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public func folderRemovalAlert(for target: FolderRemovalTarget, count: Int) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = FolderRemovalText.confirmTitle(name: target.displayName)
-        alert.informativeText = FolderRemovalText.confirmMessage(count: count)
+        alert.informativeText = FolderRemovalText.confirmMessage(name: target.displayName, count: count)
         alert.alertStyle = .warning
         alert.addButton(withTitle: FolderRemovalText.confirmButton)
         alert.addButton(withTitle: FolderRemovalText.cancelButton)
@@ -1519,8 +1531,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let target = sender.representedObject as? FolderRemovalTarget, let session else { return }
         // The confirmation's number is a `COUNT(*)`, read *once* and then used by the alert; the
         // removal itself re-reads the ids only after the user has said yes.
+        //
+        // 381: no `count > 0` guard. A root whose photos are all gone still has its `source_roots`
+        // row (a 0-count row in the left column) and removing it is the only thing the user can do
+        // with it — the confirmation says so in words (see `FolderRemovalText`).
         let count = session.folderAssetCount(rootID: target.rootID, path: target.path)
-        guard count > 0 else { return }
         guard folderRemovalPrompt(target, count) else { return }
         removeFolderFromLibrary(target)
     }
