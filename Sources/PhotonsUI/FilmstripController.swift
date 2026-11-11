@@ -113,6 +113,9 @@ public final class FilmstripCard: NSView {
     /// `AssetBadges.draw`, so the two surfaces cannot disagree about what a stack looks like.
     public private(set) var lastDrawnBadges: [String] = []
 
+    /// §382 — the capsule rects the last `draw` painted (see `AssetBadges.Layout`).
+    public private(set) var lastBadgeLayout = AssetBadges.Layout()
+
     /// The badge this cell would draw — the same string the grid card reports.
     public var badgeSignature: String {
         asset.map { AssetBadges(asset: $0, stackCount: stackCount).signature } ?? "—"
@@ -161,7 +164,7 @@ public final class FilmstripCard: NSView {
         // so the two surfaces can never disagree about what a badge means. Drawn before the missing
         // scrim so 「原文件已移动」 stays on top of everything.
         let badges = AssetBadges(asset: asset, stackCount: stackCount)
-        badges.draw(in: thumb)
+        lastBadgeLayout = badges.draw(in: thumb)
         lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
 
         // The badge is drawn *outside* the clip so its pill is never cut by the rounded corner, and
@@ -174,7 +177,9 @@ public final class FilmstripCard: NSView {
         let name = NSRect(x: 0, y: thumb.maxY + 1, width: bounds.width, height: 11)
         // 377 — same one implementation as the grid: fit the head + `…` to the caption's width
         // instead of letting `NSString.draw(in:)` word-wrap at a space or `-` and clip the rest.
-        let drawnCaption = PlaceholderStyle.fitted(asset.filename, width: name.width,
+        // §382 — 「堆叠 XXX.dng」 is composed **before** the fit, exactly like the grid card.
+        let display = StackText.displayName(asset.filename, isStack: badges.isStack)
+        let drawnCaption = PlaceholderStyle.fitted(display, width: name.width,
                                                    font: PlaceholderStyle.captionFont)
         (drawnCaption as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
         lastDrawnCaption = drawnCaption
@@ -444,12 +449,30 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             diffableDataSource.apply(snapshot, animatingDifferences: true)
         }
         isApplyingModel = false
+        // §382 — `apply(snapshot)` does not re-run the cell provider for an id that stayed put, so
+        // a metadata write (stars / colour / a new stack) never reached the cell that was already on
+        // screen. Re-configure the visible cells in place, matched by the photo each already shows.
+        reconfigureVisibleItems()
         applySelectionFromModel()
         DispatchQueue.main.async { [weak self] in
             self?.refreshVisibleThumbnails()
             self?.reconcileThumbnails(force: true)
+            self?.reconfigureVisibleItems()
         }
         if let session { lastSnapshot = modelSnapshot(session) }
+    }
+
+    /// §382 — the strip's half of the grid's `reconfigureVisibleItems`: same asset id ⇒ the cell
+    /// keeps its bitmap, and only the badge/count values are re-read from the session.
+    private func reconfigureVisibleItems() {
+        guard isViewLoaded, let session else { return }
+        for path in collectionView.indexPathsForVisibleItems() {
+            guard let cell = collectionView.item(at: path) as? FilmstripCell,
+                  let id = cell.cardView.asset?.id,
+                  let asset = assetsByID[id] else { continue }
+            cell.configure(asset: asset, isActive: session.anchorID == id,
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+        }
     }
 
     public func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {

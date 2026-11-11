@@ -1669,16 +1669,19 @@ final class PhotoRowCell: NSTableCellView {
     private let stars = NSTextField(labelWithString: "")
     /// 「原文件已移动」, over the thumbnail square. Hidden unless the row's original moved.
     private let pill = MissingFilePillView()
-    /// §378 — 「⧉ N」 in the square's bottom-right corner.
+    /// §382 — 「堆叠5张」, right-aligned at the **end of the second line** (机身 · 日期), as the user
+    /// asked: the list does not use a corner badge as its only mark. Hidden on every other row, with
+    /// an empty string, so no blank placeholder reserves width.
+    private let stackLabel = NSTextField(labelWithString: "")
+    /// §378 — 「⧉ N」 in the square's bottom-left corner (§382 moved it there from the top-right).
     ///
     /// A view of its own (like `pill`) because AppKit draws a cell *before* its subviews: a capsule
     /// painted in the cell's own `draw` would be covered by the thumbnail square the moment the row
     /// has an image — the exact row the indicator matters on.
     ///
-    /// It calls **the same** `AssetBadges.draw` the grid card and the strip cell call, with only the
-    /// stack dimension filled in: this row already draws its stars as text beside the square and its
-    /// 「原文件已移动」 as an orange pill, so feeding the routine the other corner badges here would
-    /// be a second drawing of the same facts in a 34 pt box.
+    /// It calls **the same** `AssetBadges.draw` the grid card and the strip cell call. Its frame is
+    /// the **whole 34 pt square**: the old 14 pt strip was below `AssetBadges`'s own
+    /// `height > 16` guard, so the routine returned at the door and the list never painted a thing.
     private let stackBadge = StackBadgeView()
 
     /// Which asset this row is currently showing. A recycled row must never accept an image that was
@@ -1707,9 +1710,31 @@ final class PhotoRowCell: NSTableCellView {
     /// §378 — how many photos the stack this row stands for holds (0/1 = not a stack).
     private(set) var stackCount = 0
 
-    /// What the stack badge painted, in the same vocabulary the grid card and the strip use
-    /// (`["stack:5"]`). Empty for a photo in no stack — the assertion the acceptance reads.
-    var lastDrawnBadges: [String] { stackBadge.drawn }
+    /// What the row painted, in the same vocabulary the grid card and the strip use
+    /// (`["flag:pick", "color:red", "stack:5"]`, plus `stars:N` from the row's own text line).
+    ///
+    /// §382 — the stars come from `stars.stringValue`, not from the badge view: this row paints them
+    /// as a text line beside the square, so "which stars are on screen" is a fact about that label.
+    /// The square's own capsules are read off `StackBadgeView.painted` (evidence, not intent).
+    var lastDrawnBadges: [String] {
+        var out: [String] = []
+        let rating = stars.stringValue.filter { $0 == "★" }.count
+        if rating > 0 { out.append("stars:\(rating)") }
+        out.append(contentsOf: stackBadge.drawn)
+        return out
+    }
+
+    /// §382 — the second line's right-hand label, as laid out and as shown. The acceptance reads
+    /// both: 「堆叠5张」 on a stack's row, `""` + hidden on every other row.
+    var stackLabelText: String { stackLabel.stringValue }
+    var stackLabelIsHidden: Bool { stackLabel.isHidden }
+    /// The rect the second line's right label occupies (zero when the row is not a stack).
+    var stackLabelFrame: NSRect { stackLabel.isHidden ? .zero : stackLabel.frame }
+    /// The rect `meta` actually has — it gives way to the stack label rather than running under it.
+    var metaFrame: NSRect { meta.frame }
+    /// §382 — the square the corner badge draws into, and where it painted the capsules.
+    var stackBadgeFrame: NSRect { stackBadge.frame }
+    var stackBadgeLayout: AssetBadges.Layout { stackBadge.lastLayout }
 
     // MARK: text block metrics
 
@@ -1798,7 +1823,13 @@ final class PhotoRowCell: NSTableCellView {
         meta.lineBreakMode = .byTruncatingTail
         stars.font = .systemFont(ofSize: 8)
         stars.textColor = .systemYellow
-        for v in [swatch, name, meta, stars] { addSubview(v) }
+        // §382 — the second line's right-hand count: same 9 pt as `meta`, same baseline, quiet grey.
+        stackLabel.font = .systemFont(ofSize: 9)
+        stackLabel.textColor = .secondaryLabelColor
+        stackLabel.alignment = .right
+        stackLabel.lineBreakMode = .byClipping
+        stackLabel.isHidden = true
+        for v in [swatch, name, meta, stars, stackLabel] { addSubview(v) }
         addSubview(pill)   // last: the badge sits on top of the thumbnail square
         addSubview(stackBadge)  // and the stack capsule on top of that, in the corner
     }
@@ -1814,18 +1845,29 @@ final class PhotoRowCell: NSTableCellView {
         }
         assetID = asset.id
         self.stackCount = stackCount
-        stackBadge.update(stackCount: stackCount)
+        // §382 — the corner routine gets the row's **whole** badge (rating included, so `drawn` can
+        // report `stars:N`), but paints with `drawsStars: false`: this row already shows the stars
+        // as a text line beside the square, and a 34 pt square has no room for a second copy.
+        stackBadge.update(badges: AssetBadges(asset: asset, stackCount: stackCount))
         // The placeholder stays underneath the image (006 §2): a row is never a white hole, and a
         // failure looks like "not yet", not like "broken".
         swatch.layer?.backgroundColor = PlaceholderSwatch.color(for: asset.contentHash).cgColor
-        name.stringValue = asset.filename
         filename = asset.filename
+        // §382 — the 置顶 of a stack shows 「堆叠 XXX.dng」; `filename` above stays the real one (the
+        // label is what is displayed, the model/disk never move).
+        name.stringValue = StackText.displayName(asset.filename, isStack: stackCount >= 2)
         var bits: [String] = []
         if let m = asset.cameraModel { bits.append(m) }
         if let d = asset.captureLocalDate { bits.append(d) }
         meta.stringValue = bits.joined(separator: " · ")
         stars.stringValue = asset.rating > 0 ? PlaceholderSwatch.stars(asset.rating) : ""
         name.textColor = isActive ? .labelColor : .secondaryLabelColor
+
+        // §382 — 「堆叠5张」, right-aligned on the second line. A non-stack row hides it **and**
+        // empties it: a blank label would still reserve the column and push `meta` left.
+        let label = stackCount >= 2 ? StackText.countLabel(stackCount) : StackText.empty
+        stackLabel.stringValue = label
+        stackLabel.isHidden = label.isEmpty
 
         // 「原文件已移动」 takes the meta line: on a 46 pt row the fact that the file is gone outranks
         // the camera model, and the badge is drawn on the thumbnail as well so a glance finds it.
@@ -1841,6 +1883,7 @@ final class PhotoRowCell: NSTableCellView {
         }
         // A recycled row can be reconfigured without a new `layout()` (same frame, new photo).
         refitName()
+        layoutSecondLine()
     }
 
     /// Paint the image (or drop back to the placeholder when `image` is nil).
@@ -1880,11 +1923,16 @@ final class PhotoRowCell: NSTableCellView {
     /// asset but kept its frame, so `layout()` may not run again). Solving it against the label's
     /// own `frame.width` rather than a stored number is what keeps this one rule: the column the
     /// label has is the column the fit is measured for.
+    ///
+    /// §382 — `filename` stays the real name (the model, the disk and the export never see the
+    /// prefix), and the string that is fitted is 「堆叠 XXX.dng」 **first**, then cut. Pasting the
+    /// prefix onto an already-cut name would hand the eye characters the column cannot hold.
     private func refitName(width: CGFloat? = nil) {
         guard let font = name.font else { return }
         let column = width ?? name.frame.width
         guard column > 0 else { return }
-        let fitted = PlaceholderStyle.fitted(filename, width: column, font: font)
+        let display = StackText.displayName(filename, isStack: stackCount >= 2)
+        let fitted = PlaceholderStyle.fitted(display, width: column, font: font)
         if name.stringValue != fitted { name.stringValue = fitted }
     }
 
@@ -1920,55 +1968,100 @@ final class PhotoRowCell: NSTableCellView {
         // the **exact** column `layout()` just gave it (no extra inset: a narrower string would not
         // be the longest one). `byTruncatingTail` above then has nothing left to do.
         refitName(width: width)
+        // §382 — 「堆叠5张」 is right-aligned at the end of the second line, on `meta`'s baseline.
+        // It takes its own width from the right edge and `meta` gives way (≥ 4 pt of air between
+        // them), so a long camera · date never runs under the count.
+        layoutSecondLine(in: NSRect(x: textX, y: metaY, width: width, height: heights.meta))
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)
-        // The stack capsule takes the square's **bottom-right** corner: the top-right belongs to the
-        // colour dot on the larger surfaces, and this row's square is only 34 pt. `NSView` here is
-        // unflipped, so the capsule's own frame is the square minus its height and a 3 pt inset.
-        stackBadge.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.minY,
-                                  width: swatch.frame.width, height: 14)
+        // §382 — the corner routine is given the **whole 34 pt square**. It used to get a 14 pt strip,
+        // which is below `AssetBadges.draw`'s own `height > 16` guard: the list could never paint a
+        // stack mark at all, whatever the data said.
+        stackBadge.frame = swatch.frame
+    }
+
+    /// §382 — the **full** width the second line has, before the stack label takes its share. Kept
+    /// here (not read back off `meta.frame`) because `meta` is narrowed on a stack row: reusing its
+    /// frame as the baseline would leave a recycled non-stack row with the narrow column.
+    private var secondLineColumn = NSRect.zero
+
+    /// §382 — lay the second line out as one row: `meta` on the left, 「堆叠5张」 flush right.
+    ///
+    /// Separated from `layout()` because `configure` needs the same arithmetic on a recycled row
+    /// whose frame did not change (so `layout()` may not run again). Both doors pass the **whole**
+    /// column; the label's own width is what is subtracted from it.
+    private func layoutSecondLine(in column: NSRect? = nil) {
+        if let column { secondLineColumn = column }
+        let column = secondLineColumn
+        guard column.width > 0, column.height > 0 else { return }
+        if stackLabel.isHidden {
+            meta.frame = column
+            stackLabel.frame = .zero
+            return
+        }
+        // The label is right-aligned, so its width is its own text's width (a hair of slack keeps
+        // a `byClipping` label from shaving the last glyph).
+        let needed = ceil((stackLabel.stringValue as NSString)
+            .size(withAttributes: [.font: stackLabel.font ?? .systemFont(ofSize: 9)]).width) + 1
+        let labelWidth = min(needed, column.width)
+        let gap: CGFloat = 4
+        let metaWidth = max(0, column.width - labelWidth - gap)
+        meta.frame = NSRect(x: column.minX, y: column.minY, width: metaWidth, height: column.height)
+        stackLabel.frame = NSRect(x: column.maxX - labelWidth, y: column.minY,
+                                  width: labelWidth, height: column.height)
     }
 }
 
-/// The 「⧉ N」 capsule over a photo row's 34 pt square.
+/// The corner badge over a photo row's 34 pt square.
 ///
 /// It is a view rather than a line in the cell's `draw` for the reason `MissingFilePillView` gives:
 /// AppKit paints a cell before its subviews, so a badge drawn in the cell would sit *under* the
 /// `ThumbnailEDRView` the moment the row has an image. The drawing itself is not a second
-/// implementation — it builds one `AssetBadges` carrying only the stack dimension and calls the same
+/// implementation — it hands the row's flag / colour label / stack count to the same
 /// `draw(in:corner:)` the grid card and the strip cell call.
 ///
-/// Coordinates: this view is inside an **unflipped** `NSTableCellView` and is itself unflipped, so
-/// `.bottomTrailing` in `AssetBadges`'s flipped vocabulary means "the square's visual bottom-right".
-/// The view is pinned to the square's own frame, so the capsule's 3 pt inset is measured from the
-/// square's edge, not the row's.
+/// §382: the view is pinned to the square's **own frame** (34 × 34), so the capsules' 3 pt inset is
+/// measured from the square's edge. It used to be a 14 pt strip — below `AssetBadges.draw`'s
+/// `height > 16` guard — which is why the list never painted a stack mark.
+/// §382: stars are **not** drawn here; the row already paints them as a text line, and the square
+/// has no room for a second copy. `drawn` therefore carries the flag / colour / stack vocabulary.
 final class StackBadgeView: NSView {
-    private(set) var stackCount = 0
+    private(set) var badges = AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: 0)
+    private(set) var lastLayout = AssetBadges.Layout()
 
-    /// What the badge painted (`["stack:5"]`), read back by the acceptance and the smoke.
-    var drawn: [String] {
-        AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: stackCount).drawn
-    }
+    /// What this view **painted** — recorded inside `draw`, so it is evidence rather than intent.
+    ///
+    /// §382: this used to be `badges.drawn`, i.e. a re-derivation of the values handed in. That is
+    /// why the list's 14 pt frame could go unnoticed for a whole ticket: the getter reported
+    /// `stack:5` while `draw` had returned at the front door without painting anything. Reading the
+    /// recorded layout means a capsule that was never laid out cannot claim to have been drawn.
+    ///
+    /// Stars are not part of this list: the row paints them as its own text line, and `PhotoRowCell`
+    /// adds that fact to its `lastDrawnBadges`. What is here is exactly what the square painted.
+    private(set) var painted: [String] = []
+
+    /// What the square painted (`["flag:pick", "color:red", "stack:5"]`). Empty for a photo with no
+    /// flag, no label and no stack.
+    var drawn: [String] { painted }
 
     override var isFlipped: Bool { true }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func update(stackCount: Int) {
-        guard stackCount != self.stackCount else {
-            needsDisplay = true
-            return
-        }
-        self.stackCount = stackCount
-        isHidden = stackCount < 2
+    func update(badges: AssetBadges) {
+        self.badges = badges
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard stackCount >= 2 else { return }
-        AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: stackCount)
-            .draw(in: bounds, corner: .bottomTrailing)
+        lastLayout = badges.draw(in: bounds, drawsStars: false)
+        var out: [String] = []
+        if let flag = badges.flag { out.append("flag:\(flag.rawValue)") }
+        if let label = badges.colorLabel { out.append("color:\(label.rawValue)") }
+        // Only a capsule that was laid out counts — the whole point of this getter.
+        if badges.isStack, lastLayout.stackPill != nil { out.append("stack:\(badges.stackCount)") }
+        painted = out
     }
 }
 
