@@ -2137,10 +2137,15 @@ public final class CatalogSession {
         guard let catalog else { return nil }
         let folder = AssetFilter.normalizedFolderPath(path)
         let ids = (try? catalog.assetIDs(rootID: rootID, folderPath: path)) ?? []
-        guard !ids.isEmpty else { return nil }
-        pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
-                                                                removing: Set(ids),
-                                                                anchor: anchorID)
+        // 381: an empty id list is not a reason to stop. A root whose last photo went still has a
+        // 0-count row in the left column, and only `reload()` below takes it out of the tree — a
+        // `return nil` here would leave the menu verb doing nothing at all. There is simply no
+        // anchor successor to compute when nothing the user saw is going away.
+        if !ids.isEmpty {
+            pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
+                                                                    removing: Set(ids),
+                                                                    anchor: anchorID)
+        }
         do {
             let report = try catalog.removeFolder(rootID: rootID, path: path, thumbnails: thumbnailCache)
             lastAvailabilityError = nil
@@ -2169,9 +2174,13 @@ public final class CatalogSession {
         // Every id under the root, not just the ones the current filter shows: the successor rule is
         // about the order the user saw, and the removal is about the whole root.
         let ids = (try? catalog.assetIDs(rootID: id, folderPath: "")) ?? []
-        pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
-                                                                removing: Set(ids),
-                                                                anchor: anchorID)
+        // 381: 0 张的根行照样要移（见 `removeFolder` 的同一理由）：`removeSourceRoot` 删的是
+        // `source_roots` 那一行，没有照片可删不是错误。
+        if !ids.isEmpty {
+            pendingAnchorSuccessor = SelectionAfterRemoval.successor(order: assets.map(\.id),
+                                                                    removing: Set(ids),
+                                                                    anchor: anchorID)
+        }
         do {
             let report = try catalog.removeSourceRoot(id: id, thumbnails: thumbnailCache)
             lastAvailabilityError = nil
