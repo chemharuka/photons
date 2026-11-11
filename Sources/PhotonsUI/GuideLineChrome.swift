@@ -27,7 +27,11 @@ public enum GuideLineChrome {
     /// The accepted line's colour — `#22D3EE`.
     public static let acceptedColour = NSColor(srgbRed: 0.13, green: 0.83, blue: 0.93, alpha: 1)
     /// The line's own width, in points (328's line stays 1.5).
-    public static let lineWidth: CGFloat = 2.5
+    ///
+    /// 2026-11-11 (user): 「引导线粗细再细一些」 — 2.5 → **2.0 pt**. Still thicker than 328's 1.5
+    /// (the user's original complaint was that the line was not visible), but no longer the
+    /// heavy stroke 367 shipped. The halo keeps its 1.5 pt so the colour still reads on a white wall.
+    public static let lineWidth: CGFloat = 2.0
     /// The black halo's width on each side, in points (widened with the line).
     public static let shadowWidth: CGFloat = 1.5
     /// The endpoint disc's radius, in points (diameter 8 pt).

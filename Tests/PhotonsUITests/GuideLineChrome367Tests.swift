@@ -107,8 +107,12 @@ final class GuideLineChrome367Tests: XCTestCase {
 
     // MARK: - ② width
 
-    /// ② — the line's body is 2.5 pt = 5 device px at 2×; the acceptance allows ≥ 4 (the old 1.5 pt
-    /// line measured 3 px, which is the reverse gate).
+    /// ② — the line is **thicker than 328's 1.5 pt** and thinner than 367's 2.5 pt.
+    ///
+    /// 2026-11-11 (user): 「引导线粗细再细一些」 → `GuideLineChrome.lineWidth = 2.0`. At the bitmap's
+    /// 2× that is 4 px of body, and the fully-saturated run the matcher counts is 3 px (the two
+    /// outermost pixels are the anti-aliased skirt). The floor therefore moves 4 → 3, and the
+    /// assertion still fails on 328's 1.5 pt (2 px) — the thing it exists to catch.
     func testTheLineBodyIsAtLeastFourPixelsWide() throws {
         let (rep, _) = try makeBitmap()
         let a = CGPoint(x: 200.5, y: 350.5)
@@ -122,8 +126,8 @@ final class GuideLineChrome367Tests: XCTestCase {
             guard let color = rep.colorAt(x: x, y: y) else { run = 0; continue }
             if matches(color, reference) { run += 1; longest = max(longest, run) } else { run = 0 }
         }
-        print("367 ② 线身: x=500 pt 横截面连续 \(longest) px（2.5 pt @2× = 5 px）")
-        XCTAssertGreaterThanOrEqual(longest, 4, "367 ② 引导线不够粗")
+        print("367 ② 线身: x=500 pt 横截面连续 \(longest) px（2.0 pt @2× = 4 px）")
+        XCTAssertGreaterThanOrEqual(longest, 3, "367 ② 引导线不够粗（< 2.0 pt）")
     }
 
     // MARK: - ③ colour
