@@ -149,7 +149,9 @@ final class GuideLineChrome367Tests: XCTestCase {
         for (name, delta) in against {
             XCTAssertGreaterThanOrEqual(delta, 25, "367 ③ 与 \(name) 的 ΔE00 太小")
         }
-        XCTAssertEqual(GuideLineChrome.lineWidth, 2.5)
+        // 2026-11-11：用户「再细一些，直接改不跑测试」→ `lineWidth` 2.5 → 2.0（`ba18e3d`）；
+        // 这条断言当时没跟着改，属遗留红，现按实现重钉（仍高于 328 的 1.5 pt）。
+        XCTAssertEqual(GuideLineChrome.lineWidth, 2.0)
         XCTAssertEqual(GuideLineChrome.shadowWidth, 1.5)
         XCTAssertEqual(GuideLineChrome.dotRadius, 4)
         XCTAssertEqual(GuideLineChrome.acceptedAlpha, 0.9, accuracy: 1e-12)
