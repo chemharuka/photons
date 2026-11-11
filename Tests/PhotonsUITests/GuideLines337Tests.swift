@@ -396,26 +396,36 @@ final class GuideLines337Tests: XCTestCase {
         XCTAssertEqual(tool.guideLineFailure, .notEnoughLines)
         XCTAssertEqual(session.edit.geometry.perspectiveVertical, 0, accuracy: 1e-12)
 
-        // (b) a second line 0.1° from the first — inside §2.6's 0.2° bound, so the pair says nothing
-        // about a vanishing point. (Shifted sideways first, so the two are different lines.)
+        // (b) a second line 0.1° from the first — 337 §2.6 used to call this 「没有信息」 and refuse
+        // the whole pair. **367 changed the rule** (用户：「角度很小也直接走校正，也不需要提示」):
+        // a small angle is a small correction (measured v ≈ −12.5, s ≈ −4.7°), not a failure.
+        // (Shifted sideways first, so the two are different lines.)
         let a0 = lines[0].0, b0 = lines[0].1
         let shifted = (CGPoint(x: a0.x + 80, y: a0.y), CGPoint(x: b0.x + 80, y: b0.y))
         let nearlyParallel = (turned(shifted.0, by: 0.1), turned(shifted.1, by: 0.1))
-        XCTAssertNil(draw(tool, from: nearlyParallel.0, to: nearlyParallel.1), "337 ⑥ 0.1° 近平行不应用")
-        XCTAssertEqual(tool.guideLineFailure, .nearParallel)
-        XCTAssertEqual(tool.guideLineStatusText, "两条线几乎平行，没有信息", "337 ⑥ 必须给提示")
+        XCTAssertNotNil(draw(tool, from: nearlyParallel.0, to: nearlyParallel.1),
+                        "367 ⑥ 0.1° 的小夹角也要走校正")
+        XCTAssertNil(tool.guideLineFailure, "367 ⑥ 不许再报 nearParallel")
+        XCTAssertFalse(tool.guideLineStatusText?.contains("几乎平行") ?? false,
+                       "367 ⑥ 状态行不许再提示「几乎平行」")
+        XCTAssertEqual(tool.guideLines.count, 2, "367 ⑥ 第二条线留在画布上")
+        let solution = try XCTUnwrap(tool.guideLineSolution)
+        XCTAssertEqual(solution.vertical, -12.54, accuracy: 0.5, "367 ⑥ 0.1° 的校正值")
+        XCTAssertEqual(solution.straightenDelta, -4.72, accuracy: 0.5, "367 ⑥ 摆正")
+        XCTAssertLessThanOrEqual(solution.worstResidual, 0.05, "367 ⑥ 残差 ≤0.05°")
 
-        // (c) Esc: the gesture stops, nothing is written, no row. **361 §2.2** flipped the other half
+        // (c) Esc: the gesture stops, nothing more is written. **361 §2.2** flipped the other half
         // of this: since the lines are document data, Esc keeps the ones that were kept — the single
-        // accepted line of (a) is still there, which is 「Esc 退出引导线模式，线保留」.
+        // accepted line of (a) is still there, which is 「Esc 退出引导线模式，线保留」. 367 — (b) did
+        // write one row, so the count is `rows + 1` (the old expectation was `rows`).
         _ = tool.setGuideLinesArmed(true)
         let keptBeforeEscape = tool.guideLines.count
         XCTAssertTrue(tool.cancelGuideLines(), "337 ⑥ Esc 收掉工具")
         XCTAssertFalse(tool.isGuideLinesArmed)
         XCTAssertEqual(tool.guideLines.count, keptBeforeEscape, "361 ⑥ Esc 不清线")
-        XCTAssertEqual(session.history.snapshots.count, rows, "337 ⑥ Esc 不写历史")
-        print("337 ⑥ 退化: 1 条 → notEnoughLines；0.1° → nearParallel（提示「两条线几乎平行，没有信息」）；"
-              + "Esc → 行数 \(session.history.snapshots.count)（画前 \(rows)）· 夹角 "
+        XCTAssertEqual(session.history.snapshots.count, rows + 1, "367 ⑥ 0.1° 校正已写一条历史，Esc 不再写")
+        print("367 ⑥ 退化改口径: 1 条 → notEnoughLines；0.1° → 已校正（提示「\(tool.guideLineStatusText ?? "-")」）；"
+              + "Esc → 行数 \(session.history.snapshots.count)（画前 \(rows)，0.1° 校正 +1）· 夹角 "
               + String(format: "%.2f°", abs(GuideLinesSolve.fold(angle(nearlyParallel.0, nearlyParallel.1)
                                                                  - angle(lines[0].0, lines[0].1)))))
     }

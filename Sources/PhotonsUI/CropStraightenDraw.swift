@@ -311,19 +311,47 @@ enum CropStraightenLinePainter {
     ///
     /// 337 — `colour` lets 引导线 draw the line the fit **refused** in red while the accepted ones and
     /// 328's straighten line stay white; the default keeps every existing call site's pixels.
-    static func draw(_ stroke: CropToolSegment, alpha: Double, colour: NSColor = .white) {
+    ///
+    /// 367 — the width, shadow and endpoint dots are parameters whose defaults are 328's numbers
+    /// (1.5 pt, 1 pt, no dots), so every pre-367 call site draws exactly what it drew. Only the guide
+    /// line's call sites pass `GuideLineChrome`'s numbers. `dotRadius == 0` draws no dots.
+    static func draw(_ stroke: CropToolSegment, alpha: Double,
+                     colour: NSColor = .white,
+                     width: CGFloat = CropStraightenLinePainter.lineWidth,
+                     shadowWidth: CGFloat = CropStraightenLinePainter.shadowWidth,
+                     dotRadius: CGFloat = 0,
+                     dotRingWidth: CGFloat = 0) {
         guard alpha > 0.01 else { return }
         // The shadow first, and wider by one pixel on every side: it is what makes a white line
         // readable over a bright sky (the same trick Brightroom's crop guide does with a dark
         // hairline under its white frame — `CropView._InteractiveCropGuideView.swift:973-1009`).
         let shadow = path(for: stroke)
-        shadow.lineWidth = lineWidth + 2 * shadowWidth
+        shadow.lineWidth = width + 2 * shadowWidth
         NSColor.black.withAlphaComponent(0.55 * alpha).setStroke()
         shadow.stroke()
 
         let line = path(for: stroke)
-        line.lineWidth = lineWidth
+        line.lineWidth = width
         colour.withAlphaComponent(alpha).setStroke()
         line.stroke()
+
+        // 367 — the two ends get a disc so the segment reads as a line with endpoints, and the black
+        // ring keeps the colour legible against a bright patch. The dots fade with the same alpha as
+        // the stroke (a refused line's are red, like its body).
+        guard dotRadius > 0 else { return }
+        for point in [stroke.a, stroke.b] {
+            if dotRingWidth > 0 {
+                let ring = NSBezierPath(ovalIn: NSRect(x: point.x - dotRadius - dotRingWidth,
+                                                       y: point.y - dotRadius - dotRingWidth,
+                                                       width: 2 * (dotRadius + dotRingWidth),
+                                                       height: 2 * (dotRadius + dotRingWidth)))
+                NSColor.black.withAlphaComponent(0.55 * alpha).setFill()
+                ring.fill()
+            }
+            let disc = NSBezierPath(ovalIn: NSRect(x: point.x - dotRadius, y: point.y - dotRadius,
+                                                   width: 2 * dotRadius, height: 2 * dotRadius))
+            colour.withAlphaComponent(alpha).setFill()
+            disc.fill()
+        }
     }
 }

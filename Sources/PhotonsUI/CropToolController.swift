@@ -1048,6 +1048,11 @@ public final class CropToolController {
     /// 348 — how far apart the lines were when the fit refused, in degrees: 「线间相差 6.2°」 has to
     /// print the 6.2, or the user only learns that something is wrong.
     public private(set) var guideLineMeasuredPairwise: Double?
+    /// 367 — the line whose absence made the rest solvable, as an index in the candidate set of the
+    /// gesture that found it. Only this case draws a line red (「第 N 条线与其它线矛盾」).
+    public private(set) var guideLineOffendingIndex: Int?
+    /// 367 — two lines, one of each axis: accepted, nothing written, the card says 「再各画一条」.
+    public private(set) var guideLinePairInsufficient = false
     /// 348 — `.rotationOutOfRange` when the keystone took but the turn could not be held by the
     /// dial (±45°); the two steps are independent, so this is not a refusal.
     public private(set) var guideLineRotationFailure: GuideLineFailure?
@@ -1058,6 +1063,10 @@ public final class CropToolController {
     public private(set) var guideLineApplyCount = 0
     public private(set) var ignoredGuideLineCount = 0
     public private(set) var tooShortGuideLineCount = 0
+    /// 367 — the source frame the strokes were drawn against, taken from the gesture's own mapping.
+    /// `sourceSize` is computed from the (weak) session, so a caller that has let the session go still
+    /// needs a width for the 「挨太近」 threshold. Equal to `sourceSize` whenever the session is alive.
+    private var guideLineFrameSize: ImageSize?
 
     /// 337 §4 gate ① — `true` is the shipped rule: the stroke's endpoints are walked back through
     /// the **current** composite inverse (`P⁻¹ · R⁻¹`, `LoupeMapping.sourcePoint`) before the fit, so
@@ -1233,6 +1242,8 @@ public final class CropToolController {
             guideLineFailure = nil
             guideLineMeasuredPairwise = nil
             guideLineRotationFailure = nil
+            guideLineOffendingIndex = nil
+            guideLinePairInsufficient = false
             // 361 §2.3 — 重新打开开关 is a seeding point too: the lines come back from the document
             // through the same function 进入裁切 uses, so the switch never depends on what a
             // previous disarm happened to leave in memory.
@@ -1283,6 +1294,12 @@ public final class CropToolController {
         guard isActive, isDrawingGuideLine, let stroke = guideLineStroke else { return nil }
         isDrawingGuideLine = false
 
+        // The gesture's mapping is the frame the endpoints are being walked back into; keep its size
+        // so the status line can still measure a gap if the weak session has gone away.
+        let mappedSource = ImageSize(width: Int(mapping.frameWidth.rounded()),
+                                     height: Int(mapping.frameHeight.rounded()))
+        if mappedSource.width > 1 { guideLineFrameSize = mappedSource }
+
         let dx = Double(stroke.b.x - stroke.a.x), dy = Double(stroke.b.y - stroke.a.y)
         let length = (dx * dx + dy * dy).squareRoot()
         guard length.isFinite, length >= GuideLinesSolve.minimumLengthPoints else {
@@ -1322,11 +1339,11 @@ public final class CropToolController {
                              axis: GuideLinesSolve.axis(forFoldedAngle: viewAngle),
                              viewLength: length)
 
-        // §2b.1 — at most four lines, at most two per axis. The fifth is ignored **with a reason**,
-        // never silently: the previous fit (and its document values) stay.
-        let sameAxis = guideLines.filter { $0.axis == line.axis }.count
-        guard guideLines.count < GuideLinesSolve.maxLines,
-              sameAxis < GuideLinesSolve.maxLinesPerAxis else {
+        // §2b.1 — at most four lines. The 2 + 2 shape is enforced by the assignment search below
+        // (367: a third stroke may be re-read onto the other axis), so the ceiling here is the count
+        // alone. The fifth line is ignored **with a reason**, never silently: the previous fit (and
+        // its document values) stay.
+        guard guideLines.count < GuideLinesSolve.maxLines else {
             ignoredGuideLineCount += 1
             guideLineFailure = .tooManyLines
             guideLineStroke = nil
@@ -1342,23 +1359,86 @@ public final class CropToolController {
             guideLines = candidate
             guideLineSolution = nil
             guideLineFailure = .notEnoughLines
+            guideLineMeasuredPairwise = nil
+            guideLineRotationFailure = nil
+            guideLineOffendingIndex = nil
+            guideLinePairInsufficient = false
             guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
             guideLineStrokeAlpha = 1
             scheduleGuideLineFade()
             onGuideLineChange?()
             return nil
         }
-        let fit = GuideLinesSolve.fit(lines: candidate,
-                                      current: documentPerspective,
-                                      source: sourceSize,
-                                      straightenDegrees: CropTool.clampStraighten(draft.straighten),
-                                      tolerance: guideLineTolerance)
-        guard let solution = fit.solution else {
-            // §2b.2 — all-or-nothing: the line is withdrawn (red for the same 0.3 s), the accepted
+
+        // 367 — the decision is no longer 「fit or withdraw」. Two same-axis lines are always corrected
+        // (0.02° and 0° included); one of each axis is accepted without a write; three and four lines
+        // are solved as 「2 横 2 竖」 with the axis assignment in the search; only a set that really
+        // cannot be solved (or whose extra line contradicts the rest) is refused.
+        let straighten = CropTool.clampStraighten(draft.straighten)
+        var accepted: [GuideLine]? = candidate
+        var solution: GuideLineSolution?
+        var failure: GuideLineFailure?
+        var measured: Double?
+        var rotationFailure: GuideLineFailure?
+        var offendingIndex: Int?
+        var insufficient = false
+
+        if candidate.count == 2 {
+            switch GuideLinesSolve.pairOutcome(candidate,
+                                               current: documentPerspective,
+                                               source: sourceSize,
+                                               straightenDegrees: straighten,
+                                               tolerance: guideLineTolerance) {
+            case .corrected(let value):
+                solution = value
+                measured = value.worstResidual
+                rotationFailure = value.rotationFailure
+            case .insufficient:
+                insufficient = true
+            case .unsolvable(let value):
+                failure = .linesTooFarFromAxis
+                measured = value
+            case .rejected(let reason, let value):
+                failure = reason
+                measured = value
+                // 367 — the travel's end is not the gesture's fault: the lines are what the user
+                // drew, so they stay (one of them may be slid to fix it). Only `perspective*` is
+                // left alone, which is what the `.rejected` path already does for every reason.
+                if reason == .outOfRange { accepted = candidate } else { accepted = nil }
+            }
+        } else {
+            let group = GuideLinesSolve.groupFit(candidate,
+                                                 current: documentPerspective,
+                                                 source: sourceSize,
+                                                 straightenDegrees: straighten,
+                                                 tolerance: guideLineTolerance)
+            if let value = group.solution, group.offendingIndex == nil {
+                accepted = group.lines
+                solution = value
+                measured = group.measuredWorstPairwise
+                rotationFailure = value.rotationFailure
+            } else if let index = group.offendingIndex {
+                accepted = group.lines
+                solution = group.solution
+                failure = .inconsistent
+                measured = group.measuredWorstPairwise
+                rotationFailure = group.solution?.rotationFailure
+                offendingIndex = index
+            } else {
+                accepted = nil
+                failure = group.failure ?? .inconsistent
+                measured = group.measuredWorstPairwise
+            }
+        }
+
+        guard let accepted else {
+            // §2b.2 — all-or-nothing: the new line is withdrawn (red for the same 0.3 s), the accepted
             // set and the document keep their last valid state.
-            guideLineFailure = fit.failure
-            guideLineMeasuredPairwise = fit.measuredWorstPairwise
+            guideLineFailure = failure
+            guideLineMeasuredPairwise = measured
             guideLineRotationFailure = nil
+            guideLineOffendingIndex = nil
+            guideLinePairInsufficient = false
             rejectedGuideLine = line
             rejectedGuideLineAlpha = 1
             guideLineStroke = nil
@@ -1368,16 +1448,19 @@ public final class CropToolController {
             return nil
         }
 
-        guideLines = candidate
+        guideLines = accepted
         guideLineSolution = solution
-        guideLineFailure = nil
-        guideLineMeasuredPairwise = solution.worstResidual
-        guideLineRotationFailure = solution.rotationFailure
-        rejectedGuideLine = nil
+        guideLineFailure = failure
+        guideLineMeasuredPairwise = measured ?? solution?.worstResidual
+        guideLineRotationFailure = rotationFailure
+        guideLineOffendingIndex = offendingIndex
+        guideLinePairInsufficient = insufficient
+        rejectedGuideLine = offendingIndex.map { candidate[$0] }
+        rejectedGuideLineAlpha = 1
         guideLineStroke = CropToolSegment(a: stroke.a, b: stroke.b)
         guideLineStrokeAlpha = 1
-        guideLineApplyCount += 1
-        writeGuideLineSolution(solution, lines: candidate)
+        if solution != nil { guideLineApplyCount += 1 }
+        writeGuideLineSolution(solution, lines: accepted)
         scheduleGuideLineFade()
         onGuideLineChange?()
         return solution
@@ -1465,6 +1548,8 @@ public final class CropToolController {
         guideLineFailure = nil
         guideLineMeasuredPairwise = nil
         guideLineRotationFailure = nil
+        guideLineOffendingIndex = nil
+        guideLinePairInsufficient = false
         rejectedGuideLine = nil
         onGuideLineChange?()
         return true
@@ -1481,6 +1566,8 @@ public final class CropToolController {
         guideLineFailure = nil
         guideLineMeasuredPairwise = nil
         guideLineRotationFailure = nil
+        guideLineOffendingIndex = nil
+        guideLinePairInsufficient = false
         rejectedGuideLine = nil
         rejectedGuideLineAlpha = 1
         writeGuideLineSolution(nil, lines: [])
@@ -1746,6 +1833,10 @@ public final class CropToolController {
     ///
     /// `nil` for fewer than two lines (the parameters are kept — §2.5's 「<2 条保留当前值」) and for a
     /// refusal (the lines stay where the user put them, the picture does not move).
+    ///
+    /// 367 — a drag is judged by the same rules as a fresh gesture (near-parallel is a correction,
+    /// one-of-each-axis is accepted, three/four lines get the 2 × 2 search). A move is still a move:
+    /// on a refusal the endpoints are written and only the parameters are held.
     @discardableResult
     private func reSolveGuideLines(_ lines: [GuideLine]) -> GuideLineSolution? {
         guard lines.count >= 2 else {
@@ -1753,29 +1844,75 @@ public final class CropToolController {
             guideLineFailure = .notEnoughLines
             guideLineMeasuredPairwise = nil
             guideLineRotationFailure = nil
+            guideLineOffendingIndex = nil
+            guideLinePairInsufficient = false
             writeGuideLineSolution(nil, lines: lines)
             return nil
         }
-        let fit = GuideLinesSolve.fit(lines: lines,
-                                      current: documentPerspective,
-                                      source: sourceSize,
-                                      straightenDegrees: CropTool.clampStraighten(draft.straighten),
-                                      tolerance: guideLineTolerance)
-        guard let solution = fit.solution else {
-            guideLineFailure = fit.failure
-            guideLineMeasuredPairwise = fit.measuredWorstPairwise
-            guideLineRotationFailure = nil
-            // The endpoints still go to the document: the user moved them, and a move that could not
-            // be solved is still a move (⌘Z is the way back).
-            writeGuideLineSolution(nil, lines: lines)
-            return nil
+        let straighten = CropTool.clampStraighten(draft.straighten)
+        var solution: GuideLineSolution?
+        var failure: GuideLineFailure?
+        var measured: Double?
+        var rotationFailure: GuideLineFailure?
+        var offendingIndex: Int?
+        var insufficient = false
+        var accepted = lines
+
+        if lines.count == 2 {
+            switch GuideLinesSolve.pairOutcome(lines,
+                                               current: documentPerspective,
+                                               source: sourceSize,
+                                               straightenDegrees: straighten,
+                                               tolerance: guideLineTolerance) {
+            case .corrected(let value):
+                solution = value
+                measured = value.worstResidual
+                rotationFailure = value.rotationFailure
+            case .insufficient:
+                insufficient = true
+            case .unsolvable(let value):
+                failure = .linesTooFarFromAxis
+                measured = value
+            case .rejected(let reason, let value):
+                failure = reason
+                measured = value
+            }
+        } else {
+            let group = GuideLinesSolve.groupFit(lines,
+                                                 current: documentPerspective,
+                                                 source: sourceSize,
+                                                 straightenDegrees: straighten,
+                                                 tolerance: guideLineTolerance)
+            if let value = group.solution {
+                accepted = group.lines
+                solution = value
+                measured = group.measuredWorstPairwise
+                rotationFailure = value.rotationFailure
+                if let index = group.offendingIndex {
+                    failure = .inconsistent
+                    offendingIndex = index
+                    rejectedGuideLine = lines[index]
+                    rejectedGuideLineAlpha = 1
+                } else {
+                    rejectedGuideLine = nil
+                }
+            } else {
+                failure = group.failure ?? .inconsistent
+                measured = group.measuredWorstPairwise
+            }
         }
+
+        guideLines = accepted
         guideLineSolution = solution
-        guideLineFailure = nil
-        guideLineMeasuredPairwise = solution.worstResidual
-        guideLineRotationFailure = solution.rotationFailure
-        rejectedGuideLine = nil
-        writeGuideLineSolution(solution, lines: lines)
+        guideLineFailure = failure
+        guideLineMeasuredPairwise = measured ?? solution?.worstResidual
+        guideLineRotationFailure = rotationFailure
+        guideLineOffendingIndex = offendingIndex
+        guideLinePairInsufficient = insufficient
+        if solution == nil { rejectedGuideLine = nil }
+        // The endpoints still go to the document: the user moved them, and a move that could not be
+        // solved is still a move (⌘Z is the way back).
+        writeGuideLineSolution(solution, lines: accepted)
         return solution
     }
 
@@ -1819,11 +1956,31 @@ public final class CropToolController {
     /// 348 — a refusal says **how far apart** the lines are (`measuredWorstPairwise`), and a fit that
     /// took but could not be turned upright appends the turn's own reason: 「透视已应用」 has to be in
     /// the sentence, or the user will think nothing happened when the keystone did.
+    ///
+    /// 367 — the new states: an offending line is named by its 1-based draw order; two lines of
+    /// different axes say 「再各画一条」; and a pair whose correction is numerically zero prints
+    /// nothing at all (「也不需要提示」).
     public var guideLineStatusText: String? {
+        if let index = guideLineOffendingIndex {
+            return String(format: "第 %d 条线与其它线矛盾，已忽略", index + 1)
+        }
         if let failure = guideLineFailure {
-            return failure.message(measuredWorstPairwise: guideLineMeasuredPairwise)
+            // 367 — only `.outOfRange` asks about the gap; the other reasons print their own number.
+            let source = sourceSize.width > 1 ? sourceSize : (guideLineFrameSize ?? sourceSize)
+            let spacing = failure == .outOfRange
+                ? GuideLinesSolve.horizontalSpacingFraction(of: guideLines, source: source)
+                : nil
+            return failure.message(measuredWorstPairwise: guideLineMeasuredPairwise,
+                                   spacingFraction: spacing)
+        }
+        if guideLinePairInsufficient {
+            return "一竖一横，再各画一条即可校正"
         }
         guard let solution = guideLineSolution else { return nil }
+        if abs(solution.vertical) < 0.05, abs(solution.horizontal) < 0.05,
+           abs(solution.straightenDelta) < 0.05 {
+            return nil
+        }
         var text = solution.summary
         if let rotation = solution.rotationFailure {
             text += " · " + rotation.message(measuredWorstPairwise: solution.straightenRequested)
