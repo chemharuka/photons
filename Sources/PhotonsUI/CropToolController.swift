@@ -1063,6 +1063,10 @@ public final class CropToolController {
     public private(set) var guideLineApplyCount = 0
     public private(set) var ignoredGuideLineCount = 0
     public private(set) var tooShortGuideLineCount = 0
+    /// 367 — the source frame the strokes were drawn against, taken from the gesture's own mapping.
+    /// `sourceSize` is computed from the (weak) session, so a caller that has let the session go still
+    /// needs a width for the 「挨太近」 threshold. Equal to `sourceSize` whenever the session is alive.
+    private var guideLineFrameSize: ImageSize?
 
     /// 337 §4 gate ① — `true` is the shipped rule: the stroke's endpoints are walked back through
     /// the **current** composite inverse (`P⁻¹ · R⁻¹`, `LoupeMapping.sourcePoint`) before the fit, so
@@ -1290,6 +1294,12 @@ public final class CropToolController {
         guard isActive, isDrawingGuideLine, let stroke = guideLineStroke else { return nil }
         isDrawingGuideLine = false
 
+        // The gesture's mapping is the frame the endpoints are being walked back into; keep its size
+        // so the status line can still measure a gap if the weak session has gone away.
+        let mappedSource = ImageSize(width: Int(mapping.frameWidth.rounded()),
+                                     height: Int(mapping.frameHeight.rounded()))
+        if mappedSource.width > 1 { guideLineFrameSize = mappedSource }
+
         let dx = Double(stroke.b.x - stroke.a.x), dy = Double(stroke.b.y - stroke.a.y)
         let length = (dx * dx + dy * dy).squareRoot()
         guard length.isFinite, length >= GuideLinesSolve.minimumLengthPoints else {
@@ -1389,9 +1399,12 @@ public final class CropToolController {
                 failure = .linesTooFarFromAxis
                 measured = value
             case .rejected(let reason, let value):
-                accepted = nil
                 failure = reason
                 measured = value
+                // 367 — the travel's end is not the gesture's fault: the lines are what the user
+                // drew, so they stay (one of them may be slid to fix it). Only `perspective*` is
+                // left alone, which is what the `.rejected` path already does for every reason.
+                if reason == .outOfRange { accepted = candidate } else { accepted = nil }
             }
         } else {
             let group = GuideLinesSolve.groupFit(candidate,
@@ -1952,7 +1965,13 @@ public final class CropToolController {
             return String(format: "第 %d 条线与其它线矛盾，已忽略", index + 1)
         }
         if let failure = guideLineFailure {
-            return failure.message(measuredWorstPairwise: guideLineMeasuredPairwise)
+            // 367 — only `.outOfRange` asks about the gap; the other reasons print their own number.
+            let source = sourceSize.width > 1 ? sourceSize : (guideLineFrameSize ?? sourceSize)
+            let spacing = failure == .outOfRange
+                ? GuideLinesSolve.horizontalSpacingFraction(of: guideLines, source: source)
+                : nil
+            return failure.message(measuredWorstPairwise: guideLineMeasuredPairwise,
+                                   spacingFraction: spacing)
         }
         if guideLinePairInsufficient {
             return "一竖一横，再各画一条即可校正"

@@ -198,7 +198,11 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
     ///
     /// `measuredWorstPairwise` is the worst pair angle in degrees for `inconsistent`, and the turn
     /// the lines asked for in degrees for `rotationOutOfRange`.
-    public func message(measuredWorstPairwise measured: Double?) -> String {
+    /// `spacingFraction` is the two same-axis lines' horizontal distance as a fraction of the frame
+    /// width (§367). It only changes `.outOfRange`: a pair that sits a hair apart asks for a keystone
+    /// far beyond any travel, and the useful sentence is 「挨太近」, not 「行程不够」.
+    public func message(measuredWorstPairwise measured: Double?,
+                        spacingFraction: Double? = nil) -> String {
         switch self {
         case .notEnoughLines: return "再画一条（需 2 条）"
         case .tooManyLines: return "每个方向最多 2 条"
@@ -211,6 +215,10 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
             return String(format: "这些线互相矛盾（差 %.1f°），未应用", measured)
         case .degenerate: return "新线与已有线重复，未应用"
         case .outOfRange:
+            if let spacingFraction, spacingFraction.isFinite,
+               spacingFraction < GuideLinesSolve.nearGapFraction {
+                return "两条线挨太近，判断不出透视"
+            }
             let limit = Int(PerspectiveMap.limit)
             guard let measured, measured.isFinite else { return "需要的透视超出 ±\(limit)" }
             return String(format: "线间还差 %.1f°", measured) + "，透视超出 ±\(limit)"
@@ -398,6 +406,13 @@ public enum GuideLinesSolve {
     public static let minimumSingularValue: Double = 1e-6
     /// §2.3 — two groups further apart than this are 「混合方向」, and only the bigger one is solved.
     public static let mixedDirectionDegrees: Double = 30
+    /// 367 — two same-axis lines closer than this fraction of the frame width cannot tell a vanishing
+    /// point from a slightly wrong stroke: the keystone they ask for lies far beyond the travel, so
+    /// `.outOfRange` blames the gap rather than the slider.
+    public static let nearGapFraction: Double = 0.02
+    /// 367 — a parameter this close to the travel's end is *pinned*, not solved: the residual it
+    /// reports is the best a clamped value can do, not a correction inside the slider's range.
+    public static let endpointFraction: Double = 0.999
     /// §2.2 — the stroke stays at full opacity for 0.3 s, then fades (328's flash).
     public static let holdSeconds: Double = 0.3
     public static let fadeSeconds: Double = 0.15
@@ -546,6 +561,17 @@ public enum GuideLinesSolve {
         return (90 - vMean - hMean) > mixedDirectionDegrees
     }
 
+    /// 367 — how far apart two same-axis lines sit, as a fraction of the frame width. Each line is
+    /// reduced to the mean of its endpoints' x in **source** pixels (the space `GuideLine` stores), and
+    /// the two means are subtracted. `.outOfRange` uses it to tell 「挨太近」 from 「行程不够」.
+    public static func horizontalSpacingFraction(of lines: [GuideLine],
+                                                source: ImageSize) -> Double? {
+        guard lines.count >= 2 else { return nil }
+        let means = lines.map { (Double($0.a.x) + Double($0.b.x)) / 2 }
+        guard let low = means.min(), let high = means.max() else { return nil }
+        return abs(high - low) / Double(max(source.width, 1))
+    }
+
     // MARK: the fit (§2b.3)
 
     /// Every pair's angle squared, minimised over the parameters the pairs constrain, then one turn.
@@ -689,6 +715,14 @@ public enum GuideLinesSolve {
         let sigmaMin = smallestSingularValue(jacobianAt: x, lines: lines, pairRows: pairRows,
                                              columns: columns, source: source,
                                              straightenDegrees: previousStraighten)
+
+        // §367 — a parameter pinned at the travel's end is not an answer: the clamp (or an iteration
+        // stopped on the boundary) can make the residual look flat while the correction it names is
+        // unachievable. Rejected so nothing is written; the callers' `.rejected` path already leaves
+        // `perspective*` alone.
+        if columns.contains(where: { abs(x[$0]) >= endpointFraction * PerspectiveMap.limit }) {
+            return .rejected(.outOfRange, measured: achieved)
+        }
 
         if achieved > tolerance {
             // §2b.2 — a fit pinned at the end of the travel is 「超界」, not 「矛盾」.

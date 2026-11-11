@@ -318,4 +318,93 @@ final class GuideLineTolerance367Tests: XCTestCase {
         XCTAssertEqual(GuideLineFailure.linesTooFarFromAxis.message(measuredWorstPairwise: 4.2),
                        "这两条线偏轴 4.2°，校正不了（先记下）")
     }
+
+    // MARK: - ⑤ (spacing) how far apart the pair sits decides whether 1° is solvable
+
+    /// Two `vertical` lines at `x1`/`x2` whose **source** angles differ by exactly `delta`, built
+    /// straight in source pixels: each leans δ/2 outward, so the pair converges below the frame.
+    /// No view → source round trip — the numbers below are the numbers `fit` sees.
+    private func splayedPair(x1: Double, x2: Double,
+                             delta: Double) -> [GuideLine] {
+        let h = Double(source.height)
+        let spread = tan(delta / 2 * .pi / 180) * 0.65 * h
+        let ends: [(CGPoint, CGPoint)] = [
+            (CGPoint(x: x1, y: 0.85 * h), CGPoint(x: x1 - spread, y: 0.20 * h)),
+            (CGPoint(x: x2, y: 0.85 * h), CGPoint(x: x2 + spread, y: 0.20 * h))
+        ]
+        return ends.map {
+            GuideLine(a: $0.0, b: $0.1,
+                      viewAngle: GuideLinesSolve.fold(GuideLinesSolve.degrees(dx: Double($0.1.x - $0.0.x),
+                                                                             dy: Double($0.1.y - $0.0.y))),
+                      axis: .vertical)
+        }
+    }
+
+    /// 31 % of the frame apart: 0.1° / 0.5° / 1.0° all correct to a zero residual.
+    func testFarApartPairIsCorrectedToZeroAtEveryTier() throws {
+        for delta in [0.1, 0.5, 1.0] {
+            let lines = splayedPair(x1: 3000, x2: 6000, delta: delta)
+            let inputDiff = abs(GuideLinesSolve.fold(lines[0].sourceAngle - lines[1].sourceAngle))
+            let fit = GuideLinesSolve.fit(lines: lines, current: PerspectiveMap(vertical: 0, horizontal: 0),
+                                          source: source, straightenDegrees: 0)
+            print(String(format: "367 ⑤远距 %.1f°（喂入差 %.6f°）: v %@ · 残差 %@ · 失败 %@",
+                         delta, inputDiff,
+                         fit.solution.map { String(format: "%+.4f", $0.vertical) } ?? "nil",
+                         fit.solution.map { String(format: "%.6f", $0.worstResidual) } ?? "nil",
+                         String(describing: fit.failure)))
+            XCTAssertEqual(inputDiff, delta, accuracy: 1e-6, "喂进去的两条线就是相差 delta")
+            XCTAssertNil(fit.failure, "367 ⑤ 远距 \\(delta)° 必须解得出")
+            let solution = try XCTUnwrap(fit.solution)
+            XCTAssertLessThanOrEqual(solution.worstResidual, 0.05, "367 ⑤ 远距 \\(delta)° 必须校到零")
+            XCTAssertGreaterThan(abs(solution.vertical), 0, "367 ⑤ 远距 \\(delta)° 必须真的动 v")
+
+            // And the same pair through the real door: the controller takes the correction.
+            let (session, tool) = try makeTool()
+            XCTAssertNil(draw(tool, from: lines[0].a, to: lines[0].b))
+            let applied = try XCTUnwrap(draw(tool, from: lines[1].a, to: lines[1].b),
+                                        "367 ⑤ 远距 \\(delta)° 走 endGuideLine 也要校：\\(String(describing: tool.guideLineFailure))")
+            XCTAssertNil(tool.guideLineFailure)
+            XCTAssertLessThanOrEqual(applied.worstResidual, 0.05)
+            XCTAssertNotEqual(session.edit.geometry.perspectiveVertical, 0,
+                              "367 ⑤ 远距 \\(delta)° 要写进文档")
+            XCTAssertFalse(tool.guideLineStatusText?.contains("几乎平行") ?? false)
+        }
+    }
+
+    /// 80 px apart (0.84 %): the travel needed is beyond ±400, and the card must blame the gap.
+    func testVeryClosePairBlamesTheGapNotTheTravel() throws {
+        let lines = splayedPair(x1: 3000, x2: 3080, delta: 0.5)
+        let (_, tool) = try makeTool()
+        XCTAssertNil(draw(tool, from: lines[0].a, to: lines[0].b))
+        _ = draw(tool, from: lines[1].a, to: lines[1].b)
+        let text = tool.guideLineStatusText ?? "—"
+        print("367 ⑤近距 0.5°: 存 \(tool.guideLines.count) 条 · 失败 \(String(describing: tool.guideLineFailure))"
+              + " · 提示「\(text)」")
+        XCTAssertEqual(tool.guideLines.count, 2, "367 ⑤ 近距也要留下两条线")
+        XCTAssertTrue(text.contains("挨太近"), "367 ⑤ 近距的文案要怪间距：\(text)")
+        XCTAssertFalse(text.contains("透视超出"), "367 ⑤ 近距不许说行程超限：\(text)")
+    }
+
+    /// A **wide** pair whose correction lands on the slider's end is an endpoint answer, not a
+    /// solution: `fit` rejects it as `.outOfRange`, and the message still blames the travel because
+    /// 31 % spacing is not 「挨太近」.
+    func testAPairPinnedAtTheTravelEndIsNotASolution() throws {
+        let lines = splayedPair(x1: 3000, x2: 6000, delta: 40)
+        let fit = GuideLinesSolve.fit(lines: lines, current: PerspectiveMap(vertical: 0, horizontal: 0),
+                                      source: source, straightenDegrees: 0)
+        print("367 ⑤端点 40° @31%: v "
+              + (fit.solution.map { String(format: "%+.4f", $0.vertical) } ?? "nil")
+              + " · 残差 " + (fit.solution.map { String(format: "%.6f", $0.worstResidual) } ?? "nil")
+              + " · 失败 " + String(describing: fit.failure))
+        XCTAssertNil(fit.solution, "367 ⑤ 钉在量程端点的不是解")
+        XCTAssertEqual(fit.failure, .outOfRange)
+
+        let travel = GuideLineFailure.outOfRange.message(measuredWorstPairwise: 1.2,
+                                                         spacingFraction: 0.31)
+        XCTAssertTrue(travel.contains("透视超出"), "367 ⑤ 远距仍怪行程：\(travel)")
+        let gap = GuideLineFailure.outOfRange.message(measuredWorstPairwise: 1.2,
+                                                      spacingFraction: 0.01)
+        XCTAssertTrue(gap.contains("挨太近"), "367 ⑤ 近距怪间距：\(gap)")
+        XCTAssertFalse(gap.contains("透视超出"), "367 ⑤ 近距不怪行程：\(gap)")
+    }
 }
