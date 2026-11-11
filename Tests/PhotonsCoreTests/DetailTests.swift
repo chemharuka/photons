@@ -361,17 +361,25 @@ final class DetailTests: XCTestCase {
                        "recipe=\(DecodeRecipe.current);ver=auto;scale=1.0000;dt=nr30,c40,s60,d10")
         XCTAssertEqual(doc.decodeInputs.appending(to: "photo"), "photo|dt=nr30,c40,s60,d10")
 
-        // 148: **the white balance is not a decode input any more** (143). The decoder is always left
-        // at the file's as-shot balance and the document's Kelvin/tint is an S1 gain, so no decode
-        // spelling may grow a `wb=` segment — a 100 K drag must not orphan a 5 s development.
+        // 194: **the settled white balance is a decode input again** (two-stage WB: the drag is S1,
+        // the hand's release is baked by `CIRAWFilter`). `DecodeInputs.swift:80/106/123/216-226` spells
+        // `wb=5500K/+0` for a non-as-shot pair; the as-shot document below still appends nothing, which
+        // is what keeps every pre-194 buffer identity on disk hitting. 148's "WB is never a decode
+        // input" is the stale spelling this block used to pin.
         var both = doc
         both.light.temperature = 5500
         both.light.tint = 0
         XCTAssertEqual(both.decodeInputs.appending(to: "photo"),
-                       "photo|dt=nr30,c40,s60,d10")
-        XCTAssertEqual(both.decodeKey, doc.decodeKey, "a white-balance change must not move the decode key")
-        XCTAssertFalse(both.decodesDifferently(from: doc))
-        XCTAssertEqual(both.splitFrom(doc), .render, "143: WB is an S1 gain, i.e. a render change")
+                       "photo|wb=5500K/+0|dt=nr30,c40,s60,d10")
+        XCTAssertEqual(both.decodeKey,
+                       "recipe=\(DecodeRecipe.current);ver=auto;scale=1.0000;wb=5500K/+0;dt=nr30,c40,s60,d10",
+                       "a settled WB change is a different decode (194)")
+        XCTAssertTrue(both.decodesDifferently(from: doc))
+        XCTAssertEqual(both.splitFrom(doc), .decode, "194: the settled WB is baked by the decoder")
+
+        // The as-shot half is untouched: `doc` has no `wb=` segment anywhere.
+        XCTAssertFalse(doc.decodeInputs.appending(to: "photo").contains("wb="))
+        XCTAssertFalse(doc.decodeKey.contains("wb="))
 
         // …and the **render** key is where it has to appear, or the drag would be answered with the
         // previous frame. The material is the S1 slot itself (`temp=`/`tint=`); the downstream links
