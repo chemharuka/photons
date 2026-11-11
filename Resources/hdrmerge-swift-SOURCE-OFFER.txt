@@ -1,0 +1,25 @@
+hdrmerge-swift — source code notice (GPLv3 §6)
+
+Photons ships the executable `Contents/Resources/bin/hdrmerge-swift` unchanged.
+
+Corresponding source code for that exact binary:
+
+    https://github.com/chemharuka/hdrmerge-swift
+
+    tag/commit: see Contents/Resources/bin/hdrmerge-swift.sha256 in this bundle,
+    or run `hdrmerge-swift capabilities` (field tool.version).
+
+The source is offered at no charge, from the same download location as Photons,
+and includes the complete buildable SwiftPM package plus all patches.
+No modifications were made to the upstream sources for this build.
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details:
+Contents/Resources/licenses/hdrmerge-swift-GPL-3.0.txt
+
+hdrmerge-swift is a Swift port of HDRMerge (Copyright 2012 Javier Celaya),
+also GPLv3: https://github.com/jcelaya/hdrmerge

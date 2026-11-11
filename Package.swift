@@ -8,6 +8,9 @@ let package = Package(
         .library(name: "PhotonsCore", targets: ["PhotonsCore"]),
         .library(name: "PhotonsExport", targets: ["PhotonsExport"]),
         .library(name: "PhotonsCatalog", targets: ["PhotonsCatalog"]),
+        // Optional post-processing that writes a NEW file (AI denoise, HDR merge). No
+        // dependency on PhotonsCore by design; see Sources/PhotonsExtensions/README.md.
+        .library(name: "PhotonsExtensions", targets: ["PhotonsExtensions"]),
         // The UI shell lives in a library so its pure layout math and model are unit-testable;
         // `PhotonsApp` is the thin `@main` + `AppDelegate`/menu/bundle shim; a test target can depend on
         // a library, not on an executable, which is the other reason the shell lives here.
@@ -27,6 +30,7 @@ let package = Package(
         // network download that has already failed on this machine (see the session-bus pitfalls).
         .target(name: "PhotonsCore", resources: [.copy("Kernels")]),
         .target(name: "PhotonsExport", dependencies: ["PhotonsCore"]),
+        .target(name: "PhotonsExtensions"),
         .target(name: "PhotonsCatalog", dependencies: [
             "PhotonsCore",
             .product(name: "GRDB", package: "GRDB.swift"),
@@ -40,6 +44,7 @@ let package = Package(
         .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsUI"]),
         .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
         .testTarget(name: "PhotonsExportTests", dependencies: ["PhotonsExport", "PhotonsCore"]),
+        .testTarget(name: "PhotonsExtensionsTests", dependencies: ["PhotonsExtensions"]),
         .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog", "PhotonsCore"]),
         .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI", "PhotonsCatalog"]),
     ],
