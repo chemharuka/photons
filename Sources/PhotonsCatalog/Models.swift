@@ -138,6 +138,19 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
     public var missing: Bool
     public var deleted: Bool
 
+    /// Photo stack membership (§378): the stack's id, or `nil` for a photo in no stack.
+    ///
+    /// The id is a fresh UUID minted when the stack is made — never an asset id — so changing the
+    /// top photo does not change the stack's identity. There is no `stacks` table: a stack exists
+    /// exactly as long as some asset points at its id.
+    public var stackId: String?
+
+    /// Position inside the stack. **0 = 置顶** (the member every browser shows instead of the
+    /// stack); a partial unique index guarantees exactly one 0 per `stack_id`. It is `0` for a
+    /// photo in no stack too, which is why `stack_id IS NULL` and `stack_rank = 0` mean the same
+    /// thing there.
+    public var stackRank: Int
+
     public init(id: String = UUID().uuidString,
                 sourceRootId: String,
                 relPath: String,
@@ -168,7 +181,9 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
                 importedAt: String = ISO8601.now(),
                 checkedAt: String? = nil,
                 missing: Bool = false,
-                deleted: Bool = false) {
+                deleted: Bool = false,
+                stackId: String? = nil,
+                stackRank: Int = 0) {
         self.id = id
         self.sourceRootId = sourceRootId
         self.relPath = relPath
@@ -200,6 +215,8 @@ public struct Asset: CatalogRecord, Identifiable, Equatable, Sendable {
         self.checkedAt = checkedAt
         self.missing = missing
         self.deleted = deleted
+        self.stackId = stackId
+        self.stackRank = stackRank
     }
 
     /// Readable form of `missing` for call sites that talk about the user's situation rather than

@@ -341,6 +341,17 @@ extension Catalog {
 
     public func assets(_ filter: AssetFilter = AssetFilter()) throws -> [Asset] {
         try dbQueue.read { db in
+            // §378 — **非置顶成员不进 `assets`**，这是本单最重要的一条：界面要显示的那些照片
+            // = 每个堆叠只剩 `stack_rank = 0` 那张，非堆叠照片原样保留。网格/胶片条/侧栏/键盘
+            // 导航/范围选择本来都只读 `assets`，所以「只显示置顶」是**投影出来的**，不是每个面
+            // 各写一遍过滤。
+            //
+            // 由此得到的两条结论也是规格要的：
+            //  · 筛选/排序/批量写入只认置顶那张。只有非置顶成员命中的筛选 → **整个堆叠消失**，
+            //    绝不允许成员里某张替代它出现；
+            //  · 库里 `stack_rank = 0` 是唯一的「代表」，不存在「显示代表 ≠ 置顶」这回事。
+            //
+            // 那条 `WHERE` 在 `Catalog.constraints` 里（facets 走同一条），这里只剩组装。
             let (sql, args) = try Self.assetsQuery(filter, in: db)
             return try Asset.fetchAll(db, sql: sql, arguments: StatementArguments(args))
         }
@@ -561,6 +572,16 @@ extension Catalog {
 
     public func setDeleted(_ deleted: Bool, forAsset id: String) throws {
         try dbQueue.write { db in
+            // §378 — a soft-deleted photo leaves its stack through the same door a hard delete uses,
+            // so the "exactly one 置顶" rule holds here too (the AFTER DELETE trigger cannot see a
+            // flag flip). `repairStack` then promotes or dissolves whatever is left.
+            if deleted {
+                let stackID = try String.fetchOne(
+                    db, sql: "SELECT stack_id FROM assets WHERE id = ?", arguments: [id])
+                try db.execute(sql: "UPDATE assets SET stack_id = NULL, stack_rank = 0 WHERE id = ?",
+                               arguments: [id])
+                if let stackID { try Self.repairStack(stackID, in: db) }
+            }
             try db.execute(sql: "UPDATE assets SET deleted = ? WHERE id = ?", arguments: [deleted, id])
         }
     }
