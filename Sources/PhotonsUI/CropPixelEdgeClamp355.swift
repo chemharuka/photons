@@ -83,21 +83,46 @@ public extension CropGeometry {
     /// like `CropTool`'s own `min(point, right - span)` ordering.
     func pressedToPhotoQuad(_ rect: CropRect, edges: CropEdges,
                             minimumSpan: Double = 0.001) -> CropRect {
-        let c = rect.clamped(allowsOutsideSource: true)
-        guard !edges.isEmpty, c.width > 0, c.height > 0 else { return c }
         let e = photoQuadExtent
-        let w = max(e.width, 1e-9), h = max(e.height, 1e-9)
+        return pressedToQuad(rect, edges: edges, quad: photoQuad(),
+                             extent: DSize(width: e.width, height: e.height),
+                             minimumSpan: minimumSpan)
+    }
+
+    /// **362 — the same press for a `.source` rect**, where the photograph is the **turned
+    /// rectangle** (`CropMath.rotatedFrameCorners`, the quad `frameExceedsPicture` already judges by).
+    /// 355 only pressed `.canvas` rects, so 「不出像素」 on a straightened-but-unwarped document did
+    /// nothing at all: the 9°/v=0 group of the report's four geometries had 1210 of 1320 edge samples
+    /// outside the photograph.
+    func pressedToTurnedPhotoQuad(_ rect: CropRect, edges: CropEdges,
+                                  minimumSpan: Double = 0.001) -> CropRect {
+        let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
+        let quad = CropMath.rotatedFrameCorners(in: source, degrees: rotationDegrees)
+            .map { DocumentPoint($0.x * w, $0.y * h) }
+        return pressedToQuad(rect, edges: edges, quad: quad,
+                             extent: DSize(width: w, height: h),
+                             minimumSpan: minimumSpan)
+    }
+
+    /// The one press: `quad` is the photograph's quad **in this rect's own pixel grid**, `extent` the
+    /// size of `[0,1]²` on that grid. 355's span rule, unchanged — only its inputs are parameters now.
+    func pressedToQuad(_ rect: CropRect, edges: CropEdges, quad: [DocumentPoint],
+                       extent: DSize, minimumSpan: Double = 0.001) -> CropRect {
+        let c = rect.clamped(allowsOutsideSource: true)
+        guard !edges.isEmpty, c.width > 0, c.height > 0, quad.count >= 3 else { return c }
+        let w = max(extent.width, 1e-9), h = max(extent.height, 1e-9)
         var left = c.left * w, right = c.right * w
         var top = c.top * h, bottom = c.bottom * h
         let spanX = min(max(minimumSpan, 0), 1) * w
         let spanY = min(max(minimumSpan, 0), 1) * h
+        let quadXs = quad.map(\.x), quadYs = quad.map(\.y)
 
         // 1 — x. The band the frame covers in y decides which horizontal lines are asked.
         if edges.contains(.right) || edges.contains(.left) {
             var caps: [Double] = []
             var floors: [Double] = []
-            for y in Self.scanLines(from: top, to: bottom, in: photoQuad().map(\.y)) {
-                guard let span = photoQuadSpan(atY: y) else { continue }
+            for y in Self.scanLines(from: top, to: bottom, in: quadYs) {
+                guard let span = Self.span(of: quad, atY: y) else { continue }
                 caps.append(span.max)
                 floors.append(span.min)
             }
@@ -114,8 +139,8 @@ public extension CropGeometry {
         if edges.contains(.bottom) || edges.contains(.top) {
             var caps: [Double] = []
             var floors: [Double] = []
-            for x in Self.scanLines(from: left, to: right, in: photoQuad().map(\.x)) {
-                guard let span = photoQuadSpan(atX: x) else { continue }
+            for x in Self.scanLines(from: left, to: right, in: quadXs) {
+                guard let span = Self.span(of: quad, atX: x) else { continue }
                 caps.append(span.max)
                 floors.append(span.min)
             }
@@ -128,6 +153,39 @@ public extension CropGeometry {
 
         return CropRect(left: left / w, top: top / h, right: right / w, bottom: bottom / h)
             .clamped(allowsOutsideSource: true)
+    }
+
+    /// The quad's `x` range on the horizontal line `y`, for **any** quad (`photoQuadSpan(atY:)` is
+    /// this for the photograph's own). `nil` when the line misses the quad.
+    static func span(of quad: [DocumentPoint], atY y: Double) -> (min: Double, max: Double)? {
+        guard quad.count >= 3 else { return nil }
+        var xs: [Double] = []
+        for index in quad.indices {
+            let a = quad[index], b = quad[(index + 1) % quad.count]
+            if abs(a.y - y) <= 1e-9 { xs.append(a.x); continue }
+            if (a.y - y) * (b.y - y) < 0 {
+                let t = (y - a.y) / (b.y - a.y)
+                xs.append(a.x + (b.x - a.x) * t)
+            }
+        }
+        guard let low = xs.min(), let high = xs.max(), high >= low else { return nil }
+        return (low, high)
+    }
+
+    /// The quad's `y` range on the vertical line `x`.
+    static func span(of quad: [DocumentPoint], atX x: Double) -> (min: Double, max: Double)? {
+        guard quad.count >= 3 else { return nil }
+        var ys: [Double] = []
+        for index in quad.indices {
+            let a = quad[index], b = quad[(index + 1) % quad.count]
+            if abs(a.x - x) <= 1e-9 { ys.append(a.y); continue }
+            if (a.x - x) * (b.x - x) < 0 {
+                let t = (x - a.x) / (b.x - a.x)
+                ys.append(a.y + (b.y - a.y) * t)
+            }
+        }
+        guard let low = ys.min(), let high = ys.max(), high >= low else { return nil }
+        return (low, high)
     }
 
     /// The scan lines of the rule: the two ends of the span, plus every quad vertex strictly inside

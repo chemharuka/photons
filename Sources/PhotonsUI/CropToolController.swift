@@ -650,8 +650,14 @@ public final class CropToolController {
         }
         // Gate ① only: press inside the viewport (view space). Wrong boundary, and that is the point.
         if clampsPixelsInViewSpace { return pressedInsideViewport(rect, mapping: mapping, source: source) }
-        guard let edges = handle.draggedEdges, liveCropSpace == .canvas else { return rect }
+        guard let edges = handle.draggedEdges else { return rect }
+        if pressesOnlyCanvasPixels, liveCropSpace != .canvas { return rect }
         let geometry = draftCropGeometry(source: source, perspective: livePerspective)
+        // 362 — a `.source` rect is pressed against the **turned photograph** (355 only did the
+        // `.canvas` case, so 「不出像素」 was a no-op on a straightened-but-unwarped document).
+        if liveCropSpace != .canvas, !(livePerspective?.hasWarp ?? false) {
+            return geometry.pressedToTurnedPhotoQuad(rect, edges: edges)
+        }
         return geometry.pressedToPhotoQuad(rect, edges: edges)
     }
 
@@ -2112,7 +2118,6 @@ public final class CropToolController {
                        quadRotationDegrees: Double? = nil) -> CropToolLayout {
         // 123: the angle is the same value the renderer will consume, via `CropGeometry`. The
         // overlay still draws the *delta* against the document while the slider is in flight (088).
-        let geometry = overlayGeometry
         // 088 says the framing handed in is the **document's** (`cropMapping` uses `canvasEdit`), so
         // the quad's rotation is exactly the draft delta and the picture on screen is at the
         // document's angle. A framing that already carries part of the draft angle (a draft-angle
@@ -2122,19 +2127,26 @@ public final class CropToolController {
         // be taken at that total, or a previewed frame is clamped for an angle it is not drawn at
         // (9° + 9° probe: corners just outside the sensor). In the app the framing angle **is** the
         // document's, the difference is zero, and this is `draft.straighten` bit for bit.
+        let drawnAngle = drawnCropAngle(mapping: mapping)
+        // **362 — the one projection.** The overlay draws through it and a pointer is read back
+        // through it (`cropBoxPoint`), so 「画出来的」 and 「手抓到的」 cannot be two different maps.
+        let projection = drawingProjection(source: source ?? sourceSize,
+                                           mapping: mapping,
+                                           pointScale: pointScale,
+                                           carry: carry,
+                                           quadRotationDegrees: quadRotationDegrees)
+        return CropTool.layout(crop: effectiveCrop(source: source, degrees: drawnAngle),
+                               projection: projection,
+                               showsGrid: showsGrid,
+                               exceedsPicture: frameExceedsPicture(source: source))
+    }
+
+    /// The angle the **frame** is clamped at: the draft's, plus whatever part of it the framing
+    /// already carries (088's delta, spelled once so the layout and the drag read the same number).
+    private func drawnCropAngle(mapping: LoupeMapping) -> Double {
         let documentAngle = session?.edit.geometry.straightenDegrees ?? 0
         let framingAngle = mapping.transform?.straightenDegrees ?? documentAngle
-        let drawnAngle = CropTool.clampStraighten(draft.straighten) + (framingAngle - documentAngle)
-        let quadRotation = quadRotationDegrees ?? geometry.rotationDegrees
-        return CropTool.layout(crop: effectiveCrop(source: source, degrees: drawnAngle),
-                        source: source ?? sourceSize,
-                        mapping: mapping,
-                        pointScale: pointScale,
-                        showsGrid: showsGrid,
-                        carry: carry,
-                        quadRotationDegrees: quadRotation,
-                        cropSpace: liveCropSpace,
-                        exceedsPicture: frameExceedsPicture(source: source))
+        return CropTool.clampStraighten(draft.straighten) + (framingAngle - documentAngle)
     }
 
     // MARK: the frame's allowed area (⑦ 框不许出画布 / 出照片)
@@ -2161,6 +2173,17 @@ public final class CropToolController {
     /// snapshot, instead of pressing only the edge the hand is on. One press per tick, the opposite
     /// edge moving with it, is exactly the 「夹一次、跳一次」 the report describes.
     var inscribesPixelsOnEveryTick = false
+
+    /// **362 reverse gate ①** — `true` is 355's per-tick press: only a **`.canvas`** rect is pressed,
+    /// so a `.source` rect on a straightened document is never pressed at all. Only a test turns it
+    /// on, and with it on the 9°/v=0 group leaks pixels — which is the user's 「开启了像素内还出像素」.
+    var pressesOnlyCanvasPixels = false
+
+    /// **362 reverse gate ②** — `true` converts a ratio lock (and the 32 px floor) with the
+    /// **photograph's** dimensions even for a `.canvas` rect, i.e. 355's size law. On a keystoned
+    /// document the canvas' unit is `photoQuadExtent`, so the frame is re-cut by that ratio on every
+    /// tick. Only a test turns it on.
+    var convertsTheLockInSourceUnits = false
 
     /// How many ticks the per-tick 「不出像素」 press actually moved an edge. Diagnostics only.
     public private(set) var pixelPresses = 0
@@ -2236,7 +2259,10 @@ public final class CropToolController {
         // The ratio lock is a document constraint and has to survive the clamp. Applied to the size
         // about the frame's centre, before the canvas question is asked. **310** — not while the user
         // is *moving* the frame: a refresh must never re-cut the size a drag just carried.
-        let shaped = lockReshapeSuspended ? before : reshapedForLock(before, source: src)
+        // 362 — the lock's ratio and the drag's floor are pixel facts, so they are converted with the
+        // grid the rect is measured in (the photograph, or the document canvas for a `.canvas` rect).
+        let units = lockUnits(source: src, mapping: mapping)
+        let shaped = lockReshapeSuspended ? before : reshapedForLock(before, units: units)
         let base = seen(shaped, source: src)
         let next = clampToCanvas(base, mapping: mapping, source: src)
         // 317 — the refresh owes the same containment as the tick: a frame that a drag left outside
@@ -2256,13 +2282,25 @@ public final class CropToolController {
         return true
     }
 
+    /// **362** — the units a size law converts with: the rect's own grid (the photograph, or the
+    /// document canvas for a `.canvas` rect), unless the reverse gate puts 355's spelling back.
+    private func lockUnits(source: ImageSize, mapping: LoupeMapping) -> CropUnits {
+        if convertsTheLockInSourceUnits { return CropUnits(source) }
+        return drawingProjection(source: source, mapping: mapping).units
+    }
+
     /// 162 — the ratio lock as a **document constraint**, applied to the size about the frame's
     /// centre so it never goes through `CropTool.constrain`'s `0…1²` clamp (which would forbid the
     /// camera-outside band). `clampedToCanvas` used to carry this inline; 213 keeps it as one helper
     /// so the screen-space clamp and its callers cannot disagree about the lock.
-    private func reshapedForLock(_ rect: CropRect, source: ImageSize) -> CropRect {
+    ///
+    /// **362** — `units` is the grid the rect is measured in. This used to convert the ratio with the
+    /// *photograph's* dimensions even for a `.canvas` rect, whose unit is the document canvas: at
+    /// 9°/+60 the canvas is 6553×4909, so a 3:2 frame was re-cut to 1.335 — **11 % narrower on every
+    /// tick**, which is the reported 「框的大小经常跳变」 (and why a locked frame lagged the mouse).
+    private func reshapedForLock(_ rect: CropRect, units: CropUnits) -> CropRect {
         guard let ratio = draft.lock.ratio,
-              let aspect = CropTool.normalizedAspect(ratio, source: source),
+              let aspect = CropTool.normalizedAspect(ratio, units: units),
               rect.width > 0, rect.height > 0 else { return rect }
         var w = rect.width, h = rect.height
         if w / h > aspect { w = h * aspect } else { h = w / aspect }
@@ -2555,8 +2593,11 @@ public final class CropToolController {
                                                    to: normalized, centre: centre, source: source)
             return
         }
-        let next = drag.crop(at: normalized, source: source, lock: draft.lock,
-                             bounds: canvasBounds(source: source))
+        let units = lockUnits(source: source, mapping: mapping)
+        // 330 — a `.canvas` rect is measured on the document canvas, so its legal box is `[0,1]²` of
+        // that canvas; a `.source` rect keeps 224's turned-AABB box.
+        let bounds: CropRect = liveCropSpace == .canvas ? .full : canvasBounds(source: source)
+        let next = drag.crop(at: normalized, units: units, lock: draft.lock, bounds: bounds)
         // A tick that would put the rect's **centre** outside the turned picture cannot be honoured by
         // shrinking (there is no size at that centre), and jumping it back to the middle from under the
         // hand would be worse than ignoring it: the last legal frame stands.
@@ -2581,7 +2622,7 @@ public final class CropToolController {
         // for the reverse gate only.
         let candidate = (drag.handle == .inside && !reshapesLockOnInsideDrag)
             ? next
-            : reshapedForLock(next, source: source)
+            : reshapedForLock(next, units: units)
         // 355 — **「不出像素」的每 tick 夹取，且在「框 ⊆ 画布」之**前**。** 317's one-shot inscription
         // is a discrete act (勾选时 / 改角度后) and 310 forbids a *move* from resizing, so neither of
         // them can stop a **size** drag from leaving the photograph. This presses only the edge the
@@ -2631,44 +2672,50 @@ public final class CropToolController {
 
     // MARK: converting a pointer
 
-    /// **355 — the one entry a pointer comes in through**, and the exact inverse of what the overlay
-    /// draws (`CropTool.layout`). A drag, a keyboard step and a readout all read the pointer here, so
-    /// there is one space per document and not two:
+    /// **362 — the one entry a pointer comes in through: `CropTool.projection`'s inverse.**
     ///
-    ///   · **canvas** (`liveCropSpace == .canvas` — every keystoned document, 330): the frame is a
-    ///     rectangle of the document canvas, so its inverse is `LoupeMapping.documentPoint`
-    ///     (`s5ToS3`, the camera's own inverse) followed by `÷ photoQuadExtent`. That is **the same
-    ///     `P · R` + camera the overlay's canvas branch draws through** (`CropTool.layout` →
-    ///     `DocumentPoint(u·W, v·H)` → `documentView`), undone once, in one place.
-    ///   · **source** (no keystone): `framePoint` + `R⁻¹` — 088's framing, bit for bit. Every
-    ///     keystone-free document keeps the numbers it always had.
+    /// It used to be a second, hand-written branch chain over `liveCropSpace` / `livePerspective`
+    /// while `CropTool.layout` drew through its own closure. The two agreed only as long as every
+    /// value they read agreed — the extent, the angle, the keystone and the space were each read
+    /// twice, and a mismatch in any one of them is a constant offset plus a projective gain between
+    /// the eye and the hand. A drag then draws the frame where its own map says the mouse is, so a
+    /// 355-style acceptance (input vs input) is green while the screen is wrong.
     ///
-    /// The bug this replaces: `beginDrag` / `continueDrag` called `normalized(_:…)` without a
-    /// `cropSpace`, so a keystoned document's pointer was walked back through `photoNormalized`
-    /// (`R⁻¹` then `P⁻¹`) while the frame was drawn through the canvas' own grid — one `P` too many,
-    /// which is a constant offset in px and a wrong gain (`P` is projective) at the same time.
+    /// Now: **the same `CropTool.projection` the overlay draws with**, inverted. `drawingProjection`
+    /// is the one place the three inputs (space, angle, keystone) are decided.
     func cropBoxPoint(fromView point: CGPoint,
                       mapping: LoupeMapping,
                       source: ImageSize,
                       pointScale: Double = 1) -> NormalizedPoint? {
         let scale = pointScale > 0 ? pointScale : 1
         // The reverse gate (②): read the pointer through the **frame** space while the overlay still
-        // draws the canvas' — the two spaces the 355 report measured 50–64 px apart.
+        // draws the canvas' — the two spaces the 355 report measured apart. Only a test turns it on.
         if dragMapsThroughFramePoint {
             return CropToolController.normalized(point, mapping: mapping, source: source,
                                                  pointScale: scale, rotationDegrees: straightenDelta,
                                                  perspective: nil, cropSpace: .source)
         }
-        if liveCropSpace == .canvas,
-           let document = mapping.documentPoint(viewX: Double(point.x) * scale,
-                                                viewY: Double(point.y) * scale) {
-            let extent = draftCropGeometry(source: source, perspective: livePerspective).photoQuadExtent
-            guard extent.width > 0, extent.height > 0 else { return nil }
-            return NormalizedPoint(document.x / extent.width, document.y / extent.height)
-        }
-        return CropToolController.normalized(point, mapping: mapping, source: source,
-                                             pointScale: scale, rotationDegrees: straightenDelta,
-                                             perspective: nil, cropSpace: .source)
+        return drawingProjection(source: source, mapping: mapping, pointScale: scale)
+            .normalized(viewX: Double(point.x), viewY: Double(point.y))
+    }
+
+    /// **362 — the one place the drawing projection's inputs are decided.**
+    ///
+    /// `layout` draws with this value and `cropBoxPoint` reads the pointer back with it, so 「画出来的」
+    /// and 「手抓到的」 are one function. The three answers are the document's (space, keystone, and the
+    /// angle the frame is turned by), never a second copy taken from the camera.
+    func drawingProjection(source: ImageSize,
+                           mapping: LoupeMapping,
+                           pointScale: Double = 1,
+                           carry: CropCarry = .identity,
+                           quadRotationDegrees: Double? = nil) -> CropToolProjection {
+        CropTool.projection(source: source,
+                            mapping: mapping,
+                            angle: quadRotationDegrees ?? overlayGeometry.rotationDegrees,
+                            cropSpace: liveCropSpace,
+                            perspective: livePerspective,
+                            pointScale: pointScale,
+                            carry: carry)
     }
 
     /// View point (points, y down) → normalized upright source point. `nil` when the mapping is
