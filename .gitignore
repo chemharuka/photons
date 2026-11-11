@@ -38,3 +38,6 @@ __pycache__/
 
 # 派单/规格文档只留在本机，不同步到远端（用户 2026-10-26）
 docs/tasks/
+
+# Vendored GPLv3 source builds its own binary; do not track the products.
+Vendor/hdrmerge-swift/.build/

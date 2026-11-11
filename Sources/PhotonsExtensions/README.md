@@ -39,11 +39,13 @@ let outcome = try service.merge(frames) { line in print(line) }
   这种给 darktable / RawTherapee 用）。
 - **本模块不入库**。合并完调用 `onOutput` 把 URL 交回来，由持有 `PhotonsCatalog` 的一侧走
   `ImportService`（或用户手动导入）。这样 `HDR/` 保持零核心依赖，CLI、测试、未来的面板都能直接用。
-- **合成靠外部可执行文件**：`hdrmerge-swift`（GPLv3）作为独立子进程运行，路径解析顺序为
+- **合成靠外部可执行文件**：`hdrmerge-swift`（GPLv3，源码在 `Vendor/`）作为独立子进程运行，路径解析顺序为
   `$HDRMERGE_SWIFT` → `Contents/Resources/bin/hdrmerge-swift` → `/opt/homebrew/bin` → `/usr/local/bin`。
-  没有任何 GPL 代码被链接进 Photons（GPLv3 §5 的 aggregate 条款），见
-  `~/Documents/GitHub/hdrmerge-swift/LICENSE-SCOPE.md`。工具缺失时 `isAvailable == false`，
-  调用方据此把入口置灰。
+  没有任何 GPL 代码被链接进 Photons（GPLv3 §5 的 aggregate 条款）——
+  GPLv3 源码以**嵌套包**形式放在 `Vendor/hdrmerge-swift/`（根 `Package.swift` 不引用它，
+  `swift package describe` 里看不到任何 hdrmerge target），由 `scripts/build-hdrmerge.sh`
+  单独 `swift build` 出可执行文件。工具缺失时 `isAvailable == false`，调用方据此把入口置灰。
+  见 `Vendor/hdrmerge-swift/README-VENDOR.md` 与 `~/Documents/GitHub/hdrmerge-swift/LICENSE-SCOPE.md`。
 
 ## DNG/ — 把像素写回一个合法的 DNG
 

@@ -5,8 +5,12 @@
 #   scripts/bundle-hdrmerge.sh /path/App    # into a specific bundle
 #
 # Additive on purpose: this script does not touch `scripts/bundle-app.sh`. Run it after
-# `make app` (or add it to your own wrapper) — the app itself needs no code change to carry
-# the tool, because `HDRMergeClient` resolves `Contents/Resources/bin/hdrmerge-swift` first.
+# `make app`, or just use `scripts/make-app-with-hdr.sh` which chains everything. The app itself
+# needs no code change to carry the tool, because `HDRMergeClient` resolves
+# `Contents/Resources/bin/hdrmerge-swift` first.
+#
+# The binary comes from `Vendor/hdrmerge-swift` by default (scripts/build-hdrmerge.sh); an
+# installed copy on PATH is only a fallback, so a fresh clone does not need a second checkout.
 #
 # Licensing (see hdrmerge-swift/LICENSE-SCOPE.md): the tool is GPLv3 and ships as a **separate
 # executable**. Photons stays MIT because it spawns it (Process + paths + JSON), which GPLv3 §5
@@ -16,15 +20,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${1:-$ROOT/.build/Photons.app}"
-BIN_SRC="${HDRMERGE_BIN:-$(command -v hdrmerge-swift || true)}"
+VENDOR_BIN="$ROOT/Vendor/hdrmerge-swift/.build/${CONFIG:-release}/hdrmerge-swift"
+BIN_SRC="${HDRMERGE_BIN:-}"
+if [ -z "$BIN_SRC" ] && [ -x "$VENDOR_BIN" ]; then BIN_SRC="$VENDOR_BIN"; fi
+if [ -z "$BIN_SRC" ]; then BIN_SRC="$(command -v hdrmerge-swift || true)"; fi
 
 if [ ! -d "$APP" ]; then
     echo "bundle-hdrmerge: no app at $APP — run 'make app' first" >&2
     exit 1
 fi
 if [ -z "$BIN_SRC" ] || [ ! -x "$BIN_SRC" ]; then
-    echo "bundle-hdrmerge: hdrmerge-swift not found." >&2
-    echo "  install it first:  cd ~/Documents/GitHub/hdrmerge-swift && ./scripts/install-to-photons.sh" >&2
+    echo "bundle-hdrmerge: hdrmerge-swift not built." >&2
+    echo "  build it from the vendored source:  scripts/build-hdrmerge.sh --to-app" >&2
     exit 1
 fi
 

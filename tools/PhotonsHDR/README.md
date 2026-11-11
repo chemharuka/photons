@@ -44,17 +44,26 @@ Output is `<least-exposed-frame>-merged.dng` in `-o` (or the first frame's direc
 `L1030664-merged.dng` for the Austria bracket. Options: `--bits 16|32`, `--headroom N` (default 4 =
 +2 stops of highlight room, bit-exact in 16 bits), `--feather N`, `--json`.
 
-## Packing the tool into the app bundle
+## Building the tool and packing it into the app
+
+The GPLv3 source is vendored at `Vendor/hdrmerge-swift/`, so no second checkout is needed:
 
 ```sh
-cd ~/Documents/GitHub/hdrmerge-swift && ./scripts/install-to-photons.sh   # → /opt/homebrew/bin
-cd ~/Documents/GitHub/Photons && make app && ./scripts/bundle-hdrmerge.sh
+scripts/make-app-with-hdr.sh          # make app + build the tool + pack + re-sign
 ```
 
-`bundle-hdrmerge.sh` puts the executable at `Photons.app/Contents/Resources/bin/hdrmerge-swift`,
-adds `licenses/hdrmerge-swift-GPL-3.0.txt` + `hdrmerge-swift-SOURCE-OFFER.txt`, records the binary's
-sha256, and re-signs the bundle (ad-hoc, like `bundle-app.sh`). Run it after `make app`; it edits
-nothing in the app's own sources.
+or step by step:
+
+```sh
+make app
+scripts/build-hdrmerge.sh --to-app    # swift build inside Vendor/hdrmerge-swift → Resources/bin
+scripts/bundle-hdrmerge.sh            # licenses + sha256 + re-sign the bundle
+```
+
+`Vendor/hdrmerge-swift` is a **nested** SwiftPM package that the root `Package.swift` does not
+mention, so SwiftPM never adds an edge between it and Photons — `swift package describe` lists one
+dependency (GRDB) and one target per Photons module, nothing else. A script shells out to build it.
+See `Vendor/hdrmerge-swift/README-VENDOR.md` for why that separation is load-bearing.
 
 That location is the first place `HDRMergeClient` looks when it resolves the tool, so once the
 binary is packed, anything that links `PhotonsExtensions` — a future sheet, a script, this CLI —
