@@ -1545,6 +1545,10 @@ final class PhotoRowCell: NSTableCellView {
     /// 「原文件已移动」 for this row, or nil. A string, not just a colour, so the row can be asserted
     /// on (the grid card and the strip cell expose the same one, from the same constant).
     private(set) var missingLabel: String?
+    /// 377 — the whole filename this row holds, kept separately from `name.stringValue` because the
+    /// label carries the **fitted** string (head + `…`) and the probe still has to be able to say
+    /// which photo the row is about.
+    private(set) var filename = ""
 
     // MARK: text block metrics
 
@@ -1588,16 +1592,21 @@ final class PhotoRowCell: NSTableCellView {
         var nameBreakMode: NSLineBreakMode
         /// Width the name would need at its own font, unclipped. `> name.width` means it truncates.
         var nameUnclippedWidth: CGFloat
+        /// The whole filename the row was given (never the pre-cut one).
         var nameText: String
+        /// 377 — the string `layout()` put on the label: the shared `fitted(…)` result, so the row
+        /// and the two canvas faces can be compared as strings.
+        var nameDrawnText: String
     }
 
     var layoutProbe: LayoutProbe {
-        let needed = (name.stringValue as NSString)
-            .size(withAttributes: [.font: name.font ?? NSFont.systemFont(ofSize: 11)]).width
+        let font = name.font ?? NSFont.systemFont(ofSize: 11)
+        let needed = (filename as NSString).size(withAttributes: [.font: font]).width
         return LayoutProbe(swatch: swatch.frame, name: name.frame, meta: meta.frame,
                            stars: stars.frame, pill: pill.frame,
                            nameBreakMode: name.lineBreakMode,
-                           nameUnclippedWidth: ceil(needed), nameText: name.stringValue)
+                           nameUnclippedWidth: ceil(needed), nameText: filename,
+                           nameDrawnText: name.stringValue)
     }
 
     static func reuse(in table: NSTableView, owner: Any) -> PhotoRowCell {
@@ -1618,7 +1627,11 @@ final class PhotoRowCell: NSTableCellView {
         thumbnailView.isHidden = true
         swatch.addSubview(thumbnailView)
         name.font = .systemFont(ofSize: 11, weight: .medium)
-        name.lineBreakMode = .byTruncatingMiddle
+        // 377 — tail, not middle: the user asked to see the **longest head** of the name plus `…`,
+        // the same rule as the grid card and the filmstrip. The truncation itself is done by
+        // `PlaceholderStyle.fitted` in `layout()`; this is the AppKit backstop for the one-glyph
+        // case where its measurement and ours could disagree.
+        name.lineBreakMode = .byTruncatingTail
         meta.font = .systemFont(ofSize: 9)
         meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingTail
@@ -1642,6 +1655,7 @@ final class PhotoRowCell: NSTableCellView {
         // failure looks like "not yet", not like "broken".
         swatch.layer?.backgroundColor = PlaceholderSwatch.color(for: asset.contentHash).cgColor
         name.stringValue = asset.filename
+        filename = asset.filename
         var bits: [String] = []
         if let m = asset.cameraModel { bits.append(m) }
         if let d = asset.captureLocalDate { bits.append(d) }
@@ -1661,6 +1675,8 @@ final class PhotoRowCell: NSTableCellView {
             meta.stringValue = bits.joined(separator: " · ")
             meta.textColor = .secondaryLabelColor
         }
+        // A recycled row can be reconfigured without a new `layout()` (same frame, new photo).
+        refitName()
     }
 
     /// Paint the image (or drop back to the placeholder when `image` is nil).
@@ -1694,6 +1710,20 @@ final class PhotoRowCell: NSTableCellView {
         needsDisplay = image == nil
     }
 
+    /// 377 — put the longest head + `…` that fits the label's **current** column on it.
+    ///
+    /// Called from both `layout()` (the width changed) and `configure` (a recycled row changed
+    /// asset but kept its frame, so `layout()` may not run again). Solving it against the label's
+    /// own `frame.width` rather than a stored number is what keeps this one rule: the column the
+    /// label has is the column the fit is measured for.
+    private func refitName(width: CGFloat? = nil) {
+        guard let font = name.font else { return }
+        let column = width ?? name.frame.width
+        guard column > 0 else { return }
+        let fitted = PlaceholderStyle.fitted(filename, width: column, font: font)
+        if name.stringValue != fitted { name.stringValue = fitted }
+    }
+
     override func layout() {
         super.layout()
         let side = BrowserPaneController.thumbnailSide
@@ -1722,6 +1752,10 @@ final class PhotoRowCell: NSTableCellView {
         stars.frame = NSRect(x: textX, y: starsY, width: width, height: heights.stars)
         name.frame = NSRect(x: textX, y: nameY, width: width, height: heights.name)
         meta.frame = NSRect(x: textX, y: metaY, width: width, height: heights.meta)
+        // 377 — the label gets the same fitted string the grid and the filmstrip draw, solved for
+        // the **exact** column `layout()` just gave it (no extra inset: a narrower string would not
+        // be the longest one). `byTruncatingTail` above then has nothing left to do.
+        refitName(width: width)
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)

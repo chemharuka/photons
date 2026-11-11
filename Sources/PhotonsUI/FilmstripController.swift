@@ -99,6 +99,11 @@ public final class FilmstripCard: NSView {
     /// Set inside `draw` when the badge was actually painted.
     public private(set) var lastDrawnMissingLabel: String?
 
+    /// 377 — what the caption line actually painted and at what width (same evidence the grid card
+    /// keeps, so both faces can be asserted against the same `PlaceholderStyle.fitted`).
+    public private(set) var lastDrawnCaption: String?
+    public private(set) var lastCaptionRect: NSRect = .zero
+
     public override var isFlipped: Bool { true }
 
     private var thumbRect: NSRect {
@@ -146,7 +151,13 @@ public final class FilmstripCard: NSView {
             lastDrawnMissingLabel = missingLabel
         }
         let name = NSRect(x: 0, y: thumb.maxY + 1, width: bounds.width, height: 11)
-        (asset.filename as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
+        // 377 — same one implementation as the grid: fit the head + `…` to the caption's width
+        // instead of letting `NSString.draw(in:)` word-wrap at a space or `-` and clip the rest.
+        let drawnCaption = PlaceholderStyle.fitted(asset.filename, width: name.width,
+                                                   font: PlaceholderStyle.captionFont)
+        (drawnCaption as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
+        lastDrawnCaption = drawnCaption
+        lastCaptionRect = name
     }
 }
 
