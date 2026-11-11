@@ -216,6 +216,10 @@ public extension CropGeometry {
         }
         if slack(0, 0) >= -tolerance { return c }        // already inside: nothing moves
 
+        // 380 — a **search** starts here. The size handles' canvas branch and the reverse gate still
+        // use it; a *move* (`.inside`) must not (`TranslationFeasibleSet` is its law).
+        KeystoneTranslationProbe380.directionScans &+= 1
+
         // **Which way is in, and how far?** Two questions that have to be asked together: a corner
         // outside two edges is never fixed on one axis alone, and a frame that starts far outside
         // leaves the region again at the far end of a ray. So every direction is scanned for its
@@ -383,6 +387,193 @@ public extension CropGeometry {
         return (c.map(\.x).min() ?? 0, c.map(\.y).min() ?? 0)
     }
 
+    // MARK: 380 — a move's containment is a **projection**, not a search
+
+    /// **380 — the translations a *move* may take, as one convex set.**
+    ///
+    /// 371 fixed the size handles (a tick is the hand's delta on the frame it holds, and a clamp pins
+    /// it). A **move** (`.inside`) went through `translated(_:inside:)`, whose direction scan and
+    /// bisection pick a *new* direction and distance on every tick: what the user sees is the search's
+    /// output, not the hand's step — 「尺寸/位置乱跳，还出界」.
+    ///
+    /// A translation never changes the shape, so 「框 ⊆ 区域」 is exactly 「四个角都在区域里」: one
+    /// linear inequality per corner and region edge, i.e. a convex polygon in `t` (the rect's own
+    /// normalized units). Its **nearest point** to the hand's `t` is the whole law:
+    ///
+    ///   · `t` inside → `t` itself, bit for bit (the frame follows the hand);
+    ///   · `t` outside → the orthogonal projection (it stops *on* the boundary, exactly);
+    ///   · a projection is idempotent, so a hand that keeps pushing gets the same frame back every
+    ///     tick — the 「被钉住后逐位冻结」 371 gives the size handles.
+    ///
+    /// Pure algebra: no sampling, no direction scan, no iteration cap. Nothing here reads a screen.
+    public struct HalfPlane380: Sendable, Equatable {
+        /// `ax·t.x + ay·t.y ≤ b`.
+        public var ax: Double
+        public var ay: Double
+        public var b: Double
+        public init(ax: Double, ay: Double, b: Double) {
+            self.ax = ax
+            self.ay = ay
+            self.b = b
+        }
+        /// Signed distance to this line, positive on the legal side.
+        public func slack(x: Double, y: Double) -> Double { b - (ax * x + ay * y) }
+    }
+
+    /// The feasible translations of a frame, `{ t : every half-plane }` — a convex polygon.
+    public struct TranslationFeasibleSet380: Sendable {
+        public let constraints: [HalfPlane380]
+
+        public init(constraints: [HalfPlane380]) {
+            self.constraints = constraints
+        }
+
+        public var isEmpty: Bool { constraints.isEmpty }
+
+        public func isFeasible(x: Double, y: Double, tolerance: Double = 0) -> Bool {
+            constraints.allSatisfy { $0.slack(x: x, y: y) >= -tolerance }
+        }
+
+        /// The nearest point of the set to `t`, or `nil` when the set is empty (a frame no
+        /// translation can hold — 317's 「放不下」, which the caller answers by keeping the rect).
+        ///
+        /// `t` feasible → `t` **unchanged** (the idempotence the acceptance asserts); otherwise the
+        /// standard convex-polygon nearest point: a single violated edge's foot, or — at a corner —
+        /// the intersection of two violated edges. Both are closed form.
+        public func project(x: Double, y: Double,
+                            tolerance: Double = 1e-9) -> (x: Double, y: Double)? {
+            if isFeasible(x: x, y: y, tolerance: tolerance) { return (x, y) }
+            guard !constraints.isEmpty else { return nil }
+            var best: (point: (x: Double, y: Double), distance: Double)?
+
+            func consider(_ point: (x: Double, y: Double)) {
+                guard isFeasible(x: point.x, y: point.y, tolerance: tolerance) else { return }
+                let distance = hypot(point.x - x, point.y - y)
+                if best == nil || distance < best!.distance { best = (point, distance) }
+            }
+
+            let violated = constraints.filter { $0.slack(x: x, y: y) < 0 }
+            // ① the foot of each violated edge.
+            for edge in violated {
+                let norm = edge.ax * edge.ax + edge.ay * edge.ay
+                guard norm > 1e-24 else { continue }
+                let scale = edge.slack(x: x, y: y) / norm
+                consider((x + edge.ax * scale, y + edge.ay * scale))
+            }
+            // ② the corner where two violated edges meet.
+            for i in violated.indices {
+                for j in violated.indices where j > i {
+                    let p = violated[i], q = violated[j]
+                    let determinant = p.ax * q.ay - p.ay * q.ax
+                    guard abs(determinant) > 1e-18 else { continue }
+                    consider(((p.b * q.ay - p.ay * q.b) / determinant,
+                              (p.ax * q.b - p.b * q.ax) / determinant))
+                }
+            }
+            return best?.point
+        }
+    }
+
+    /// **380 — the move's one region.** The feasible translations of `crop` so that every one of its
+    /// document corners stays inside the photograph's quad **and** the document canvas — one
+    /// intersection, projected once, never 「先夹画布、再平进四边形」 (that sequence is this task's bug).
+    ///
+    /// `t` is in the rect's **own normalized units**; the constraint rows are in document pixels
+    /// (`Mᵀn`, `M` the affine part of the frame's own walk), and the normal is unit length, so the
+    /// feasibility tolerance is a pixel distance.
+    ///
+    /// `nil` when the state cannot be expressed as a translation set — a `.source` rect of a
+    /// **keystoned** document, a state `CropToolController.liveCropSpace` cannot produce (a keystoned
+    /// document is always read on its canvas), but one a caller could build by hand.
+    ///
+    /// `insidePhotoPixels == false` is 「不出像素」 off: the only region is the document canvas, so a
+    /// move is still one projection, just a smaller set.
+    func moveFeasibleSet380(of crop: CropRect,
+                            insidePhotoPixels: Bool = true) -> TranslationFeasibleSet380? {
+        if hasKeystoneQuad, !cropIsCanvasSpaced { return nil }
+        let c = crop.clamped(allowsOutsideSource: true)
+        guard c.width > 0, c.height > 0 else { return nil }
+        // **§6.3 — the two spaces are two different questions, and only one of them is rotated.**
+        //
+        //   · `.canvas` — the frame *is* a rectangle of the canvas: its four corners are
+        //     `documentQuad(of:)`'s, i.e. **turned** by θ exactly like the picture. Both sides of
+        //     「框 ⊆ 画布 ∩ 照片」 are then read on one grid, so conjugating the two regions' edges by
+        //     the frame's own affine map is the whole law (this branch is right, and stays untouched).
+        //   · `.source` — the frame is a rectangle of the photograph's **own pixel grid**: the overlay
+        //     draws it axis-aligned in photo-normalized coordinates (`R(−θ)` is the picture's, not the
+        //     frame's), so its legality is literally `0 ≤ left+t.x`, `right+t.x ≤ 1`,
+        //     `0 ≤ top+t.y`, `bottom+t.y ≤ 1` — four axis-aligned rows, **no rotation, no
+        //     `documentOrigin`, no canvas AABB**.
+        //
+        // Reading the `.source` frame's corners as turned (`documentQuad`, or photo pixels shifted by
+        // `documentOrigin`) compares an **un-turned** box with a **turned** region: at θ = 9° the
+        // projection calls a frame legal while it sits 0.0394 (normalized, ≈ 236 px) outside the
+        // photograph, and never once reaches the boundary, so nothing ever freezes
+        // (`CropMovePixelPress380Tests` ⑪⑫ — measured before this branch existed).
+        if !cropIsCanvasSpaced {
+            // 「不出像素」 on → the photograph itself; off → the document canvas, which in
+            // photo-normalized coordinates is `documentCanvasCropRect` (a superset of `[0,1]²` at
+            // θ ≠ 0, `[0,1]²` at every right angle — so the two answers agree where they must).
+            let legal: CropRect = insidePhotoPixels ? .full : documentCanvasCropRect
+            return TranslationFeasibleSet380(constraints: [
+                HalfPlane380(ax: -1, ay: 0, b: c.left - legal.left),
+                HalfPlane380(ax: 1, ay: 0, b: legal.right - c.right),
+                HalfPlane380(ax: 0, ay: -1, b: c.top - legal.top),
+                HalfPlane380(ax: 0, ay: 1, b: legal.bottom - c.bottom),
+            ])
+        }
+        // **The frame's four corners at `t = 0`, and what one unit of `t` moves them by** — `.canvas`
+        // only: there the frame and the picture are the same turn, so `documentQuad` (the one owner of
+        // that walk) gives the corners and its two edge vectors give `mapX` / `mapY`.
+        let quad = documentQuad(of: c)
+        guard quad.count == 4 else { return nil }
+        let corners: [DocumentPoint] = quad
+        let mapX = (x: (quad[1].x - quad[0].x) / c.width, y: (quad[1].y - quad[0].y) / c.width)
+        let mapY = (x: (quad[3].x - quad[0].x) / c.height, y: (quad[3].y - quad[0].y) / c.height)
+        let extent = photoQuadExtent
+        var regions = [DocumentRegion.axisAligned(width: extent.width, height: extent.height)]
+        if insidePhotoPixels {
+            // 380 — the picture in the **same** grid (`documentPointInCanvas`), so the two rows below
+            // are literally 「画布 ∩ 照片」 and one projection answers both. The canvas is the quad's
+            // AABB by definition, so its four rows never exclude what the picture's four accept.
+            regions.append(DocumentRegion(photoQuadInDocumentPixels380()))
+        }
+        var constraints: [HalfPlane380] = []
+        constraints.reserveCapacity(regions.count * 4 * corners.count)
+        for region in regions {
+            for edge in region.halfPlanes {
+                // (n · (corner + M·t) ≤ offset)  ⇔  (Mᵀn) · t ≤ offset − n · corner
+                let ax = mapX.x * edge.nx + mapX.y * edge.ny
+                let ay = mapY.x * edge.nx + mapY.y * edge.ny
+                for corner in corners {
+                    constraints.append(HalfPlane380(
+                        ax: ax, ay: ay,
+                        b: edge.offset - (edge.nx * corner.x + edge.ny * corner.y)))
+                }
+            }
+        }
+        return TranslationFeasibleSet380(constraints: constraints)
+    }
+
+    /// **380 — the photograph's four corners in the document canvas' pixels** — the grid
+    /// `documentQuad(of:)` speaks, through that same one entry (`documentPointInCanvas`).
+    ///
+    /// **§5.1 — the origin is handed in, not defaulted.** `documentQuad(of:)` passes
+    /// `documentOrigin`; the default of the single entry is a *test gate*
+    /// (`DocumentCanvasConvention364.foldsDocumentOriginIntoCanvas`, 364's reverse switch). Reading it
+    /// here would make 「框 ⊆ 照片」 two sets in two origins the moment that gate is flipped — the
+    /// exact shape of this task's 「投影通过了、框还是出界」. `documentOrigin` is a property of the
+    /// document, so the two spellings of the same four points must agree independently of any test
+    /// switch (see `CropMovePixelPress380Tests.testGridCoherence380`).
+    /// `internal` rather than `private` for one reason: §5.3 ⑩ asserts the identity *between* the two
+    /// spellings of the picture's corners, so the test has to be able to ask this one.
+    func photoQuadInDocumentPixels380() -> [DocumentPoint] {
+        let o = documentOrigin
+        return [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map {
+            documentPointInCanvas(normalizedX: $0.0, $0.1, origin: o)
+        }
+    }
+
     /// The worst signed distance (in pixels, positive inside) of `quad`'s corners to `region`.
     static func slack(of quad: [DocumentPoint], inside region: DocumentRegion) -> Double {
         quad.reduce(Double.infinity) { min($0, region.inset($1)) }
@@ -410,6 +601,30 @@ public extension CropGeometry {
 /// Two regions matter to 324 and both are one of these: the document canvas (an axis-aligned
 /// rectangle) and the photograph's quadrilateral. The distance is in **pixels** — the normals are
 /// unit length — which is what lets the acceptance quote `≥ −1e−9` without a unit conversion.
+// MARK: - 380 · a move is a projection
+
+/// **380 — the search counter.** `translated(_:inside:)` is a *direction scan*: 8 probes plus up to
+/// 60 samples and 52 bisection steps per tick. It is the right answer for a size handle's canvas
+/// clamp (the frame may be genuinely larger than the region), but it is **not** how a *move* may be
+/// bounded: a scan's output is a function of its own probes, so every tick re-picks a direction and a
+/// distance and the frame jumps by up to `limit = 2.5` region widths.
+///
+/// This counter exists so the acceptance can say 「`.inside` 不再做搜索」 as a number (`== 0`) instead
+/// of a reading of the code. `moveFeasibleSet380` / `TranslationFeasibleSet380.project` never touch
+/// it — they are closed form.
+public enum KeystoneTranslationProbe380 {
+    /// How many times `translated(_:inside:)` ran its probe/bisection search. Diagnostics only.
+    nonisolated(unsafe) public static var directionScans = 0
+
+    /// A read-and-reset: the acceptance measures one trajectory at a time.
+    @discardableResult
+    public static func takeDirectionScans() -> Int {
+        let value = directionScans
+        directionScans = 0
+        return value
+    }
+}
+
 public struct DocumentRegion: Sendable {
 
     public let corners: [DocumentPoint]
@@ -447,6 +662,13 @@ public struct DocumentRegion: Sendable {
         DocumentRegion([DocumentPoint(0, 0), DocumentPoint(width, 0),
                         DocumentPoint(width, height), DocumentPoint(0, height)])
     }
+
+    /// **380** — the same edges as raw half-planes (`nx·x + ny·y ≤ offset`), unit normals.
+    ///
+    /// Read-only: a translation's feasible set is these rows conjugated by the rect's own affine map
+    /// (see `CropGeometry.moveFeasibleSet380`). Exposed so the projection and the signed distance are
+    /// built from **one** resolution of the interior side, not two.
+    var halfPlanes: [(nx: Double, ny: Double, offset: Double)] { edges }
 
     /// Signed distance to the nearest edge, in pixels; positive inside, negative outside.
     public func inset(_ p: DocumentPoint) -> Double {
