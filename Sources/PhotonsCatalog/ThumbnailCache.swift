@@ -429,8 +429,41 @@ public final class ThumbnailCache {
         public var tempFiles = 0
     }
 
+    /// 363 — **who deleted which photo's pixels**, by door.
+    ///
+    /// The two bulk doors (`removeAll(contentHash:)` and `trim()`) are library-wide by nature: a bug
+    /// in either one deletes a photo that nobody asked about, and the visible symptom is the one the
+    /// user reported — *another* photo's preview going back to an older rendering. Counting the
+    /// deletions **per content hash** is what makes "editing B never touched A" an assertion instead
+    /// of an argument: one edit transaction must add nothing to either tally.
+    ///
+    /// `prunedSuperseded` is the legitimate, same-photo count (`store` keeping one file per photo),
+    /// kept separate so a test can tell "this photo replaced its own preview" from "another photo's
+    /// preview was removed".
+    public struct RetentionAudit: Sendable, Equatable {
+        public var removeAllCalls = 0
+        public var trimCalls = 0
+        /// Files deleted by `removeAll(contentHash:)`, per owner.
+        public var deletedByRemoveAll: [String: Int] = [:]
+        /// Files deleted by `trim()`, per owner (attributable HD files only).
+        public var deletedByTrim: [String: Int] = [:]
+        /// Files deleted by `store`'s one-file-per-photo prune, per owner.
+        public var prunedSuperseded: [String: Int] = [:]
+        /// Files `store` refused to evict because they were published *after* the write that was
+        /// pruning (an older document's render landing late must not delete a newer edit's file).
+        public var keptNewerThanWrite = 0
+    }
+
     public let root: URL
     public var policy: TrimPolicy
+    /// 363 — deletion tally by door, for the acceptance (see `RetentionAudit`).
+    public var retentionAudit: RetentionAudit {
+        lock.lock(); defer { lock.unlock() }
+        return audit
+    }
+    public func resetRetentionAudit() {
+        lock.lock(); audit = RetentionAudit(); lock.unlock()
+    }
     /// P1f: what the migration in `init` found and did. Read by `ThumbnailService.Stats.rebuilt`.
     public private(set) var versionSweep = VersionSweep(previous: nil, current: "", isUpgrade: false)
     /// Shorthand for the one bit a caller outside the cache needs: this process upgraded the
@@ -439,6 +472,8 @@ public final class ThumbnailCache {
     private let fm = FileManager.default
     private let lock = NSLock()
     private var counters = Stats()
+    /// 363 — deletions by door, under the same lock as `counters`.
+    private var audit = RetentionAudit()
     /// At most one mtime touch per (key, process) — otherwise every grid read rewrites an inode
     /// (§3).
     private var touched: Set<String> = []
@@ -623,25 +658,44 @@ public final class ThumbnailCache {
     /// still shows the old document while the new commit rebuilds): the loser of that race may delete
     /// the winner's file, and the next lookup simply regenerates it — the cache has no correctness
     /// role, and being conservative here would mean keeping files forever.
+    ///
+    /// 363 — **"regenerates it" was the bug.** A late render of the *previous* document lands after
+    /// the new edit's file and, ordered by mtime, is the "newest": the old copy survived and the
+    /// user's new preview was deleted, i.e. the reported 「改 A 后预览回退」 in its most damaging
+    /// form. The prune is therefore ordered by **publication, not authority**: a write may only
+    /// remove files that were already on disk *before* it (strictly older `mtime`), plus it always
+    /// keeps its own file. A file published after this write belongs to a later intent and is never
+    /// this write's victim; two files can survive such a race, and the next store of the same photo
+    /// (or the LRU) reclaims the loser.
     private func retainNewestHDOnly(for key: ThumbKey) {
         guard key.spec.isHDFamily else { return }
         let dir = url(for: key).deletingLastPathComponent()
         // One prune per **family**: a photo legitimately owns one `.heic` (1920, loupe stand-in)
         // and one `.jpg` (512, cells) at a time, so each extension keeps its own newest file.
         let ext = "." + key.spec.fileExtension
+        let keep = url(for: key).path
         let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
-        var owners: [(path: String, modified: Date)] = []
+        let written = (try? fm.attributesOfItem(atPath: keep))?[.modificationDate] as? Date
+            ?? .distantPast
+        var victims: [String] = []
+        var protectedNewer = 0
         for name in names where name.hasSuffix(ext) && !name.hasPrefix(".") {
             let path = dir.appendingPathComponent(name).path
+            guard path != keep else { continue }
             guard Self.hdOwner(ofFileAt: path) == key.contentHash else { continue }
             let modified = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
                 ?? .distantPast
-            owners.append((path, modified))
+            // Published at or after this write: a later intent's file, not this write's to remove.
+            if modified >= written { protectedNewer += 1; continue }
+            victims.append(path)
         }
-        guard owners.count > 1 else { return }
-        guard let newest = owners.max(by: { $0.modified < $1.modified }) else { return }
-        for item in owners where item.path != newest.path {
-            try? fm.removeItem(atPath: item.path)
+        for path in victims {
+            if (try? fm.removeItem(atPath: path)) != nil {
+                lock.lock(); audit.prunedSuperseded[key.contentHash, default: 0] += 1; lock.unlock()
+            }
+        }
+        if protectedNewer > 0 {
+            lock.lock(); audit.keptNewerThanWrite += protectedNewer; lock.unlock()
         }
     }
 
@@ -883,6 +937,7 @@ public final class ThumbnailCache {
     @discardableResult
     public func removeAll(contentHash: String, developJSONs: [String] = ["{}"]) -> Int {
         var removed = 0
+        lock.lock(); audit.removeAllCalls += 1; lock.unlock()
         let recipes = developJSONs.isEmpty ? ["{}"] : Array(Set(developJSONs))
         for tier in ThumbTier.allCases {
             var keys = [ThumbKey.preview(contentHash: contentHash, tier: tier)]
@@ -928,6 +983,9 @@ public final class ThumbnailCache {
         lock.lock()
         touched = touched.filter { !$0.contains(contentHash) }
         lock.unlock()
+        if removed > 0 {
+            lock.lock(); audit.deletedByRemoveAll[contentHash, default: 0] += removed; lock.unlock()
+        }
         return removed
     }
 
@@ -983,6 +1041,8 @@ public final class ThumbnailCache {
     @discardableResult
     public func trim(now: Date = Date(), knownKeys: [ThumbKey] = []) -> TrimReport {
         var report = TrimReport()
+        lock.lock(); audit.trimCalls += 1; lock.unlock()
+        var trimmedOwners: [String: Int] = [:]
         let items = inventory()
         report.totalBefore = items.reduce(0) { $0 + $1.bytes }
 
@@ -1015,7 +1075,11 @@ public final class ThumbnailCache {
                     || (policy.maxFiles > 0 && remainingCount > policy.maxFiles) else { return 0 }
             guard now.timeIntervalSince(item.modified) >= policy.protectWindow else { return 0 }
             guard !removed.contains(item.url.path) else { return 0 }
+            // 363 — who owned it, read *before* the file goes: the audit's whole point is that a
+            // bulk door cannot be blamed for (or hide) another photo's pixels.
+            let owner = ThumbnailCache.hdOwner(ofFileAt: item.url.path)
             guard (try? fm.removeItem(at: item.url)) != nil else { return 0 }
+            if let owner { trimmedOwners[owner, default: 0] += 1 }
             removed.insert(item.url.path)
             remaining -= item.bytes
             remainingCount -= 1
@@ -1056,7 +1120,10 @@ public final class ThumbnailCache {
 
         cleanTempFiles(now: now, report: &report)
         report.totalAfter = remaining
-        lock.lock(); counters.evicted += report.evicted; lock.unlock()
+        lock.lock()
+        counters.evicted += report.evicted
+        for (owner, count) in trimmedOwners { audit.deletedByTrim[owner, default: 0] += count }
+        lock.unlock()
         return report
     }
 

@@ -159,6 +159,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private var providerCache: ThumbnailCache?
     /// Outstanding loads by photo row. Cancelled the moment the row leaves the window.
     private var thumbRequests: [Int: ThumbnailRequest] = [:]
+    /// 363 — deliveries dropped because the document moved on while the frame was rendering.
+    public private(set) var staleThumbnailDrops = 0
     private var reconcileWork: DispatchWorkItem?
     private var cellTier: ThumbTier = .t256
     private var lastWanted: Set<Int> = []
@@ -867,10 +869,19 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     private func requestThumbnail(row: Int, asset: Asset, tier: ThumbTier,
                                   display: ImageSize, priority: ThumbPriority) {
-        guard let provider = provider(), thumbRequests[row] == nil else { return }
+        guard let provider = provider() else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
+        let document = document(for: asset)
+        let wanted = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        if let pending = thumbRequests[row] {
+            // One request per row for one key.
+            guard pending.key.digest != wanted.digest else { return }
+            // 363 — a later document superseded it; condemn the old ask (see the grid's twin).
+            pending.cancel()
+            thumbRequests[row] = nil
+        }
         let token = provider.request(index: row, asset: asset, fileURL: url,
-                                     document: document(for: asset), tier: tier, spec: .hdJPEG,
+                                     document: document, tier: tier, spec: .hdJPEG,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(row: idx, key: key, display: display, image: image)
@@ -884,6 +895,13 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let cell = photosTable.view(atColumn: 0, row: row, makeIfNecessary: false) as? PhotoRowCell,
               cell.assetID == session.assets[row].id else { return }
         // The row may have been recycled between request and delivery; the asset id is the guard.
+        // 363 — and the document may have moved on: a frame for an older edit must not land here.
+        let asset = session.assets[row]
+        guard key.digest == ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset)).digest
+        else {
+            staleThumbnailDrops += 1
+            return
+        }
         cell.thumbnailTier = key.tier
         cell.applyThumbnail(image, key: key, display: display)
     }

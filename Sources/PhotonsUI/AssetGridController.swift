@@ -47,24 +47,58 @@ public final class AssetCollectionView: NSCollectionView {
 ///
 /// No Metal (headless/VM): falls back to a plain SDR `CALayer`, so the grid still draws.
 final class ThumbnailEDRView: NSView {
+    /// 363 — the picture this view is showing, and whether its layer is currently visible.
+    ///
+    /// Two rules, and the difference between them is the reported flicker:
+    ///
+    ///  · **nothing to keep** (the first bitmap of a cell, or one arriving after `clearThumbnail` on
+    ///    recycle): stay hidden until the new drawable is on the compositor, so a reused
+    ///    `CAMetalLayer` can never show the previous photo for one frame;
+    ///  · **a picture is already up** (a re-render of the same photo — every edit): **never hide
+    ///    it.** The old drawable stays on screen until the new one is presented, so the preview is
+    ///    replaced in the same rectangle instead of going old picture → solid swatch → new picture.
     var image: CGImage? {
         didSet {
             guard let image else {
                 surface?.setImage(nil)
                 if surface == nil { layer?.contents = nil }
-                isHidden = true
+                showsBitmap = false
+                setHidden(true)
                 return
             }
             if let surface {
-                // Stay hidden until the new drawable is on the compositor. Otherwise a recycled
-                // CAMetalLayer shows its previous photo for one frame ("wrong photo, then correct").
-                isHidden = true
-                surface.setImage(image) { [weak self] in self?.isHidden = false }
+                // A picture that is already **on screen** stays up: the surface presents the new
+                // drawable and the compositor swaps it in place. When nothing visible would be kept
+                // (the cell's first bitmap, or a second one arriving before the first was presented)
+                // the layer stays hidden until the newest present lands — which is also what stops a
+                // *recycled* cell from showing the previous photo for one frame.
+                let keepVisible = showsBitmap && !isHidden
+                surface.setImage(image, onPresented: keepVisible ? nil : { [weak self] in
+                    self?.setHidden(false)
+                })
             } else {
                 layer?.contents = image
-                isHidden = false
+                setHidden(false)
             }
+            showsBitmap = true
         }
+    }
+
+    /// 363 — `true` once a bitmap has been handed to the compositor and is showing. Reset by
+    /// `image = nil` (a recycled cell), which is exactly when hiding the layer is *correct*.
+    private var showsBitmap = false
+
+    /// 363 — **the solid-frame counter.** Every hide of this layer while it is showing a picture is
+    /// one frame in which the card's hash-coloured placeholder gradient is what the eye sees, i.e.
+    /// exactly the 纯色 the user reported between the old preview and the new one. The fix makes the
+    /// only hide happen when there is nothing to keep (`showsBitmap == false`); the acceptance asserts
+    /// this stays 0 across twenty edits, and the number is structural — it observes the layer, not
+    /// the code path, so restoring an unconditional hide turns it red.
+    private(set) var blankedPreviewCount = 0
+
+    private func setHidden(_ hidden: Bool) {
+        if hidden, !isHidden, showsBitmap { blankedPreviewCount += 1 }
+        isHidden = hidden
     }
 
     private let cornerRadius: CGFloat
@@ -208,6 +242,16 @@ public final class AssetCardView: NSView {
     /// The EDR surface, exposed so a test can read back `wantsExtendedDynamicRangeContent`,
     /// `contentsFormat` and the actual float pixels (acceptance 223 §3).
     public var thumbnailLayer: CALayer? { thumbnailView.layer }
+
+    /// 363 — is the bitmap layer actually on screen? `false` while a *new* bitmap is being handed to
+    /// the compositor, i.e. exactly the frame in which the card's placeholder gradient (a solid
+    /// colour) is what the eye sees. A refresh that keeps the old picture up must never set this to
+    /// `false` for a photo that already had one.
+    public var thumbnailSurfaceVisible: Bool { !thumbnailView.isHidden }
+
+    /// 363 — same question as the grid card's, as a count: how many times this cell blanked a preview
+    /// it was already showing. 0 means the swap is old picture → new picture with no solid frame.
+    public var blankedPreviewFrames: Int { thumbnailView.blankedPreviewCount }
 
     public override init(frame frameRect: NSRect = .zero) {
         super.init(frame: frameRect)
@@ -377,6 +421,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var isApplyingModel = false
     private(set) public var metrics = GridLayout.metrics(forWidth: 800)
     public private(set) var reloadCount = 0
+    /// 363 — deliveries dropped because the document moved on while the frame was rendering. A
+    /// stale frame landing is the "preview goes back" failure; this number proves the guard ran.
+    public private(set) var staleThumbnailDrops = 0
 
     // MARK: thumbnails
 
@@ -697,8 +744,23 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     // MARK: thumbnails
 
-    /// The live document for the anchor photo, the stored one for every other row. The thumbnail key
-    /// is derived from this, which is how a slider commit changes the cache file the grid draws.
+    /// The document a cell **asks** for: the live one for the photo on screen, the stored one for
+    /// every other row (218's key input).
+    ///
+    /// 363 — this is the line between *asking* and *rendering*, and it is the whole fix for the
+    /// pause that had been swallowed a level up. The cell's **pixels** are still the committed ones:
+    /// the swap goes old picture → new picture (`applyThumbnail` keeps the previous bitmap up, and
+    /// `ThumbnailEDRView` never hides a frame it is showing), and a delivery for an older document
+    /// is dropped (`thumbnailDidLoad`). What must **not** happen is skipping the ask altogether: with
+    /// the committed row as the key, a drag asked for nothing at all, so 326's pause had nothing to
+    /// refuse and nothing to hold — a cell that is not re-`configure`d (the loupe has no cell) waits
+    /// for a refresh that may never come.
+    ///
+    /// Asking for the live document is safe *because of the pause*, in exactly the two ways §4/326
+    /// define it: a key whose file is missing is refused and held for the release (no render while
+    /// the hand is down, and one replay instead of twenty), and a key whose file is already on disk
+    /// is a **file switch** the pause allows (it starts no producer run). Deriving the key from
+    /// `session.edit` is therefore what makes the pause observable at all.
     private func document(for asset: Asset) -> EditModel {
         guard let session else { return .neutral }
         if asset.id == session.loadedEditAssetID { return session.edit }
@@ -758,10 +820,22 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,
                                   display: ImageSize, priority: ThumbPriority) {
-        guard let provider = provider(), thumbRequests[index] == nil else { return }
+        guard let provider = provider() else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
+        let document = document(for: asset)
+        let wanted = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        if let pending = thumbRequests[index] {
+            // Already asking for exactly this: one request per cell.
+            guard pending.key.digest != wanted.digest else { return }
+            // 363 — a **later** document superseded it. The old ask is condemned instead of being
+            // left to land: an older frame repainting a cell that has moved on is the same class of
+            // bug as the pre-edit key coming back, and it also keeps the queue free of renders
+            // nobody will ever see.
+            pending.cancel()
+            thumbRequests[index] = nil
+        }
         let token = provider.request(index: index, asset: asset, fileURL: url,
-                                     document: document(for: asset), tier: tier, spec: .hdJPEG,
+                                     document: document, tier: tier, spec: .hdJPEG,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
@@ -777,6 +851,15 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         guard let cell = collectionView.item(at: path) as? AssetGridItem else { return }
         // The cell may have been recycled between request and delivery; the asset id is the guard.
         guard cell.cardView.asset?.id == session.assets[index].id else { return }
+        // 363 — **and the document may have moved on.** A frame rendered for an older edit must not
+        // land on a cell that already carries a newer one: that is precisely the "preview goes back
+        // to the old picture" the user reported, one document earlier.
+        let row = session.assets[index]
+        guard key.digest == ThumbnailProvider.hdJPEGKey(for: row, document: document(for: row)).digest
+        else {
+            staleThumbnailDrops += 1
+            return
+        }
         cell.cardView.applyThumbnail(image, key: key, display: display)
     }
 
@@ -801,7 +884,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             guard let cell = collectionView.item(at: path) as? AssetGridItem,
                   let asset = cell.cardView.asset,
                   let index = session.assets.firstIndex(where: { $0.id == asset.id }) else { continue }
-            applyThumbnail(to: cell, index: index, asset: asset)
+            // 363 — the catalog row, not the cell's configured copy: the thumbnail key is derived
+            // from `develop_json`, and the copy in the card is only as fresh as the last
+            // `configure`. Reading it here is what reverted an edited photo to its pre-edit key.
+            applyThumbnail(to: cell, index: index, asset: session.assets[index])
         }
     }
 
@@ -814,12 +900,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let path = IndexPath(item: index, section: 0)
         guard collectionView.indexPathsForVisibleItems().contains(path),
               let cell = collectionView.item(at: path) as? AssetGridItem,
-              let asset = cell.cardView.asset, asset.id == id else { return }
+              cell.cardView.asset?.id == id else { return }
         // An in-flight request still carries the pre-edit key. Letting it land after the new one
         // would repaint the old frame, so it is cancelled before the re-request.
         thumbRequests[index]?.cancel()
         thumbRequests.removeValue(forKey: index)
-        applyThumbnail(to: cell, index: index, asset: asset)
+        applyThumbnail(to: cell, index: index, asset: session.assets[index])
     }
 
     private func reconcileThumbnails(force: Bool) {

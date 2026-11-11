@@ -615,6 +615,40 @@ final class ThumbnailServiceTests: XCTestCase {
         }
     }
 
+    /// 363 — **a cached file is a switch, not a render.**
+    ///
+    /// 326's pause refuses anything that would start a producer run; a key whose file is already on
+    /// disk costs one read, so freezing it would freeze the picture the user is looking at (dragging
+    /// back over a value they have already rendered). The service therefore admits it *during* the
+    /// drag, and `servesFromDiskOnly` guarantees it can never fall through to the producer.
+    func testACachedKeyIsServedWhilePausedWithoutRendering() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let service = ThumbnailService(cache: cache, config: .init(), producer: producer)
+
+        // Put the bytes on disk first: the rendering the user has already seen before the drag.
+        let keyed = spec(30)
+        service.request(keyed, priority: .onScreen)
+        waitIdle(service)
+        XCTAssertEqual(producer.callCount, 1)
+        XCTAssertTrue(cache.exists(keyed.key))
+
+        service.isPaused = true
+        defer { service.isPaused = false }
+        let switching = service.request(keyed, priority: .onScreen)
+        waitIdle(service)
+
+        XCTAssertEqual(producer.callCount, 1, "a cached key started a render during the drag")
+        XCTAssertEqual(service.heldCount, 0, "a cached switch was held for the release")
+        let stats = self.stats(service) { $0.hits >= 1 }
+        XCTAssertEqual(stats.rejectedWhilePaused, 0, "a cached switch was refused")
+        XCTAssertGreaterThanOrEqual(stats.hits, 1, "the cached file was not read")
+        XCTAssertEqual(stats.missGenerated, 1, "a second render ran")
+        XCTAssertFalse(switching.isCancelled)
+        XCTAssertFalse(switching.isHeld)
+        XCTAssertNotNil(result(service, of: switching), "the cached switch never reported back")
+    }
+
     /// 326 — the fix for the 1920 preview specifically: a **warm** is not a request anybody is
     /// waiting for, so a pause queues it instead of refusing it. Nothing runs until the interaction
     /// ends (`producer.callCount == 0` while paused), and then it lands without a second ask.

@@ -73,6 +73,14 @@ public final class FilmstripCard: NSView {
     /// The EDR surface, exposed for the acceptance read-back.
     public var thumbnailLayer: CALayer? { thumbnailView.layer }
 
+    /// 363 — same question as the grid card's: is the bitmap on screen, or is the card's solid
+    /// placeholder gradient the thing the eye sees while a new bitmap is swapped in?
+    public var thumbnailSurfaceVisible: Bool { !thumbnailView.isHidden }
+
+    /// 363 — how many times this cell blanked a preview it was already showing (0 = the swap goes
+    /// old picture → new picture with no solid frame in between).
+    public var blankedPreviewFrames: Int { thumbnailView.blankedPreviewCount }
+
     private let thumbnailView = ThumbnailEDRView(cornerRadius: 6)
     private let overlay = FilmstripOverlayView()
 
@@ -519,7 +527,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         requestThumbnail(index: index, asset: asset, tier: tier, display: display, priority: .onScreen)
     }
 
-    /// The live document for the anchor photo, the stored one for every other row (218 key input).
+    /// The live document for the photo on screen, the stored one for every other row (218's key
+    /// input) — 363: the cell's *pixels* stay committed (nothing is blanked, an older delivery is
+    /// dropped), but the cell must still **ask** for the document the user is looking at, or the
+    /// pause (326/§4) has nothing to refuse and nothing to hold. See the grid's twin for the full
+    /// argument, including why a cached key is a file switch the pause allows.
     private func document(for asset: Asset) -> EditModel {
         guard let session else { return .neutral }
         if asset.id == session.loadedEditAssetID { return session.edit }
@@ -528,10 +540,20 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,
                                   display: ImageSize, priority: ThumbPriority) {
-        guard let provider = provider(), thumbRequests[index] == nil else { return }
+        guard let provider = provider() else { return }
         guard let session, let url = session.fileURL(for: asset) else { return }
+        let document = document(for: asset)
+        let wanted = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        if let pending = thumbRequests[index] {
+            // One request per cell for one key.
+            guard pending.key.digest != wanted.digest else { return }
+            // 363 — a later document superseded it: condemn the old ask so an older frame cannot
+            // repaint this cell after a newer one is already there.
+            pending.cancel()
+            thumbRequests[index] = nil
+        }
         let token = provider.request(index: index, asset: asset, fileURL: url,
-                                     document: document(for: asset), tier: tier, spec: .hdJPEG,
+                                     document: document, tier: tier, spec: .hdJPEG,
                                      display: display,
                                      priority: priority) { [weak self] idx, key, image in
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
@@ -546,6 +568,13 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         guard let cell = collectionView.item(at: path) as? FilmstripCell else { return }
         // The cell may have been recycled between request and delivery; the asset id is the guard.
         guard cell.cardView.asset?.id == session.assets[index].id else { return }
+        // 363 — and the document may have moved on: a frame for an older edit must not land here.
+        let row = session.assets[index]
+        guard key.digest == ThumbnailProvider.hdJPEGKey(for: row, document: document(for: row)).digest
+        else {
+            staleThumbnailDrops += 1
+            return
+        }
         cell.cardView.thumbnailTier = key.tier
         cell.cardView.applyThumbnail(image, key: key, display: display)
     }
@@ -568,7 +597,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             guard let cell = collectionView.item(at: path) as? FilmstripCell,
                   let asset = cell.cardView.asset,
                   let index = session.assets.firstIndex(where: { $0.id == asset.id }) else { continue }
-            applyThumbnail(to: cell, index: index, asset: asset)
+            // 363 — the **catalog row**, not the copy the cell was configured with: `develop_json` is
+            // what the key is derived from, and that copy is only as fresh as the last `configure`.
+            // Reading it here is what put an edited photo back on its pre-edit key.
+            applyThumbnail(to: cell, index: index, asset: session.assets[index])
         }
     }
 
@@ -580,12 +612,12 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         let path = IndexPath(item: index, section: 0)
         guard collectionView.indexPathsForVisibleItems().contains(path),
               let cell = collectionView.item(at: path) as? FilmstripCell,
-              let asset = cell.cardView.asset, asset.id == id else { return }
+              cell.cardView.asset?.id == id else { return }
         // The in-flight request still carries the pre-edit key; cancel it so it cannot repaint the
         // old frame after the new one arrives.
         thumbRequests[index]?.cancel()
         thumbRequests.removeValue(forKey: index)
-        applyThumbnail(to: cell, index: index, asset: asset)
+        applyThumbnail(to: cell, index: index, asset: session.assets[index])
     }
 
     private func reconcileThumbnails(force: Bool) {
@@ -750,6 +782,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     let scrollActivity = CenteredScroll.Activity()
     /// How many times a centred scroll actually moved the strip. 332's 「已居中 → 0 次」 counts this.
     public private(set) var centerScrollCount = 0
+    /// 363 — deliveries dropped because the document moved on while the frame was rendering.
+    public private(set) var staleThumbnailDrops = 0
     /// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion` in the app; a test replaces it.
     public var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     /// What the last centred scroll gave `NSAnimationContext` — 0 on the jumped (reduce-motion) path.
