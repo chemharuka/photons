@@ -42,10 +42,52 @@ cp "$BIN_SRC" "$DEST/hdrmerge-swift"
 chmod +x "$DEST/hdrmerge-swift"
 ( cd "$DEST" && shasum -a 256 hdrmerge-swift > hdrmerge-swift.sha256 )
 
-cp "$ROOT/Resources/hdrmerge-swift-LICENSE.txt" \
+# The GPL text comes straight from the vendored source — one copy in the tree, not two — so it is
+# impossible for the license shipped in the bundle to drift from the code it covers.
+cp "$ROOT/Vendor/hdrmerge-swift/LICENSE" \
    "$APP/Contents/Resources/licenses/hdrmerge-swift-GPL-3.0.txt"
-cp "$ROOT/Resources/hdrmerge-swift-SOURCE-OFFER.txt" \
-   "$APP/Contents/Resources/licenses/hdrmerge-swift-SOURCE-OFFER.txt"
+
+# §6(d) source offer. Generated rather than kept as a second file for the same reason: the commit
+# and the sha256 it names are facts about *this* build, and a hand-maintained copy goes stale.
+VENDOR_COMMIT="$(awk '/^commit/{print $2}' "$ROOT/Vendor/hdrmerge-swift/VERSION.txt" 2>/dev/null || echo unknown)"
+BINARY_SHA="$(awk '{print $1}' "$DEST/hdrmerge-swift.sha256" 2>/dev/null || echo unknown)"
+cat > "$APP/Contents/Resources/licenses/hdrmerge-swift-SOURCE-OFFER.txt" <<OFFER
+hdrmerge-swift — source code notice (GPLv3 section 6)
+
+Photons ships the executable \`Contents/Resources/bin/hdrmerge-swift\`.
+  binary sha256   $BINARY_SHA
+
+Corresponding source code for that exact binary is included in this distribution:
+
+    Vendor/hdrmerge-swift/          (upstream commit $VENDOR_COMMIT)
+
+That directory is a verbatim copy of the upstream project with no local patches,
+and it builds the shipped binary with:
+
+    scripts/build-hdrmerge.sh --to-app
+
+Upstream, for reference:
+
+    https://github.com/chemharuka/hdrmerge-swift
+
+Both copies are offered at no charge and from the same location as Photons.
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details:
+Contents/Resources/licenses/hdrmerge-swift-GPL-3.0.txt
+
+Scope: the Photons application itself is MIT-licensed and does not link this
+program — it launches it as a separate process and exchanges file paths and JSON,
+which GPLv3 section 5 treats as an aggregate. Only this executable and the sources
+under Vendor/hdrmerge-swift/ are GPLv3. See THIRD_PARTY_NOTICES.md.
+
+hdrmerge-swift is a Swift port of HDRMerge (Copyright 2012 Javier Celaya), also
+GPLv3: https://github.com/jcelaya/hdrmerge
+OFFER
 
 # A binary inside the bundle changes the code directory, so the signature has to be redone.
 # Ad-hoc, exactly like bundle-app.sh does it for the app itself.

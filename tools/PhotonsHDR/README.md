@@ -57,13 +57,13 @@ or step by step:
 ```sh
 make app
 scripts/build-hdrmerge.sh --to-app    # swift build inside Vendor/hdrmerge-swift → Resources/bin
-scripts/bundle-hdrmerge.sh            # licenses + sha256 + re-sign the bundle
+scripts/bundle-hdrmerge.sh            # generate licenses + sha256, then re-sign
 ```
 
 `Vendor/hdrmerge-swift` is a **nested** SwiftPM package that the root `Package.swift` does not
 mention, so SwiftPM never adds an edge between it and Photons — `swift package describe` lists one
 dependency (GRDB) and one target per Photons module, nothing else. A script shells out to build it.
-See `Vendor/hdrmerge-swift/README-VENDOR.md` for why that separation is load-bearing.
+See `VENDOR-hdrmerge-swift.md` for why that separation is load-bearing.
 
 That location is the first place `HDRMergeClient` looks when it resolves the tool, so once the
 binary is packed, anything that links `PhotonsExtensions` — a future sheet, a script, this CLI —

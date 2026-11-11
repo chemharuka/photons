@@ -52,7 +52,7 @@ let outcome = try service.merge(frames) { line in print(line) }
   GPLv3 源码以**嵌套包**形式放在 `Vendor/hdrmerge-swift/`（根 `Package.swift` 不引用它，
   `swift package describe` 里看不到任何 hdrmerge target），由 `scripts/build-hdrmerge.sh`
   单独 `swift build` 出可执行文件。工具缺失时 `isAvailable == false`，调用方据此把入口置灰。
-  见 `Vendor/hdrmerge-swift/README-VENDOR.md` 与 `~/Documents/GitHub/hdrmerge-swift/LICENSE-SCOPE.md`。
+  见 `VENDOR-hdrmerge-swift.md` 与 `~/Documents/GitHub/hdrmerge-swift/LICENSE-SCOPE.md`。
 
 ## DNG/ — 把像素写回一个合法的 DNG
 

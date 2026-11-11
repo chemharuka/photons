@@ -8,7 +8,7 @@
 # MIT. It is a nested package the root `Package.swift` deliberately does not know about, so SwiftPM
 # never adds an edge between the two. Shelling out to `swift build` keeps the code in one tree (no
 # hunting for a second checkout) while keeping the build graphs separate — see
-# Vendor/hdrmerge-swift/README-VENDOR.md.
+# VENDOR-hdrmerge-swift.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

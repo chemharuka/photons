@@ -58,3 +58,29 @@ and `local/research/licensing.md`. Decoding is `CIRAWFilter`, metadata is ImageI
 no source was copied. The M2 schema shape (wide `assets` + cold 1:1 satellite table, import session
 ledger, `content_hash`/`quick_hash` pair) was designed from those readings and is our own code.
 
+
+## hdrmerge-swift (vendored GPLv3 executable, not linked)
+
+- Upstream: <https://github.com/chemharuka/hdrmerge-swift> — **GPL-3.0-or-later**
+- Vendored at `Vendor/hdrmerge-swift/` (verbatim, commit recorded in its `VERSION.txt`;
+  the full GPL text is `Vendor/hdrmerge-swift/LICENSE`). Not a SwiftPM dependency of this
+  package — `swift package describe` lists one dependency (GRDB) and no hdrmerge target.
+- `scripts/build-hdrmerge.sh` compiles it and copies the executable into
+  `Photons.app/Contents/Resources/bin/hdrmerge-swift`. Photons then **spawns it as a child
+  process** and exchanges file paths and JSON on stdio; nothing from it is compiled into the
+  Photons binary, and `PhotonsExtensions/HDR/HDRMergeClient.swift` contains only process/JSON
+  plumbing, no merge algorithm.
+- Why that is compatible with Photons being MIT: GPLv3 §5 (last paragraph) says including a
+  covered work in an *aggregate* does not extend the licence to the other parts, and the GNU GPL
+  FAQ (`#MereAggregation`) draws the line at "pipes, sockets and command-line arguments" versus
+  "linked together in a shared address space". See `VENDOR-hdrmerge-swift.md` and
+  `LICENSE-SCOPE.md`.
+- Obligations discharged at bundle time (`scripts/bundle-hdrmerge.sh`): the GPL text and a §6(d)
+  source offer are written into `Contents/Resources/licenses/`, and the binary's sha256 into
+  `Contents/Resources/bin/`. Because the source is vendored in this same tree, the offer points at
+  something the recipient already has.
+- Only this executable and `Vendor/hdrmerge-swift/` are GPLv3. The Photons application remains MIT.
+- The feature is optional at runtime: with no tool built, the 合并 HDR DNG… entry is unavailable and
+  nothing else changes.
+- hdrmerge-swift is itself a Swift port of HDRMerge (© 2012 Javier Celaya, GPLv3):
+  <https://github.com/jcelaya/hdrmerge>
