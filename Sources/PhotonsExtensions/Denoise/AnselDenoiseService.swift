@@ -192,6 +192,19 @@ public struct AnselDenoiseService: Sendable {
             acc[i] /= wsum[i]
         }
 
+        // Blend the denoised answer back toward the original. Applied here, on normalized values
+        // and before the pad is cropped, so the caller's black/white levels are untouched.
+        //
+        // This has to use `source` (which equals the padded mosaic) rather than `mosaic`: for a
+        // padded run the two differ in size, and indexing `mosaic` by the padded stride would
+        // read the wrong row for every x past `width`.
+        let strength = Float(min(max(options.strength, 0), 1))
+        if strength < 1 {
+            for i in 0..<acc.count where wsum[i] > 0 {
+                acc[i] = source[i] + strength * (acc[i] - source[i])
+            }
+        }
+
         // Crop the pad back off.
         if padW == 0 && padH == 0 {
             return AnselDenoiseOutcome(mosaic: acc, width: W, height: H,

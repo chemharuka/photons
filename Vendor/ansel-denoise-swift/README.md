@@ -6,6 +6,28 @@
 **输出仍是 RGGB mosaic**（不是 RGB），黑点/白电平不变，只改像素值。这是它和绝大多数
 「AI 降噪」的根本区别。
 
+License: **GPL-3.0-or-later** (see `LICENSE`). ansel-denoise is © Aurélien Pierre; this port
+keeps the same license.
+
+仓库：<https://github.com/chemharuka/ansel-denoise-swift>
+
+## 目录
+
+| 路径 | 内容 | 许可 |
+|---|---|---|
+| `Sources/AnselDenoise/` | 网络前向、CPU 卷积、Metal 内核 | GPL-3.0 |
+| `Sources/AnselDenoiseCLI/` | 可执行文件（`tile` / `batch` / `bench` / `info` / `capabilities`） | GPL-3.0 |
+| `Host/Photons/AnselDenoiseClient.swift` | 宿主侧客户端：起进程、读写 float32 文件、解析 JSON | **MIT** |
+| `Tests/` | 7 个单元测试（头部解析、卷积、上采样、前向、GELU） | GPL-3.0 |
+
+`Host/` 下那个文件是 MIT 的——它只 *spawn* 这个 GPL 可执行文件，不链接任何东西。它由宿主
+仓库复制过去使用（或直接编译进宿主），本仓库保留一份作为权威副本。理由见 `LICENSE-SCOPE.md`。
+
+> **改客户端请改这里，然后同步到宿主。** Photons 里实际参与编译的是
+> `Sources/PhotonsExtensions/Denoise/AnselDenoiseClient.swift`，`Vendor/ansel-denoise-swift/`
+> 不参与编译（`Package.swift` 不引用它）。两份内容必须一致——`AnselDenoiseService.swift`
+> （tiling、CFA 相位、羽化、strength 混合）只存在于宿主侧，不在本仓库。
+
 ## 为什么是这个模型
 
 | | ansel | nonlocal-matchfilter |
@@ -42,8 +64,16 @@ $EXE batch MODEL.anselnn tiles.f32 --tile 256 --count 1426 \
 $EXE bench MODEL.anselnn --compare-cpu --tiles 256,512,1024
 ```
 
-配套 Python：`run_gpu_variants.py`（真实 RAW 全流程）、`to_dng.py`（写 DNG）、
-`ref_forward.py`（独立 numpy 参考实现，用于对拍）。
+配套工具（不在本仓库）：真实 RAW 全流程、DNG 写回、独立 numpy 参考实现对拍。
+
+协议细节见 `PROTOCOL.md`；移植过程中踩过的坑见 `PORTING.md`。
+
+## 安装到 Photons
+
+```bash
+./scripts/install-to-photons.sh            # → /opt/homebrew/bin
+./scripts/install-to-photons.sh --in-app   # → Photons.app/Contents/Resources/bin
+```
 
 ## 权重
 
@@ -87,6 +117,31 @@ R 2.82 = 2 × 1.41      G 3.94 = 2 × 1.97      B 2.96 = 2 × 1.48
 
 `--sigma-scale` 可调（默认 `2.82,3.94,2.96`）。代码里是乘系数的平方到 a/b 上，
 等价于 σ 乘系数（因为 σ 是开方出来的）。
+
+**这组系数不随模型变。** 它是「噪声 profile 的量纲约定」，由传感器和 profile 采集方法决定，
+与网络容量无关。上游把它写成全局常量 `DEFAULT_SIGMA_CALIBRATION = (2·1.41, 2·1.97, 2·1.48)`。
+
+### 1b. strength 是另一回事，在宿主侧
+
+`strength`（0…1，宿主侧 `AnselDenoiseClient` 默认 **0.85**）不是本 CLI 的参数。它是拼接之后的
+后处理混合：
+
+```
+out = 原图 + strength × (降噪结果 − 原图)
+```
+
+在归一化域内做，所以不会破坏黑/白电平。与 `--sigma-scale` 的区别：
+
+| | `--sigma-scale` | `strength` |
+|---|---|---|
+| 谁执行 | 网络 | 宿主 |
+| 原理 | 告诉网络噪声有多大，让它真的更用力 | 数学混合，不重新推理 |
+| 代价 | 重跑推理 | 一次遍历 |
+| 副作用 | 会改变网络对纹理的判断 | 调低会把噪声和细节一起放回来 |
+
+**实测：全强度（1.0）并不比 0.85 更接近真值。** 在合成的斜坡+噪声上，`strength=1.0` 的残差
+是 0.00262，0.85 是 0.00249 —— 网络会过冲，把真实信号和噪声一起减掉。这是默认取 0.85 而不是
+1.0 的实测依据，也是 Ansel 自己默认 0.85 的原因。
 
 ### 2. Metal 内核必须统一用 channels-last
 

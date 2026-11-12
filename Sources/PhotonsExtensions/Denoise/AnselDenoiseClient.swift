@@ -71,6 +71,15 @@ public struct AnselDenoiseOptions: Sendable, Equatable {
     public var sigmaScale: [Double] = [2.82, 3.94, 2.96]
     /// Run on the GPU (Metal). Roughly 30× faster than the CPU path at every tile size.
     public var useGPU: Bool = true
+    /// How much of the denoised result to use, 0…1. The blend is
+    /// `out = original + strength·(denoised − original)`, applied in the same normalized domain as
+    /// the input, so it cannot disturb black/white levels.
+    ///
+    /// 0.85 is what Ansel ships: enough to visibly clean up, little enough that texture survives.
+    /// Note this is **not** the same knob as `sigmaScale`. Sigma tells the network how much noise
+    /// to expect (it re-runs inference and decides what to remove); strength only decides how much
+    /// of the answer to keep. Lowering strength puts original noise back along with the detail.
+    public var strength: Double = 0.85
 
     public init() {}
 }
