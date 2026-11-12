@@ -282,9 +282,9 @@ final class DenoiseHUD387Tests: XCTestCase {
                         "③ 第三行必须匹配 ^\\d+:\\d{2}$，实际 \(lines[2])")
     }
 
-    // MARK: - ④ 位置是照片中心（不是画布中心）
+    // MARK: - ④ 位置钉在**UI（画布）中心**，不跟照片走
 
-    func testTheBoxCentresOnThePhotoNotOnTheCanvas() throws {
+    func testTheBoxCentresOnTheCanvasNotOnThePhoto() throws {
         let assets = try makeSession()
         try installFakeTool(blocking: true)
         let (loupe, _) = try makeLoupe(anchor: assets[0].id)
@@ -302,21 +302,20 @@ final class DenoiseHUD387Tests: XCTestCase {
 
         let photo = try photoRect(loupe)
         let canvasCentre = CGPoint(x: loupe.view.bounds.midX, y: loupe.view.bounds.midY)
-        let dx = abs(laydown.center.x - photo.midX), dy = abs(laydown.center.y - photo.midY)
-        print(String(format: "④ 卡片中心 (%.2f, %.2f) · 照片中心 (%.2f, %.2f) · 差 (%.2f, %.2f) pt · "
-                     + "画布中心 (%.2f, %.2f) 距照片中心 (%.2f, %.2f) pt",
-                     laydown.center.x, laydown.center.y, photo.midX, photo.midY, dx, dy,
-                     canvasCentre.x, canvasCentre.y,
-                     abs(canvasCentre.x - photo.midX), abs(canvasCentre.y - photo.midY)))
+        let dx = abs(laydown.center.x - canvasCentre.x)
+        let dy = abs(laydown.center.y - canvasCentre.y)
+        print(String(format: "④ 卡片中心 (%.2f, %.2f) · 画布中心 (%.2f, %.2f) · 差 (%.2f, %.2f) pt · "
+                     + "照片中心 (%.2f, %.2f)（已知被 pan 平移过 %.0f/%.0f pt，所以两者本就该不同）",
+                     laydown.center.x, laydown.center.y, canvasCentre.x, canvasCentre.y, dx, dy,
+                     photo.midX, photo.midY, 120.0, -80.0))
 
-        XCTAssertLessThanOrEqual(dx, 1, "④ 横向必须贴着照片中心")
-        XCTAssertLessThanOrEqual(dy, 1, "④ 纵向必须贴着照片中心")
-        // …and the two centres are genuinely different here, so ④ is not ⑤'s degenerate case.
-        XCTAssertGreaterThan(hypot(canvasCentre.x - photo.midX, canvasCentre.y - photo.midY), 20,
-                             "④ 这一帧里画布中心与照片中心必须明显不同")
-        XCTAssertGreaterThan(hypot(laydown.center.x - canvasCentre.x,
-                                   laydown.center.y - canvasCentre.y), 20,
-                             "④ 卡片没有跟着画布中心 —— 那正是反向门 ⑮ 要抓的")
+        // 2026-11-12（用户）：「降噪中固定在UI的中间」。方向与本单第一版**相反**：
+        // 卡片钉的是画布中心，不是照片中心 —— 缩放/平移照片时它不许动。
+        XCTAssertLessThanOrEqual(dx, 1, "④ 横向必须钉在画布中心")
+        XCTAssertLessThanOrEqual(dy, 1, "④ 纵向必须钉在画布中心")
+        // …and the photo really was panned away, so ④ is not a degenerate "both centres coincide" case.
+        XCTAssertGreaterThan(hypot(photo.midX - canvasCentre.x, photo.midY - canvasCentre.y), 20,
+                             "④ 这一帧里照片中心必须被平移得明显偏离画布中心")
 
         try Data().write(to: gate)
         waitForDenoiseEnd()

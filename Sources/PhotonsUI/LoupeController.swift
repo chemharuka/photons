@@ -5029,36 +5029,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         DenoiseProgressOverlay.elapsedText(seconds)
     }
 
-    /// **The photo's centre**, in the overlay's points: `photoRect`'s midX/midY.
+    /// 387/392 — **the card sits in the middle of the UI, not on the photograph.**
     ///
-    /// The projection is the one authority every other canvas overlay already uses (`CropTool.layout`,
-    /// `maskHandlesLayout`): `framing().mapping(of: viewState)` — the frame rect mapped to view points,
-    /// divided by the backing scale. When there is no projection yet, or one degenerate enough to be
-    /// meaningless (the first frame of a photo), the canvas' own centre is the honest fallback (§2.5:
-    /// `photoRect.width > 1 && height > 1` 才用).
+    /// 2026-11-12（用户）：「降噪中的提示目前会随着界面缩放而修改位置？降噪中固定在UI的中间」。
+    /// 之前这里优先返回 `photoRect` 的中心，于是缩放/平移照片时卡片跟着跑 —— 用户要的是它钉在
+    /// 画布可视区正中。`framing()` 因此不再参与，`denoisePhotoRectInView()` 一并删掉。
+    ///
+    /// 画布中心在窗口 resize 时会动，那是应该的：它跟的是 **UI**，不是照片。
     private func denoiseBoxCenter() -> CGPoint {
-        let canvasCentre = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
-        guard let rect = denoisePhotoRectInView(), rect.width > 1, rect.height > 1 else {
-            return canvasCentre
-        }
-        return CGPoint(x: rect.midX, y: rect.midY)
-    }
-
-    /// Where the photograph is on the canvas, in view points — recomputed here rather than read off a
-    /// frame, because the box must be in the right place on the very first tick (before any frame of
-    /// this photo has landed).
-    ///
-    /// `framing()` is only asked **after** the visibility gate in `refreshDenoiseHUD`, so an idle
-    /// loupe never pays for this.
-    private func denoisePhotoRectInView() -> CGRect? {
-        guard let framing = framing() else { return nil }
-        let mapping = framing.mapping(of: viewState)
-        let scale = max(backingScale, 1e-6)
-        let a = mapping.frameView(frameX: 0, frameY: 0)
-        let b = mapping.frameView(frameX: framing.sourceWidth, frameY: framing.sourceHeight)
-        guard a.x.isFinite, a.y.isFinite, b.x.isFinite, b.y.isFinite else { return nil }
-        return CGRect(x: min(a.x, b.x) / scale, y: min(a.y, b.y) / scale,
-                      width: abs(b.x - a.x) / scale, height: abs(b.y - a.y) / scale)
+        CGPoint(x: container.bounds.midX, y: container.bounds.midY)
     }
 
     /// 188 — **the stale rectangle's one gate.**
