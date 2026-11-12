@@ -1055,6 +1055,46 @@ public enum CropMath {
                           allowsOutsideSource: allowsOutsideSource)
     }
 
+    /// **397 — the same law with the units spelled out.** A lock's ratio is a **pixel** ratio, so
+    /// converting it into the rect's normalized space needs the pixel grid the rect is *measured in* —
+    /// and that is not always the photograph.
+    ///
+    /// A `.canvas`-spaced rect (`GeometryGroup.cropSpace`) is a rectangle of the **document canvas**
+    /// (`CropGeometry.photoQuadExtent`: the photograph after `P → R`, 9846×6536 for the user's file
+    /// against the source's 9520×6336). Interpreting its ratio on the source grid therefore describes
+    /// a *different* rectangle: 1.5067 in normalized units instead of 1.5025, i.e. 0.28 % off, which
+    /// the fit then magnifies into the 35 px black band the user sees at the bottom of the canvas.
+    ///
+    /// The crop tool has converted in the rect's own units since 362 (`CropToolProjection.units`);
+    /// this overload is the same arithmetic for the **render** path, which used to read
+    /// `orientedSource` unconditionally. `fittedCrop` itself is untouched: in `.source` units it was
+    /// already right, and the two spaces are the same picture whenever there is no keystone.
+    public static func lockedCrop(_ lock: AspectLock, in crop: CropRect,
+                                  units: (width: Double, height: Double),
+                                  allowsOutsideSource: Bool = false) -> CropRect {
+        guard let ratio = lock.ratio else {
+            return crop.clamped(allowsOutsideSource: allowsOutsideSource)
+        }
+        return fittedCrop(aspect: ratio, in: crop, units: units,
+                          allowsOutsideSource: allowsOutsideSource)
+    }
+
+    /// `fittedCrop` with the pixel grid handed in explicitly (`397`). Same algebra, one call to it:
+    /// `normalizedAspect = aspect · units.height / units.width`.
+    public static func fittedCrop(aspect: Double, in crop: CropRect,
+                                  units: (width: Double, height: Double),
+                                  allowsOutsideSource: Bool = false) -> CropRect {
+        let c = crop.clamped(allowsOutsideSource: allowsOutsideSource)
+        guard aspect.isFinite, aspect > 0 else { return c }
+        let normalizedAspect = aspect * units.height / max(units.width, 1)
+        guard normalizedAspect.isFinite, normalizedAspect > 0 else { return c }
+        var w = c.width
+        var h = c.height
+        if w / h > normalizedAspect { w = h * normalizedAspect } else { h = w / normalizedAspect }
+        return CropRect(left: c.centerX - w / 2, top: c.centerY - h / 2,
+                        right: c.centerX + w / 2, bottom: c.centerY + h / 2)
+    }
+
     /// True when every sample of `crop` (rotated by `degrees` about its own centre) lands inside the
     /// source, i.e. the straighten needs no edge clamping. Same inequality the kernel relies on.
     public static func fitsInsideSource(_ crop: CropRect, in source: ImageSize,

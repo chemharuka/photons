@@ -1180,6 +1180,17 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                                                flipHorizontal: false, flipVertical: false,
                                                aspectLock: .original, quarterTurns: 0)
 
+    /// **397 reverse gate — never true in the app.** With it set, `renderCrop` converts the aspect
+    /// lock with the **photograph's** dimensions again, i.e. the pre-397 arithmetic: a `.canvas`
+    /// rect's ratio is then read on the source grid (1.5067 instead of 1.5025 on the user's file), the
+    /// locked rect comes back 1.95 % off and the canvas' bottom band goes black. Only a test turns it
+    /// on; the product never sets it.
+    ///
+    /// `nonisolated(unsafe)` for the same reason `CropGeometry.pre330SourceSpace` and
+    /// `LoupeFraming.readsCanvasCropAsSource` are: one flag, read synchronously on the render path,
+    /// written once by a test before that path runs.
+    nonisolated(unsafe) public static var readsSourceUnitsForLock = false
+
     public init(crop: NormalizedRect = .full,
                 rotationDegrees: Double = 0,
                 flipHorizontal: Bool = false,
@@ -1431,12 +1442,55 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// Measured in the **turned** frame (schema 9): the lock's ratio is a pixel ratio, so it is
     /// fitted against `orientedSource`, and the rect stays a rectangle of the picture the user sees.
     /// At `quarterTurns == 0` this is byte for byte the pre-9 call.
+    ///
+    /// **397 — and against the grid the rect is actually measured in.** The lock's ratio is in
+    /// **pixels**, so turning it into the rect's normalized space needs that space's pixel size. It
+    /// is the photograph only for a `.source` rect; a `.canvas` rect (330) is a rectangle of the
+    /// **document canvas** — the photograph after `P → R`, `CropGeometry.photoQuadExtent`. The crop
+    /// tool has converted in those units since 362 (`CropToolProjection.units`); this function was
+    /// still reading `orientedSource` unconditionally, so one `aspectLock` described two different
+    /// rectangles: 6060.3×8931.8 (ratio 0.6785) when rendering against 6060.3×9105.8 (0.6655) when
+    /// dragging. The fit then cannot hold the lock and the canvas' bottom band goes black — the
+    /// reported 35 px, 1.9 % of the frame, and the same 1.9 % is why the frame did not follow the
+    /// hand. `.source` documents are untouched (the two grids are one picture there whenever there
+    /// is no keystone, and the arithmetic is the identical call).
     public func renderCrop(source: ImageSize) -> CropRect {
         // 132: the crop is the output frame and may extend past the photograph; S0 writes those
         // pixels transparent/black. An in-range rect is unchanged by the editing clamp.
-        CropMath.lockedCrop(aspectLock, in: cropRect, source: orientedSource(source),
+        CropMath.lockedCrop(aspectLock, in: cropRect, units: cropUnitsForLock(source: source),
                             allowsOutsideSource: true)
             .clamped(allowsOutsideSource: true)
+    }
+
+    /// **397 — the pixel grid `aspectLock` is converted with.** The rect's own units: the turned
+    /// photograph for a `.source` crop, the document canvas for a `.canvas` one.
+    ///
+    /// The canvas is `CropGeometry.photoQuadExtent` of a group carrying **this document's angle,
+    /// keystone and crop space** — the same construction `CropTool.projection` makes for the drag
+    /// path (`CropTool.swift:462-471`). The angle there is `framing.transform?.straightenDegrees` +
+    /// the draft's delta; at rest the framing *is* the document and the delta is 0, so the total is
+    /// `straightenDegrees`, and 「拖动与渲染同基准」 holds by construction rather than by two
+    /// spellings agreeing. `quarterTurns` is 0 because the source handed over is already turned —
+    /// the same convention the crop tool and `FrameTransform` use.
+    ///
+    /// A tuple, not `CropUnits`: that type lives in `PhotonsUI` and this file is `PhotonsCore`.
+    public func cropUnitsForLock(source: ImageSize) -> (width: Double, height: Double) {
+        let oriented = orientedSource(source)
+        // 397 reverse gate — never true in the app (see the property's own doc).
+        guard cropSpace == .canvas, !GeometryGroup.readsSourceUnitsForLock else {
+            return (Double(max(oriented.width, 1)), Double(max(oriented.height, 1)))
+        }
+        let geometry = CropGeometry(
+            geometry: GeometryGroup(crop: .full,
+                                    rotationDegrees: straightenDegrees,
+                                    aspectLock: .original,
+                                    quarterTurns: 0,
+                                    perspectiveVertical: perspectiveVertical,
+                                    perspectiveHorizontal: perspectiveHorizontal,
+                                    cropSpace: .canvas),
+            source: oriented)
+        let e = geometry.photoQuadExtent
+        return (e.width, e.height)
     }
 
     /// `renderCrop` in the stored `NormalizedRect` form.

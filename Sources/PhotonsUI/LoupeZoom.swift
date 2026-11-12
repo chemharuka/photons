@@ -681,9 +681,15 @@ public struct LoupeFraming: Equatable, Sendable {
                 canvasRole: CanvasRole = .export) {
         let ds = decodeScale > 0 && decodeScale.isFinite ? decodeScale : 1
         let turned = edit.geometry.orientedSource(decoded)
-        let crop = CropMath.lockedCrop(edit.geometry.aspectLock,
-                                      in: edit.geometry.cropRect,
-                                      source: turned)
+        // **397 — the renderer's own answer, not a second conversion.** This used to spell
+        // `CropMath.lockedCrop(…, source: turned)`, i.e. the same source-grid reading of `aspectLock`
+        // that `renderCrop` had: a `.canvas` rect (330) is measured on the document canvas, so the
+        // camera framed a 6061×8932 picture while S0 drew a 6061×9106 one — 1.9 % off, which is 适应
+        // stopping short and the frame not following the hand. `RenderGraph.plan` asks
+        // `edit.geometry.renderCrop(source: …)` on the very same decoded grid, so delegating here
+        // makes 「镜头框的那张画」 and 「渲染出的那张画」 one call by construction. For a `.source`
+        // document the answer is bit-for-bit the old one (same `lockedCrop` call, same `turned`).
+        let crop = edit.geometry.renderCrop(source: decoded)
         self.init(viewport: viewport,
                   sourceWidth: Double(turned.width) / ds,
                   sourceHeight: Double(turned.height) / ds,
