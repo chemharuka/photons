@@ -1,6 +1,6 @@
 import AppKit
 
-// MARK: - 387 · 「降噪中」 的居中卡片
+// MARK: - 387 · 「降噪中」 的居中卡片 ／ 392 · 「HDR 合成」 的居中卡片
 //
 // The user's second-round spec (2026-11-12, 「第二轮修订」) is three lines and nothing else:
 //
@@ -25,13 +25,19 @@ import AppKit
 // The view itself is the same contract as `HighlightOverlayView` / `CropToolOverlayView`: transparent,
 // `hitTest → nil` (the canvas owns every click), pure `draw(_:)` — no `NSTextField` subviews, which is
 // what keeps a 0.5 s tick from laying out anything.
-final class DenoiseProgressOverlay: NSView {
+//
+// 392 (2026-11-12) added a second card of exactly this shape —— 「HDR 合成 / 3 张 / 0:34」 —— and the
+// user's rule for it was 「继续做」, i.e. **not a second implementation**: the size, the 8 pt clamp, the
+// 分:秒 arithmetic and the drawing are all here, in `ProgressCardOverlay`, and a card supplies only
+// its three strings. Two copies of that arithmetic is how 「the HDR box moved when the digits changed」
+// happens three months from now.
+class ProgressCardOverlay: NSView {
 
     // MARK: what is on screen
 
-    /// `hidden` is the resting state: nothing drawn, nothing to read. `running` means the box is up
-    /// **for the photo on screen right now** — the decision is `LoupeController.refreshDenoiseHUD`'s,
-    /// not this view's, because only the controller knows which photo the single-photo view is showing.
+    /// `hidden` is the resting state: nothing drawn, nothing to read. `running` means the box is up.
+    /// The decision is the **controller's**, not this view's, because only the controller knows which
+    /// photo the single-photo view is showing (387) or whether a merge is in flight (392).
     enum State: Equatable {
         case hidden
         case running
@@ -40,17 +46,16 @@ final class DenoiseProgressOverlay: NSView {
     /// One laid-down frame of the card. Read by the acceptance instead of pixels, because a
     /// screenshot cannot say 「the box did not change width when the digits did」 with a number.
     struct Laydown: Equatable {
-        /// Always three entries, in this order: `["降噪中", "1000×1000", "0:34"]`. The second is `""`
-        /// when the photo's dimensions are unknown.
+        /// Always three entries, in the card's own order — `["降噪中", "1000×1000", "0:34"]` for 387,
+        /// `["HDR 合成", "3 张", "0:34"]` for 392. A line the card cannot fill yet is `""`.
         var lines: [String]
-        /// The **box'** centre in the overlay's own points (`bounds`' centre, after the clamp): equal
-        /// to the photo's centre whenever the photo is big enough to hold the box.
+        /// The **box'** centre in the overlay's own points (`bounds`' centre, after the clamp).
         var center: CGPoint
         /// The box itself, in the overlay's own points. Its `size` is always `boxSize` — that is ②.
         var bounds: CGRect
     }
 
-    /// **The one size.** 180 × 74, for every string this card can ever hold.
+    /// **The one size.** 180 × 74, for every string either card can ever hold.
     static let boxSize = CGSize(width: 180, height: 74)
     /// The card's corner radius (the user asked for a rounded card; 10 pt reads as one at this size).
     static let cornerRadius: CGFloat = 10
@@ -68,39 +73,28 @@ final class DenoiseProgressOverlay: NSView {
     override var isOpaque: Bool { false }
     override var isFlipped: Bool { true }
 
-    /// Never a hit target: a click on the middle of the picture still belongs to the canvas (⑥).
+    /// Never a hit target: a click on the middle of the picture still belongs to the canvas (⑥/⑦).
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    // MARK: the three lines (pure, so ③ ⑨ ⑩ ⑪ are arithmetic and not a screenshot)
+    // MARK: the lines (pure, so the acceptance is arithmetic and not a screenshot)
 
-    /// `宽×高`, or `""` when either number is unknown — **never** `0×0`. `×` is U+00D7 (MULTIPLICATION
-    /// SIGN), not the letter `x`: ③ checks the code point, because at 11 pt they are hard to tell apart
-    /// on screen and only one of them is right.
-    static func pixelText(width: Int?, height: Int?) -> String {
-        guard let width, let height, width > 0, height > 0 else { return "" }
-        return "\(width)×\(height)"
-    }
+    /// The two type sizes. The title is **bigger than the two detail lines** (②), and the detail lines
+    /// are monospaced-digit so a ticking clock does not shimmy sideways inside the fixed box.
+    static let titleFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
+    static let detailFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
 
-    /// `分:秒` — minutes unpadded, seconds two digits, **no hours**: 3665 s is `61:05` (§2.4, ⑪).
+    /// `分:秒` — minutes unpadded, seconds two digits, **no hours**: 3665 s is `61:05` (§2.4, 387 ⑪).
+    /// Shared by both cards so 「HDR 的时间带小时了」 cannot be a one-file bug.
     static func elapsedText(_ seconds: Double) -> String {
         let total = seconds.isFinite ? max(0, Int(seconds)) : 0
         return "\(total / 60):" + String(format: "%02d", total % 60)
     }
 
-    /// The three lines, in the user's order. One function so the order cannot drift between the
-    /// drawing and the acceptance.
-    static func lines(width: Int?, height: Int?, elapsed: Double) -> [String] {
-        ["降噪中", pixelText(width: width, height: height), elapsedText(elapsed)]
-    }
-
-    /// The title line. Exposed because ① asserts 「不带省略号」 on the literal.
-    static let title = "降噪中"
-
     // MARK: the box' rect
 
     /// Centre the fixed box on `center`, then keep it inside `containerBounds.insetBy(8, 8)`.
     ///
-    /// A photo smaller than the box (a 40 × 30 rect, ⑤) is why the clamp exists at all: the box is
+    /// A photo smaller than the box (a 40 × 30 rect, 387 ⑤) is why the clamp exists at all: the box is
     /// **not** shrunk to fit — it stays 180 × 74 and slides until it is legal. When the clamp bites,
     /// `center` is the box' own centre, so `bounds.midX/midY == center` always holds.
     static func laydown(lines: [String], center: CGPoint, containerBounds: CGRect) -> Laydown {
@@ -125,12 +119,22 @@ final class DenoiseProgressOverlay: NSView {
         return out
     }
 
-    // MARK: drawing
+    // MARK: where the three lines land
 
-    /// The type the three lines are drawn with: one place, because ② changes the strings and must not
-    /// change the box.
-    static let titleFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
-    static let detailFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+    /// The three text rects inside `box`, in draw order: title, line 2, line 3.
+    ///
+    /// One function, called by `draw(_:)` **and** by the acceptance: ② asks whether the three lines are
+    /// centred on the same x, and the only honest place to measure that is the rect the text is
+    /// actually drawn into. Fixed y/height per slot — the box never re-flows for its content.
+    static func textRects(in box: CGRect) -> [CGRect] {
+        let slot = box.insetBy(dx: 8, dy: 0)
+        let rows: [(y: CGFloat, height: CGFloat)] = [(14, 20), (37, 15), (54, 15)]
+        return rows.map { row in
+            CGRect(x: slot.minX, y: box.minY + row.y, width: slot.width, height: row.height)
+        }
+    }
+
+    // MARK: drawing
 
     override func draw(_ dirtyRect: NSRect) {
         guard state == .running, let laydown = lastLaydown,
@@ -147,19 +151,17 @@ final class DenoiseProgressOverlay: NSView {
         card.lineWidth = 1
         card.stroke()
 
-        // Fixed slots inside the fixed box: title, pixels, elapsed. The second line is empty when the
-        // dimensions are unknown, which draws nothing — the card keeps its size either way.
-        let slot = laydown.bounds.insetBy(dx: 8, dy: 0)
-        draw(line: laydown.lines[0], font: Self.titleFont, color: .labelColor,
-             y: laydown.bounds.minY + 14, height: 20, in: slot)
-        draw(line: laydown.lines[1], font: Self.detailFont, color: .secondaryLabelColor,
-             y: laydown.bounds.minY + 37, height: 15, in: slot)
-        draw(line: laydown.lines[2], font: Self.detailFont, color: .secondaryLabelColor,
-             y: laydown.bounds.minY + 54, height: 15, in: slot)
+        // Fixed slots inside the fixed box: title, then the two detail lines. An empty line draws
+        // nothing — the card keeps its size either way (387 ⑩).
+        let rects = Self.textRects(in: laydown.bounds)
+        let fonts = [Self.titleFont, Self.detailFont, Self.detailFont]
+        let colors: [NSColor] = [.labelColor, .secondaryLabelColor, .secondaryLabelColor]
+        for (index, rect) in rects.enumerated() where index < laydown.lines.count {
+            draw(line: laydown.lines[index], font: fonts[index], color: colors[index], in: rect)
+        }
     }
 
-    private func draw(line: String, font: NSFont, color: NSColor,
-                      y: CGFloat, height: CGFloat, in slot: CGRect) {
+    private func draw(line: String, font: NSFont, color: NSColor, in rect: CGRect) {
         guard !line.isEmpty else { return }
         let style = NSMutableParagraphStyle()
         style.alignment = .center
@@ -167,7 +169,29 @@ final class DenoiseProgressOverlay: NSView {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font, .foregroundColor: color, .paragraphStyle: style,
         ]
-        (line as NSString).draw(in: CGRect(x: slot.minX, y: y, width: slot.width, height: height),
-                                withAttributes: attributes)
+        (line as NSString).draw(in: rect, withAttributes: attributes)
     }
+}
+
+// MARK: - 387 · the denoise card's three strings
+
+/// 「降噪中 / 宽×高 / 分:秒」. Everything else — size, clamp, clock format, drawing — is the base class.
+final class DenoiseProgressOverlay: ProgressCardOverlay {
+
+    /// `宽×高`, or `""` when either number is unknown — **never** `0×0`. `×` is U+00D7 (MULTIPLICATION
+    /// SIGN), not the letter `x`: ③ checks the code point, because at 11 pt they are hard to tell apart
+    /// on screen and only one of them is right.
+    static func pixelText(width: Int?, height: Int?) -> String {
+        guard let width, let height, width > 0, height > 0 else { return "" }
+        return "\(width)×\(height)"
+    }
+
+    /// The three lines, in the user's order. One function so the order cannot drift between the
+    /// drawing and the acceptance.
+    static func lines(width: Int?, height: Int?, elapsed: Double) -> [String] {
+        [title, pixelText(width: width, height: height), elapsedText(elapsed)]
+    }
+
+    /// The title line. Exposed because ① asserts 「不带省略号」 on the literal.
+    static let title = "降噪中"
 }

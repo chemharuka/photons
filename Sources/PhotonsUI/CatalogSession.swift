@@ -765,6 +765,28 @@ public final class CatalogSession {
     /// True between the click and the result: a second click must not start a second 15 s job.
     public private(set) var isHDRMergeRunning = false
 
+    /// 392 — **参与正在进行的这一次合成的 id 列表**（空 = 没有在跑）。
+    ///
+    /// 为什么留列表而不是一个数：卡片的显示条件是「当前单图视图显示的照片**属于这一批**」
+    /// （2026-11-12 用户补充：「HDR 合成是多张参与，所以设计的那些图片都显示」），所以运行期间必须
+    /// 拿得到这批 id。降噪能只用 `denoiseAssetID` 一张，是因为它只处理一张；HDR 是多张。
+    /// `hdrMergeSelection()` 的 `participants` 在开始后不再保存，这里留一份。
+    ///
+    /// 只在 `hdrMergeSelection()` 成功启动处写一次、`finishHDRMerge` 清空，
+    /// **不参与**合成的执行、堆叠或入库，也不改任何既有状态机。
+    public private(set) var hdrMergeParticipantIDs: [String] = []
+
+    /// 392 — 卡片第二行读的张数。与列表同源，所以显示条件与「N 张」不可能各说各话。
+    public var hdrMergeFrameCount: Int { hdrMergeParticipantIDs.count }
+
+    /// 392 — 只读派生量：`nil` 表示「现在没有合成在跑」，否则是这一次参与合成的 id。
+    ///
+    /// 不引入第二个「是否在跑」的事实：它只有一个来源 `isHDRMergeRunning`，这里只是把
+    /// 「在跑吗」与「哪几张」捆成一个原子答案，免得 UI 两次读之间状态翻了。
+    public var hdrMergingParticipantIDs: [String]? {
+        isHDRMergeRunning ? hdrMergeParticipantIDs : nil
+    }
+
     /// What the last successful merge produced — the numbers the tool reported, the asset that joined
     /// the library, and the stack it tops. Nil until a merge succeeds; the failure path leaves it nil
     /// and fills `lastHDRMergeError` instead.
@@ -854,6 +876,9 @@ public final class CatalogSession {
         let service = hdrMergeService
         let queue = hdrMergeQueue
         isHDRMergeRunning = true
+        // 392 — 卡片的两行（张数 + 显示条件）都读这一份 id 列表；它与 `participants` 是同一组，
+        // 只是活到运行结束。
+        hdrMergeParticipantIDs = participants
         lastHDRMergeProgress = "准备合成…"
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in self?.lastHDRMergeProgress = text }
@@ -953,6 +978,7 @@ public final class CatalogSession {
     /// Back on the main actor: publish the outcome, bump the projection, select the result.
     private func finishHDRMerge(_ run: HDRMergeRun) {
         isHDRMergeRunning = false
+        hdrMergeParticipantIDs = []                  // 392 — no run, no participants; the card goes away
         hdrMergeCompletionCount += 1
         hdrMergeRanOffMain = run.ranOffMain
         lastHDRMergeError = run.failure
