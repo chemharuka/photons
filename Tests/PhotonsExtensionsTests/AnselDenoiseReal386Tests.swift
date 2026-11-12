@@ -88,8 +88,6 @@ final class AnselDenoiseReal386Tests: XCTestCase {
               + "black=\(originalNorm.blackByPhase) white=\(originalNorm.white)")
 
         var options = AnselDenoiseOptions()
-        options.tileSize = 256
-        options.overlap = 48
         let job = AnselDenoiseJob(location: AnselDenoiseLocation(modelURL: model,
                                                                 variant: .quarter),
                                   options: options)

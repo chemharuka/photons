@@ -213,8 +213,6 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
 
         var options = AnselDenoiseOptions()
-        options.tileSize = 128          // the fixture is 1024², so 128 keeps the fake run quick
-        options.overlap = 32
         let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
                                                                 modelURL: try makeDummyModel()),
                                   options: options)
@@ -265,8 +263,6 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
 
         var options = AnselDenoiseOptions()
-        options.tileSize = 128
-        options.overlap = 32
         let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
                                                                 modelURL: try makeDummyModel()),
                                   options: options)
@@ -317,7 +313,7 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
         cp "$input" "$out" || exit 4
         bytes=$(wc -c < "$out" | tr -d ' ')
-        echo "{\\"tiles\\":1,\\"tileSize\\":128,\\"ms\\":1.0,\\"backend\\":\\"fake\\",\\"cfa\\":\\"rggb\\",\\"bytes\\":$bytes}"
+        echo "\\\"{\\\"pieces\\\":1,\\\"columns\\\":1,\\\"rows\\\":1,\\\"seams\\\":0,\\\"singlePass\\\":true,\\\"peakBytes\\\":$bytes,\\\"ms\\\":1.0,\\\"backend\\\":\\\"fake\\\",\\\"cfa\\\":\\\"rggb\\\"}"
         """
         try script.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)

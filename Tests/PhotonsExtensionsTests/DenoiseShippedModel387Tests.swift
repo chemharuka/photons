@@ -11,14 +11,14 @@ import XCTest
 ///
 /// 这里钉住的是**查找顺序**，因为打包位置和解析顺序不一致时，打进去也找不到，
 /// 而症状只是菜单灰掉（没有任何崩溃或日志）。
-final class ProbeDenoiseBinModelsTests: XCTestCase {
+final class DenoiseShippedModel387Tests: XCTestCase {
 
     private let location = AnselDenoiseLocation(variant: .quarter)
 
     /// ① `bin/models/` 必须排在 bundle 顶层 `models/` 之前。
     func testTheBinModelsLocationIsSearchedBeforeTheTopLevel() throws {
         let searched = location.searchedModelURLs(environment: [:], bundle: Bundle(for: Self.self))
-        print("PROBE order:")
+        print("387 查找顺序:")
         for (i, url) in searched.enumerated() { print("  [\(i)] \(url.path)") }
 
         let binIndex = try XCTUnwrap(
@@ -59,13 +59,13 @@ final class ProbeDenoiseBinModelsTests: XCTestCase {
         // A fresh clone or a `swift test` without `make app` has no bundle: skip rather than fail,
         // but print so a green run cannot be mistaken for "the layout was checked".
         guard FileManager.default.fileExists(atPath: bin.path) else {
-            print("PROBE 跳过：没有 \(bin.path)（先跑 make app 才有 bundle 可查）")
+            print("387 跳过：没有 \(bin.path)（先跑 make app 才有 bundle 可查）")
             throw XCTSkip("no built app bundle at \(bin.path)")
         }
 
         let fm = FileManager.default
-        print("PROBE tool  exists=\(fm.fileExists(atPath: tool.path)) executable=\(fm.isExecutableFile(atPath: tool.path))")
-        print("PROBE model exists=\(fm.fileExists(atPath: model.path)) bytes=\((try? Data(contentsOf: model).count) ?? -1)")
+        print("387 tool  exists=\(fm.fileExists(atPath: tool.path)) executable=\(fm.isExecutableFile(atPath: tool.path))")
+        print("387 model exists=\(fm.fileExists(atPath: model.path)) bytes=\((try? Data(contentsOf: model).count) ?? -1)")
         XCTAssertTrue(fm.isExecutableFile(atPath: tool.path), "工具应可执行：\(tool.path)")
         XCTAssertTrue(fm.fileExists(atPath: model.path), "模型应与工具同目录：\(model.path)")
 
