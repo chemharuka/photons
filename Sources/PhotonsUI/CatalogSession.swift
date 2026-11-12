@@ -3,6 +3,9 @@ import Observation
 import PhotonsCatalog
 import PhotonsCore
 import PhotonsExport
+// §384: the HDR verb. `PhotonsExtensions` owns `HDRMergeService`, which spawns the GPLv3
+// `hdrmerge-swift` binary as a child process — nothing of it is linked into this app.
+import PhotonsExtensions
 
 /// The one and only source of truth for the workspace.
 ///
@@ -725,6 +728,257 @@ public final class CatalogSession {
             lastStackError = "\(error.localizedDescription)"
             return false
         }
+    }
+
+    // MARK: HDR 合成 (§384) — 右键菜单一个动词，不弹窗口
+    //
+    // The user's contract: 「不用弹窗口，直接和堆叠一样，在右键菜单入口」 and 「参与合成的照片 = 用户
+    // 自己确认的方式就是先选好，再点菜单项」. So there is no sheet, no frame picker and no second
+    // dialog: the selection *is* the choice, and the whole job is one verb that reports into
+    // `lastHDRMergeError` / `lastHDRMergeProgress` — the same "a failure is never silent" contract
+    // `lastStackError` keeps.
+    //
+    // Threading cannot be relaxed: `inspect` ≈2.8 s/frame, `merge` ≈15 s per 60 MP frame, and
+    // `ImportService.run` is synchronous with its own disk I/O. The whole body therefore runs on
+    // `hdrMergeQueue` and only the *result* comes back to the main actor. `hdrMergeRanOffMain`
+    // records what the worker actually saw, so a test can assert the hop instead of trusting this
+    // comment (§3 ⑦).
+
+    /// Why the last HDR merge did not happen, in the service's own Chinese prose
+    /// (`HDRMergeService.Failure.description`) — or the tool's compatibility sentence, which is
+    /// already specific (「尺寸不一致：…」). Nil after a success. Never a sheet: no windows.
+    public private(set) var lastHDRMergeError: String?
+
+    /// The last progress line (`解码 1/3…`), then a one-line summary after a success. One string the
+    /// panel or the footer can read — there is no global HUD in this app and §384 says not to build
+    /// one for this.
+    public private(set) var lastHDRMergeProgress: String?
+
+    /// Runs started / finished. A test waits for the second number instead of sleeping.
+    public private(set) var hdrMergeRunCount = 0
+    public private(set) var hdrMergeCompletionCount = 0
+
+    /// What the worker thread saw when it entered the blocking body. `nil` before the first run;
+    /// `false` would mean the merge ran on the main thread — the bug §3 ⑦ exists to catch.
+    public private(set) var hdrMergeRanOffMain: Bool?
+
+    /// True between the click and the result: a second click must not start a second 15 s job.
+    public private(set) var isHDRMergeRunning = false
+
+    /// What the last successful merge produced — the numbers the tool reported, the asset that joined
+    /// the library, and the stack it tops. Nil until a merge succeeds; the failure path leaves it nil
+    /// and fills `lastHDRMergeError` instead.
+    public struct HDRMergeReport: Sendable, Equatable {
+        public let output: URL
+        public let width: Int
+        public let height: Int
+        public let frameCount: Int
+        public let whiteLevel: Int
+        public let assetID: String
+        public let stackTopID: String
+        public let stackCount: Int
+    }
+
+    public private(set) var lastHDRMergeReport: HDRMergeReport?
+
+    /// The service the menu validates against and the verb calls. Injectable so a test can point the
+    /// client at a missing binary (⇒ 「未找到 hdrmerge-swift」) or at a pinned copy.
+    public var hdrMergeService = HDRMergeService()
+
+    /// Whether the merge tool is **actually there**.
+    ///
+    /// `HDRMergeService.isAvailable` only answers "a client was resolved" — a client can name a path
+    /// that no longer exists (a bundle that lost its binary, a Homebrew upgrade mid-session), and
+    /// `merge` is what would then fail with `tool_missing` 15 s later. The menu needs the same answer
+    /// the merge would get, so the check is the executable itself.
+    public var isHDRMergeAvailable: Bool {
+        guard let client = hdrMergeService.client else { return false }
+        return FileManager.default.isExecutableFile(atPath: client.executableURL.path)
+    }
+
+    /// The queue the blocking half runs on. Injectable so a test can observe the hop without racing
+    /// the global pool.
+    public var hdrMergeQueue = DispatchQueue(label: "photons.hdr.merge", qos: .userInitiated)
+
+    /// 合成所选的照片: 结果 + 参与的原帧 = 一个新堆叠，**结果为置顶**，参与的原帧抽离旧堆叠。
+    ///
+    /// Returns the participating asset ids (empty when the verb refused to start), so a test can name
+    /// the frames without re-reading the selection.
+    @discardableResult
+    public func hdrMergeSelection() -> [String] {
+        hdrMergeRunCount += 1
+        lastHDRMergeError = nil
+        lastHDRMergeProgress = nil
+        hdrMergeRanOffMain = nil
+
+        guard let catalog else {
+            lastHDRMergeError = "未打开库"
+            return []
+        }
+        guard !isHDRMergeRunning else {
+            lastHDRMergeError = "已有一次 HDR 合成在进行"
+            return []
+        }
+        guard isHDRMergeAvailable else {
+            lastHDRMergeError = HDRMergeService.Failure.toolMissing.description
+            return []
+        }
+        // The two gates the menu greys on, re-checked here: a stale menu or a keyboard path must not
+        // be able to start a job the tool would refuse 3 s later.
+        let chosen = selectedAssets
+        var frames: [URL] = []
+        var participants: [String] = []
+        for asset in chosen {
+            guard HDRMergeService.mergeableExtensions.contains(asset.ext.lowercased()) else {
+                lastHDRMergeError = HDRMergeService.Failure.notCFARaw(asset.filename).description
+                return []
+            }
+            guard let url = fileURL(for: asset) else {
+                lastHDRMergeError = HDRMergeService.Failure.unreadable(asset.filename).description
+                return []
+            }
+            frames.append(url)
+            participants.append(asset.id)
+        }
+        guard frames.count >= 2 else {
+            lastHDRMergeError = HDRMergeService.Failure.notEnoughFrames(frames.count).description
+            return []
+        }
+        guard let importService = makeImportService(),
+              let rootID = chosen.first?.sourceRootId
+        else {
+            lastHDRMergeError = "未打开库"
+            return []
+        }
+
+        let service = hdrMergeService
+        let queue = hdrMergeQueue
+        isHDRMergeRunning = true
+        lastHDRMergeProgress = "准备合成…"
+        let report: @Sendable (String) -> Void = { [weak self] text in
+            Task { @MainActor in self?.lastHDRMergeProgress = text }
+        }
+        queue.async { [weak self] in
+            let run = Self.runHDRMerge(service: service, importService: importService,
+                                       catalog: catalog, frames: frames,
+                                       participantIDs: participants,
+                                       rootID: rootID, progress: report)
+            Task { @MainActor in self?.finishHDRMerge(run) }
+        }
+        return participants
+    }
+
+    /// What one HDR run produced. A plain `Sendable` box so the background half never touches the
+    /// session (which is main-actor isolated).
+    private struct HDRMergeRun: Sendable {
+        var ranOffMain = false
+        var failure: String?
+        var output: URL?
+        var assetID: String?
+        var width = 0
+        var height = 0
+        var frameCount = 0
+        var whiteLevel = 0
+        var stackTopID: String?
+        var stackCount = 0
+    }
+
+    /// The blocking half. **Runs off the main thread** (asserted by the caller via `ranOffMain`).
+    ///
+    /// Order is the contract: 预检 → merge → 加进库 → 抽离旧堆叠 + 组新堆叠. The merged file lands
+    /// next to its sources (`HDRMergeService` default), so no extra directory is invented here.
+    private nonisolated static func runHDRMerge(service: HDRMergeService,
+                                               importService: ImportService,
+                                               catalog: Catalog,
+                                               frames: [URL],
+                                               participantIDs: [String],
+                                               rootID: String,
+                                               progress: @escaping @Sendable (String) -> Void) -> HDRMergeRun {
+        var run = HDRMergeRun()
+        run.ranOffMain = !Thread.isMainThread
+        do {
+            progress("预检 \(frames.count) 帧…")
+            if let issue = try service.compatibilityIssue(frames) {
+                run.failure = issue
+                return run
+            }
+
+            var importedID: String?
+            var importFailure: String?
+            let outcome = try service.merge(frames, progress: { progress($0) }, onOutput: { url in
+                // `onOutput` is the module's own "add this to your library" hook — it knows nothing
+                // about catalogs, which is why the import lives here and not in PhotonsExtensions.
+                // `ImportService` dedupes by content hash, so a re-run cannot create two rows.
+                do {
+                    let summary = try importService.run(sources: [url],
+                                                        options: ImportOptions(mode: .reference,
+                                                                               rootID: rootID,
+                                                                               recursive: false))
+                    importedID = summary.addedAssetIDs.first
+                    if importedID == nil {
+                        importFailure = "合成结果已经在库里（内容相同），没有新建照片"
+                    }
+                } catch {
+                    importFailure = error.localizedDescription
+                }
+            })
+            run.width = outcome.width
+            run.height = outcome.height
+            run.frameCount = outcome.frameCount
+            run.whiteLevel = outcome.whiteLevel
+            run.output = outcome.output
+            if let importFailure {
+                run.failure = importFailure
+                return run
+            }
+            guard let importedID else {
+                run.failure = "合成结果未能加入照片库"
+                return run
+            }
+            run.assetID = importedID
+
+            progress("加入堆叠…")
+            let summary = try catalog.makeHDRStack(resultAssetID: importedID,
+                                                  participantIDs: participantIDs)
+            run.stackTopID = summary?.topID
+            run.stackCount = summary?.count ?? 0
+            return run
+        } catch {
+            run.failure = (error as? HDRMergeService.Failure)?.description
+                ?? error.localizedDescription
+            return run
+        }
+    }
+
+    /// Back on the main actor: publish the outcome, bump the projection, select the result.
+    private func finishHDRMerge(_ run: HDRMergeRun) {
+        isHDRMergeRunning = false
+        hdrMergeCompletionCount += 1
+        hdrMergeRanOffMain = run.ranOffMain
+        lastHDRMergeError = run.failure
+        lastHDRMergeReport = nil
+        guard run.failure == nil, let assetID = run.assetID else {
+            lastHDRMergeProgress = nil
+            return
+        }
+        // A stack write is catalog metadata, not an edit: the same signal a rating uses, and ⌘Z never
+        // walks it back.
+        metadataWriteCount += 1
+        lastMetadataAffectedRows = run.stackCount
+        metadataRevision &+= 1
+        lastStackError = nil
+        lastStackAffectedRows = run.stackCount
+        reload()
+        // The result is 置顶, so it is the row the projection shows; select it and the user sees the
+        // finished photo where the bracketed frames used to be.
+        if assets.contains(where: { $0.id == assetID }) { selectOnly(assetID) }
+        if let output = run.output {
+            lastHDRMergeReport = HDRMergeReport(output: output, width: run.width, height: run.height,
+                                                frameCount: run.frameCount, whiteLevel: run.whiteLevel,
+                                                assetID: assetID, stackTopID: run.stackTopID ?? "",
+                                                stackCount: run.stackCount)
+        }
+        lastHDRMergeProgress = "合成完成：\(run.width)×\(run.height)，\(run.frameCount) 帧"
     }
 
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.

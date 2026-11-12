@@ -1,6 +1,9 @@
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+// §384 — `HDRMergeService.mergeableExtensions` / `isAvailable` are what the menu row validates on.
+// The service spawns the GPLv3 `hdrmerge-swift` binary as a child process; it is never linked in.
+import PhotonsExtensions
 
 /// The photo grid: `NSCollectionView` + flow layout + recycled placeholder cells.
 ///
@@ -430,6 +433,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     public let contextMenu = AssetContextMenu()
     /// §378 — the verbs behind the 「堆叠 ▸」 submenu the shared menu carries.
     private lazy var stackMenuTarget = StackMenuTarget(session: session)
+    /// §384 — 「HDR 合成…」 is a sibling of 「堆叠 ▸」 and shares the same target grammar: a small
+    /// `NSObject` that forwards one selector to the session.
+    private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
@@ -1114,6 +1120,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         StackMenuBuilder.attach(to: contextMenu.menu, session: session,
                                 target: stackMenuTarget,
                                 selectedIDs: session.selectedAssets.map(\.id))
+        // §384 — one row, same level as 「堆叠 ▸」, no sheet behind it.
+        HDRMenuBuilder.attach(to: contextMenu.menu, session: session,
+                              target: hdrMenuTarget,
+                              selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 
@@ -1409,6 +1419,92 @@ public enum StackMenuBuilder {
         holder.submenu = stackMenu
         menu.insertItem(holder, at: 0)
         menu.insertItem(.separator(), at: 1)
+    }
+}
+
+/// 右键 ▸「HDR 合成…」 — a **sibling** of 「堆叠 ▸」, not a submenu, and never a sheet.
+///
+/// The user's contract (2026-11-11): 「不用弹窗口，直接和堆叠一样，在右键菜单入口」, and
+/// 「参与合成的照片 = 用户自己确认的方式就是先选好，再点菜单项」. So the item carries one verb and
+/// one decision: *can this selection be merged*, with the reason on the row when it cannot. It is
+/// attached to all three browsers' shared context menu from this one builder, so the grid, the strip
+/// and the sidebar cannot disagree.
+///
+/// Unlike 「堆叠 ▸」 the item is **always present** when a browser builds its menu, and grey instead
+/// of hidden when it does not apply: a row that vanishes teaches nothing, and a missing tool must
+/// say 「未找到 hdrmerge-swift」 rather than silently take the feature away (§3 ②③).
+@MainActor
+public final class HDRMenuTarget: NSObject {
+    public weak var session: CatalogSession?
+
+    public init(session: CatalogSession?) {
+        self.session = session
+        super.init()
+    }
+
+    @objc func mergePressed(_ sender: Any?) {
+        session?.hdrMergeSelection()
+    }
+}
+
+@MainActor
+public enum HDRMenuBuilder {
+
+    public static let title = "HDR 合成…"
+
+    /// Why the item is grey for this selection, or nil when it is usable. Public because it is the
+    /// whole rule: the menu, its tooltip and the verb's own re-check must agree, and a test should be
+    /// able to read the sentence without walking an `NSMenu`.
+    public static func unavailableReason(session: CatalogSession?, selectedIDs: [String]) -> String? {
+        guard let session else { return "未打开库" }
+        guard selectedIDs.count >= 2 else { return "至少需要选中两张 DNG" }
+        let nonRaw = session.selectedAssets.first {
+            !HDRMergeService.mergeableExtensions.contains($0.ext.lowercased())
+        }
+        if let nonRaw { return "只支持 DNG：\(nonRaw.filename)" }
+        // Checked **last** so the reason names the real blocker: a missing tool with one photo
+        // selected should complain about the selection first.
+        guard session.isHDRMergeAvailable else { return "未找到 hdrmerge-swift" }
+        return nil
+    }
+
+    /// The one row. Always returned (that is how it can be grey with a reason), enabled only when
+    /// `unavailableReason` is nil.
+    public static func item(session: CatalogSession?, target: HDRMenuTarget,
+                            selectedIDs: [String]) -> NSMenuItem {
+        let entry = NSMenuItem(title: title,
+                               action: #selector(HDRMenuTarget.mergePressed(_:)),
+                               keyEquivalent: "")
+        entry.target = target
+        if let reason = unavailableReason(session: session, selectedIDs: selectedIDs) {
+            entry.isEnabled = false
+            entry.toolTip = reason
+        } else {
+            entry.isEnabled = true
+            entry.toolTip = "把选中的 \(selectedIDs.count) 张 DNG 合成一张，结果与参与的照片组成新堆叠"
+        }
+        return entry
+    }
+
+    /// Put the row right **after** the 「堆叠」 group (or first when there is no stack group), so the
+    /// two library verbs read as one block in every browser.
+    public static func attach(to menu: NSMenu, session: CatalogSession?, target: HDRMenuTarget,
+                              selectedIDs: [String]) {
+        for (index, existing) in menu.items.enumerated().reversed() where existing.title == title {
+            // Drop the row and, when this builder put one there, the separator after it.
+            if index + 1 < menu.items.count, menu.items[index + 1].isSeparatorItem {
+                menu.removeItem(at: index + 1)
+            }
+            menu.removeItem(at: index)
+        }
+        var insertAt = 0
+        if let stackIndex = menu.items.firstIndex(where: { $0.title == StackMenuBuilder.title }) {
+            insertAt = stackIndex + 1
+            if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
+        }
+        menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs),
+                        at: insertAt)
+        menu.insertItem(.separator(), at: insertAt + 1)
     }
 }
 

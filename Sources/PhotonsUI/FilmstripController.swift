@@ -202,6 +202,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     public let contextMenu = AssetContextMenu()
     /// §378 — the verbs behind the 「堆叠 ▸」 submenu.
     private lazy var stackMenuTarget = StackMenuTarget(session: session)
+    /// §384 — the 「HDR 合成…」 verb's target, built next to the stack one.
+    private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
 
@@ -524,6 +526,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                            missingIDs: session.missingAssets.map(\.id))
         StackMenuBuilder.attach(to: contextMenu.menu, session: session, target: stackMenuTarget,
                                 selectedIDs: session.selectedAssets.map(\.id))
+        // §384 — 「HDR 合成…」 sits next to 「堆叠 ▸」, same builder as the grid and the sidebar.
+        HDRMenuBuilder.attach(to: contextMenu.menu, session: session, target: hdrMenuTarget,
+                              selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 

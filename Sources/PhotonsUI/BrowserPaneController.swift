@@ -35,6 +35,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public let contextMenu = AssetContextMenu()
     /// §378 — the verbs behind the 「堆叠 ▸」 submenu.
     private lazy var stackMenuTarget = StackMenuTarget(session: session)
+    /// §384 — the 「HDR 合成…」 verb's target, built next to the stack one.
+    private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
     private let sourcesScroll = NSScrollView()
     private let photosScroll = NSScrollView()
     private let matte = NSVisualEffectView()
@@ -783,6 +785,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // §378 — the same builder the grid and the strip use, so the three menus are one grammar.
         StackMenuBuilder.attach(to: contextMenu.menu, session: session, target: stackMenuTarget,
                                 selectedIDs: session.selectedAssets.map(\.id))
+        // §384 — the same row the grid and the strip carry.
+        HDRMenuBuilder.attach(to: contextMenu.menu, session: session, target: hdrMenuTarget,
+                              selectedIDs: session.selectedAssets.map(\.id))
     }
 
     /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
