@@ -287,10 +287,16 @@ final class HDRMergeMenu384Tests: XCTestCase {
     // MARK: - ⑧ 真跑一次（有样本就跑）
 
     func testARealMergeStacksTheResultOnTop() throws {
-        let raw = ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"]
-            .map { URL(fileURLWithPath: $0) }
-        guard let raw, FileManager.default.fileExists(atPath: raw.path) else {
-            throw XCTSkip("⑧ 没有 PHOTONS_TEST_RAW，跳过真实合并")
+        // Candidate fixtures, same shape as the rest of the suite: an explicit sample wins, then
+        // the committed bracket. The committed pair exists because this test's whole point is a
+        // *real* merge — synthetic CFA frames cannot produce an exposure ratio to check.
+        let candidates: [URL] = [
+            ProcessInfo.processInfo.environment["PHOTONS_TEST_RAW"].map { URL(fileURLWithPath: $0) },
+            Self.fixture("hdr-bracket-a.dng"),
+        ].compactMap { $0 }
+        guard let raw = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })
+        else {
+            throw XCTSkip("⑧ 没有 PHOTONS_TEST_RAW 也没有 hdr-bracket-a.dng，跳过真实合并")
         }
         // The fixture pairs the sample with its neighbour — a bracket, same body, same size. Copies
         // land in `workDir` so nothing of the user's folder is touched.
@@ -299,6 +305,13 @@ final class HDRMergeMenu384Tests: XCTestCase {
         let siblings = try FileManager.default.contentsOfDirectory(at: raw.deletingLastPathComponent(),
                                                                   includingPropertiesForKeys: nil)
             .filter { $0.pathExtension.lowercased() == "dng" && $0 != raw }
+            // A bracket has to be the *same scene*: when the sample is one of the committed pair,
+            // only take its partner, never some other DNG that happens to share the folder.
+            .filter { other in
+                let stem = raw.deletingPathExtension().lastPathComponent
+                guard stem.hasSuffix("-a") else { return true }
+                return other.deletingPathExtension().lastPathComponent == String(stem.dropLast(2)) + "-b"
+            }
         guard let other = siblings.first else { throw XCTSkip("⑧ 样本旁没有第二张 DNG") }
         let a = dir.appendingPathComponent("FRAME_A.dng")
         let b = dir.appendingPathComponent("FRAME_B.dng")
@@ -320,9 +333,17 @@ final class HDRMergeMenu384Tests: XCTestCase {
             frames.append(asset)
         }
         session.reload()
+        // Point the session at the app's own binary: this test's subject is the merge, not tool
+        // discovery, and under `swift test` there is no bundle-internal tool to discover.
+        if let tool = Self.bundledTool() { session.hdrMergeService = HDRMergeService(client: tool) }
+        guard session.isHDRMergeAvailable else {
+            throw XCTSkip("⑧ 没有构建好的 Photons.app（先跑 scripts/build-and-run.sh --no-launch）")
+        }
         session.setSelection(Set(frames.map(\.id)), anchor: frames[0].id)
         session.hdrMergeSelection()
-        waitForMerge(timeout: 600)
+        // A refusal sets `lastHDRMergeError` and never bumps the counter, so waiting on the counter
+        // alone would hang instead of failing. Watch both.
+        waitForMergeOrRefusal(timeout: 600)
 
         if let error = session.lastHDRMergeError {
             print("⑧ 工具拒绝这对样本：\(error)")
@@ -347,6 +368,32 @@ final class HDRMergeMenu384Tests: XCTestCase {
 
     // MARK: - helpers
 
+    /// A file under `Tests/Fixtures/`, located from this source file so it works from any cwd.
+    private static func fixture(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PhotonsUITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent("Tests/Fixtures/\(name)")
+    }
+
+    /// The tool as the *app* resolves it — `Contents/Resources/bin/hdrmerge-swift` in the built
+    /// bundle.
+    ///
+    /// The session a test builds here gets `Bundle.main` = the xctest runner, which has no
+    /// `Resources/bin`, and the client deliberately has no PATH fallback (a stale copy outside the
+    /// app is exactly the bug that hid a broken merge behind an old binary). So a real-merge test
+    /// has to say which binary to use, the same way `HDRMergeServiceTests` does.
+    private static func bundledTool() -> HDRMergeClient? {
+        let bin = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PhotonsUITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // package root
+            .appendingPathComponent(".build/Photons.app/Contents/Resources/bin/hdrmerge-swift")
+        guard FileManager.default.isExecutableFile(atPath: bin.path) else { return nil }
+        return HDRMergeClient(executableURL: bin)
+    }
+
     private func rowCount() throws -> Int {
         try catalog.dbQueue.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM assets") ?? -1
@@ -362,6 +409,20 @@ final class HDRMergeMenu384Tests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         XCTFail("合成在 \(timeout) s 内没有回来")
+    }
+
+    /// Same wait, but a *refusal* counts as an outcome. `hdrMergeSelection()` returns early on a
+    /// missing tool / one frame / a busy queue, setting `lastHDRMergeError` and never touching the
+    /// completion counter — so polling the counter alone turns every refusal into a 10-minute hang
+    /// with no message. Whoever calls this gets an immediate answer either way.
+    private func waitForMergeOrRefusal(timeout: TimeInterval = 120) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if session.hdrMergeCompletionCount > 0 { return }
+            if session.lastHDRMergeError != nil { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTFail("合成在 \(timeout) s 内没有回来，也没有给出拒绝理由")
     }
 
     /// A 332-byte TIFF with `PhotometricInterpretation = 34892` (LinearRaw) and 3 samples — what the

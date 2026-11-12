@@ -33,6 +33,14 @@ out/
 # pipeline/make_small_dng.py from real Leica metadata (no photo content), 2.1 MB,
 # and the writer tests cannot run without it.
 !Tests/Fixtures/small-rggb.dng
+# ...and the real two-frame HDR bracket the merge acceptance test needs: `hdr-bracket-a/b.dng`
+# are 2094x1774 crops of two genuine exposures of the same scene (L1030667 at 1/250 s ISO 100,
+# L1030668 at 1/100 s ISO 320, ~3 stops apart), cut from the centre-above part of the frame and
+# kept as raw mosaics. hdrmerge-swift only merges photometric 32803, so there is no synthetic
+# substitute for an actual bracket — a dryer fixture could not prove the exposure ratio and the
+# CFA plumbing that this test exists to prove. Still GPL-free: these are the author's own photos,
+# committed with their permission, and the tag pair is all a merge reads.
+!Tests/Fixtures/hdr-bracket-*.dng
 
 # scratch by-products
 *.bak

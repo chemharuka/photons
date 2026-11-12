@@ -9,12 +9,24 @@ import AppKit
 /// missing, so a machine without them still gets a green `make verify`.
 final class HDRMergeServiceTests: XCTestCase {
 
-    private static let bracket = ["L1030664.dng", "L1030665.dng", "L1030666.dng"]
-
+    /// The bracket the real-merge tests run on: an explicit sample on disk wins, else the committed
+    /// `Tests/Fixtures/hdr-bracket-*.dng` pair (two genuine exposures of one scene, ~3 stops apart,
+    /// 2094x1774 raw crops). Both frames must be mergeable CFA DNGs — a synthetic stand-in cannot
+    /// stand in here, because the assertion is about an exposure ratio and a CFA round trip.
     private static func bracketURLs() -> [URL]? {
-        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop/austria")
-        let urls = Self.bracket.map { dir.appendingPathComponent($0) }
-        return urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) } ? urls : nil
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let onDisk = ["L1030664.dng", "L1030665.dng", "L1030666.dng"]
+            .map { home.appendingPathComponent("Desktop/austria/\($0)") }
+        if onDisk.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) { return onDisk }
+
+        let fixtures = ["hdr-bracket-a.dng", "hdr-bracket-b.dng"].map { name in
+            URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()   // PhotonsExtensionsTests
+                .deletingLastPathComponent()   // Tests
+                .deletingLastPathComponent()   // package root
+                .appendingPathComponent("Tests/Fixtures/\(name)")
+        }
+        return fixtures.allSatisfy { FileManager.default.fileExists(atPath: $0.path) } ? fixtures : nil
     }
 
     private static func tempDirectory() throws -> URL {
@@ -97,10 +109,16 @@ final class HDRMergeServiceTests: XCTestCase {
             progressLines.append(line)
         }
 
-        XCTAssertEqual(outcome.output.lastPathComponent, "L1030664-merged.dng")
+        // The output is named after the least-exposed frame, and `metadataFrom` is that same frame.
+        // Assert the relationship between the two rather than a hardcoded filename, so the test
+        // follows whatever bracket it was given instead of pinning one.
+        let metaStem = outcome.metadataFrom.deletingPathExtension().lastPathComponent
+        XCTAssertEqual(outcome.output.lastPathComponent, "\(metaStem)-merged.dng",
+                       "output is named after the frame the metadata came from")
         XCTAssertEqual(outcome.output.deletingLastPathComponent().path, dir.path)
-        XCTAssertEqual(outcome.frameCount, 3)
-        XCTAssertEqual(outcome.metadataFrom.lastPathComponent, "L1030664.dng")
+        XCTAssertEqual(outcome.frameCount, frames.count)
+        XCTAssertTrue(copies.contains { $0.lastPathComponent == outcome.metadataFrom.lastPathComponent },
+                      "metadata must come from one of the inputs")
         XCTAssertEqual(outcome.whiteLevel, 65535, "headroom 4 in a 16-bit container")
         XCTAssertTrue(FileManager.default.fileExists(atPath: outcome.output.path))
         XCTAssertTrue(progressLines.contains { $0.hasPrefix("解码") })
