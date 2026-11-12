@@ -1175,6 +1175,30 @@ public final class CatalogSession {
         var inheritFailure: String?
     }
 
+    /// §395 / §396 — 那唯一一条「产物带着原图编辑」历史行的 label。
+    ///
+    /// 396 之后它同时**包住三项覆写**（解码器 v9.dng、两根降噪归零），因为整件事是一个 payload
+    /// 一次 `appendDevelop`。改这个名字等于改两单的验收（395 的 ④ 与 396 的 ⑥ 都按字符串断言），
+    /// 所以 396 沿用它而不是新起一条 —— 用户看到的是「产物的编辑 = 原图编辑 + 三项调整」一个步骤。
+    nonisolated static let denoiseInheritLabel = "模型降噪：继承编辑"
+
+    /// §396 B — 这个产物文件**自己**认不认 `"9.dng"`。
+    ///
+    /// 这是**文件能力**的问题，不是运行时行为：`EditModel.decoderVersion` 只接受该文件
+    /// `supportedDecoderVersions` 里的一项，而裸 `"9"` 不在 SL3 的列表里、赋上去会静默读回
+    /// `8`（`EditModel.swift:165-172` 的实测注释：`8`→`08193a35…`、`8.dng`→`a15055fa…`、
+    /// `9.dng`→`f4d7e53b…`）。所以入口是 `RAWDecoder.availableVersions(for:)` —— 它建一个
+    /// 临时 `CIRAWFilter` 读 `supportedDecoderVersions`，与解码路径用的是同一个来源。
+    ///
+    /// **不做「试写再读回」**：那测的是这台机器此刻的行为（`RAWDecoder.decodeDetailed` 的
+    /// read-back 才是那件事），而这里要问的是文件允不允许。
+    ///
+    /// 读不出来（不是 RAW、文件坏了、`CIRAWFilter` 为 nil）一律回答 `false` —— 调用方因此
+    /// 留 `nil`（= 跟随 Apple），既不会写入一个读回会变的值，也不会因为这一项把降噪判失败。
+    nonisolated static func supportsV9(at url: URL) -> Bool {
+        ((try? RAWDecoder.availableVersions(for: url)) ?? []).contains("9.dng")
+    }
+
     /// 阻塞的那一半。**不在主线程**（由 `ranOffMain` 断言）。
     ///
     /// 顺序就是契约：降噪 → 加进库 → 抽离旧堆叠 + 组新堆叠。产物写在源目录，
@@ -1216,14 +1240,41 @@ public final class CatalogSession {
             // `pasteSettings` 合并写入（不经 `sections:` ⇒ 全量；它只写 payload 带的字段，且
             // 里面走 `appendDevelop`，所以整件事是**一个** undo 步骤；蒙版是追加不是替换）。
             //
+            // §396 — **继承与覆写一次写完**，仍然只是一个 undo 步骤。§2.3 的推荐做法是「在
+            // `inherited` 快照上改完再 `pasteSettings`」，但 `EditSnapshot` 不携带
+            // `detailSettings`（它是 042 的四个解码轴，不在剪贴板里 —— 395 的
+            // `testTheClipboardsBoundaryIsTheKnownGap` 把这条缺口钉住了），所以走不了
+            // `pasteSettings`。这里用它的两步等价展开：`snapshot.applied(to:)` 就是
+            // `pasteSettings` 内部的那一次合并（同一个方法、同样的 `destinationAspect = nil`），
+            // 然后 `appendDevelop` 落一条历史行。因此行为与 395 逐字段相同，只多了下面三项。
+            //
             // 失败**不许**拖垮降噪：这段只是「产物带着原图的编辑」的加分项，降噪本身已经成功
             // （文件在磁盘、已入库）。所以 catch 只记 `inheritFailure`，绝不设 `run.failure`
             // —— 后者会让 `finishDenoise` 判整单失败、清掉报告。`participantID` 就是原图的 id。
             progress("继承编辑…")
             do {
-                let settings = try catalog.copySettings(fromAsset: participantID)
-                try catalog.pasteSettings(settings, intoAsset: importedID,
-                                          label: "模型降噪：继承编辑")
+                let inherited = try catalog.copySettings(fromAsset: participantID)
+                let current = try catalog.develop(forAsset: importedID)
+                var payload = inherited.applied(to: current)
+
+                // 396 B — 产物默认走 **v9.dng**（用户的取舍：v9 下 Apple 的三根 no-op 滑杆关掉，
+                // 让模型降噪的结果不被解码器二次处理）。**只有文件自己列了这个版本才写**：裸
+                // "9" 或文件不支持的版本会被静默读回 v8（`EditModel.swift:165-172` 的实测注释），
+                // 所以先问文件的能力，问不到就留 nil（= 跟随 Apple 默认），绝不硬写、也不用
+                // 「试写再读回」冒充能力判断（那是运行时行为）。
+                if Self.supportsV9(at: outcome.output) {
+                    payload.decoderVersion = "9.dng"
+                }
+
+                // 396 C — 降噪归零。v9 下 `colorNR` 是无效写（`DecoderCapabilities.swift:17`：
+                // v9 让 chroma NR / detail / moiré 三根滑杆变 no-op），但产物**可能被切回 v8
+                // 打开**（解码器是用户能选的），那时 `colorNR = 0` 仍然是「不要二次降噪」的正确
+                // 表达 —— 所以两根都写，代价是 v9 下这一行不改变像素。
+                payload.detailSettings.luminanceNR = 0
+                payload.detailSettings.colorNR = 0
+
+                try catalog.appendDevelop(payload, label: Self.denoiseInheritLabel,
+                                          forAsset: importedID)
             } catch {
                 run.inheritFailure = error.localizedDescription
             }
