@@ -208,16 +208,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // `doubleAction` + `target` 才会响应双击，这里以前从没接过，所以双击等于没发生。
         photosTable.target = self
         photosTable.doubleAction = #selector(openPhotoRowInLoupe(_:))
-        // 352 — the press reaches the guard before `NSTableView` selects: a second press inside the
-        // double-click window that lands on a **different** row is the one that slid under the
-        // pointer, and it is eaten whole (`true`) instead of switching photo.
+        // 383 — 按下时只记命中项（双击要打开**第一下**那张）。352 的「窗口内命中另一行就整次吞掉」
+        // 随延迟居中一起退役：单击不再居中，行不会从指针下面滑走；点两行就是两次正常的单击。
         photosTable.onMouseDown = { [weak self] event in
             guard let self else { return false }
             let point = self.photosTable.convert(event.locationInWindow, from: nil)
-            return self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date()) == .swallow
+            _ = self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date())
+            return false
         }
-        clickGuard.onCenter = { [weak self] id in self?.performDeferredCenter(anchorID: id) }
-        clickGuard.onCenterDropped = { [weak self] id in self?.settleWithoutCentering(anchorID: id) }
 
         // 右键：the same removal verbs the grid and the filmstrip offer, on the same menu object. The
         // list resolves the click through `clickedRow`, which AppKit keeps current for us.
@@ -325,8 +323,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         super.viewDidLayout()
         layoutPanes()
         scheduleThumbnailReconcile()
-        // 332 — the first real viewport only exists after layout.
-        centerAnchorIfChanged()
+        // 383 — **布局不再是居中 door**（理由同 `FilmstripController.viewDidLayout`：布局随时发生，
+        // 而锚点可能是另一面刚选中的那张）。居中只剩双击进编辑视角与编辑落地两个显式入口。
     }
 
     deinit {
@@ -400,20 +398,24 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         let next = modelSnapshot(session)
         guard next != lastSnapshot else {
             updateSelectionAndActive()
+            // 383 — 选择/锚点变了不是滚动的理由（本条的单击、胶片条的单击都一样）。记为已结算，于是
+            // 随后的一次 `viewDidLayout` 也不会替它居中；居中只剩双击与编辑落地两个显式入口。
+            markAnchorSettled()
             return
         }
         lastSnapshot = next
         refresh()
+        markAnchorSettled()
     }
 
     /// Selection/anchor only: update the selected rows, the footer and the active label colour.
     /// No `reloadData()` — that would recycle every row and clear its thumbnail for no pixel change.
+    ///
+    /// 383 — 这里以前调 `centerAnchorIfChanged()`，于是「点哪一行就滚到哪一行」。单击只选中，居中只有
+    /// 两个入口：双击进编辑视角（`openRowInLoupe`）与编辑落地（303 的 0.25 s 窗口 → `centerAnchor()`）。
     public func updateSelectionAndActive() {
         guard isViewLoaded, let session else { return }
         applySelectionFromModel()
-        // 332 — the anchor can move without the list changing: every door (click, arrow key, a model
-        // write from elsewhere) lands here, and centring is idempotent when it has not moved.
-        centerAnchorIfChanged()
         footer.stringValue = session.selection.isEmpty
             ? "未选择"
             : "已选 \(session.selection.count)"
@@ -657,6 +659,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     ///
     /// - Parameter assetID: 352 — the photo the first press hit, when the pair is still open. It
     ///   overrides the row, because a re-centre between the two presses can move the row.
+    ///
+    /// 383 §2.4 — 进编辑视角是显式动作，所以这里居中一次（幂等：已居中则 0 次），不再有 352 那种
+    /// 「挂起一次、第二个按下 flush」的延迟居中。
     @discardableResult
     public func openRowInLoupe(_ row: Int, assetID: String? = nil) -> Bool {
         guard let session, let asset = session.assets[safe: row] else { return false }
@@ -664,7 +669,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard session.assets.contains(where: { $0.id == id }) else { return false }
         session.selectOnly(id)
         session.mode = .loupe
+        centreForLoupeEntry()
         return true
+    }
+
+    /// 383 — 双击 / Return 进了 `.loupe` 之后居中一次；已居中（≤ 2 pt）是 no-op，所以重复触发不抖。
+    private func centreForLoupeEntry() {
+        guard let id = session?.anchorID else { return }
+        if centerAnchor() { centredAnchorID = id }
     }
 
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
@@ -672,7 +684,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     // MARK: 332 — keep the anchor photo in the middle of the photo list
 
-    /// 352 — the press/double-click/deferred-centre rule, shared verbatim with `FilmstripController`.
+    /// 383 — the press/double-click rule, shared verbatim with `FilmstripController`: 单击只选中，
+    /// 双击打开第一下那张。352 的延迟居中 / 吞第二下已退役。
     public let clickGuard = BrowserClickGuard()
 
     /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
@@ -714,31 +727,6 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         return true
     }
 
-    /// Centre whenever the anchor moved, whichever door moved it.
-    ///
-    /// 352 — **except** when the anchor is the one a click is still deciding about: that centre waits
-    /// on `clickGuard.pendingCenter` for one double-click window, so the list cannot slide a
-    /// different row under the second press of a double-click.
-    private func centerAnchorIfChanged() {
-        guard let id = session?.anchorID, id != centredAnchorID else { return }
-        guard !clickGuard.isCenterDeferred(id) else { return }
-        if centerAnchor() { centredAnchorID = id }
-    }
-
-    /// 352 — the parked centre fired (a window after the press, or now because the second press was a
-    /// double-click). Centre only; the selection is not touched.
-    private func performDeferredCenter(anchorID: String) {
-        guard let session, session.anchorID == anchorID, anchorID != centredAnchorID else { return }
-        if centerAnchor() { centredAnchorID = anchorID }
-    }
-
-    /// 352 — the parked centre was dropped because the user scrolled; settle the anchor so a later
-    /// model refresh does not pull the list back over them.
-    private func settleWithoutCentering(anchorID: String) {
-        guard session?.anchorID == anchorID else { return }
-        centredAnchorID = anchorID
-    }
-
     /// 352 — the row under `point` (table coordinates) at **press time**, or nil for empty space.
     public func hit(at point: NSPoint) -> BrowserClickGuard.Hit? {
         guard let session else { return nil }
@@ -762,7 +750,16 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         isApplyingModel = false
         session.setSelection([asset.id], anchor: asset.id)
         updateSelectionAndActive()
+        // 383 — 单击只选中：记为已结算（随后的一次布局不会再把它滚到中间）。
+        markAnchorSettled()
         return decision
+    }
+
+    /// 383 — 单击 / 键盘行移动只选中：把当前锚点记为「已结算」，任何「锚点变了」的 door 都不再为它
+    /// 滚动（布局 door 已随 383 退役，这条是双保险）。`centerAnchor()` 的幂等判据仍是几何（≤ 2 pt），
+    /// 双击进编辑视角与编辑落地都直接调它，所以「已结算」不会挡掉那两条显式入口。
+    private func markAnchorSettled() {
+        centredAnchorID = session?.anchorID
     }
 
     // MARK: right-click (same verbs as the grid and the strip)
@@ -912,11 +909,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func photoListDidScroll() {
-        // 352 — a move `Activity` did not attribute to our own animation is the user scrolling: the
-        // parked centre is dropped, not pulled back over them.
-        let before = scrollActivity.lastUserChangeAt
+        // 332 — a move `Activity` did not attribute to our own animation is the user scrolling.
+        // 383: nothing is parked any more (a click never centres), so this only records the timestamp.
         scrollActivity.noteChange()
-        clickGuard.noteUserScroll(scrollActivity.lastUserChangeAt != before)
         scheduleThumbnailReconcile()
     }
 
@@ -1098,6 +1093,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard !ids.isEmpty else { return }
         let anchor = ids.first { session.anchorID == $0 } ?? ids.first
         session.setSelection(Set(ids), anchor: anchor)
+        // 383 — 单击（含 AppKit 的键盘行移动）只选中：把锚点记为已结算，于是 `viewDidLayout` 那条 door
+        // 不会因为随后的一次布局就把它滚到中间。
+        markAnchorSettled()
     }
 
     /// A folder row is a filter, not a selection: the same `reload()` the flat list drove.
@@ -2065,9 +2063,9 @@ final class StackBadgeView: NSView {
     }
 }
 
-/// 352 — the photo list's table, with one hook: the press reaches `BrowserPaneController` **before**
-/// `NSTableView` starts selecting, so the double-click guard can swallow the second press of a pair
-/// that landed on a different row — the row that slid under the pointer when 332 recentred.
+/// 352 / 383 — the photo list's table, with one hook: the press reaches `BrowserPaneController`
+/// **before** `NSTableView` starts selecting, so the press-time hit can be recorded for the
+/// double-click's target (`openTargetID`). 383: the hook no longer eats a press — nothing swallows.
 final class PhotoListTableView: NSTableView {
     var onMouseDown: ((NSEvent) -> Bool)?
 
