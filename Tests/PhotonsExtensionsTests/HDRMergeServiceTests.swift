@@ -50,6 +50,14 @@ final class HDRMergeServiceTests: XCTestCase {
         XCTAssertEqual(try client.protocolVersion(), 1)
     }
 
+    /// A merged DNG is stored as SOF3 lossless JPEG by default. Uncompressed costs ~2.4× the disk
+    /// (120,114,648 → 49,321,692 bytes on a three-frame 60 MP bracket) for bit-identical pixels, so
+    /// "off unless asked" is not the behaviour anyone wants — and nothing in the UI can ask.
+    func testCompressionIsOnByDefault() {
+        XCTAssertTrue(HDRMergeOptions().compress, "client default must request --compress")
+        XCTAssertTrue(HDRMergeService().compress, "service default must request --compress")
+    }
+
     func testMissingToolIsATypedFailure() {
         let service = HDRMergeService(client: HDRMergeClient(executableURL: URL(fileURLWithPath: "/nonexistent/tool")))
         XCTAssertThrowsError(try service.merge([URL(fileURLWithPath: "/tmp/a.dng"),

@@ -24,9 +24,11 @@ public struct HDRMergeOptions: Sendable, Equatable {
     public var whiteLevel: Int?
     /// Take EXIF/DNG metadata from this frame instead of the least exposed one.
     public var metadataFrom: URL?
-    /// Store the mosaic as SOF3 lossless JPEG (`Compression = 7`): 121 MB → ~50 MB on a 60 MP
-    /// frame, bit-exact, and the only compressed form Core Image accepts (it refuses Deflate).
-    public var compress: Bool = false
+    /// Store the mosaic as SOF3 lossless JPEG (`Compression = 7`): 120 MB → 49 MB on a 60 MP
+    /// frame (measured: 120,114,648 → 49,321,692 bytes, +0.7 s), bit-exact, and the only compressed
+    /// form Core Image accepts (it refuses Deflate). On by default: an uncompressed merged DNG is
+    /// ~2.4× the size for no benefit, since the pixels are bit-exact either way.
+    public var compress: Bool = true
 
     public init() {}
 }

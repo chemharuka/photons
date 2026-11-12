@@ -106,10 +106,10 @@ public final class HDRMergeService: @unchecked Sendable {
     /// 16-bit container and leaves +2 stops of recovered highlight room (WhiteLevel 65535).
     public var headroom = 4.0
     public var featherRadius = 3
-    /// SOF3 lossless JPEG. 121 MB → ~50 MB on a 60 MP frame, pixels bit-exact, and the only
+    /// SOF3 lossless JPEG. 120 MB → 49 MB on a 60 MP frame, pixels bit-exact, and the only
     /// compressed form the system decoder accepts (Core Image rejects Deflate outright).
-    /// Off by default so existing callers keep byte-for-byte behaviour.
-    public var compress = false
+    /// On by default: uncompressed costs ~2.4× the disk for identical pixels.
+    public var compress = true
 
     private let clientOverride: HDRMergeClient?
 
