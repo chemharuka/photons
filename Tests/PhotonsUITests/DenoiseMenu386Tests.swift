@@ -108,13 +108,33 @@ final class DenoiseMenu386Tests: XCTestCase {
     }
 
     /// Tool + model that "exist everywhere" from the menu's point of view: a stand-in executable and
-    /// a placeholder `.anselnn`. The stand-in copies the tile file through, so the whole host-side
-    /// chain runs in seconds and the assertions are about wiring, not about the network's quality.
+    /// a placeholder `.anselnn`. §390 — the stand-in answers `capabilities` with `image-dng` and takes
+    /// the DNG-in / DNG-out argument list, copying the file through. The whole host-side chain (naming
+    /// → temp → rename → report) therefore runs in seconds and the assertions are about wiring, not
+    /// about the network's quality.
+    /// 390 — the stand-in has to refuse a non-DNG, because **decoding moved into the tool**.
+    ///
+    /// Before 390 Photons decoded the mosaic itself (`AnselDenoiseService`), so a stand-in that only
+    /// `cp`'d its input was sufficient: the host would fail on a five-byte file anyway. Now the host
+    /// hands two paths to the tool and reads a JSON report, so a bare `cp` turns a five-byte "DNG"
+    /// into a *successful* denoise. Nothing in the current suite would notice — the tests that feed
+    /// garbage (`testAFailedRunLeavesNoFileAndNoRow`) still pass with or without this check, because
+    /// the host's own DNG gate (`source.pathExtension` + `exists`) catches the rest. This is
+    /// **defensive**: it keeps 「⑤ 失败不留垃圾」 meaningful for any future case that hands the tool
+    /// a real path to a fake file.
+    ///
+    /// The check is deliberately coarse: `size < 64` or a wrong `II*\0` magic. The real tool says
+    /// 「解码 RAW 失败：文件在 N 处被截断」; all this stand-in reproduces is that phrase plus exit 2
+    /// (every real failure exits 2).
     @discardableResult
     private func installFakeTool(on session: CatalogSession) throws -> URL {
         let tool = workDir.appendingPathComponent("fake-ansel-denoise-swift")
         let script = """
         #!/bin/sh
+        if [ "$1" = "capabilities" ]; then
+          echo '{"tool":{"name":"ansel-denoise-swift","protocol":2},"gpu":"Fake GPU","features":["image","image-dng","gpu"]}'
+          exit 0
+        fi
         input="$3"
         out=""
         while [ $# -gt 0 ]; do
@@ -122,8 +142,14 @@ final class DenoiseMenu386Tests: XCTestCase {
           shift
         done
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
+        size=$(wc -c < "$input" | tr -d ' ')
+        magic=$(head -c 4 "$input" | od -An -tx1 | tr -d ' \\n')
+        if [ "$size" -lt 64 ] || [ "$magic" != "49492a00" ]; then
+          echo "error: 解码 RAW 失败：文件只有 $size 字节，不是完整的 DNG" >&2
+          exit 2
+        fi
         cp "$input" "$out" || exit 4
-        echo '{"tiles":1,"tileSize":128,"ms":1.0,"backend":"fake","cfa":"rggb"}'
+        echo '{"width":1024,"height":1024,"cfa":"rggb","mosaicCfa":"rggb","pieces":1,"columns":1,"rows":1,"seams":0,"seconds":0.05,"readSeconds":0.0,"inferenceSeconds":0.05,"writeSeconds":0.0,"backend":"fake","outputBytes":1}'
         """
         try script.write(to: tool, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)

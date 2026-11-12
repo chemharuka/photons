@@ -101,10 +101,15 @@ final class DenoiseHUD387Tests: XCTestCase {
         return out
     }
 
-    /// A stand-in `ansel-denoise-swift` that **blocks until `gate` exists**, then copies the tile file
+    /// A stand-in `ansel-denoise-swift` that **blocks until `gate` exists**, then copies the file
     /// through (`failAfterGate: false`) or refuses with a non-zero exit (`true`). 「In flight」 becomes a
     /// state the test owns: ① ⑦ hold the run open for as long as they need and then release it, so
     /// nothing here depends on a sleep landing in the right window.
+    ///
+    /// §390 — the argument list is the DNG one now (`image <model> <in.dng> … --out <out.dng>`), and
+    /// `capabilities` has to answer `image-dng` or the job refuses to start at all. The stand-in is a
+    /// byte copy in both directions, so 「the run finished」 is not evidence of denoising — the tests
+    /// here are about the card, not about pixels.
     ///
     /// `failAfterGate` exists because a genuinely *failing* run is otherwise instantaneous (a truncated
     /// DNG dies in the decode, before the tool is even launched), and a card that is never observably up
@@ -116,6 +121,10 @@ final class DenoiseHUD387Tests: XCTestCase {
         let script = """
         #!/bin/sh
         gate="\(gate.path)"
+        if [ "$1" = "capabilities" ]; then
+          echo '{"tool":{"name":"ansel-denoise-swift","protocol":2},"gpu":"Fake GPU","features":["image","image-dng","gpu"]}'
+          exit 0
+        fi
         input="$3"
         out=""
         while [ $# -gt 0 ]; do
@@ -125,8 +134,16 @@ final class DenoiseHUD387Tests: XCTestCase {
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
         n=0
         while [ ! -f "$gate" ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n+1)); done
+        # 393 — 解码归工具（390），所以假工具也要拒绝非 DNG；否则「1 字节占位」会被当成
+        # 降噪成功，测试就在验一个不存在的成功路径。
+        size=$(wc -c < "$input" | tr -d ' ')
+        magic=$(head -c 4 "$input" | od -An -tx1 | tr -d ' \\n')
+        if [ "$size" -lt 64 ] || [ "$magic" != "49492a00" ]; then
+          echo "error: 解码 RAW 失败：文件只有 $size 字节，不是完整的 DNG" >&2
+          exit 2
+        fi
         \(failAfterGate ? "echo 'model exploded on purpose' >&2; exit 7" : "cp \"$input\" \"$out\" || exit 4")
-        echo '{"tiles":1,"tileSize":128,"ms":1.0,"backend":"fake","cfa":"rggb"}'
+        echo '{"width":1024,"height":1024,"cfa":"rggb","mosaicCfa":"rggb","pieces":1,"columns":1,"rows":1,"seams":0,"seconds":0.05,"readSeconds":0.0,"inferenceSeconds":0.05,"writeSeconds":0.0,"backend":"fake","outputBytes":1}'
         """
         try script.write(to: tool, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)

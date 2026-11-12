@@ -1,22 +1,25 @@
 //
 //  AnselDenoiseJob.swift
 //
-//  §386 的端到端链路：**一个函数从文件到文件**。
+//  §390 的端到端链路：**两个路径，一次调用**。
 //
-//      DNG → SourceDNGDecode.readMosaic(UInt16)
-//          → 归一化（减黑电平、除以白电平-黑电平）
-//          → AnselDenoiseService.denoise（阻塞，务必 off-main）
-//          → 反归一化回 UInt16
-//          → DNGRawWriter.write(from: 原文件, to: 产物)   ← tag 全量复制
-//          → <同目录>/<原名>-denoised.dng
+//      DNG → AnselDenoiseClient.denoiseImage(model:input:output:) → DNG
 //
-//  为什么归一化在这里而不是在四个既有文件里：`SourceDNGDecode` 给的是文件自己的
-//  `UInt16` 原始样本（**黑电平没有减**），`DNGRawWriter` 要的也是同一量级的 `UInt16`，
-//  中间那层归一化只对 `AnselDenoiseService` 有意义（它按 [0,1] 的 `Var = a·x + b`
-//  理解噪声）。所以「除/乘」属于调用方 —— 也就是本文件。两边都不改，插件的行为一个字节不动。
+//  这段之前是本文件里约 480 行的「读 DNG → 归一化 → 写 f32 → 调工具 → 读回 f32 →
+//  反归一化 → 写 DNG」。工具侧（`ansel-denoise-swift` `image in.dng --out out.dng`，d03fa25）
+//  现在自己读文件、自己写文件，所以宿主侧的搬运没有意义：60 MP 上那 284 s 的搬运在工具侧
+//  变成 2.1 s 读 + 0.9 s 写，总耗时从 350 s 降到 42 s。
 //
-//  GPL 边界不变：本文件只调 `AnselDenoiseClient` / `AnselDenoiseService` 的公开 API，
-//  `ansel-denoise-swift` 始终是子进程。
+//  为什么搬走是对的：归一化要用的黑/白电平、CFA 相位、ActiveArea 全在**输入文件**里。以前
+//  宿主读一遍、工具按宿主给的数字理解噪声，两边就有两个关于同一张图的看法；现在两边读的是
+//  同一个文件，不可能不一致。分块策略（切不切、切几块、怎么羽化）同样是工具自己的内存特性，
+//  宿主复刻它只会得到一份会漂移的副本。
+//
+//  本文件剩下的职责只有三件：命名（`-denoised.dng` / `-denoised-2.dng` 递增）、失败不留垃圾
+//  （先写临时名再改名）、以及把工具的 JSON 报告翻译成 `Outcome`。
+//
+//  GPL 边界不变：本文件只调 `AnselDenoiseClient` 的公开 API，`ansel-denoise-swift` 始终是
+//  子进程，没有任何一行被链接进来。
 //
 
 import Foundation
@@ -181,121 +184,27 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
     }
 }
 
-// MARK: - 归一化
-
-/// 一张 DNG 自己的「黑电平 / 白电平」，以及两个方向的换算。
-///
-/// 黑电平按 CFA 相位取值（`BlackLevelRepeatDim` 2×2 ⇒ 4 个值，Leica 是 4×512），
-/// 白电平是标量。归一化就是 `(v − black)/(white − black)`，与 DNG 规范里 CFA 数据的
-/// 定义一致 —— 这也是 `AnselDenoiseService` 的输入契约（黑已减、除过白电平）。
-///
-/// **往返必须是恒等**（§3 ④）：`normalize` 存 `Float`，`denormalize` 在 `Double` 里乘回去再
-/// 四舍五入。`Float` 的相对误差 ≤ 2⁻²⁴，乘上 15871 的码值跨度后远小于 0.5 码，所以对任何
-/// 落在 `[black, white]` 里的样本都精确还原（测试逐样本断言，容差 0）。
-public struct MosaicNormalization: Sendable, Equatable {
-
-    /// 每个 CFA 相位的黑电平，行优先。
-    public let blackByPhase: [Double]
-    public let repeatRows: Int
-    public let repeatCols: Int
-    public let white: Double
-
-    public init(blackByPhase: [Double], repeatRows: Int = 2, repeatCols: Int = 2, white: Double) {
-        precondition(!blackByPhase.isEmpty, "black levels must not be empty")
-        precondition(white > blackByPhase.max()!, "white level must exceed every black level")
-        self.blackByPhase = blackByPhase
-        self.repeatRows = max(1, repeatRows)
-        self.repeatCols = max(1, repeatCols)
-        self.white = white
-    }
-
-    /// 单值黑电平的常见情形（`BlackLevel` 只有一个值）。
-    public init(black: Double, white: Double) {
-        self.init(blackByPhase: [black], repeatRows: 1, repeatCols: 1, white: white)
-    }
-
-    public var range: Double { white - blackByPhase[0] }
-
-    public func black(row: Int, col: Int) -> Double {
-        let r = row % repeatRows, c = col % repeatCols
-        let index = r * repeatCols + c
-        return blackByPhase[min(index, blackByPhase.count - 1)]
-    }
-
-    @inline(__always)
-    public func normalize(_ value: UInt16, row: Int, col: Int) -> Float {
-        Float((Double(value) - black(row: row, col: col)) / range)
-    }
-
-    @inline(__always)
-    public func denormalize(_ value: Float, row: Int, col: Int) -> UInt16 {
-        guard value.isFinite else { return UInt16(black(row: row, col: col).rounded()) }
-        let raw = Double(value) * range + black(row: row, col: col)
-        if raw <= 0 { return 0 }
-        if raw >= Double(UInt16.max) { return UInt16.max }
-        return UInt16(raw.rounded())
-    }
-
-    public func normalized(_ samples: [UInt16], width: Int, height: Int) -> [Float] {
-        var out = [Float](repeating: 0, count: samples.count)
-        for y in 0..<height {
-            let row = y * width
-            for x in 0..<width {
-                out[row + x] = normalize(samples[row + x], row: y, col: x)
-            }
-        }
-        return out
-    }
-
-    public func quantized(_ mosaic: [Float], width: Int, height: Int) -> [UInt16] {
-        var out = [UInt16](repeating: 0, count: mosaic.count)
-        for y in 0..<height {
-            let row = y * width
-            for x in 0..<width {
-                out[row + x] = denormalize(mosaic[row + x], row: y, col: x)
-            }
-        }
-        return out
-    }
-}
-
 // MARK: - 失败
 
+/// 宿主侧还会失败的四种情形。**读文件失败不在这里**：解码、缺 tag、坏 CFA 相位现在都是工具
+/// 自己的错误（它读那个文件，所以它报那一份），经 `AnselDenoiseFailure` 原样变成 `.denoise`。
 public enum AnselDenoiseJobError: Error, CustomStringConvertible, Sendable {
     case notADNG(String)
-    case noRawImage(String)
-    case missingTag(String, Int)
-    case missingCFAPattern
-    case badCFAPattern(String)
     case toolMissing(searched: [String])
     case modelMissing(expectedPath: String)
-    case decode(String)
     case denoise(String)
-    case write(String)
     case move(String)
 
     public var description: String {
         switch self {
         case .notADNG(let name):
             return "只支持 DNG：\(name)"
-        case .noRawImage(let name):
-            return "\(name) 里没有 CFA RAW 数据（已去马赛克的线性 DNG 无法降噪）"
-        case .missingTag(let what, let tag):
-            return "源文件缺少 \(what)（tag \(tag)），无法做黑/白电平归一化"
-        case .missingCFAPattern:
-            return "源文件缺少 CFAPattern（tag 33422），无法确定 Bayer 相位"
-        case .badCFAPattern(let raw):
-            return "无法解析 CFA 相位：\(raw)"
         case .toolMissing:
             return AnselDenoiseNotices.toolMissing
         case .modelMissing(let path):
             return AnselDenoiseNotices.modelMissing(path)
-        case .decode(let message):
-            return "解码 RAW 失败：\(message)"
         case .denoise(let message):
             return "降噪失败：\(message)"
-        case .write(let message):
-            return "写入降噪后的 DNG 失败：\(message)"
         case .move(let message):
             return "产物落盘失败：\(message)"
         }
@@ -312,9 +221,15 @@ public struct AnselDenoiseJob: Sendable {
         public let output: URL
         public let width: Int
         public let height: Int
+        /// **不再由工具回报**：黑白电平留在文件自己的 tag 里（工具整份复制），这条 DNG 路径
+        /// 上没有任何东西需要把它们单独抬出来。留着字段是因为 `Outcome` 是公开 API 且
+        /// `CatalogSession` 会把它抄进 `DenoiseReport`；值为 `0`，不要当读数用。
         public let whiteLevel: Double
+        /// 同上，恒为 `[]`。
         public let blackLevels: [Double]
+        /// 文件声明的 CFA 相位（tag 33422），工具读出来的那一个。
         public let cfa: String
+        /// 保留字段：与 `pieces` 同值（386 的菜单/报告都叫它 tile 数）。
         public let tiles: Int
         /// Pieces the tool used; 1 means a single pass and therefore no seams.
         public let pieces: Int
@@ -353,171 +268,56 @@ public struct AnselDenoiseJob: Sendable {
         return candidate
     }
 
-    // MARK: 读数（黑/白/CFA 都来自原文件自己）
-
-    /// `BlackLevel` / `WhiteLevel` / `BlackLevelRepeatDim` / `CFAPattern`，全部按原文件。
-    ///
-    /// 一律 `Double`：`BlackLevel` 可能是 RATIONAL（Leica 写 `512/1`），也可能是 SHORT 数组。
-    static func normalization(of doc: SourceDNG) throws -> MosaicNormalization {
-        let blackEntry = doc.raw[50714] ?? doc.ifd0[50714]
-        let whiteEntry = doc.raw[50717] ?? doc.ifd0[50717]
-        let repeatEntry = doc.raw[50713] ?? doc.ifd0[50713]
-
-        let blacks = numericValues(blackEntry)
-        guard !blacks.isEmpty else { throw AnselDenoiseJobError.missingTag("BlackLevel", 50714) }
-        guard let white = numericValues(whiteEntry).first else {
-            throw AnselDenoiseJobError.missingTag("WhiteLevel", 50717)
-        }
-        let dims = numericValues(repeatEntry)
-        let rows = dims.count >= 2 ? Int(dims[0]) : (blacks.count == 4 ? 2 : 1)
-        let cols = dims.count >= 2 ? Int(dims[1]) : (blacks.count == 4 ? 2 : 1)
-        guard white > (blacks.max() ?? 0) else {
-            throw AnselDenoiseJobError.missingTag("WhiteLevel > BlackLevel", 50717)
-        }
-        return MosaicNormalization(blackByPhase: blacks, repeatRows: rows, repeatCols: cols,
-                                   white: white)
-    }
-
-    /// `33422 CFAPattern` → `"rggb"` 这样的四字母。猜是不允许的：坏相位会让整张图变棋盘格，
-    /// 所以标签缺失就直接报错，而不是假设 rggb。
-    static func cfaPattern(of doc: SourceDNG) throws -> String {
-        guard let entry = doc.raw[33422] ?? doc.ifd0[33422] else {
-            throw AnselDenoiseJobError.missingCFAPattern
-        }
-        let values = numericValues(entry).map { Int($0) }
-        guard values.count == 4 else {
-            throw AnselDenoiseJobError.badCFAPattern("\(values)")
-        }
-        let letters = values.map { v -> Character in
-            switch v {
-            case 0: return "r"
-            case 1: return "g"
-            case 2: return "b"
-            default: return "?"
-            }
-        }
-        guard !letters.contains("?") else {
-            throw AnselDenoiseJobError.badCFAPattern("\(values)")
-        }
-        return String(letters)
-    }
-
-    /// TIFF 的数值标签 → `Double`。只处理本文件真的会读的类型（BYTE/SHORT/LONG/RATIONAL/
-    /// SRATIONAL），别的类型返回空数组 —— 一个不认识的类型不该被猜成 0。
-    static func numericValues(_ entry: TIFFEntry?) -> [Double] {
-        guard let entry else { return [] }
-        func u16(_ i: Int) -> Double { Double(UInt16(entry.value[i]) | (UInt16(entry.value[i + 1]) << 8)) }
-        func u32(_ i: Int) -> Double {
-            Double(UInt32(entry.value[i]) | (UInt32(entry.value[i + 1]) << 8)
-                   | (UInt32(entry.value[i + 2]) << 16) | (UInt32(entry.value[i + 3]) << 24))
-        }
-        var out: [Double] = []
-        switch entry.type {
-        case 1:                                  // BYTE
-            out = entry.value.prefix(entry.count).map(Double.init)
-        case 3:                                  // SHORT
-            var i = 0
-            while i + 2 <= entry.value.count { out.append(u16(i)); i += 2 }
-        case 4:                                  // LONG
-            var i = 0
-            while i + 4 <= entry.value.count { out.append(u32(i)); i += 4 }
-        case 5, 10:                              // RATIONAL / SRATIONAL
-            var i = 0
-            while i + 8 <= entry.value.count {
-                let num = Double(u32(i)), den = Double(u32(i + 4))
-                out.append(den == 0 ? 0 : num / den)
-                i += 8
-            }
-        default:
-            break
-        }
-        return out
-    }
-
     // MARK: 跑
 
-    /// 一次完整链路。产物**先写临时名再改名**：任何一步失败都不会在源目录留下半个
-    /// `-denoised.dng`（§3 ⑤）。
+    /// 一次完整链路：**把两个路径交给工具**，然后一次改名。
+    ///
+    /// 工具写的是临时名，所以任何一步失败都不会在源目录留下半个 `-denoised.dng`（§3 ④）：
+    /// 工具自己失败时不会写出文件，写出来了但没退出 0 时 `defer` 会把它删掉，只有 JSON 报告
+    /// 与文件都存在之后才改成最终名。
+    ///
+    /// CFA 不再作为参数传：文件里有（tag 33422），工具自己读。宿主传错才是 bug —— 一个坏相位
+    /// 会让整张图变棋盘格，而宿主没有任何办法比工具更清楚这个文件。
     public func run(source: URL,
                     progress: ((String) -> Void)? = nil) throws -> Outcome {
         let fm = FileManager.default
-        guard source.pathExtension.lowercased() == "dng" else {
-            throw AnselDenoiseJobError.notADNG(source.lastPathComponent)
-        }
-        guard fm.fileExists(atPath: source.path) else {
+        guard source.pathExtension.lowercased() == "dng", fm.fileExists(atPath: source.path) else {
             throw AnselDenoiseJobError.notADNG(source.lastPathComponent)
         }
         let client = try location.requireClient()
         let model = try location.requireModel()
-
-        // 1. 读 mosaic（UInt16，黑电平**还没**减）
-        progress?("读取 RAW…")
-        let data: Data
-        let doc: SourceDNG
-        let mosaicSamples: (samples: [UInt16], width: Int, height: Int)
-        do {
-            data = try Data(contentsOf: source, options: .alwaysMapped)
-            doc = try SourceDNG(data: data)
-            mosaicSamples = try doc.readMosaic(data: data)
-        } catch let error as AnselDenoiseJobError {
-            throw error
-        } catch let error as SourceDNG.ReadError {
-            // 没有 SubIFDs / 不是 CFA：这是「不是可降噪的 DNG」，不是像素解码坏了。
-            if case .noRawSubIFD = error {
-                throw AnselDenoiseJobError.noRawImage(source.lastPathComponent)
-            }
-            throw AnselDenoiseJobError.decode(error.description)
-        } catch {
-            throw AnselDenoiseJobError.decode("\(error)")
+        // 协议门槛：没有 `image-dng` 的工具只能做 f32 搬运，而宿主这边已经不搬了。与其让它
+        // 猜一个形状不同的参数表，不如在这里说清「工具太旧」。
+        guard (try? client.supportsDNG()) == true else {
+            throw AnselDenoiseJobError.toolMissing(searched: [client.executableURL.path])
         }
 
-        let normalization = try Self.normalization(of: doc)
-        let cfa = try Self.cfaPattern(of: doc)
-        let width = mosaicSamples.width, height = mosaicSamples.height
-        guard width > 0, height > 0, mosaicSamples.samples.count == width * height else {
-            throw AnselDenoiseJobError.decode("mosaic 尺寸与像素数不符")
-        }
-
-        // 2. 归一化 → 降噪 → 反归一化
         var options = self.options
-        options.cfa = cfa
         // 噪声参数：本单先用默认（`Var = a·x + b`），ISO 自适应留给下一单（§2.1）。
         if options.noiseA.isEmpty { options.noiseA = [0.0004, 0.0003, 0.0004] }
         if options.noiseB.isEmpty { options.noiseB = [3e-6, 1e-6, 1e-6] }
 
-        progress?("归一化 \(width)×\(height)…")
-        let normalized = normalization.normalized(mosaicSamples.samples, width: width, height: height)
-
-        // 单块 = 无接缝。分块策略（是否需要切、切几块、怎么羽化）由 GPL 侧的 `image`
-        // 子命令决定：那是它自己的内存特性，宿主不该复刻这份算术。
-        progress?("降噪 \(width)×\(height)…")
-        let service = AnselDenoiseService(client: client, modelURL: model)
-        let outcome: AnselDenoiseOutcome
-        do {
-            outcome = try service.denoise(mosaic: normalized, width: width, height: height,
-                                          options: options)
-        } catch let failure as AnselDenoiseFailure {
-            throw AnselDenoiseJobError.denoise(failure.description)
-        } catch {
-            throw AnselDenoiseJobError.denoise("\(error)")
-        }
-
-        progress?("写回 DNG（\(outcome.pieces) 块，\(outcome.seams) 处接缝）…")
-        let quantized = normalization.quantized(outcome.mosaic, width: width, height: height)
-
-        // 3. 写 DNG：临时名 → 改名。`DNGRawWriter` 全量复制 tag（黑白电平、ActiveArea、
-        //    DefaultCrop、OpcodeList2/3、XMP、EXIF/GPS、预览），所以产物能按原样渲染。
         let finalURL = Self.outputURL(for: source, fileManager: fm)
         let temp = finalURL.deletingLastPathComponent()
             .appendingPathComponent(".denoise-\(UUID().uuidString).dng")
         defer { try? fm.removeItem(at: temp) }
 
-        let result: DNGRawWriter.Result
+        progress?("降噪 \(source.lastPathComponent)…")
+        let report: AnselDenoiseDNGReport
         do {
-            result = try DNGRawWriter.write(samples: quantized, width: width, height: height,
-                                            from: source, to: temp)
+            report = try client.denoiseImage(model: model, input: source, output: temp, options: options)
+        } catch let failure as AnselDenoiseFailure {
+            // `tool_failed` 的 message 就是工具的 stderr，本身已经是给用户看的那句中文
+            // （「解码 RAW 失败：…」）。再套一层 `code:` 只会让菜单那句读起来像日志。
+            throw AnselDenoiseJobError.denoise(
+                failure.code == "tool_failed" ? failure.message : failure.description)
         } catch {
-            throw AnselDenoiseJobError.write("\(error)")
+            throw AnselDenoiseJobError.denoise("\(error)")
+        }
+        if report.backend != "gpu" && options.useGPU {
+            // 不致命（CPU 上结果仍然正确），但这是唯一能把「跑 7 分钟」和「跑 40 秒」区分开的
+            // 地方，所以它必须出现在进度文案里，而不是只躺在报告里等人去读。
+            progress?("降噪完成（CPU：--gpu 未生效）")
         }
         do {
             try? fm.removeItem(at: finalURL)
@@ -526,11 +326,10 @@ public struct AnselDenoiseJob: Sendable {
             throw AnselDenoiseJobError.move("\(error)")
         }
 
-        return Outcome(output: finalURL, width: width, height: height,
-                       whiteLevel: normalization.white, blackLevels: normalization.blackByPhase,
-                       cfa: cfa, tiles: outcome.pieces,
-                       pieces: outcome.pieces, seams: outcome.seams,
-                       seconds: outcome.seconds,
-                       backend: outcome.backend, byteCount: result.byteCount, source: source)
+        return Outcome(output: finalURL, width: report.width, height: report.height,
+                       whiteLevel: 0, blackLevels: [], cfa: report.cfa,
+                       tiles: report.pieces, pieces: report.pieces, seams: report.seams,
+                       seconds: report.seconds, backend: report.backend,
+                       byteCount: report.outputBytes, source: source)
     }
 }
