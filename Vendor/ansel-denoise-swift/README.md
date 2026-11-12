@@ -15,10 +15,12 @@ keeps the same license.
 
 | 路径 | 内容 | 许可 |
 |---|---|---|
-| `Sources/AnselDenoise/` | 网络前向、CPU 卷积、Metal 内核 | GPL-3.0 |
-| `Sources/AnselDenoiseCLI/` | 可执行文件（`tile` / `batch` / `bench` / `info` / `capabilities`） | GPL-3.0 |
-| `Host/Photons/AnselDenoiseClient.swift` | 宿主侧客户端：起进程、读写 float32 文件、解析 JSON | **MIT** |
-| `Tests/` | 7 个单元测试（头部解析、卷积、上采样、前向、GELU） | GPL-3.0 |
+| `Sources/AnselDenoise/` | 网络前向、CPU 卷积、Metal 内核、`image` 的规划与羽化 | GPL-3.0 |
+| `Sources/AnselDenoise/DNG/` | **DNG 读写**：TIFF/IFD 读取、mosaic 解码、无损 JPEG 编解码、DNG 写回 | GPL-3.0 |
+| `Sources/AnselDenoiseCLI/` | 可执行文件（`image` / `tile` / `batch` / `bench` / `info` / `capabilities`） | GPL-3.0 |
+| `Host/Photons/AnselDenoiseClient.swift` | 宿主侧客户端：起进程、解析 JSON | **MIT** |
+| `Tests/` | 单元测试（头部解析、卷积、上采样、前向、GELU、DNG 全链路） | GPL-3.0 |
+| `scripts/` | 验收与反向门的脚本（`acceptance.sh` / `reverse-gates.sh` / `*-invariants.py` / `make-dng.py`） | GPL-3.0 |
 
 `Host/` 下那个文件是 MIT 的——它只 *spawn* 这个 GPL 可执行文件，不链接任何东西。它由宿主
 仓库复制过去使用（或直接编译进宿主），本仓库保留一份作为权威副本。理由见 `LICENSE-SCOPE.md`。
@@ -51,12 +53,15 @@ EXE=/tmp/ansel-rel/release/ansel-denoise-swift
 # 看模型信息
 $EXE info denoise-quarter-single-v1.anselnn
 
-# 单块（float32 裸文件，宽高按像素数）
+# DNG 进 / DNG 出（**宿主用这个**）：工具自己读写 RAW，只传两个路径
+$EXE image MODEL.anselnn shot.dng --gpu --json --out shot-denoised.dng
+
+# 单块（float32 裸文件，宽高按像素数）—— 实验/bench 用
 $EXE tile MODEL.anselnn in.f32 --width 256 --height 256 \
      --a "0.0004,0.0003,0.0004" --b "3e-6,1e-6,1e-6" \
      --cfa rggb --gpu --out out.f32
 
-# 批量（60 MP 用这个：一次进程处理所有块）
+# 批量（一次进程处理所有块）
 $EXE batch MODEL.anselnn tiles.f32 --tile 256 --count 1426 \
      --a "..." --b "..." --cfa rggb --gpu --out out.f32
 
@@ -64,7 +69,18 @@ $EXE batch MODEL.anselnn tiles.f32 --tile 256 --count 1426 \
 $EXE bench MODEL.anselnn --compare-cpu --tiles 256,512,1024
 ```
 
-配套工具（不在本仓库）：真实 RAW 全流程、DNG 写回、独立 numpy 参考实现对拍。
+`image` 的格式由**扩展名**决定：`.dng` 走 DNG 路径（读 RAW、取文件里的 black/white/CFA、
+写回 DNG），其它走旧的 float32 mosaic 路径。输入输出必须是同一格式，混用直接报错。
+
+### 一次 60 MP 实测（L1030402.dng，9536×6344，release 构建，M1 Max）
+
+```
+read 2.25 s + infer 38.28 s + write 0.86 s = 41.48 s（wall 41.98 s）
+peak RSS 39.6 GB，单 pass，950 tiles
+```
+
+改之前这条路是 **350 s**，其中工具推理 66 s、宿主侧搬运 mosaic 284 s。现在搬运没有了，
+总耗时 = 推理 + 读写，而读写各占 5 % 和 2 %。
 
 协议细节见 `PROTOCOL.md`；移植过程中踩过的坑见 `PORTING.md`。
 
@@ -77,15 +93,31 @@ $EXE bench MODEL.anselnn --compare-cpu --tiles 256,512,1024
 
 ## 权重
 
-不随本仓库分发（GPL 与体积原因）。从上游 manifest 拉取并校验：
+**许可：权重不是 GPL。** 上游分三件事，权重不在任何一类限制里：
+
+| 对象 | 许可 | 覆盖 |
+|---|---|---|
+| `Sources/` 本仓库代码 | GPL-3.0-or-later | 代码 |
+| `LICENSE-DATA.md`（ATDL-1.1） | 训练**数据** | 仅原始传感器 tile |
+| `.anselnn` 权重 | **都不适用** | 无限制 |
+
+`LICENSE-DATA.md` §2.2 原文：「**The resulting weights are yours**: this license places no
+restriction on them — use, ship, sell or license them however you see fit…」
+
+所以权重放仓库没有许可问题，GPL 义务也**不**延伸到权重（GPL 覆盖的是实现——Swift 移植与
+Metal 内核——不是网络跑的那堆数字）。详见 `weights/README.md`。
+
+`denoise-quarter-single-v1.anselnn`（1.9 MB，默认变体）**已提交**，clone 下来可直接跑测试和
+降噪。其余五个用脚本按 manifest 的 sha256 校验下载（不入库，理由是 100 MB 二进制进 git 历史
+是永久成本，而它只是一次 curl）：
 
 ```bash
-curl -sL -o manifest.json \
-  https://raw.githubusercontent.com/aurelienpierreeng/ansel-denoise/master/models/manifest.json
-# 按 manifest 里的 sha256 下载并校验，例如：
-curl -sL -O https://raw.githubusercontent.com/aurelienpierreeng/ansel-denoise/master/models/denoise-quarter-single-v1.anselnn
-shasum -a 256 denoise-quarter-single-v1.anselnn   # 与 manifest 比对
+./scripts/fetch-weights.sh                 # 全部六个，逐个 sha256 校验
+./scripts/fetch-weights.sh quarter-single  # 单个
+./scripts/fetch-weights.sh --list          # 只看列表
 ```
+
+校验失败的下载文件会被**删除**而不是保留——损坏的权重文件能正常加载，只会安静地产生错误像素。
 
 六个变体：`quarter/half/large` × `single/multi`。**只用 `single`**（`multi` 需要
 superpixel binning，本实现未包含）。
