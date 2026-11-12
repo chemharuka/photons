@@ -300,6 +300,9 @@ public struct AnselDenoiseJob: Sendable {
         public let blackLevels: [Double]
         public let cfa: String
         public let tiles: Int
+        /// Pieces the tool used; 1 means a single pass and therefore no seams.
+        public let pieces: Int
+        public let seams: Int
         public let seconds: Double
         public let backend: String
         public let byteCount: Int
@@ -469,7 +472,9 @@ public struct AnselDenoiseJob: Sendable {
         progress?("归一化 \(width)×\(height)…")
         let normalized = normalization.normalized(mosaicSamples.samples, width: width, height: height)
 
-        progress?("降噪 \(width)×\(height)，tile \(options.tileSize)…")
+        // 单块 = 无接缝。分块策略（是否需要切、切几块、怎么羽化）由 GPL 侧的 `image`
+        // 子命令决定：那是它自己的内存特性，宿主不该复刻这份算术。
+        progress?("降噪 \(width)×\(height)…")
         let service = AnselDenoiseService(client: client, modelURL: model)
         let outcome: AnselDenoiseOutcome
         do {
@@ -481,7 +486,7 @@ public struct AnselDenoiseJob: Sendable {
             throw AnselDenoiseJobError.denoise("\(error)")
         }
 
-        progress?("写回 \(outcome.tiles) 个 tile 的 DNG…")
+        progress?("写回 DNG（\(outcome.pieces) 块，\(outcome.seams) 处接缝）…")
         let quantized = normalization.quantized(outcome.mosaic, width: width, height: height)
 
         // 3. 写 DNG：临时名 → 改名。`DNGRawWriter` 全量复制 tag（黑白电平、ActiveArea、
@@ -507,7 +512,9 @@ public struct AnselDenoiseJob: Sendable {
 
         return Outcome(output: finalURL, width: width, height: height,
                        whiteLevel: normalization.white, blackLevels: normalization.blackByPhase,
-                       cfa: cfa, tiles: outcome.tiles, seconds: outcome.seconds,
+                       cfa: cfa, tiles: outcome.pieces,
+                       pieces: outcome.pieces, seams: outcome.seams,
+                       seconds: outcome.seconds,
                        backend: outcome.backend, byteCount: result.byteCount, source: source)
     }
 }

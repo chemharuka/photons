@@ -201,7 +201,14 @@ final class AnselDenoiseJob386Tests: XCTestCase {
                       "第 3 级必须是 ~/Library/Application Support/Photons/models，实际 \(expectedPath)")
         XCTAssertEqual(location.modelPathHint(), expectedPath, "tooltip 写的路径就是用户该放文件的地方")
         // A path that does not exist anywhere resolves to nil, never to a guess.
-        XCTAssertNil(location.resolvedModel(environment: [:]))
+        //
+        // Only assert this when nothing is actually installed: on a machine where a model has
+        // been put in the user directory (the normal state after using the feature) resolving to
+        // that file is correct behaviour, not a bug in the resolver.
+        let installed = FileManager.default.fileExists(atPath: expectedPath)
+        if !installed {
+            XCTAssertNil(location.resolvedModel(environment: [:]))
+        }
     }
 
     // MARK: - 整链（假 tool：把输入 tile 原样抄成输出）
@@ -313,7 +320,7 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
         cp "$input" "$out" || exit 4
         bytes=$(wc -c < "$out" | tr -d ' ')
-        echo "\\\"{\\\"pieces\\\":1,\\\"columns\\\":1,\\\"rows\\\":1,\\\"seams\\\":0,\\\"singlePass\\\":true,\\\"peakBytes\\\":$bytes,\\\"ms\\\":1.0,\\\"backend\\\":\\\"fake\\\",\\\"cfa\\\":\\\"rggb\\\"}"
+        echo "{\\\"pieces\\\":1,\\\"columns\\\":1,\\\"rows\\\":1,\\\"seams\\\":0,\\\"singlePass\\\":true,\\\"peakBytes\\\":$bytes,\\\"ms\\\":1.0,\\\"backend\\\":\\\"fake\\\",\\\"cfa\\\":\\\"rggb\\\"}"
         """
         try script.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)

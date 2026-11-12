@@ -51,13 +51,6 @@ public enum AnselDenoiseVariant: String, Sendable, CaseIterable {
 
 public struct AnselDenoiseOptions: Sendable, Equatable {
     public var variant: AnselDenoiseVariant = .quarter
-    /// Tile edge in mosaic pixels. Must be a multiple of 16 (the network halves resolution
-    /// `depth = 4` times, so anything smaller or misaligned collapses the bottleneck to 1×1).
-    public var tileSize: Int = 256
-    /// Context margin between tiles, in pixels. Ansel's measured receptive field decays to ~1e-6
-    /// of peak at r = 32 and to zero by 96; 48 is their shipped value. A smaller overlap leaves
-    /// faint seams that a single-tile test will never reveal.
-    public var overlap: Int = 48
     /// CFA at the mosaic's top-left, row-major, e.g. "rggb".
     public var cfa: String = "rggb"
     /// Per-channel Poisson-Gaussian coefficients such that `Var = a·x + b` on values normalized
@@ -86,8 +79,14 @@ public struct AnselDenoiseOptions: Sendable, Equatable {
 
 public struct AnselDenoiseReport: Sendable, Equatable {
     public let output: URL
-    public let tiles: Int
-    public let tileSize: Int
+    /// How many pieces the image was handed to the network in. 1 means a single pass, no seams.
+    public let pieces: Int
+    public let columns: Int
+    public let rows: Int
+    public let seams: Int
+    public let singlePass: Bool
+    /// Bytes the largest single forward pass was expected to need.
+    public let peakBytes: Int
     public let milliseconds: Double
     public let backend: String
     public let cfa: String
@@ -162,41 +161,55 @@ public struct AnselDenoiseClient: Sendable {
         return response["gpu"] as? String
     }
 
-    /// Denoise `count` tiles already packed back-to-back in `input`.
+    /// Denoise a whole mosaic in one call.
     ///
-    /// The caller owns tiling: this tool works on a flat float32 buffer of
-    /// `count × tileSize²` normalized mosaic values and returns the same shape. Doing the tiling
-    /// (and the feathered reassembly) outside keeps the GPL component ignorant of image layout
-    /// and lets the host reuse its own overlap logic.
-    public func denoiseBatch(model: URL,
-                             inputTiles: URL,
-                             count: Int,
+    /// Everything about fitting the image into memory happens on the other side of the process
+    /// boundary: the tool decides whether the frame goes through in one pass or has to be cut, how
+    /// many pieces that needs, where the cuts go, and how to feather them. This side stays a
+    /// transport — write float32, run, read float32.
+    ///
+    /// That placement is deliberate. Splitting exists because of *that implementation's* memory
+    /// profile (0.64 GB per megapixel), so hard-coding a piece count here would mean two programs
+    /// agreeing on a number that changes whenever those kernels change.
+    ///
+    /// The tool removes the artefact that motivated this design: the network denoises less
+    /// aggressively near an input edge, so tile borders used to leave visible structure. A single
+    /// pass over 60 MP is also faster (55.8 s vs 77.9 s as 1426 tiles) because tiling spends about
+    /// a third of its work on overlap that is then blended away.
+    ///
+    /// - Parameters:
+    ///   - input: raw float32, `width × height`, normalized to [0,1], row-major.
+    ///   - output: same shape written here.
+    public func denoiseImage(model: URL,
+                             input: URL,
+                             width: Int,
+                             height: Int,
                              output: URL,
                              options: AnselDenoiseOptions = AnselDenoiseOptions()) throws -> AnselDenoiseReport {
-        precondition(count > 0, "tile count must be positive")
+        precondition(width > 0 && height > 0, "image dimensions must be positive")
         precondition(options.noiseA.count == 3 && options.noiseB.count == 3,
                      "noiseA/noiseB must each have 3 channel values")
 
         var arguments = [
-            "batch", model.path, inputTiles.path,
-            "--tile", String(options.tileSize),
-            "--count", String(count),
+            "image", model.path, input.path,
+            "--width", String(width),
+            "--height", String(height),
             "--a", options.noiseA.map { String(format: "%.9g", $0) }.joined(separator: ","),
             "--b", options.noiseB.map { String(format: "%.9g", $0) }.joined(separator: ","),
             "--sigma-scale", options.sigmaScale.map { String(format: "%.9g", $0) }.joined(separator: ","),
             "--cfa", options.cfa.lowercased(),
+            "--strength", String(format: "%.9g", options.strength),
             "--json",
             "--out", output.path,
         ]
         if options.useGPU { arguments.insert("--gpu", at: 3) }
 
         let response = try runJSON(arguments: arguments)
-        guard let tiles = response["tiles"] as? Int,
-              let ms = response["ms"] as? Double,
+        guard let ms = response["ms"] as? Double,
               let backend = response["backend"] as? String,
               let cfa = response["cfa"] as? String else {
             throw AnselDenoiseFailure(code: "bad_response",
-                                      message: "batch did not report tiles/ms/backend/cfa",
+                                      message: "image run did not report ms/backend/cfa",
                                       exitCode: 0)
         }
         guard FileManager.default.fileExists(atPath: output.path) else {
@@ -204,12 +217,15 @@ public struct AnselDenoiseClient: Sendable {
                                       message: "tool reported success but \(output.path) is missing",
                                       exitCode: 0)
         }
-        return AnselDenoiseReport(output: output, tiles: tiles,
-                                  tileSize: response["tileSize"] as? Int ?? options.tileSize,
+        return AnselDenoiseReport(output: output,
+                                  pieces: response["pieces"] as? Int ?? 1,
+                                  columns: response["columns"] as? Int ?? 1,
+                                  rows: response["rows"] as? Int ?? 1,
+                                  seams: response["seams"] as? Int ?? 0,
+                                  singlePass: response["singlePass"] as? Bool ?? true,
+                                  peakBytes: response["peakBytes"] as? Int ?? 0,
                                   milliseconds: ms, backend: backend, cfa: cfa)
     }
-
-    // MARK: - process plumbing
 
     private func runJSON(arguments: [String]) throws -> [String: Any] {
         var env = ProcessInfo.processInfo.environment
