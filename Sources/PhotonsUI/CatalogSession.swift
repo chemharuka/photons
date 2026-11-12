@@ -1033,6 +1033,14 @@ public final class CatalogSession {
 
     public private(set) var lastDenoiseReport: DenoiseReport?
 
+    /// §395 — 继承编辑那一步自己的失败原因，中文一句。`nil` = 没跑过或成功了。
+    ///
+    /// **与 `lastDenoiseError` 刻意分开**：继承失败时降噪本身是成功的 —— 文件在磁盘、已在库里、
+    /// 已堆叠 —— 所以那一条不许写成 `run.failure`（`finishDenoise` 会因此认为整单失败，把报告
+    /// 清掉、把堆叠的元数据信号也一起跳过）。这里只留一句「产物没有继承到原图的编辑」的原因，
+    /// 供 tooltip / 日志读。成功一次就清空，与 `lastDenoiseError` 同一个生命周期。
+    public private(set) var lastDenoiseInheritError: String?
+
     /// 工具与模型在哪儿。Injectable：测试把它指向一个不存在的可执行文件或模型路径，
     /// 就能复现「菜单灰掉的三种原因」，不需要真装东西。
     public var denoiseLocation = AnselDenoiseLocation()
@@ -1137,6 +1145,8 @@ public final class CatalogSession {
         var byteCount = 0
         var stackTopID: String?
         var stackCount = 0
+        /// §395 — 继承编辑那一步的失败原因。**不进 `failure`**：降噪成功了，产物不该被判失败。
+        var inheritFailure: String?
     }
 
     /// 阻塞的那一半。**不在主线程**（由 `ranOffMain` 断言）。
@@ -1176,6 +1186,22 @@ public final class CatalogSession {
             }
             run.assetID = importedID
 
+            // §395 — 产物继承原图的**全部**编辑。用现成的那一对：`copySettings` 取快照、
+            // `pasteSettings` 合并写入（不经 `sections:` ⇒ 全量；它只写 payload 带的字段，且
+            // 里面走 `appendDevelop`，所以整件事是**一个** undo 步骤；蒙版是追加不是替换）。
+            //
+            // 失败**不许**拖垮降噪：这段只是「产物带着原图的编辑」的加分项，降噪本身已经成功
+            // （文件在磁盘、已入库）。所以 catch 只记 `inheritFailure`，绝不设 `run.failure`
+            // —— 后者会让 `finishDenoise` 判整单失败、清掉报告。`participantID` 就是原图的 id。
+            progress("继承编辑…")
+            do {
+                let settings = try catalog.copySettings(fromAsset: participantID)
+                try catalog.pasteSettings(settings, intoAsset: importedID,
+                                          label: "模型降噪：继承编辑")
+            } catch {
+                run.inheritFailure = error.localizedDescription
+            }
+
             progress("组成堆叠…")
             let summary2 = try catalog.makeStack(resultAssetID: importedID,
                                                  participantIDs: [participantID])
@@ -1197,6 +1223,8 @@ public final class CatalogSession {
         denoiseCompletionCount += 1
         denoiseRanOffMain = run.ranOffMain
         lastDenoiseError = run.failure
+        // §395 — 继承失败是**降噪成功**的附注：它单独一行，不影响 `lastDenoiseError` / 报告的有无。
+        lastDenoiseInheritError = run.inheritFailure
         lastDenoiseReport = nil
         guard run.failure == nil, let assetID = run.assetID else {
             lastDenoiseProgress = nil
