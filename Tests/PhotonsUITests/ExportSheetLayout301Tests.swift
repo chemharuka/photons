@@ -158,13 +158,15 @@ final class ExportSheetLayout301Tests: XCTestCase {
         var trailing = 0
         for probe in readouts {
             let rect = frame(of: probe, in: hosted.host)
-            XCTAssertLessThanOrEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding + 0.5,
+            XCTAssertLessThanOrEqual(rect.maxX, sheet.maxX - ExportRowGrid.trailingPadding + 0.5,
                                      "335 · \(probe.rowID) 读数越过面板右 padding")
             guard probe.rowID != "export.ppi" else { continue }
             trailing += 1
             XCTAssertEqual(rect.maxX, ExportRowGrid.contentRight, accuracy: 0.5,
                            "335 · \(probe.rowID) 读数右沿 \(rect.maxX)")
-            XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding, accuracy: 0.5,
+            // 388 —— 内容右沿 = 面板宽 − trailingPadding（20 + scrollerGutter）。以前这里写的是
+            // `− horizontalPadding`，那正好是"内容铺到面板边、指示条压上来"的那个旧假设。
+            XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.trailingPadding, accuracy: 0.5,
                            "335 · \(probe.rowID) 读数右沿必须等于面板右 padding")
         }
         XCTAssertGreaterThanOrEqual(trailing, 3, "至少三行（质量 / 尺寸 / 不透明度）读数贴 540")
@@ -296,12 +298,17 @@ final class ExportSheetLayout301Tests: XCTestCase {
         XCTAssertEqual(summaryRect.height, ExportRowGrid.footerHeight, accuracy: 0.5)
         XCTAssertEqual(buttonsRect.height, ExportRowGrid.buttonHeight, accuracy: 0.5)
 
-        // 重心：左右 padding 相等 —— 摘要左边 = 面板左边 + 20，按钮右边 = 面板右边 − 20。
+        // 重心：内容盒（560 = 面板 576 − scrollerGutter 16）里左右 padding 相等 ——
+        // 摘要左边 = 面板左边 + 20，按钮右边 = 面板右边 − trailingPadding(36) = 540。
+        //
+        // 388 —— 面板本身**故意**不对称：右边多出的 16 是给 overlay 滚动指示条的留白。所以
+        // 「相等」这句话现在成立在内容盒上，不再是面板上；拿面板边比会得到 20 vs 36。
         XCTAssertEqual(summaryRect.minX - sheet.minX, ExportRowGrid.horizontalPadding, accuracy: 0.5,
                        "摘要左侧 padding")
-        XCTAssertEqual(sheet.maxX - buttonsRect.maxX, ExportRowGrid.horizontalPadding, accuracy: 0.5,
-                       "按钮右侧 padding")
-        XCTAssertEqual(summaryRect.minX - sheet.minX, sheet.maxX - buttonsRect.maxX, accuracy: 0.5,
-                       "左右 padding 必须相等")
+        XCTAssertEqual(sheet.maxX - buttonsRect.maxX, ExportRowGrid.trailingPadding, accuracy: 0.5,
+                       "按钮右侧 padding（20 + scrollerGutter）")
+        XCTAssertEqual(summaryRect.minX - sheet.minX,
+                       sheet.maxX - buttonsRect.maxX - ExportRowGrid.scrollerGutter, accuracy: 0.5,
+                       "内容盒里左右 padding 必须相等（面板右侧多 16 是给指示条的）")
     }
 }

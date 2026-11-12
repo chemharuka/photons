@@ -12,19 +12,40 @@ import SwiftUI
 /// **内部**的一段 —— 数值行左起、单位紧跟（PPI），或者值+单位贴着主列右沿（百分数 / px）。于是
 /// 只剩两条列线：
 ///
-///     [padding 20] [label 110 trailing] [gap 8] [main 402 → 右沿 540] [padding 20]
+///     [padding 20] [label 110 trailing] [gap 8] [main 402 → 右沿 540] [padding 20] [gutter 16 → 576]
 ///
 /// 标签右沿 130 与主列起点 138 是 302 的实测值，一个不动；控件右沿从 424 长到 540，于是
 /// **424 那条中间线消失**（这正是 335 的可判定形式）。
+///
+/// 388 —— 最右边那 16 是 `scrollerGutter`：面板 560 → 576，内容是 0…540 不动。overlay 式滚动
+/// 指示条画在面板右缘、不占布局宽度，所以这段留白必须在**面板**上加，不能从内容里挤。
 ///
 /// 行高 24 / 行距 8 → **pitch 32，只有这一种**；节与节之间额外 16，节标题 24，标题到首行 8。
 enum ExportRowGrid {
 
     // MARK: 面板
 
-    /// 560 —— sheet 固定宽，不再随窗口。左右 padding 相等，这是重心。
-    static let panelWidth: CGFloat = 560
+    /// 滚动指示条要让出的宽度。macOS 默认是 overlay 式 scroller：它**画在内容之上、不占布局宽度**，
+    /// 所以只把内容铺到面板边是不够的 —— 指示条会压在读数（百分数 / px）右沿上。
+    static let scrollerGutter: CGFloat = 16
+
+    /// 576 —— sheet 固定宽（`ExportSheetController.present` 也按这个宽度开窗），不再随窗口。
+    ///
+    /// 560 是**内容**宽度（左 padding 20 + 内容 520 + 右 padding 20），右侧再加 `scrollerGutter` 16
+    /// 是给 overlay 指示条的留白。见 `contentRight` 的注释：加宽的是面板，不是内容。
+    static let panelWidth: CGFloat = 560 + scrollerGutter
     static let horizontalPadding: CGFloat = 20
+    /// 内容区右 padding（左侧同宽 20）：panelWidth − padding − gutter。
+    static var trailingPadding: CGFloat { horizontalPadding + scrollerGutter }
+    /// 388 —— 滚动区右缘与面板右缘之间的视觉留白。
+    ///
+    /// overlay 式指示条贴的是**它自己那个 `NSScrollView` 的右缘**（实测：ScrollView 右沿 540 时
+    /// 指示条落在 523…540），不是面板右缘。所以要让指示条离开内容，ScrollView 必须伸到面板边上；
+    /// 这里只留 4 pt 免得指示条贴着窗口边。
+    static let scrollerEdgeInset: CGFloat = 4
+    /// 388 —— 滚动区的「破出量」= 内容缩进量。ScrollView 向右破出 `trailingPadding − scrollerEdgeInset`
+    /// （= 32），它内部的滚动内容再缩进同样多，两者成对抵消 —— 于是 540 这条右沿一动不动。
+    static var scrollerBleed: CGFloat { trailingPadding - scrollerEdgeInset }
     /// 内容自适应上限。
     static let contentMaxHeight: CGFloat = 640
 
@@ -74,15 +95,22 @@ enum ExportRowGrid {
 
     // MARK: 推导出的锚点（测试读的就是这些）
 
-    static var contentWidth: CGFloat { panelWidth - horizontalPadding * 2 }
+    /// 内容宽 = 540 − 20 = 520。**不读 `panelWidth`**：面板加宽（给指示条）不改变内容宽。
+    static var contentWidth: CGFloat { contentRight - horizontalPadding }
     /// 标签右沿：20 + 110 = 130。（302 的注释写成 118 是笔误，实测一直是 130。）
     static var labelRight: CGFloat { horizontalPadding + labelWidth }
     /// 主列左沿：130 + 8 = 138。
     static var controlLeft: CGFloat { labelRight + gap }
-    /// 主列右沿：138 + 402 = 540 = 面板右 padding。**不再有 424。**
+    /// 主列右沿：138 + 402 = 540。**不再有 424。**
     static var controlRight: CGFloat { controlLeft + controlWidth }
-    /// 主列右沿 = 面板右 padding：560 − 20 = 540。
-    static var contentRight: CGFloat { panelWidth - horizontalPadding }
+    /// 内容右沿 / 主列右沿：**字面 540**，不再是 `panelWidth − horizontalPadding`。
+    ///
+    /// 388 —— 这个字面值是本单的关键，别"顺手改回推导式"：面板为给 overlay 滚动指示条让位而从
+    /// 560 加宽到 576，如果右沿跟着 `panelWidth − padding` 变成 556，那么滑杆读数与百分数会**一起
+    /// 右移 16 pt**，指示条仍旧压着它们 —— 加宽就白做了。540 是内容的右沿，560 是内容的宽度（= 20
+    /// + 520 + 20），576 只是面板。三者关系：`contentRight == horizontalPadding + contentWidth`，
+    /// 且 `panelWidth == contentWidth + horizontalPadding + trailingPadding`。
+    static var contentRight: CGFloat { 540 }
     /// 行 pitch：24 + 8 = 32。
     static var rowPitch: CGFloat { rowHeight + rowSpacing }
 

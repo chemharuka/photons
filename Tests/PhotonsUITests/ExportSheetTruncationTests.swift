@@ -323,7 +323,9 @@ final class ExportSheetTruncationTests: XCTestCase {
         }
         for rect in readouts where rect.maxX > 400 {
             XCTAssertEqual(rect.maxX, 540, accuracy: 0.5, "335 · 读数右沿")
-            XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.horizontalPadding, accuracy: 0.5)
+            // 388 —— 面板宽 576，内容右沿 = 576 − trailingPadding(36) = 540。旧写法
+            // `− horizontalPadding` 会得到 556，那是"内容铺到面板边"的老假设。
+            XCTAssertEqual(rect.maxX, sheet.maxX - ExportRowGrid.trailingPadding, accuracy: 0.5)
         }
     }
 

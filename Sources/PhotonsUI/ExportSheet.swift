@@ -1083,8 +1083,13 @@ public struct ExportSheetView: View {
             }
             footer
         }
-        .padding(ExportRowGrid.horizontalPadding)
-        // 560 —— sheet 固定宽（`ExportSheetController.present` 也按这个宽度开窗），不再随窗口。
+        // 388 —— 左右不等：左边 20，右边 20 + scrollerGutter(16)。面板加宽 16，内容右沿仍是 540。
+        // overlay 式滚动指示条画在内容之上、不占布局宽度，所以这 16 pt 只能是**面板**多出来的宽度，
+        // 不能靠缩窄内容腾出来（那样读数与百分数会左移，与 335 的 540 锚点冲突）。
+        .padding(.leading, ExportRowGrid.horizontalPadding)
+        .padding(.trailing, ExportRowGrid.trailingPadding)
+        .padding(.vertical, ExportRowGrid.horizontalPadding)
+        // 576 —— sheet 固定宽（`ExportSheetController.present` 也按这个宽度开窗），不再随窗口。
         .frame(width: ExportRowGrid.panelWidth)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(.regularMaterial)
@@ -1177,10 +1182,15 @@ public struct ExportSheetView: View {
                 afterSectionView
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // 388 —— 与下面 ScrollView 的负 padding 成对：ScrollView 向右破出多少，内容就缩进多少。
+            .padding(.trailing, ExportRowGrid.scrollerBleed)
         }
         // 161 §6 —— 滚动区吃掉剩余高度；没有结果行时底部不留空白条。
         .frame(maxHeight: .infinity)
         .scrollIndicators(.visible)
+        // 388 —— 把 ScrollView 本身伸到面板右缘：overlay 式指示条贴的是 ScrollView 的右缘，
+        // 不是面板的。只加内容 padding 是没用的（实测 523…540 压着百分数）。
+        .padding(.trailing, -ExportRowGrid.scrollerBleed)
         .background(ExportLayoutProbeHost(kind: .form))
     }
 
@@ -1728,10 +1738,13 @@ public struct ExportSheetView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // 388 —— 与 form 同一招：结果列表的 overlay 指示条也不许压住 `detail` 文字。
+            .padding(.trailing, ExportRowGrid.scrollerBleed)
         }
         .frame(maxWidth: .infinity)
         .frame(height: max(28, min(176, 10 + CGFloat(model.rows.count) * 18)))
         .layoutPriority(0)
+        .padding(.trailing, -ExportRowGrid.scrollerBleed)
         .background(ExportLayoutProbeHost(kind: .results, rowCount: model.rows.count))
     }
 
