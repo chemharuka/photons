@@ -51,6 +51,13 @@ public struct RawFrame {
     public let cfaCols: Int
     /// 0 = R, 1 = G, 2 = B, 3 = G2 (values are indices into CFAPlaneColor).
     public let cfaPattern: [UInt8]
+    /// `CFAPlaneColor` as stored: RGB for a plain Bayer sensor, RGBW or RG1G2B for sensors that
+    /// declare a fourth plane. Length is the number of colour planes the mosaic can address, so
+    /// nothing downstream may assume 3.
+    public let cfaPlaneColor: [UInt8]
+    /// `CFALayout` (50711): 1 = rectangular, 2 = staggered, 3 = staggered-4, 4 = staggered-9.
+    /// Only 1 is mergeable; the others interleave rows and need a different plane model.
+    public let cfaLayout: Int
     /// Per-CFA-cell black level.
     public let blackLevel: [Double]
     public let whiteLevel: Int
@@ -77,24 +84,59 @@ public struct RawFrame {
     public let dateTime: String
     public let orientation: Int
 
-    public var width: Int { activeWidth }
-    public var height: Int { activeHeight }
+    /// The **photo** size: DefaultCropSize inside ActiveArea. This is smaller than the stored
+    /// array whenever the sensor has dummy/optical-black margins, and it is what the merge must
+    /// work on — merging the margins in produces the classic 0/16383 band along the right edge.
+    public var width: Int { cropWidth }
+    public var height: Int { cropHeight }
 
-    /// Colour index of the sample at (x, y) in **active-area** coordinates.
+    /// Pixel offset of the photo rectangle from the start of the active area.
+    public var photoLeft: Int { cropX }
+    public var photoTop: Int { cropY }
+
+    /// Colour index of the sample at (x, y) in **photo** coordinates.
     @inline(__always)
     public func colorAt(_ x: Int, _ y: Int) -> Int {
-        Int(cfaPattern[(y % cfaRows) * cfaCols + (x % cfaCols)])
+        // The CFA phase is a property of the sensor grid, so the crop offset must be added back
+        // in: cropping an RGGB pattern by an odd number of pixels would otherwise invert it.
+        Int(cfaPattern[((y + cropY) % cfaRows) * cfaCols + ((x + cropX) % cfaCols)])
     }
 
     @inline(__always)
     public func blackAt(_ x: Int, _ y: Int) -> Double {
-        blackLevel[(y % cfaRows) * cfaCols + (x % cfaCols)]
+        blackLevel[((y + cropY) % cfaRows) * cfaCols + ((x + cropX) % cfaCols)]
     }
 
-    /// Raw sample at active-area coordinates (margins applied).
+    /// Raw sample at **photo** coordinates (active area + crop applied).
     @inline(__always)
     public func sample(_ x: Int, _ y: Int) -> UInt16 {
-        pixels[(y + activeTop) * fullWidth + (x + activeLeft)]
+        pixels[(y + cropY + activeTop) * fullWidth + (x + cropX + activeLeft)]
+    }
+
+    /// `cfaPattern` re-phased so that index (0,0) is the colour of the *photo* rectangle's
+    /// top-left sample. A crop offset that is not a multiple of the CFA repeat has to be rotated
+    /// out, otherwise the written DNG claims the wrong Bayer phase.
+    public var photoCFAPattern: [UInt8] {
+        CFA.rotate(cfaPattern, rows: cfaRows, cols: cfaCols, byX: cropX, byY: cropY)
+    }
+}
+
+public enum CFA {
+    /// Rotate a CFA pattern so that the new index (0,0) corresponds to old index (byY, byX).
+    /// A shift by an *even* number of pixels in a 2×2 pattern is a no-op; an odd one swaps the
+    /// colours and turns RGGB into GBRG, which is the classic "everything is magenta" bug.
+    public static func rotate(_ pattern: [UInt8], rows: Int, cols: Int,
+                              byX: Int, byY: Int) -> [UInt8] {
+        let sx = ((byX % cols) + cols) % cols
+        let sy = ((byY % rows) + rows) % rows
+        guard sx != 0 || sy != 0, pattern.count >= rows * cols else { return pattern }
+        var out = [UInt8](repeating: 0, count: rows * cols)
+        for y in 0..<rows {
+            for x in 0..<cols {
+                out[y * cols + x] = pattern[((y + sy) % rows) * cols + ((x + sx) % cols)]
+            }
+        }
+        return out
     }
 }
 
@@ -142,6 +184,22 @@ public enum DNGReader {
             pattern = [UInt8](repeating: 1, count: cfaRows * cfaCols)
         }
 
+        // CFAPlaneColor names the colour of each index in CFAPattern. Its length is the number of
+        // planes the mosaic addresses — 3 for Bayer, 4 for RGBW / RG1G2B sensors — so read it
+        // instead of assuming RGB. A pattern index outside it is a broken file.
+        let planeColor = e[50710]?.raw.map { UInt8($0) } ?? [0, 1, 2]
+        // CFALayout: 1 = rectangular (all that the merge can handle). Staggered layouts (2/3/4)
+        // interleave rows and would need a different plane model, so refuse them explicitly
+        // rather than merge the wrong pixels.
+        let layout = e[50711]?.firstInt ?? 1
+        guard layout == 1 else {
+            throw DNGError.inconsistentGeometry("CFALayout \(layout) (staggered CFA) is not supported")
+        }
+        if let maxIndex = pattern.map({ Int($0) }).max(), maxIndex >= planeColor.count {
+            throw DNGError.inconsistentGeometry(
+                "CFAPattern references plane \(maxIndex) but CFAPlaneColor has \(planeColor.count) entries")
+        }
+
         let blackRep = e[50713]?.ints ?? [1, 1]
         let blackVals = e[50714]?.doubles ?? [0]
         var black = [Double](repeating: blackVals.first ?? 0, count: cfaRows * cfaCols)
@@ -169,12 +227,28 @@ public enum DNGReader {
             throw DNGError.inconsistentGeometry("empty ActiveArea")
         }
 
-        let cropOrigin = e[50719]?.ints ?? [0, 0]
-        let cropSize = e[50720]?.ints ?? [0, 0]
-        let cropX = cropOrigin.first ?? 0
-        let cropY = cropOrigin.count > 1 ? cropOrigin[1] : 0
-        let cropW = cropSize.first ?? activeWidth
-        let cropH = cropSize.count > 1 ? cropSize[1] : activeHeight
+        // DefaultCropOrigin/Size are RATIONAL in most camera DNGs (Leica writes type 5), and
+        // `ints` has no rational case, so they have to be read as doubles. They are the
+        // authoritative photo rectangle: the stored array and even ActiveArea can be larger
+        // (Leica SL3: 9536×6344 stored, ActiveArea covers all of it, photo is 9520×6336 at 4,4),
+        // and the surplus columns carry sensor dummy data — 0/16383 alternation — which must
+        // never reach the mosaic.
+        func intPair(_ entry: TIFFEntry?) -> [Int]? {
+            guard let entry else { return nil }
+            let v = entry.doubles.map { Int($0.rounded()) }
+            return v.isEmpty ? nil : v
+        }
+        let cropOrigin = intPair(e[50719]) ?? [0, 0]
+        let cropSize = intPair(e[50720]) ?? []
+        var cropX = cropOrigin.first ?? 0
+        var cropY = cropOrigin.count > 1 ? cropOrigin[1] : 0
+        var cropW = cropSize.first ?? activeWidth
+        var cropH = cropSize.count > 1 ? cropSize[1] : activeHeight
+        // Reject a crop that does not fit the active area instead of producing garbage.
+        if cropW <= 0 || cropH <= 0 || cropX < 0 || cropY < 0
+            || cropX + cropW > activeWidth || cropY + cropH > activeHeight {
+            cropX = 0; cropY = 0; cropW = activeWidth; cropH = activeHeight
+        }
 
         let pixels = try decodePixels(tiff: tiff, ifd: e,
                                      width: width, height: height,
@@ -221,6 +295,7 @@ public enum DNGReader {
                         cropX: cropX, cropY: cropY,
                         cropWidth: cropW, cropHeight: cropH,
                         cfaRows: cfaRows, cfaCols: cfaCols, cfaPattern: pattern,
+                        cfaPlaneColor: planeColor, cfaLayout: layout,
                         blackLevel: black, whiteLevel: white,
                         pixels: pixels,
                         make: make, model: model,

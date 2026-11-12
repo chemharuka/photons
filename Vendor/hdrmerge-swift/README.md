@@ -40,6 +40,19 @@ this port keeps the same license and the same algorithm structure.
 * **Alignment** — a synthetic 6 px / 4 px shift is recovered, the canvas is
   cropped to 5194 × 3898, and the merged mosaic still matches the analytic
   prediction to ≤ 1 LSB.
+* **Crop geometry** — a Leica SL3 DNG stores 9536 × 6344 and asks for a
+  9520 × 6336 picture at (4,4); the 12 surplus columns carry sensor dummy data.
+  A single-frame merge with `--headroom 4` now reproduces exactly that crop
+  rectangle — **60,318,720 / 60,318,720 samples bit-identical** to
+  `(sample − black) × mult + black` — with no margin pixel in the output, and
+  the written DNG declares `DefaultCropSize = 9520 × 6336` at (0,0).
+* **CFA generality** — nothing is pinned to 2×2 or to three colours: `CFA.rotate`
+  works for any `CFARepeatPatternDim` (a 6×6 pattern is covered by a test), a
+  four-plane `CFAPlaneColor` survives the merge and the write instead of being
+  flattened to RGB, and a staggered `CFALayout` is refused at read time rather
+  than merged as if it were rectangular. An audit of all 499 DNGs on this
+  machine found every one to be 2×2 / 3-plane, which is exactly why these paths
+  are tested synthetically.
 * Output opens in LibRaw (`raw-identify`: "YI M1 image") and in ImageIO.
 
 Timings (M-series, release build): decode 60 MP ≈ 2.8 s; merge 20 MP from two

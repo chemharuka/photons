@@ -55,6 +55,9 @@ public struct MergedImage {
     public var cfaPattern: [UInt8]
     public var cfaRows: Int
     public var cfaCols: Int
+    /// `CFAPlaneColor` to write out: carried from the source so a 4-plane sensor keeps its fourth
+    /// plane instead of being flattened to RGB.
+    public var cfaPlaneColor: [UInt8]
     /// Placement of each input frame inside the merged canvas, in input order.
     public var offsets: [(x: Int, y: Int)]
     /// 1-based index into `offsets` of the frame used as reference (brightest).
@@ -63,10 +66,12 @@ public struct MergedImage {
 
     public init(width: Int, height: Int, values: [Float], black: Double, white: Int,
                 cfaPattern: [UInt8], cfaRows: Int, cfaCols: Int,
+                cfaPlaneColor: [UInt8] = [0, 1, 2],
                 offsets: [(x: Int, y: Int)], referenceIndex: Int, report: [String]) {
         self.width = width; self.height = height; self.values = values
         self.black = black; self.white = white
         self.cfaPattern = cfaPattern; self.cfaRows = cfaRows; self.cfaCols = cfaCols
+        self.cfaPlaneColor = cfaPlaneColor
         self.offsets = offsets; self.referenceIndex = referenceIndex; self.report = report
     }
 }
@@ -78,6 +83,19 @@ struct Plane {
     var pixels: [UInt16]
     var dx: Int = 0
     var dy: Int = 0
+    /// CFA phase of *this* frame, in photo coordinates. Frames are sorted by brightness, so the
+    /// colour lookup can no longer assume it matches the first input's phase.
+    var cfaPattern: [UInt8] = [0, 1, 1, 2]
+    var cfaRows: Int = 2
+    var cfaCols: Int = 2
+    /// Number of distinct planes in `CFAPlaneColor` (3 for Bayer RGGB, 4 for RGBW / dual-green
+    /// sensors that name G and G2 separately).
+    var colorCount: Int = 3
+
+    /// Colour index at photo coordinates — same indexing as `RawFrame.colorAt`.
+    @inline(__always) func colorAt(_ x: Int, _ y: Int) -> Int {
+        Int(cfaPattern[(y % cfaRows) * cfaCols + (x % cfaCols)])
+    }
 
     @inline(__always) func contains(_ x: Int, _ y: Int) -> Bool {
         x >= dx && x < dx + width && y >= dy && y < dy + height
@@ -212,26 +230,36 @@ public enum HDRMergeCore {
         guard !frames.isEmpty else { throw MergeError.noFrames }
         let first = frames[0]
         for f in frames.dropFirst() {
-            guard f.activeWidth == first.activeWidth, f.activeHeight == first.activeHeight,
+            // Compare the *photo* geometry, not the stored array: two cameras (or the same camera
+            // before/after a firmware change) can store different margin sizes around the same
+            // picture rectangle.
+            guard f.cropWidth == first.cropWidth, f.cropHeight == first.cropHeight,
                   f.cfaPattern == first.cfaPattern, f.cfaRows == first.cfaRows,
                   f.cfaCols == first.cfaCols else {
                 throw MergeError.geometryMismatch("\(f.url.lastPathComponent) differs from \(first.url.lastPathComponent)")
+            }
+            if f.cropX % first.cfaCols != first.cropX % first.cfaCols
+                || f.cropY % first.cfaRows != first.cropY % first.cfaRows {
+                throw MergeError.geometryMismatch("\(f.url.lastPathComponent) crop offset \(f.cropX),\(f.cropY) has a different CFA phase than \(first.cropX),\(first.cropY)")
             }
         }
 
         var report: [String] = []
         let white = options.customWhiteLevel ?? first.whiteLevel
 
-        // 1. Black-subtracted planes, in input order.
+        // 1. Black-subtracted planes, in input order. `sample`/`blackAt` are photo-relative, so
+        //    the sensor margins never enter the mosaic.
         var planes: [Plane] = frames.map { f in
-            var px = [UInt16](repeating: 0, count: f.activeWidth * f.activeHeight)
-            for y in 0..<f.activeHeight {
-                for x in 0..<f.activeWidth {
+            var px = [UInt16](repeating: 0, count: f.cropWidth * f.cropHeight)
+            for y in 0..<f.cropHeight {
+                for x in 0..<f.cropWidth {
                     let v = Int(f.sample(x, y)) - Int(f.blackAt(x, y))
-                    px[y * f.activeWidth + x] = UInt16(max(0, v))
+                    px[y * f.cropWidth + x] = UInt16(max(0, v))
                 }
             }
-            return Plane(width: f.activeWidth, height: f.activeHeight, pixels: px)
+            return Plane(width: f.cropWidth, height: f.cropHeight, pixels: px,
+                         cfaPattern: f.photoCFAPattern, cfaRows: f.cfaRows, cfaCols: f.cfaCols,
+                         colorCount: f.cfaPlaneColor.count)
         }
 
         // 2. Sort brightest → darkest (HDRMerge's "most to least exposed").
@@ -242,17 +270,24 @@ public enum HDRMergeCore {
         planes = order.map { planes[$0] }
 
         // 3. Saturation level from the brightest frame, per CFA colour.
-        var hist = [[Int]](repeating: [Int](repeating: 0, count: 65536), count: 4)
-        let pw = planes[0].width, ph = planes[0].height
+        //
+        // `planes[0]` is the brightest frame after the sort above, so the colour lookup has to
+        // use *that* frame's CFA phase, not `first`'s (which is the first in input order). When
+        // the bracket is not sorted darkest-first on the command line the two differ, and reading
+        // the histogram through the wrong phase swaps R/B — the white level then comes from the
+        // wrong channel pair.
+        let brightest = planes[0]
+        let nColors = max(4, brightest.colorCount)
+        var hist = [[Int]](repeating: [Int](repeating: 0, count: 65536), count: nColors)
+        let pw = brightest.width, ph = brightest.height
         for y in 0..<ph {
             for x in 0..<pw {
-                let c = Int(first.cfaPattern[(y % first.cfaRows) * first.cfaCols + (x % first.cfaCols)])
-                hist[min(c, 3)][Int(planes[0].pixels[y * pw + x])] += 1
+                hist[brightest.colorAt(x, y)][Int(brightest.pixels[y * pw + x])] += 1
             }
         }
         let minCount = max(1, pw * ph / 10000)
-        var maxPerColor = [Int](repeating: 0, count: 4)
-        for c in 0..<4 {
+        var maxPerColor = [Int](repeating: 0, count: nColors)
+        for c in 0..<nColors {
             for v in stride(from: 65535, through: 0, by: -1) where hist[c][v] > minCount {
                 maxPerColor[c] = v
                 break
@@ -390,8 +425,9 @@ public enum HDRMergeCore {
 
         return MergedImage(width: cw, height: ch, values: out,
                            black: black, white: Int(outWhite),
-                           cfaPattern: first.cfaPattern,
+                           cfaPattern: first.photoCFAPattern,
                            cfaRows: first.cfaRows, cfaCols: first.cfaCols,
+                           cfaPlaneColor: first.cfaPlaneColor,
                            offsets: planes.map { ($0.dx, $0.dy) },
                            referenceIndex: 1,
                            report: report)

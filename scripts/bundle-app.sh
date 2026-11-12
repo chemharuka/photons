@@ -108,6 +108,18 @@ if [ -x "$ROOT/scripts/bundle-ansel-models.sh" ]; then
         echo "model       skipped（没有 denoise-quarter-single-v1.anselnn；「模型降噪…」会退到 ~/Library/Application Support/Photons/models）" >&2
 fi
 
+# hdrmerge-swift (GPLv3, a separate executable — never linked). Same rule as the denoise tool: it
+# must be re-added after the `rm -rf "$APP"` above and before the signature, or `make app` wipes
+# it and the only symptom is a greyed-out 「HDR 合并…」 menu item.
+#
+# The tool ships inside the app and nowhere else. A copy in /opt/homebrew/bin would be *looked at*
+# by `HDRMergeClient` only as a last resort, but having one on the machine is what let a stale
+# binary answer for the app in the first place — so the build no longer installs there.
+if [ -x "$ROOT/scripts/build-hdrmerge.sh" ] && [ -x "$ROOT/scripts/bundle-hdrmerge.sh" ]; then
+    "$ROOT/scripts/bundle-hdrmerge.sh" "$APP" || \
+        echo "hdrmerge    skipped（没有构建好的 hdrmerge-swift；「HDR 合并…」会显示未找到工具）" >&2
+fi
+
 xattr -cr "$APP" 2>/dev/null || true
 
 # Ad-hoc signature: enough to launch locally and to keep Gatekeeper quiet on this machine.

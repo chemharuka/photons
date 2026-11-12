@@ -49,16 +49,11 @@ Output is `<least-exposed-frame>-merged.dng` in `-o` (or the first frame's direc
 The GPLv3 source is vendored at `Vendor/hdrmerge-swift/`, so no second checkout is needed:
 
 ```sh
-scripts/make-app-with-hdr.sh          # make app + build the tool + pack + re-sign
+scripts/build-and-run.sh              # the one build entry point (has --no-launch)
 ```
 
-or step by step:
-
-```sh
-make app
-scripts/build-hdrmerge.sh --to-app    # swift build inside Vendor/hdrmerge-swift → Resources/bin
-scripts/bundle-hdrmerge.sh            # generate licenses + sha256, then re-sign
-```
+`build-and-run.sh` runs `make app`, then `scripts/build-hdrmerge.sh` and `scripts/bundle-hdrmerge.sh`
+for you. That is the whole sequence — there is no separate "with HDR" build target.
 
 `Vendor/hdrmerge-swift` is a **nested** SwiftPM package that the root `Package.swift` does not
 mention, so SwiftPM never adds an edge between it and Photons — `swift package describe` lists one

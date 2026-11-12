@@ -117,7 +117,12 @@ public enum HDRMergeProgress: Sendable, Equatable {
 ///   1. explicit `executableURL`
 ///   2. `$HDRMERGE_SWIFT` (dev override)
 ///   3. `Bundle.main/Contents/Resources/bin/hdrmerge-swift` (shipped inside the app)
-///   4. `/opt/homebrew/bin/hdrmerge-swift`, `/usr/local/bin/hdrmerge-swift` (dev installs)
+///
+/// There is deliberately no PATH fallback. The tool ships inside the app and nowhere else, so a
+/// copy in `/opt/homebrew/bin` would only ever be a second, older version that the app cannot tell
+/// apart — and a stale one there silently ran last week's merge code while the bundled copy sat
+/// unused. `scripts/build-hdrmerge.sh --to-path` exists for debugging the tool on its own, but the
+/// app never looks for it.
 public struct HDRMergeClient: Sendable {
     public let executableURL: URL
 
@@ -136,18 +141,15 @@ public struct HDRMergeClient: Sendable {
             self.executableURL = URL(fileURLWithPath: env)
             return
         }
-        var candidates: [URL] = []
         if let res = bundle.resourceURL {
-            candidates.append(res.appendingPathComponent("bin/hdrmerge-swift"))
-        }
-        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/hdrmerge-swift"))
-        candidates.append(URL(fileURLWithPath: "/usr/local/bin/hdrmerge-swift"))
-        for c in candidates where FileManager.default.isExecutableFile(atPath: c.path) {
-            self.executableURL = c
-            return
+            let bundled = res.appendingPathComponent("bin/hdrmerge-swift")
+            if FileManager.default.isExecutableFile(atPath: bundled.path) {
+                self.executableURL = bundled
+                return
+            }
         }
         throw HDRMergeFailure(code: "tool_missing",
-                             message: "hdrmerge-swift not found (looked in app resources and /usr/local/bin)",
+                             message: "hdrmerge-swift not found at Contents/Resources/bin/hdrmerge-swift",
                              exitCode: nil)
     }
 

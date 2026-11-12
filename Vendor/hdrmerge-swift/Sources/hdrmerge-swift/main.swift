@@ -144,6 +144,7 @@ func runInspect(_ p: Parsed, _ progress: ProgressReporter) throws -> Response {
         \(url.lastPathComponent)
           camera        \(f.make) \(f.model)
           raw size      \(f.fullWidth) x \(f.fullHeight)  (active \(f.activeWidth)x\(f.activeHeight) @ \(f.activeLeft),\(f.activeTop))
+          photo size    \(f.width) x \(f.height)  (crop origin \(f.cropX),\(f.cropY))
           CFA           \(f.cfaRows)x\(f.cfaCols)  \(cfa)
           black         \(f.blackLevel.map { String(format: "%.1f", $0) }.joined(separator: ", "))
           white         \(f.whiteLevel)
@@ -244,23 +245,23 @@ func runSynth(_ p: Parsed) throws -> Response {
     let dx = p.positional.count > 4 ? (Int(p.positional[3]) ?? 0) : 0
     let dy = p.positional.count > 4 ? (Int(p.positional[4]) ?? 0) : 0
     let black = src.blackLevel.max() ?? 0
-    var values = [Float](repeating: 0, count: src.activeWidth * src.activeHeight)
-    for y in 0..<src.activeHeight {
-        for x in 0..<src.activeWidth {
+    var values = [Float](repeating: 0, count: src.width * src.height)
+    for y in 0..<src.height {
+        for x in 0..<src.width {
             let sx = x - dx, sy = y - dy
-            guard sx >= 0, sx < src.activeWidth, sy >= 0, sy < src.activeHeight else { continue }
+            guard sx >= 0, sx < src.width, sy >= 0, sy < src.height else { continue }
             let v = (Double(src.sample(sx, sy)) - black) / divisor + black
-            values[y * src.activeWidth + x] = Float(min(max(v, 0), Double(src.whiteLevel)))
+            values[y * src.width + x] = Float(min(max(v, 0), Double(src.whiteLevel)))
         }
     }
-    let m = MergedImage(width: src.activeWidth, height: src.activeHeight, values: values,
+    let m = MergedImage(width: src.width, height: src.height, values: values,
                         black: black, white: src.whiteLevel,
-                        cfaPattern: src.cfaPattern, cfaRows: src.cfaRows, cfaCols: src.cfaCols,
+                        cfaPattern: src.photoCFAPattern, cfaRows: src.cfaRows, cfaCols: src.cfaCols,
                         offsets: [(0, 0)], referenceIndex: 1, report: [])
     let data = try DNGWriter.render(m, source: src, bits: 16)
     try atomicWrite(data, to: URL(fileURLWithPath: p.positional[1]))
     if !p.json {
-        print("wrote \(p.positional[1]) (\(src.activeWidth)x\(src.activeHeight), /\(divisor), shift \(dx),\(dy))")
+        print("wrote \(p.positional[1]) (\(src.width)x\(src.height), /\(divisor), shift \(dx),\(dy))")
     }
     return Response(ok: true, command: "synth", payload: ["output": p.positional[1]])
 }

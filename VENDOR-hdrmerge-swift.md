@@ -42,10 +42,10 @@ Either one would put all of Photons under GPLv3.
 ## Build path
 
 ```sh
-scripts/build-hdrmerge.sh             # swift build inside Vendor/ → /opt/homebrew/bin
-scripts/build-hdrmerge.sh --to-app    # … → Photons.app/Contents/Resources/bin
-scripts/make-app-with-hdr.sh          # make app + the two lines above + pack + sign
+scripts/build-and-run.sh              # the one build entry point: make app + the tool + pack + sign
 ```
+
+`build-and-run.sh` is the only thing you need to run; everything below is what it does in order.
 
 `scripts/bundle-hdrmerge.sh` then **generates** the three artefacts the licence requires into
 `Contents/Resources/licenses/` and `Contents/Resources/bin/`: the GPL text (copied from

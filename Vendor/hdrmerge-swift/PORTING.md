@@ -57,8 +57,28 @@ Source of truth: [HDRMerge](https://github.com/jcelaya/hdrmerge) master
   single-component image silently shifts colours by one pixel.
 * Tag numbers that are easy to get wrong: `50711` = CFALayout,
   `50719` = DefaultCropOrigin, `50720` = DefaultCropSize, `50829` = ActiveArea.
+* `DefaultCropOrigin`/`DefaultCropSize` are **RATIONAL**, not LONG. Reading them
+  through an integer-only accessor silently yields nothing and the crop falls
+  back to the whole ActiveArea. `TIFFEntry.ints` has no `rational` case, so they
+  must be read as `doubles`.
+* The photo rectangle is smaller than the stored array and can be smaller than
+  `ActiveArea` too: a Leica SL3 DNG stores 9536×6344, sets `ActiveArea` to all of
+  it, and asks for a 9520×6336 picture at (4,4). The surplus columns are sensor
+  dummy data that alternates between 0 and the white level. Merging the active
+  area instead of the crop puts a black/white band down the right edge — the
+  output is still a valid DNG, so only pixel inspection catches it.
 * `BlackLevel` may be `RATIONAL` or `SHORT`; `BlackLevelRepeatDim` is not always
   equal to the CFA repeat dim.
+* **Nothing about the CFA may be hardcoded to 2×2 or to three colours.**
+  `CFA.rotate` takes `cfaRows`/`cfaCols` from `CFARepeatPatternDim`, so a 6×6
+  pattern works; `CFAPlaneColor` is read from `50710` and carried through to the
+  output, so a four-plane sensor (RGBW, RG1G2B) keeps its fourth plane instead of
+  being flattened to RGB; the saturation histogram is sized from that plane count
+  instead of a fixed four. `CFALayout != 1` (staggered CFA) is refused at read
+  time, because staggered layouts interleave rows and need a different plane
+  model. Auditing the 499 DNGs on this machine found only 2×2/3-plane files,
+  which is why these paths are covered by synthetic tests
+  (`CFAGeneralityTests.swift`) rather than by real ones.
 
 ## Verified numbers in the repo
 

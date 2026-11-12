@@ -31,6 +31,13 @@ if pgrep -x Photons >/dev/null 2>&1; then
   for _ in {1..20}; do pgrep -x Photons >/dev/null 2>&1 || break; sleep 0.25; done
 fi
 
+# The HDR merge tool ships inside the app, and `make app` packs it (scripts/bundle-app.sh does so
+# right before the signature). But `make app` cannot *build* it: that source is a nested GPLv3
+# package the root Package.swift deliberately does not mention, so SwiftPM has no edge to it.
+# Compile it **first**, otherwise the bundle step packs whatever binary was left from last time —
+# which is exactly the failure that let a stale tool answer for the app.
+scripts/build-hdrmerge.sh
+
 make app
 
 # 图标来自 Resources/AppIcon.icon（Icon Composer 文档）+ 由 scripts/appicon.py 烘出的经典 icns。

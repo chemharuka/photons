@@ -4,8 +4,8 @@
 #   scripts/bundle-hdrmerge.sh              # into .build/Photons.app
 #   scripts/bundle-hdrmerge.sh /path/App    # into a specific bundle
 #
-# Additive on purpose: this script does not touch `scripts/bundle-app.sh`. Run it after
-# `make app`, or just use `scripts/make-app-with-hdr.sh` which chains everything. The app itself
+# Additive on purpose: this script does not touch `scripts/bundle-app.sh`. `scripts/build-and-run.sh`
+# calls it right after `make app`, so a normal build already carries the tool. The app itself
 # needs no code change to carry the tool, because `HDRMergeClient` resolves
 # `Contents/Resources/bin/hdrmerge-swift` first.
 #

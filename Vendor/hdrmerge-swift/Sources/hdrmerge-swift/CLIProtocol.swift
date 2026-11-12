@@ -138,8 +138,15 @@ extension RawFrame {
             "model": model,
             "rawWidth": fullWidth,
             "rawHeight": fullHeight,
-            "width": activeWidth,
-            "height": activeHeight,
+            // `width`/`height` are the *photo* size (DefaultCropSize), which is what a host shows
+            // and what the merge works on. ActiveArea can be larger — Leica stores 9536×6344 of
+            // which 9520×6336 is picture — so the raw numbers stay available separately.
+            "width": cropWidth,
+            "height": cropHeight,
+            "activeWidth": activeWidth,
+            "activeHeight": activeHeight,
+            "cropX": cropX,
+            "cropY": cropY,
             "cfaPattern": cfaPattern.map { Int($0) },
             "cfaRows": cfaRows,
             "cfaCols": cfaCols,

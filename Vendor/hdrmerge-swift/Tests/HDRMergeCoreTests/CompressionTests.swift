@@ -23,20 +23,20 @@ final class CompressionTests: XCTestCase {
     /// A synthetic bracket: the source frame and a 2-stop-darker copy of it, merged. Runs the real
     /// merge path so the writer is exercised on the same data the tool produces.
     private func mergedBracket(_ frame: RawFrame) throws -> MergedImage {
-        let w = frame.activeWidth, h = frame.activeHeight
+        let w = frame.width, h = frame.height
         let dark = MergedImage(width: w, height: h,
                                values: (0..<(w * h)).map { i in
-                                   let v = Float(frame.pixels[i]) - 512
+                                   let v = Float(frame.sample(i % w, i / w)) - 512
                                    return max(0, v / 4) + 512
                                },
                                black: 512, white: 16383,
-                               cfaPattern: frame.cfaPattern, cfaRows: frame.cfaRows,
+                               cfaPattern: frame.photoCFAPattern, cfaRows: frame.cfaRows,
                                cfaCols: frame.cfaCols,
                                offsets: [(0, 0), (0, 0)], referenceIndex: 1, report: [])
         let bright = MergedImage(width: w, height: h,
-                                 values: (0..<(w * h)).map { i in Float(frame.pixels[i]) },
+                                 values: (0..<(w * h)).map { i in Float(frame.sample(i % w, i / w)) },
                                  black: 512, white: 16383,
-                                 cfaPattern: frame.cfaPattern, cfaRows: frame.cfaRows,
+                                 cfaPattern: frame.photoCFAPattern, cfaRows: frame.cfaRows,
                                  cfaCols: frame.cfaCols,
                                  offsets: [(0, 0), (0, 0)], referenceIndex: 1, report: [])
         return bright

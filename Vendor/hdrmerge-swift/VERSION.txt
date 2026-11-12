@@ -1,5 +1,5 @@
 upstream   https://github.com/chemharuka/hdrmerge-swift
-commit     ff96b88
+commit     dba6d36
 license    GPL-3.0-or-later
-vendored   2026-11-11
+vendored   2026-11-12
 patches    none (verbatim copy)

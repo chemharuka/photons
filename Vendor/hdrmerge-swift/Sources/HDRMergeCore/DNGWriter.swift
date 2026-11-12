@@ -231,7 +231,9 @@ public enum DNGWriter {
         main.addShorts(339, [bits == 32 ? 3 : 1])                // SampleFormat
         main.addShorts(33421, [UInt16(merged.cfaRows), UInt16(merged.cfaCols)])
         main.addBytes(33422, merged.cfaPattern)
-        main.addBytes(50710, [0, 1, 2])
+        // Carry the source's plane colours: a 4-plane sensor (RGBW, RG1G2B) must keep its fourth
+        // plane or CFAPattern indices would point at nothing.
+        main.addBytes(50710, merged.cfaPlaneColor)
         main.addShorts(50711, [1])                               // CFALayout: rectangular
         main.addShorts(50713, [UInt8(merged.cfaRows), UInt8(merged.cfaCols)].map { UInt16($0) })
         main.addRationals(50714, merged.cfaPattern.enumerated().map { (i, _) in

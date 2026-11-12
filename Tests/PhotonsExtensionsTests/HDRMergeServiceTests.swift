@@ -24,12 +24,27 @@ final class HDRMergeServiceTests: XCTestCase {
         return dir
     }
 
+    /// Under `swift test` the host bundle is the xctest runner, which has no
+    /// `Contents/Resources/bin` — so the production resolution (bundle only, no PATH fallback)
+    /// finds nothing and every real-merge assertion would skip. Point the service at the built app
+    /// instead, through the same `HDRMERGE_SWIFT` override the client already honours. Falls back
+    /// to the plain bundle lookup when the app has not been built.
+    private static func service() -> HDRMergeService {
+        let app = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents/GitHub/photons/.build/Photons.app")
+            .appendingPathComponent("Contents/Resources/bin/hdrmerge-swift")
+        if FileManager.default.isExecutableFile(atPath: app.path) {
+            return HDRMergeService(client: HDRMergeClient(executableURL: app))
+        }
+        return HDRMergeService()
+    }
+
     // MARK: tool discovery
 
     func testToolIsDiscoverableAndSpeaksProtocol1() throws {
-        let service = HDRMergeService()
+        let service = Self.service()
         guard let client = service.client else {
-            throw XCTSkip("hdrmerge-swift not installed (bundled at Contents/Resources/bin or /opt/homebrew/bin)")
+            throw XCTSkip("hdrmerge-swift not installed (bundled at Contents/Resources/bin)")
         }
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: client.executableURL.path))
         XCTAssertEqual(try client.protocolVersion(), 1)
@@ -47,7 +62,7 @@ final class HDRMergeServiceTests: XCTestCase {
     }
 
     func testOneFrameIsRejectedBeforeSpawningAnything() {
-        let service = HDRMergeService()
+        let service = Self.service()
         XCTAssertThrowsError(try service.merge([URL(fileURLWithPath: "/tmp/a.dng")])) { error in
             XCTAssertEqual((error as? HDRMergeService.Failure)?.code, "not_enough_frames")
         }
@@ -56,7 +71,7 @@ final class HDRMergeServiceTests: XCTestCase {
     // MARK: the merge
 
     func testMergeWritesCFADNGNamedAfterTheLeastExposedFrame() throws {
-        guard HDRMergeService().isAvailable else { throw XCTSkip("tool missing") }
+        guard Self.service().isAvailable else { throw XCTSkip("tool missing") }
         guard let frames = Self.bracketURLs() else { throw XCTSkip("no sample bracket") }
 
         let dir = try Self.tempDirectory()
@@ -69,7 +84,7 @@ final class HDRMergeServiceTests: XCTestCase {
         }
 
         var progressLines: [String] = []
-        let service = HDRMergeService()
+        let service = Self.service()
         let outcome = try service.merge(copies) { line in
             progressLines.append(line)
         }
@@ -97,7 +112,7 @@ final class HDRMergeServiceTests: XCTestCase {
     }
 
     func testSecondMergeGetsANumberedName() throws {
-        guard HDRMergeService().isAvailable else { throw XCTSkip("tool missing") }
+        guard Self.service().isAvailable else { throw XCTSkip("tool missing") }
         guard let frames = Self.bracketURLs() else { throw XCTSkip("no sample bracket") }
         let dir = try Self.tempDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -116,7 +131,7 @@ final class HDRMergeServiceTests: XCTestCase {
     }
 
     func testSelectionIsFilteredToDNGBeforeSpawning() throws {
-        let service = HDRMergeService()
+        let service = Self.service()
         // A JPEG in the list must be dropped, not handed to a tool that would fail on it.
         let mixed = [URL(fileURLWithPath: "/tmp/a.dng"), URL(fileURLWithPath: "/tmp/b.jpg")]
         XCTAssertThrowsError(try service.mergeSelection(mixed)) { error in

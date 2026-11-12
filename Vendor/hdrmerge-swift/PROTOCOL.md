@@ -71,17 +71,30 @@ Success payload:
 so usually a few pixels smaller than the inputs); `offsets` are in input order
 and are what the host needs if it wants to map input coordinates to output.
 
+The canvas is built from the frames' **photo** rectangle (`DefaultCropSize`),
+never from the stored sensor array. Camera DNGs routinely store a larger array —
+Leica SL3: 9536×6344 stored, `ActiveArea` over all of it, photo 9520×6336 at
+4,4 — and the surplus columns are sensor dummy data, so using them put a
+black/white band down the right edge of every merged file. The output DNG is
+written at photo size with `DefaultCropOrigin = 0,0`, and its `CFAPattern` is
+re-phased so index (0,0) is the photo's top-left sample.
+
 ### `inspect --json FILE…`
 
 ```json
 {"ok":true,"command":"inspect","frames":[
   {"path":"…","fileName":"A.dng","make":"LEICA CAMERA AG","model":"LEICA SL3",
-   "rawWidth":9536,"rawHeight":6344,"width":9536,"height":6344,
+   "rawWidth":9536,"rawHeight":6344,"width":9520,"height":6336,
+   "activeWidth":9536,"activeHeight":6344,"cropX":4,"cropY":4,
    "cfaPattern":[0,1,1,2],"cfaRows":2,"cfaCols":2,
    "blackLevel":[512,512,512,512],"whiteLevel":16383,
    "exposureTime":0.0025,"iso":100,
    "asShotNeutral":[0.400783,1,0.602707]}]}
 ```
+
+`width/height` are the photo size, which is what a host should show and what the
+merge produces; `rawWidth/rawHeight` are the stored array and
+`activeWidth/activeHeight` the `ActiveArea` inside it. All three can differ.
 
 Cheap enough (≈2.8 s for a 60 MP frame — the whole lossless JPEG still has to be
 decoded to prove the file is usable) to use as a pre-flight check.
