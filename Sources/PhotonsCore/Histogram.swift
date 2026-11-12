@@ -13,13 +13,24 @@ import CryptoKit
 // longer enters the geometry of the measurement at all; it only derives `clippedCeiling` (how much
 // *this* screen would throw away) and the card's 「本机能显示到哪」 tick.
 //
-// **2. The x axis is an sRGB code axis, derived here.** Below white the bins are uniform in the code
-// value this process computes by applying the sRGB OETF to the linear sample (`srgbEncode`), so the
-// axis still means "how many pixels at code k" — the same reading as before, and the same 256 bins an
-// 8-bit output has. Above white the axis is exponential in **stops of linear light**, because a stop
-// is a doubling of light and the headroom S4 is handed is a linear multiple of white; one stop of
-// *code* is 2.4 stops of light (sRGB is ~γ2.4 above the knee), so a code-doubling axis would lie by
-// that factor and the display-ceiling marker could not be placed on it.
+// **2. The x axis is a Rec.2020 code axis, derived here.** Below white the bins are uniform in the
+// code value this process computes by applying the sRGB OETF to the linear sample (`srgbEncode`), so
+// the axis still means "how many pixels at code k" — the same reading as before, and the same 256
+// bins an 8-bit output has. **The primaries are the working space's — Rec.2020 — not sRGB's** (385).
+// The working space *is* Rec.2020 (`ColorPrimaries.working`), and a user's screen may be wider than
+// P3, so converting the picture into sRGB before counting is wrong twice over: it throws away colour
+// this app can show, and — since sRGB is a *strict subset* of Rec.2020 — it **invents negative
+// components** on the green/cyan side (`Rec2020 (0,1,1) → sRGB` has R = −0.6577). `binIndex` files
+// every value ≤ 0 into bin 0, so those pixels read as black: measured on `L1030552`, the red series
+// put 12288 pixels (1.96 %) in bin 0 through the sRGB matrix and 2 without it — a 246:1 single-channel
+// pile-up that no amount of black level or +EV could fix, because `blacks` is a multiply and a
+// negative times any gain is still negative. **Only the basis changed, not the curve:** the OETF is
+// still sRGB's, so a code here is a Rec.2020-primaries/sRGB-curve code — which is exactly what
+// `OutputPrimaries.rec2020` tags, and what `Histogram.primaries` now reports. Above white the axis is
+// exponential in **stops of linear light**, because a stop is a doubling of light and the headroom S4
+// is handed is a linear multiple of white; one stop of *code* is 2.4 stops of light (the OETF is
+// ~γ2.4 above the knee), so a code-doubling axis would lie by that factor and the display-ceiling
+// marker could not be placed on it.
 //
 // **3. There is one measurement per picture, not one per frame.** `RenderGraph.measureHistogram`
 // renders the whole picture once, at a thumbnail scale (long edge ≤ `maxLongEdge`), and counts the
@@ -56,12 +67,16 @@ import CryptoKit
 //   · `binCount` is the *measurement's* resolution, not the file's. The default 256 matches an
 //     8-bit output; a 16-bit export that wants per-code counts would ask for 65536 bins (4 × 256 KB
 //     of counters here, so that is a caller's decision, not a default).
-//   · The four series are R, G, B and **luma**. Since 075 both entry points are counted in *display*
-//     light: an encoded sample already is, and a scene-linear one is converted from the working
-//     primaries first (`measure`), so the axis, the ceiling and the luma all describe the same space
-//     and Rec.709 (`lumaWeights`) is the right basis for them. The *scene* luma — the working
-//     primaries' own weights, which is what S1/S2/S1.7 use — is `ColorPrimaries.working
-//     .luminanceWeights`, and `LinearImage.statistics()` is where a picture-wide scene luma lives.
+//   · The four series are R, G, B and **luma**. Since 385 the three colour series are the working
+//     primaries' own components, encoded with the OETF — an encoded sample arrives that way and a
+//     scene-linear one is no longer converted (the matrix that used to move it into sRGB is gone, see
+//     §2). The luma series still weights those components with **Rec.709** `lumaWeights`, which was
+//     correct when the components were sRGB's; 385 changed the primaries and not the weights, so on a
+//     wide-gamut pixel it is a Rec.709-luma *approximation* rather than a stated luma. It is exact for
+//     neutrals (the weights sum to 1) and every claim in the tests is about greys. The weights that
+//     belong to the working primaries are `ColorPrimaries.working.luminanceWeights` (what S1/S2/S1.7
+//     use, and what a picture-wide scene luma is in `LinearImage.statistics()`); changing them here is
+//     a separate decision because the pointer readout shares this constant.
 
 /// Scene-linear RGB, as S3 hands it to S4 — **no** transfer function, **no** headroom clamp.
 ///
@@ -164,11 +179,13 @@ public struct Histogram: Sendable, Equatable {
     /// threshold every 8-bit tool uses, on a measurement that no longer arrives encoded.
     public static let clipHighThreshold: Double = 0.999
     public static let clipLowThreshold: Double = 0.001
-    /// **Rec.709** — the **display-referred** weights. Both entry points end up in display light: an
-    /// encoded sample is already there, and a scene-linear one is converted into it before it is
-    /// counted (`measure`, 075), so the axis, the ceiling and this luma are all display quantities and
-    /// 709 is the right basis for them. The *working* primaries' weights live in
-    /// `ColorPrimaries.working.luminanceWeights` and are what the render kernels use.
+    /// **Rec.709** weights, applied to the components as they arrive (`measure`), which since 385 are
+    /// the **working primaries'** (Rec.2020) components rather than sRGB's. Kept at 709 because the
+    /// histogram's luma series is a display-luma reading of a code axis and because this constant is
+    /// shared with the pointer readout; the working primaries' own weights are
+    /// `ColorPrimaries.working.luminanceWeights` (what the render kernels use and what a scene luma
+    /// is), and 385 deliberately did not switch to them — see the note at the top of this file.
+    /// Exact for neutrals either way (each set sums to 1).
     public static let lumaWeights: (r: Double, g: Double, b: Double) = (0.2126, 0.7152, 0.0722)
 
     /// Bins per channel on the SDR segment.
@@ -185,8 +202,10 @@ public struct Histogram: Sendable, Equatable {
     public let roi: ImageRect
     /// The grid the samples came from (long edge ≤ `maxLongEdge`).
     public let sampleSize: ImageSize
-    /// Output primaries the samples are in. Always `.sRGB`: the measurement is taken before S4's
-    /// primaries matrix, so the codes on the axis are sRGB codes regardless of the panel.
+    /// The primaries the codes on the axis are in. `.rec2020` for a scene-linear measurement (385):
+    /// the working space is Rec.2020 and nothing converts it before counting. An encoded sample
+    /// reports whatever its own `DisplayImage` was tagged with (`measure(_ image:)`), because those
+    /// codes were written by S4's matrix and the label has to follow the pixels.
     public let primaries: OutputPrimaries
     /// The display ceiling this measurement's `clippedCeiling` was derived for, in **linear** units
     /// where 1 is SDR white. It cannot move a bin any more; it travels with the measurement so the
@@ -483,22 +502,15 @@ extension Histogram {
         let high = encoded ? Float(clipHighThreshold) : srgbDecode(Float(clipHighThreshold))
         let low = encoded ? Float(clipLowThreshold) : srgbDecode(Float(clipLowThreshold))
         let (wr, wg, wb) = (Float(lumaWeights.r), Float(lumaWeights.g), Float(lumaWeights.b))
-        // 075 — **the code axis is a display axis.** This measurement is taken before S4, so since the
-        // working space became Rec.2020 the values arriving here are Rec.2020 codes while the axis the
-        // card draws (and the axis `measureFrameHistogram` reads off the finished frame) is sRGB.
-        // Encoding the working code directly put the same picture's red series 8–13 % of the sample
-        // into the wrong bins, and — measured — the two plots disagreed by up to 13 % per bin while
-        // both were "right" in their own space. So a linear sample is converted into the output
-        // primaries first, once per sample, and everything below (bins, thresholds, luma) is display
-        // light. `.sRGB` is the axis because that is what `RenderGraph.measureHistogram` renders and
-        // what `Histogram.primaries` reports.
-        let toDisplay = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
-        let (m00, m01, m02) = (Float(toDisplay[0, 0]), Float(toDisplay[0, 1]), Float(toDisplay[0, 2]))
-        let (m10, m11, m12) = (Float(toDisplay[1, 0]), Float(toDisplay[1, 1]), Float(toDisplay[1, 2]))
-        let (m20, m21, m22) = (Float(toDisplay[2, 0]), Float(toDisplay[2, 1]), Float(toDisplay[2, 2]))
-        // Branch-free, like `lumaMix` below: 1 for a scene-linear sample, 0 when the sample already
-        // *is* a display code. Nine multiplies per pixel against the three `pow`s already spent.
-        let mix: Float = encoded ? 0 : 1
+        // 385 — **there is no primaries matrix here any more.** The axis is the working space's own
+        // code axis: the linear pixels arrive already in Rec.2020 (`ColorPrimaries.working`), and
+        // 075's conversion into sRGB was what pushed every colour outside sRGB negative on one channel
+        // — Rec.2020's green and cyan corners are outside sRGB, so `Rec2020 (0,1,1) → sRGB` has
+        // R = −0.6577 — and `binIndex` files every value ≤ 0 into bin 0. Measured on `L1030552` with
+        // the library's own edit: R bin 0 = 12288 (1.96 % of the sample) through the sRGB matrix, 2
+        // without it. Rec.2020 is also the honest basis for a panel wider than P3. An encoded sample
+        // was never converted (`mix` was 0 for it), so this changes the scene-linear path only — and
+        // removes nine multiplies per pixel with it.
         // The ceiling is a *value* now, not a clamp whose output we read back: a sample at or above it
         // is light this screen would throw away. Slack by half a float16 step (2^-11 relative) — that
         // is the quantisation of the texture the samples came from, and without it a value that is
@@ -550,8 +562,6 @@ extension Histogram {
                                         frameWidth: frame.width, x0: rect.x, width: rect.width,
                                         y0: rect.y, rows: rows,
                                         sdrBins: binCount, scale: scale, encoded: encoded,
-                                        m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12,
-                                        m20: m20, m21: m21, m22: m22, mix: mix,
                                         wr: wr, wg: wg, wb: wb, lumaMix: lumaMix,
                                         high: high, low: low, ceilingFloor: ceilingFloor)
                     return
@@ -576,8 +586,6 @@ extension Histogram {
                                             frameWidth: frame.width, x0: rect.x, width: rect.width,
                                             y0: y0, rows: chunk,
                                             sdrBins: binCount, scale: scale, encoded: encoded,
-                                            m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12,
-                                            m20: m20, m21: m21, m22: m22, mix: mix,
                                             wr: wr, wg: wg, wb: wb, lumaMix: lumaMix,
                                             high: high, low: low, ceilingFloor: ceilingFloor)
                     }
@@ -603,7 +611,7 @@ extension Histogram {
                              clippedLow: Double(Int(counts[loIndex])) / n)
         }
         return Histogram(binCount: binCount, sampleCount: counted, canvas: frame,
-                         roi: rect, sampleSize: frame, primaries: .sRGB,
+                         roi: rect, sampleSize: frame, primaries: .rec2020,
                          headroom: headroom,
                          red: channel(0, statsBase, statsBase + 4, statsBase + 8),
                          green: channel(stride, statsBase + 1, statsBase + 5, statsBase + 9),
@@ -622,9 +630,6 @@ extension Histogram {
                                   into base: UnsafeMutablePointer<UInt32>, statsBase: Int,
                                   frameWidth: Int, x0: Int, width: Int, y0: Int, rows: Int,
                                   sdrBins: Int, scale: Float, encoded: Bool,
-                                  m00: Float, m01: Float, m02: Float,
-                                  m10: Float, m11: Float, m12: Float,
-                                  m20: Float, m21: Float, m22: Float, mix: Float,
                                   wr: Float, wg: Float, wb: Float, lumaMix: Float,
                                   high: Float, low: Float, ceilingFloor: Float) {
         let block = sdrBins + hdrBinCount
@@ -639,10 +644,9 @@ extension Histogram {
             for x in x0..<(x0 + width) {
                 let o = (row + x) * 4
                 let wr0 = unbounded(px[o]), wg0 = unbounded(px[o + 1]), wb0 = unbounded(px[o + 2])
-                // Working primaries → display primaries (075), a no-op on an encoded sample.
-                let rv = wr0 + mix * ((m00 * wr0 + m01 * wg0 + m02 * wb0) - wr0)
-                let gv = wg0 + mix * ((m10 * wr0 + m11 * wg0 + m12 * wb0) - wg0)
-                let bv = wb0 + mix * ((m20 * wr0 + m21 * wg0 + m22 * wb0) - wb0)
+                // No primaries matrix (385): the sample is counted in the primaries it arrived in —
+                // the working space's Rec.2020 — so the axis cannot invent a negative component.
+                let (rv, gv, bv) = (wr0, wg0, wb0)
                 // A frame sample carries the shipped luma in alpha (it is the only channel left, and
                 // deriving it from three codes would be a different quantity — see
                 // `computeFrameSample`).

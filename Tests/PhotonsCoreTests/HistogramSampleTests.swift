@@ -59,10 +59,17 @@ final class HistogramSampleTests: XCTestCase {
     /// render — one render, two domains, which is what makes the comparison a controlled one.
     private func renderFrame(_ graph: RenderGraph, _ edit: EditModel = .neutral,
                              canvas: ImageSize? = nil, scale: Double = 1,
-                             headroom: Double = 1, collectHistogram: Bool = false)
+                             headroom: Double = 1, collectHistogram: Bool = false,
+                             primaries: OutputPrimaries = .sRGB)
         throws -> (texture: MTLTexture, shipped: Histogram?) {
+        // 385 — `primaries` picks the frame's own output space. The default stays `.sRGB` because
+        // S4's sRGB encode is what most of these fixtures reason about, but the tests that compare a
+        // frame against the **scene-linear** measurement (which is now counted in the working
+        // space, Rec.2020) have to render the frame in that same space or they are comparing two
+        // different bases: `testSamePixelsTwoDomains` measured 5.87 % of the red sample landing in a
+        // different bin purely because one side was sRGB and the other Rec.2020.
         let options = RenderOptions(canvas: canvas, scale: scale,
-                                    display: DisplayOptions(primaries: .sRGB, bitDepth: 16,
+                                    display: DisplayOptions(primaries: primaries, bitDepth: 16,
                                                             headroom: headroom),
                                     useCache: false, wantsPixels: false,
                                     collectHistogram: collectHistogram, histogramBins: 256)
@@ -199,13 +206,13 @@ final class HistogramSampleTests: XCTestCase {
     func testSamePixelsTwoDomains() throws {
         let w = 1200, h = 900                       // 1.08 Mpx, ordinary tones, nothing above white
         let graph = try makeGraph(image(width: w, height: h))
-        let frame = try renderFrame(graph, scale: 1, collectHistogram: true)
+        let frame = try renderFrame(graph, scale: 1, collectHistogram: true, primaries: .rec2020)
         defer { graph.recycle(output: frame.texture) }
         let shipped = try XCTUnwrap(frame.shipped)
         XCTAssertEqual(shipped.sampleCount, w * h, "the reference must be every pixel")
 
         let measured = try graph.measureFrameHistogram(fromFrame: frame.texture, edit: .neutral,
-                                                      sampleLongEdge: w)
+                                                      sampleLongEdge: w, primaries: .rec2020)
         XCTAssertEqual(measured.cost.sampleSize.keyString, "1200x900",
                        "≥ the picture, so the grid is the picture: stride 1, no resampling")
         XCTAssertEqual(measured.histogram.sampleCount, shipped.sampleCount)
@@ -254,9 +261,10 @@ final class HistogramSampleTests: XCTestCase {
         let graph = try makeGraph(image(width: w, height: h, hot: false, textured: false))
 
         let shipped = try graph.measureHistogram(.neutral)
-        let frame = try renderFrame(graph, scale: 1)
+        let frame = try renderFrame(graph, scale: 1, primaries: .rec2020)
         defer { graph.recycle(output: frame.texture) }
-        let live = try graph.measureFrameHistogram(fromFrame: frame.texture, edit: .neutral)
+        let live = try graph.measureFrameHistogram(fromFrame: frame.texture, edit: .neutral,
+                                                   primaries: .rec2020)
         XCTAssertEqual(live.cost.sampleSize.keyString, "141x256")
         XCTAssertEqual(shipped.sampleSize.keyString, "562x1024")
 
@@ -286,7 +294,8 @@ final class HistogramSampleTests: XCTestCase {
         // One render, both domains: the shipped measurement of *this* frame and the frame's own
         // texture. Comparing against a second render would mix "what the clamp did" with "did the two
         // renders agree", and only the first is the question here.
-        let sdrFrame = try renderFrame(graph, scale: 1, headroom: 1, collectHistogram: true)
+        let sdrFrame = try renderFrame(graph, scale: 1, headroom: 1, collectHistogram: true,
+                                       primaries: .rec2020)
         defer { graph.recycle(output: sdrFrame.texture) }
         let shipped = try XCTUnwrap(sdrFrame.shipped)
         XCTAssertGreaterThan(shipped.red.hdrTotal, 0, "the picture has light above white")
@@ -355,7 +364,8 @@ final class HistogramSampleTests: XCTestCase {
         let canvas = ImageSize(width: 1600, height: 1000)   // … into a landscape window
         let graph = try makeGraph(image(width: w, height: h, textured: false))
 
-        let shown = try renderFrame(graph, canvas: canvas, scale: 0.71, collectHistogram: true)
+        let shown = try renderFrame(graph, canvas: canvas, scale: 0.71, collectHistogram: true,
+                                    primaries: .rec2020)
         defer { graph.recycle(output: shown.texture) }
         let shipped = try XCTUnwrap(shown.shipped)
         // An in-render measurement is labelled in the *frame's* coordinates (the canvas it drew),
