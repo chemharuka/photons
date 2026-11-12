@@ -966,7 +966,12 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     /// 383 — 双击 / Return 进了 `.loupe` 之后居中一次（幂等：已居中则 0 次）。显式动作，不需要任何
     /// 双击窗口，也不再走 `pendingCenter`。
-    private func centreForLoupeEntry() {
+    ///
+    /// 391 — **从别的面**进入单图时，`WorkspaceRootView` 的网格回调也调这一个入口（胶片条自己
+    /// 不知道网格里双击了哪张）。所以它是 `public` 的：不再是内部细节，而是「进单图的第三个面
+    /// 请把这个锚点摆到中间」这一句。幂等由 `centerAnchor()` 的几何判据（≤ 2 pt）保证，重复触发
+    /// 不会让条带抖一下。
+    public func centreForLoupeEntry() {
         guard let id = session?.anchorID else { return }
         if centerAnchor() { centredAnchorID = id }
     }
