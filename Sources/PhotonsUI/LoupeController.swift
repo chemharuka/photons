@@ -278,6 +278,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Same contract as the three above (transparent, `hitTest → nil`, drawn in `draw(_:)`), and it
     /// starts hidden — `refreshDenoiseHUD` is its only writer.
     private let denoiseHUD = DenoiseProgressOverlay()
+    /// 392 — 「HDR 合成」 的居中卡片: the same fixed 180×74 box, three lines
+    /// (HDR 合成 / N 张 / 分:秒). Same contract as the two above (transparent, `hitTest → nil`,
+    /// drawn in `draw(_:)`), starts hidden, and `refreshHDRMergeHUD` is its only writer.
+    ///
+    /// It is a **separate view** from `denoiseHUD` on purpose: the two cards overlap geometrically, and
+    /// two states in one view would mean 「hide the denoise card」 and 「show the merge card」 sharing a
+    /// single `state` field. 392 §7.3 says a simultaneous pair is not a case this ticket solves.
+    private let hdrHUD = HDRMergeProgressOverlay()
     /// 裁切工具条: 比例 / 拉直 / 翻转 / 九宫格 / 应用 / 取消. The only chrome on the canvas that takes
     /// clicks, and it exists only while the tool is on.
     let cropBar = CropToolBar()
@@ -1419,6 +1427,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // against a dead controller, nor a bridge re-arming an observation on a released session.
         denoiseTicker?.invalidate()
         denoiseTicker = nil
+        // 392 — same rule for the merge card's ticker.
+        hdrMergeTicker?.invalidate()
+        hdrMergeTicker = nil
         bridge.cancel()
     }
 
@@ -1455,7 +1466,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // is still the topmost chrome.
         for overlay in [highlightOverlay as NSView, draftOverlay as NSView,
                         maskHandlesOverlay as NSView, denoiseHUD as NSView,
-                        cropOverlay as NSView] {
+                        hdrHUD as NSView, cropOverlay as NSView] {
             overlay.frame = container.bounds
             overlay.autoresizingMask = [.width, .height]
             container.addSubview(overlay)
@@ -1543,6 +1554,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 387 — a resize is a new canvas: the box' 8 pt clamp is measured against `container.bounds`,
         // so the card has to be re-laid out (and re-centred on the photo) with the new one.
         refreshDenoiseHUD()
+        // 392 — same reason for the other card: its clamp host is `container.bounds`.
+        refreshHDRMergeHUD()
         // 258 — the stand-in occupies the same `content` rect as the real frame, so a resize while it
         // is up has to re-place it too. No-op when nothing is standing in.
         refreshFirstFramePlaceholderGeometry()
@@ -1660,6 +1673,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = self.session?.anchorID
         }, { [weak self] in
             self?.refreshDenoiseHUD()
+        })
+        // 392 — the 「HDR 合成」 card. Two reads, both load-bearing and different from 387's:
+        //   · `hdrMergingParticipantIDs` — is a merge in flight, and **which** photos are in it;
+        //   · `anchorID`                 — the photo the single-photo view is showing, because the user's
+        //                                  rule is 「参与合成的那几张都显示」 ⇒ switch to another
+        //                                  participant and the card stays, switch out of the batch and
+        //                                  it goes away.
+        // It is a **membership** test (`participants.contains(anchorID)`), never `anchorID == 某一个`.
+        bridge.observe({ [weak self] in
+            guard let self else { return }
+            _ = self.session?.hdrMergingParticipantIDs
+            _ = self.session?.anchorID
+        }, { [weak self] in
+            self?.refreshHDRMergeHUD()
         })
     }
 
@@ -2154,6 +2181,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 387 — the card is centred on the **photo**, so a pan or a zoom moves it. Cheap when no run is
         // going (it reads two session flags and returns before touching the projection).
         refreshDenoiseHUD()
+        // 392 — the same refresh hook for the other card. Its centre is the canvas', so a pan cannot move
+        // it; it is here for the one thing that *does* change — the clamp host after a canvas resize.
+        refreshHDRMergeHUD()
         requestViewportRender()
     }
 
@@ -4987,7 +5017,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // the clamp host is the container's own rect — the same one every other canvas overlay is laid
         // out in, and the rect §2.5 names.
         let laydown = DenoiseProgressOverlay.laydown(lines: lines,
-                                                   center: denoiseBoxCenter(),
+                                                   center: canvasBoxCenter(),
                                                    containerBounds: container.bounds)
         denoiseHUD.lastLaydown = laydown
         denoiseHUD.state = .running
@@ -5036,8 +5066,109 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 画布可视区正中。`framing()` 因此不再参与，`denoisePhotoRectInView()` 一并删掉。
     ///
     /// 画布中心在窗口 resize 时会动，那是应该的：它跟的是 **UI**，不是照片。
-    private func denoiseBoxCenter() -> CGPoint {
+    ///
+    /// 392 的两张卡（降噪 / HDR 合成）走**同一个函数**：卡片的居中规则只有一条，写在两处就会
+    /// 有一天只改一处。
+    private func canvasBoxCenter() -> CGPoint {
         CGPoint(x: container.bounds.midX, y: container.bounds.midY)
+    }
+
+    // MARK: - 392 · 「HDR 合成」 的居中卡片
+    //
+    // 和 387 同一张卡、同一套算术，只有三行内容不同（`HDRMergeProgressOverlay`）。显示条件与 387
+    // **方向相同、判据不同**：
+    //
+    //   · 降噪是单张：`isDenoiseRunning && anchorID == denoiseAssetID`；
+    //   · HDR 合成是多张，所以没有「一张结果照片」可以当锚点。2026-11-12（用户）：
+    //     「HDR 合成是多张参与，所以设计的那些图片都显示」 ⇒ 条件是
+    //     **「有合成在跑」且「当前显示的照片属于参与的那一批」**，即
+    //     `anchorID ∈ participants`，不是 `anchorID == 某一个 id`。
+    //     切到参与者中的任意一张 → 卡片在；切到不参与的照片 → 卡片消失。
+    //
+    // 时钟与 387 同一套：`startedAt` + 0.5 s `Timer` + **`.common` 模式**（`.default` 会在拖滑杆的
+    // event-tracking 里冻住，§2.3），运行结束立刻 `invalidate()`。
+
+    /// 正在合成的这一次从什么时候开始。`nil` = 没有在跑。
+    private var hdrMergeStartedAt: Date?
+    /// 0.5 s 的**已用时间**驱动器。结束后必须回到 `nil`（⑤/⑥）。
+    private var hdrMergeTicker: Timer?
+    /// 这一轮创建过的 ticker 对象。`hdrMergeTicker = nil` 也能让字段读起来是空的，而一个忘掉
+    /// `invalidate()` 的写法在字段上看不出来 —— runloop 还在每 0.5 s 叫一次闭包。按 `isValid` 数。
+    private var hdrMergeTickerAudit: [Timer] = []
+    /// 卡片一共被铺下去几次。测试用它证明 0.5 s 的 tick 真的在走。
+    private var hdrMergeLaydownCount = 0
+
+    /// 卡片自己的状态 —— 验收读的是**真正铺下去的那一帧**，不是重新推导一遍。
+    var hdrHUDStateForTesting: ProgressCardOverlay.State { hdrHUD.state }
+    var hdrLaydownForTesting: ProgressCardOverlay.Laydown? { hdrHUD.lastLaydown }
+    var hdrHUDViewForTesting: HDRMergeProgressOverlay { hdrHUD }
+    /// `true` 表示那个 0.5 s ticker 还活着。⑤/⑥ 要求合成结束的瞬间它是 `false`。
+    var isHDRMergeTimerRunningForTesting: Bool { hdrMergeTicker?.isValid ?? false }
+    /// 创建过的 timer 里**还活着**的个数。⑥ 的反向门：忘掉 `invalidate()` 就一定是 1。
+    var liveHDRMergeTickerCountForTesting: Int { hdrMergeTickerAudit.filter(\.isValid).count }
+    /// 一共起过几个 timer（没起过读 0）。
+    var hdrMergeTickerCountForTesting: Int { hdrMergeTickerAudit.count }
+    /// 卡片铺下去的次数 —— 证明 ticker 在跑，而不是只在开始/结束时各铺一次。
+    var hdrMergeLaydownCountForTesting: Int { hdrMergeLaydownCount }
+
+    /// **The only writer** of the HDR card. 四个调用点，和 387 一致：观察桥（合成开始/结束）、
+    /// 0.5 s ticker、`viewDidLayout`（窗口 resize 是新的画布）以及相机变化的回调。
+    ///
+    /// 顺序也是有意的：先读 session 的那一个派生量、先把 ticker 的生死定下来，静止态在这之前返回，
+    /// 所以没有合成时这张卡是**零成本**。
+    private func refreshHDRMergeHUD() {
+        let participants = session?.hdrMergingParticipantIDs
+        // 时钟跟的是**这一次合成**，不是「卡片这一帧可见」：切到不参与的照片时卡片消失，
+        // 但时间不能归零 —— 合成还在跑，切回去它得接着数。
+        syncHDRMergeClock(running: participants != nil)
+        guard let participants, !participants.isEmpty else {
+            hdrHUD.state = .hidden
+            hdrHUD.lastLaydown = nil
+            return
+        }
+        // 显示条件（用户 2026-11-12 补充）：当前显示的那张**属于这一批**。
+        guard let anchorID = session?.anchorID, participants.contains(anchorID) else {
+            hdrHUD.state = .hidden
+            hdrHUD.lastLaydown = nil
+            return
+        }
+        let lines = HDRMergeProgressOverlay.lines(frameCount: participants.count,
+                                                  elapsed: hdrMergeElapsed())
+        // 位置与降噪卡**同一个函数**：钉在画布（UI）中心，不跟照片走（§2.2）。
+        let laydown = HDRMergeProgressOverlay.laydown(lines: lines,
+                                                      center: canvasBoxCenter(),
+                                                      containerBounds: container.bounds)
+        hdrHUD.lastLaydown = laydown
+        hdrHUD.state = .running
+        hdrMergeLaydownCount += 1
+    }
+
+    /// 让时钟和 ticker 跟着这一次合成一起生灭。
+    private func syncHDRMergeClock(running: Bool) {
+        guard running else {
+            hdrMergeStartedAt = nil
+            // ⑥ / 反向门 ⑫：光把卡片藏起来不算数，timer 必须作废，否则一个死掉的运行还在每
+            // 0.5 s 叫一次。
+            hdrMergeTicker?.invalidate()
+            hdrMergeTicker = nil
+            return
+        }
+        if hdrMergeStartedAt == nil { hdrMergeStartedAt = Date() }
+        guard hdrMergeTicker == nil else { return }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshHDRMergeHUD()
+        }
+        timer.tolerance = 0
+        // `.common`，不是 `.default`：否则拖滑杆（event tracking mode）时时间会冻住（§2.3）。
+        RunLoop.main.add(timer, forMode: .common)
+        hdrMergeTicker = timer
+        hdrMergeTickerAudit.append(timer)
+    }
+
+    /// 这一轮已经过去的秒数；没有在跑时是 `0`（一个防御性答案，永远不画）。
+    private func hdrMergeElapsed() -> Double {
+        guard let started = hdrMergeStartedAt else { return 0 }
+        return max(0, Date().timeIntervalSince(started))
     }
 
     /// 188 — **the stale rectangle's one gate.**
