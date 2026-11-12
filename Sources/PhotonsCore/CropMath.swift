@@ -300,7 +300,14 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// `0.84` of strength, `w ≥ 1 − 0.84/2 = 0.58` — still convex, still no pole. It is *only* the
     /// clamp and the slider's track; the strength is scaled by `strengthUnit`, never by this
     /// number (see `verticalStrength` for the trap).
-    public static let limit = 400.0
+    ///
+    /// **353b (用户 2026-11-12)** — ±500: 「透视可以做到500吗」→「改成500」. `s = 1.05`,
+    /// `w ≥ 1 − 1.05/2 = 0.475` — still convex, still no pole, so nothing downstream changes
+    /// shape. The near edge magnifies to **2.105×** (`1/(1 − 1.05/2)` … at the resolved corner)
+    /// against 400's 1.724×, i.e. the extra travel buys a more aggressive stretch, not new reach
+    /// that was previously clipped by a pole. Because the denominator stays `strengthUnit`, the
+    /// **existing** ±100…±400 values keep their strength bit for bit; only the track got longer.
+    public static let limit = 500.0
     /// **347** — the unit the strength is divided by: **100**, hard-wired, no longer `limit`.
     ///
     /// The strength used to read `-vertical / PerspectiveMap.limit * tangentPerUnit`. Widening
@@ -313,12 +320,60 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// of the travel, 200 units is `0.42`, i.e. 12.39° of convergence.
     public static let tangentPerUnit = 0.21
 
-    public var vertical: Double      // clamped −400…400 (353; 347 was ±200)
+    public var vertical: Double      // clamped −500…500 (353b; 353 was ±400)
     public var horizontal: Double
 
     public init(vertical: Double, horizontal: Double) {
-        self.vertical = PerspectiveMap.clamp(vertical)
-        self.horizontal = PerspectiveMap.clamp(horizontal)
+        // 353b — **one axis gives way to the other.** `limit` is a *per-axis* clamp, but the two
+        // strengths enter one homography (`M = M_horizontal · M_vertical`) and the corner that
+        // matters reads
+        //
+        //     w_min = 1 − (|s_v| + |s_h|) / 2        s = slider / strengthUnit · tangentPerUnit
+        //
+        // (measured to 1e-16 against the real matrix in `PerspectiveRange347Tests`). Two axes at
+        // 500 therefore cancel — `w = −0.05`, a pole, and the picture tears instead of warping.
+        // That coupling is not new with 500: two axes at 400 gave `w = 0.160`, positive only by
+        // luck, and 476.19 is where any pair lands exactly on zero (`100 / tangentPerUnit`).
+        //
+        // So the pair is clamped as a **pair**: the magnitude sum is scaled back to
+        // `coupledTravelBudget` keeping both signs, which is the "one axis gives way" behaviour
+        // the user asked for. At `|v| ≤ 450` and `|h| ≤ 450` the sum is ≤ 900, so every existing
+        // document (±400 max, sum ≤ 800) is untouched bit for bit.
+        let v = PerspectiveMap.clamp(vertical)
+        let h = PerspectiveMap.clamp(horizontal)
+        let sum = abs(v) + abs(h)
+        let budget = PerspectiveMap.coupledTravelBudget
+        if sum > budget, sum > 0 {
+            let k = budget / sum
+            self.vertical = v * k
+            self.horizontal = h * k
+            return
+        }
+        self.vertical = v
+        self.horizontal = h
+    }
+
+    /// The largest `|v| + |h|` the pair may reach. **900** (用户 2026-11-12：「上限设置为900好了」)
+    /// — a round number that leaves `w_min = 1 − 900·0.21/200 = 0.055`, i.e. the pole at
+    /// `sum = 952.38` is still 52 units away.
+    ///
+    /// It sits **below** `2 × limit` (1000), which is exactly why the pair needs its own bound:
+    /// each axis alone may use the whole track, the two together may not. At 900 the near edge is
+    /// already magnified `1/(1 − 0.945/2) = 1.90×`, so a tighter budget would only trade visible
+    /// reach for margin nobody can see.
+    public static let coupledTravelBudget = 900.0
+
+    /// The `w_min` the budget buys, derived — never a second constant to keep in sync.
+    /// `1 − 900 · 0.21 / (2 · 100) = 0.055`.
+    public static var coupledWFloor: Double {
+        1 - coupledTravelBudget * tangentPerUnit / (2 * strengthUnit)
+    }
+
+    /// `w_min` for a pair, the formula `init` inverts. Exposed because the acceptance reads it.
+    public static func minimumW(vertical: Double, horizontal: Double) -> Double {
+        let sv = abs(vertical) / strengthUnit * tangentPerUnit
+        let sh = abs(horizontal) / strengthUnit * tangentPerUnit
+        return 1 - (sv + sh) / 2
     }
 
     /// A value read from a document, made legal: finite and inside ±`limit` (353: ±400).

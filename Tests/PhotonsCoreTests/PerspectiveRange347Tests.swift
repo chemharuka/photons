@@ -170,6 +170,7 @@ final class PerspectiveRange347Tests: XCTestCase {
         let travel: [(vertical: Double, horizontal: Double)] = [
             (120, 0), (-120, 0), (150, 0), (-150, 0), (200, 0), (-200, 0),
             (300, 0), (-300, 0), (400, 0), (-400, 0),   // 353 — 行程到 ±400
+            (500, 0), (-500, 0),                        // 353b — 行程到 ±500
         ]
         var smallestW = Double.infinity
         for t in travel {
@@ -212,28 +213,115 @@ final class PerspectiveRange347Tests: XCTestCase {
         let both400 = cornerW(PerspectiveMap(vertical: 400, horizontal: 400))
         print(String(format: "353 ④ min w: 垂直 400 = %.17g · 水平 400 = %.17g · 双 400 = %.17g",
                      vertical400.min() ?? .nan, horizontal400.min() ?? .nan, both400.min() ?? .nan))
+        let vertical500 = cornerW(PerspectiveMap(vertical: 500, horizontal: 0))
+        let horizontal500 = cornerW(PerspectiveMap(vertical: 0, horizontal: 500))
+        let both500 = cornerW(PerspectiveMap(vertical: 500, horizontal: 500))
+        print(String(format: "353b ④ min w: 垂直 500 = %.17g · 水平 500 = %.17g · 双 500 = %.17g",
+                     vertical500.min() ?? .nan, horizontal500.min() ?? .nan, both500.min() ?? .nan))
         XCTAssertGreaterThanOrEqual(vertical200.min() ?? 0, 0.78, "347 ④ 垂直 200 的 w 余量")
         XCTAssertGreaterThanOrEqual(horizontal200.min() ?? 0, 0.78, "347 ④ 水平 200 的 w 余量")
         XCTAssertGreaterThan(both.min() ?? 0, 0, "347 ④ 双 200 仍无奇点")
         XCTAssertGreaterThanOrEqual(vertical400.min() ?? 0, 0.58, "353 ④ 垂直 400 的 w 余量（1 − 0.84/2）")
         XCTAssertGreaterThanOrEqual(horizontal400.min() ?? 0, 0.58, "353 ④ 水平 400 的 w 余量")
         XCTAssertGreaterThan(both400.min() ?? 0, 0, "353 ④ 双 400 仍无奇点")
-        XCTAssertGreaterThanOrEqual(smallestW, 0.58, "353 ④ 十档里最小的 w")
+        // 353b — the single-axis margin, with a **float** tolerance: `1 − 1.05/2` is not exact in
+        // binary, so the measured 0.47499999999999987 must not be compared with `>=` against 0.475.
+        XCTAssertEqual(vertical500.min() ?? 0, 0.475, accuracy: 1e-12, "353b ④ 垂直 500 的 w 余量（1 − 1.05/2）")
+        XCTAssertEqual(horizontal500.min() ?? 0, 0.475, accuracy: 1e-12, "353b ④ 水平 500 的 w 余量")
+        XCTAssertGreaterThanOrEqual(smallestW, 0.475 - 1e-12, "353b ④ 十二档里最小的 w")
+
+        // 353b — **the coupled axis is the real bound, not `limit` alone.** `M = M_h · M_v` and the
+        // corner `w` is `1 − (|s_v| + |s_h|)/2`, so two axes at 500 cancel: the raw matrix gives
+        // `w = −0.05`, a pole. `init` therefore clamps the **pair** (one axis gives way), and the
+        // number that matters is the budget (900, 用户定), which is below
+        // `2 × limit = 1000` — each axis alone may use the whole track, the two together may not.
+        print(String(format: "353b ④ 耦合预算 = %.2f（2×limit = %.0f）· w 下限 %.2f",
+                     PerspectiveMap.coupledTravelBudget, 2 * PerspectiveMap.limit,
+                     PerspectiveMap.coupledWFloor))
+        let c500 = PerspectiveMap(vertical: 500, horizontal: 500)
+        print(String(format: "353b ④ 请求双 500 → 实际 v %.4f / h %.4f · w_min %.17g",
+                     c500.vertical, c500.horizontal,
+                     PerspectiveMap.minimumW(vertical: c500.vertical, horizontal: c500.horizontal)))
+        XCTAssertGreaterThan(PerspectiveMap.minimumW(vertical: c500.vertical, horizontal: c500.horizontal),
+                             0, "353b ④ 双 500 必须被收缩到无奇点")
+        XCTAssertEqual(abs(c500.vertical) + abs(c500.horizontal),
+                       PerspectiveMap.coupledTravelBudget, accuracy: 1e-9,
+                       "353b ④ 收缩后正好落在预算上")
+        XCTAssertEqual(c500.vertical / c500.horizontal, 1.0, accuracy: 1e-12,
+                       "353b ④ 等比收缩：两轴同幅时保持相等")
+
+        // 单轴到顶时，另一轴还有多少余量（这是「一轴让位」的可感知后果）。
+        let onlyV = PerspectiveMap(vertical: 500, horizontal: 0)
+        XCTAssertEqual(onlyV.vertical, 500, accuracy: 1e-12, "353b ④ 单轴 500 不许被收缩")
+        let v500h300 = PerspectiveMap(vertical: 500, horizontal: 300)
+        print(String(format: "353b ④ 请求 v500/h300 → 实际 v %.4f / h %.4f",
+                     v500h300.vertical, v500h300.horizontal))
+        XCTAssertLessThanOrEqual(abs(v500h300.vertical) + abs(v500h300.horizontal),
+                                 PerspectiveMap.coupledTravelBudget + 1e-9,
+                                 "353b ④ 800 ≤ 900 ⇒ 不该收缩")
+        XCTAssertEqual(v500h300.vertical, 500, accuracy: 1e-12, "353b ④ 800 在预算内，v 保持 500")
+
+        // 预算 900 的确切边界：475 + 425 = 900 恰好落在预算上，不收缩；476 + 425 = 901 收缩。
+        let atBudget = PerspectiveMap(vertical: 475, horizontal: 425)
+        XCTAssertEqual(atBudget.vertical, 475, accuracy: 1e-12, "353b ④ 475+425=900 恰好不缩")
+        XCTAssertEqual(atBudget.horizontal, 425, accuracy: 1e-12)
+        let overBudget = PerspectiveMap(vertical: 476, horizontal: 425)
+        print(String(format: "353b ④ 476+425=901（超 1）→ v %.6f / h %.6f · 和 %.6f",
+                     overBudget.vertical, overBudget.horizontal,
+                     abs(overBudget.vertical) + abs(overBudget.horizontal)))
+        XCTAssertEqual(abs(overBudget.vertical) + abs(overBudget.horizontal), 900, accuracy: 1e-9,
+                       "353b ④ 超出后正好缩回 900")
+
+        // 既存文档逐字不动：±400 双轴的 800 远在预算内。
+        let legacy = PerspectiveMap(vertical: 400, horizontal: 400)
+        XCTAssertEqual(legacy.vertical, 400, accuracy: 1e-15, "353b ④ 既存 400 不许被收缩")
+        XCTAssertEqual(legacy.horizontal, 400, accuracy: 1e-15)
+        XCTAssertEqual(both400.min() ?? 0, 0.16, accuracy: 1e-12, "353b ④ 双 400 的 w 仍是 0.16")
     }
 
     // MARK: - the clamp lives on `limit`, the strength on 100
 
     func testTheLimitMovesAndTheUnitDoesNot() {
         print("347 · limit \(PerspectiveMap.limit) · strengthUnit \(PerspectiveMap.strengthUnit)")
-        XCTAssertEqual(PerspectiveMap.limit, 400, "353: limit = 400（只用于夹取与行程）")
+        XCTAssertEqual(PerspectiveMap.limit, 500, "353b: limit = 500（单轴夹取与滑杆行程）")
         XCTAssertEqual(PerspectiveMap.strengthUnit, 100, "347: 强度分母写死 100")
-        XCTAssertEqual(PerspectiveMap(vertical: 450, horizontal: 0).vertical, 400,
-                       "353: 文档里 450 夹到 400")
-        XCTAssertEqual(PerspectiveMap(vertical: -450, horizontal: 0).vertical, -400)
+        XCTAssertEqual(PerspectiveMap(vertical: 550, horizontal: 0).vertical, 500,
+                       "353b: 单轴 550 夹到 500")
+        XCTAssertEqual(PerspectiveMap(vertical: -550, horizontal: 0).vertical, -500)
+        XCTAssertEqual(PerspectiveMap(vertical: 500, horizontal: 0).vertical, 500,
+                       "353b: 单轴 500 本身不再被夹")
+        XCTAssertEqual(PerspectiveMap(vertical: 450, horizontal: 0).vertical, 450,
+                       "353b: 450 现在合法（353 时会被夹到 400）")
         XCTAssertEqual(PerspectiveMap(vertical: 400, horizontal: 0).vertical, 400,
-                       "353: 400 本身不再被夹")
+                       "353: 400 仍合法")
         XCTAssertEqual(PerspectiveMap(vertical: 200, horizontal: 0).vertical, 200,
                        "353: 200 仍合法（347 的行程未被收回）")
         XCTAssertEqual(PerspectiveMap(vertical: .nan, horizontal: 0).vertical, 0, "347: 非数 → 0")
+
+        // 353b — 单轴夹取在前、耦合收缩在后：550 + 550 先各自夹到 500，再等比缩到预算。
+        let over = PerspectiveMap(vertical: 550, horizontal: 550)
+        print(String(format: "353b · 550/550 → v %.4f / h %.4f（和 %.2f ≤ 预算 %.2f）",
+                     over.vertical, over.horizontal,
+                     abs(over.vertical) + abs(over.horizontal),
+                     PerspectiveMap.coupledTravelBudget))
+        XCTAssertLessThanOrEqual(abs(over.vertical), 500, "353b: 单轴不许超过 limit")
+        XCTAssertLessThanOrEqual(abs(over.vertical) + abs(over.horizontal),
+                                 PerspectiveMap.coupledTravelBudget + 1e-9, "353b: 和必须在预算内")
+    }
+
+    /// 353b — **the strength of an existing value must not move.** Widening the track only lengthens
+    /// the slider; if the denominator had followed `limit`, every document in the library would have
+    /// been repainted by a re-parametrisation. This pins the half 347 was about.
+    func testWideningTheTrackDoesNotRepaint() {
+        for v in [100.0, 200.0, 300.0, 400.0] {
+            let s = PerspectiveMap(vertical: v, horizontal: 0).verticalStrength
+            let expected = -v / 100 * 0.21
+            XCTAssertEqual(s, expected, accuracy: 1e-15,
+                           "353b: 滑杆 \(v) 的强度必须仍是 \(-v / 100 * 0.21)")
+            print(String(format: "353b ⑤ v %+5.0f · s %.17g · 期望 %.17g", v, s, expected))
+        }
+        let at500 = PerspectiveMap(vertical: 500, horizontal: 0).verticalStrength
+        print(String(format: "353b ⑤ v %+5.0f · s %.17g（新增的那一档）", 500.0, at500))
+        XCTAssertEqual(at500, -1.05, accuracy: 1e-12, "353b: 500 的强度 = −1.05")
     }
 }

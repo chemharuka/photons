@@ -743,7 +743,7 @@ final class GuideLines337Tests: XCTestCase {
     ///
     /// The range is read from the **field SwiftUI built** (`NumberFieldController.row.range`) rather
     /// than from a constant here, so a panel left at ±100 is red no matter what core says.
-    func testThePerspectiveSlidersTravelToTwoHundred() throws {
+    func testThePerspectiveSlidersTravelToTheLimit() throws {
         let (panel, _) = try transformPanel(width: 330)
         defer { panel.window.contentView = nil }
         let session = try XCTUnwrap(panel.session)
@@ -758,8 +758,8 @@ final class GuideLines337Tests: XCTestCase {
         let row = try XCTUnwrap(vertical.controller?.row, "347 ⑤ 读数没有控制器")
         let rowH = try XCTUnwrap(horizontal.controller?.row)
         print("347 ⑤ 滑杆行程: 垂直 \(row.range) · 水平 \(rowH.range) · 读数格式 \(row.format)")
-        XCTAssertEqual(row.range, -400 ... 400, "353 ⑤ 垂直透视的行程必须是 −400…400")
-        XCTAssertEqual(rowH.range, -400 ... 400, "353 ⑤ 水平透视的行程必须是 −400…400")
+        XCTAssertEqual(row.range, -500 ... 500, "353b ⑤ 垂直透视的行程必须是 −500…500")
+        XCTAssertEqual(rowH.range, -500 ... 500, "353b ⑤ 水平透视的行程必须是 −500…500")
         XCTAssertEqual(row.range, -PerspectiveMap.limit ... PerspectiveMap.limit,
                        "347 ⑤ 滑杆 = 夹取那一个数")
 
