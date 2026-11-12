@@ -121,11 +121,6 @@ public struct AnselDenoiseService: Sendable {
         let inURL = dir.appendingPathComponent("tiles.f32")
         let outURL = dir.appendingPathComponent("denoised.f32")
 
-        var opts = options
-        opts.tileSize = tile
-        opts.noiseA = options.noiseA
-        opts.noiseB = options.noiseB
-
         do {
             try tiles.withUnsafeBufferPointer { Data(buffer: $0) }.write(to: inURL)
         } catch {
@@ -136,7 +131,7 @@ public struct AnselDenoiseService: Sendable {
                                             inputTiles: inURL,
                                             count: placed.count,
                                             output: outURL,
-                                            options: opts)
+                                            options: options)
 
         let raw = try Data(contentsOf: outURL, options: .mappedIfSafe)
         let expected = placed.count * tile * tile * MemoryLayout<Float>.size
