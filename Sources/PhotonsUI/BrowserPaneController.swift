@@ -37,6 +37,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private lazy var stackMenuTarget = StackMenuTarget(session: session)
     /// §384 — the 「HDR 合成…」 verb's target, built next to the stack one.
     private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
+    /// §386 — 「模型降噪…」's target.
+    private lazy var denoiseMenuTarget = DenoiseMenuTarget(session: session)
     private let sourcesScroll = NSScrollView()
     private let photosScroll = NSScrollView()
     private let matte = NSVisualEffectView()
@@ -785,6 +787,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // §384 — the same row the grid and the strip carry.
         HDRMenuBuilder.attach(to: contextMenu.menu, session: session, target: hdrMenuTarget,
                               selectedIDs: session.selectedAssets.map(\.id))
+        // §386 — 「模型降噪…」, the same row the grid and the strip carry.
+        DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session, target: denoiseMenuTarget,
+                                  selectedIDs: session.selectedAssets.map(\.id))
     }
 
     /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).
