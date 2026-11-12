@@ -678,7 +678,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     /// 383 — 双击 / Return 进了 `.loupe` 之后居中一次；已居中（≤ 2 pt）是 no-op，所以重复触发不抖。
-    private func centreForLoupeEntry() {
+    ///
+    /// 391 — `public` 的理由同胶片条的孪生方法：网格里双击时由 `WorkspaceRootView` 调一次。
+    public func centreForLoupeEntry() {
         guard let id = session?.anchorID else { return }
         if centerAnchor() { centredAnchorID = id }
     }

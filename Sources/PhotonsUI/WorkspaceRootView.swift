@@ -467,7 +467,22 @@ public final class WorkspaceRootView: NSView {
             divider.onDragEnded = { [weak self] in self?.endPanelDividerDrag() }
         }
 
-        gridController.onActivate = { [weak self] id in self?.session.activate(id) }
+        // 391 — 网格双击进单图：`session.activate` 只写模型（选中 + `mode = .loupe`），另外两个面
+        // 不知道要滚，所以这里补一次居中。两个入口都是幂等的（已居中 → `centerAnchor()` 判据
+        // ≤ 2 pt 直接返回 false），从网格连点几次不会累积滚动。
+        //
+        // 无脑调两面的代价是零：列表模式下胶片条虽然 `isHidden` 但仍有几何，会顺带对位好（切到
+        // 胶片条模式时不用再滚一次）；胶片条模式下侧栏没有照片行，`centerAnchor()` 自己返回 false。
+        //
+        // 不推迟到下一帧：`activate` 只把 canvas 的子视图从网格换成单图，胶片条/侧栏的 frame 由
+        // `browserMode` 决定、与本单无关，所以这一拍读到的就是最终几何 —— 实测两面偏移与
+        // `CenteredScroll.target` 差 0.0 pt（偏差若来自旧几何不可能为 0）。推迟反而与用户连点抢帧。
+        gridController.onActivate = { [weak self] id in
+            guard let self else { return }
+            self.session.activate(id)
+            self.filmstripController.centreForLoupeEntry()
+            self.browserPane.centreForLoupeEntry()
+        }
         filmstripController.onActivate = { [weak self] id in self?.session.activate(id) }
         topBar.onOpen = { [weak self] in self?.openLibraryPanel() }
         topBar.onModeChange = { [weak self] mode in self?.session.mode = mode }
