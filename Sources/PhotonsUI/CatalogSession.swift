@@ -981,6 +981,237 @@ public final class CatalogSession {
         lastHDRMergeProgress = "合成完成：\(run.width)×\(run.height)，\(run.frameCount) 帧"
     }
 
+    // MARK: 模型降噪 (§386) — 右键菜单一个动词，不弹窗口
+    //
+    // 和 §384 的 HDR 合成同一套口径：入口在右键菜单、点下去不弹窗、选择本身就是「处理哪张」。
+    // 不同的是**只处理单张**，而且产物是「原图的降噪版」，所以完成后原图不消失 ——
+    // 它成为新堆叠的第二张，产物置顶。
+    //
+    // 线程：一张 60 MP 是 1426 个 tile（step 208），GPU 上也要几十秒；解码 / 归一化 /
+    // 写 DNG 同样是几十秒级的同步工作。整个 body 因此在 `denoiseQueue` 上跑，主线程只收结果。
+    // `denoiseRanOffMain` 记录 worker 实际看到的值，测试断言的是这个，不是注释。
+
+    /// 为什么上一次模型降噪没做成，中文原因。成功时为 nil。永远不弹窗。
+    public private(set) var lastDenoiseError: String?
+
+    /// 进度一行（`降噪 9536×6344，tile 256…`），成功后是结果摘要。没有全局 HUD（§2.5）。
+    public private(set) var lastDenoiseProgress: String?
+
+    /// 起了几次 / 完成了几次。测试等第二个数字，不靠 sleep。
+    public private(set) var denoiseRunCount = 0
+    public private(set) var denoiseCompletionCount = 0
+
+    /// worker 进入阻塞体时看到的值。`nil` = 还没跑过；`false` 意味着跑在主线程（§3 ⑥ 要抓的 bug）。
+    public private(set) var denoiseRanOffMain: Bool?
+
+    /// 点了到结果之间为 true：第二次点击不许再起一个几十秒的任务。
+    public private(set) var isDenoiseRunning = false
+
+    /// 上一次成功的数字。失败时留 nil 并填 `lastDenoiseError`。
+    public struct DenoiseReport: Sendable, Equatable {
+        public let output: URL
+        public let source: URL
+        public let width: Int
+        public let height: Int
+        public let whiteLevel: Double
+        public let cfa: String
+        public let tiles: Int
+        public let seconds: Double
+        public let byteCount: Int
+        public let assetID: String
+        public let stackTopID: String
+        public let stackCount: Int
+    }
+
+    public private(set) var lastDenoiseReport: DenoiseReport?
+
+    /// 工具与模型在哪儿。Injectable：测试把它指向一个不存在的可执行文件或模型路径，
+    /// 就能复现「菜单灰掉的三种原因」，不需要真装东西。
+    public var denoiseLocation = AnselDenoiseLocation()
+
+    /// 工具**真的在**：`AnselDenoiseClient` 会把一条不存在的显式路径原样收下，
+    /// 所以这里问的是那个文件本身（与 `isHDRMergeAvailable` 同一条规矩）。
+    public var isDenoiseToolAvailable: Bool {
+        guard let client = denoiseLocation.client() else { return false }
+        return FileManager.default.isExecutableFile(atPath: client.executableURL.path)
+    }
+
+    /// 模型在四级解析顺序里找到了没有。
+    public var isDenoiseModelAvailable: Bool {
+        denoiseLocation.resolvedModel() != nil
+    }
+
+    /// 缺模型时 tooltip 要写的完整期望路径。
+    public var denoiseModelPathHint: String { denoiseLocation.modelPathHint() }
+
+    /// 阻塞的那一半跑在这个队列上。Injectable，测试因此能不抢全局池。
+    public var denoiseQueue = DispatchQueue(label: "photons.denoise", qos: .userInitiated)
+
+    /// 对选中的**那一张**跑模型降噪：产物落在原图同目录，然后原图 + 产物组成一个新堆叠、
+    /// **产物置顶**、选中产物。
+    ///
+    /// 返回参与的原图 id（拒绝启动时为空数组），测试因此不用再读一遍选择。
+    @discardableResult
+    public func denoiseSelection() -> [String] {
+        denoiseRunCount += 1
+        lastDenoiseError = nil
+        lastDenoiseProgress = nil
+        denoiseRanOffMain = nil
+
+        guard let catalog else {
+            lastDenoiseError = AnselDenoiseNotices.noLibrary
+            return []
+        }
+        guard !isDenoiseRunning else {
+            lastDenoiseError = AnselDenoiseNotices.alreadyRunning
+            return []
+        }
+        guard isDenoiseToolAvailable else {
+            lastDenoiseError = AnselDenoiseNotices.toolMissing
+            return []
+        }
+        guard isDenoiseModelAvailable else {
+            lastDenoiseError = AnselDenoiseNotices.modelMissing(denoiseModelPathHint)
+            return []
+        }
+        // 菜单已经拦过这三条；这里是第二次，因为一个过期的菜单行或键盘路径不该让任务白跑。
+        let chosen = selectedAssets
+        guard chosen.count == 1 else {
+            lastDenoiseError = AnselDenoiseNotices.singlePhotoOnly
+            return []
+        }
+        let asset = chosen[0]
+        guard asset.ext.lowercased() == "dng" else {
+            lastDenoiseError = AnselDenoiseNotices.onlyDNG(asset.filename)
+            return []
+        }
+        guard let url = fileURL(for: asset) else {
+            lastDenoiseError = AnselDenoiseNotices.onlyDNG(asset.filename)
+            return []
+        }
+        guard let importService = makeImportService() else {
+            lastDenoiseError = AnselDenoiseNotices.noLibrary
+            return []
+        }
+
+        let job = AnselDenoiseJob(location: denoiseLocation)
+        let queue = denoiseQueue
+        let participantID = asset.id
+        let rootID = asset.sourceRootId
+        isDenoiseRunning = true
+        lastDenoiseProgress = "准备降噪…"
+        let report: @Sendable (String) -> Void = { [weak self] text in
+            Task { @MainActor in self?.lastDenoiseProgress = text }
+        }
+        queue.async { [weak self] in
+            let run = Self.runDenoise(job: job, importService: importService, catalog: catalog,
+                                      source: url, participantID: participantID, rootID: rootID,
+                                      progress: report)
+            Task { @MainActor in self?.finishDenoise(run) }
+        }
+        return [participantID]
+    }
+
+    /// 一次降噪的产物。纯 `Sendable` 盒子，后台那一半永远不碰 session。
+    private struct DenoiseRun: Sendable {
+        var ranOffMain = false
+        var failure: String?
+        var output: URL?
+        var source: URL?
+        var assetID: String?
+        var width = 0
+        var height = 0
+        var whiteLevel: Double = 0
+        var cfa = ""
+        var tiles = 0
+        var seconds: Double = 0
+        var byteCount = 0
+        var stackTopID: String?
+        var stackCount = 0
+    }
+
+    /// 阻塞的那一半。**不在主线程**（由 `ranOffMain` 断言）。
+    ///
+    /// 顺序就是契约：降噪 → 加进库 → 抽离旧堆叠 + 组新堆叠。产物写在源目录，
+    /// 所以走 `mode: .reference` + 原图的 `sourceRootId`（与 §384 一致）。
+    private nonisolated static func runDenoise(job: AnselDenoiseJob,
+                                               importService: ImportService,
+                                               catalog: Catalog,
+                                               source: URL,
+                                               participantID: String,
+                                               rootID: String,
+                                               progress: @escaping @Sendable (String) -> Void) -> DenoiseRun {
+        var run = DenoiseRun()
+        run.ranOffMain = !Thread.isMainThread
+        do {
+            let outcome = try job.run(source: source, progress: { progress($0) })
+            run.output = outcome.output
+            run.source = source
+            run.width = outcome.width
+            run.height = outcome.height
+            run.whiteLevel = outcome.whiteLevel
+            run.cfa = outcome.cfa
+            run.tiles = outcome.tiles
+            run.seconds = outcome.seconds
+            run.byteCount = outcome.byteCount
+
+            progress("加入照片库…")
+            // `ImportService` 按内容哈希去重，重跑不会造出第二行。
+            let summary = try importService.run(sources: [outcome.output],
+                                               options: ImportOptions(mode: .reference,
+                                                                      rootID: rootID,
+                                                                      recursive: false))
+            guard let importedID = summary.addedAssetIDs.first else {
+                run.failure = "降噪结果已经在库里（内容相同），没有新建照片"
+                return run
+            }
+            run.assetID = importedID
+
+            progress("组成堆叠…")
+            let summary2 = try catalog.makeStack(resultAssetID: importedID,
+                                                 participantIDs: [participantID])
+            run.stackTopID = summary2?.topID
+            run.stackCount = summary2?.count ?? 0
+            return run
+        } catch {
+            run.failure = (error as? AnselDenoiseJobError)?.description ?? error.localizedDescription
+            return run
+        }
+    }
+
+    /// 回到主 actor：发布结果、推进投影、选中产物。
+    private func finishDenoise(_ run: DenoiseRun) {
+        isDenoiseRunning = false
+        denoiseCompletionCount += 1
+        denoiseRanOffMain = run.ranOffMain
+        lastDenoiseError = run.failure
+        lastDenoiseReport = nil
+        guard run.failure == nil, let assetID = run.assetID else {
+            lastDenoiseProgress = nil
+            return
+        }
+        // 堆叠是库元数据，不是编辑：和评分用同一个信号，⌘Z 不会走回去。
+        metadataWriteCount += 1
+        lastMetadataAffectedRows = run.stackCount
+        metadataRevision &+= 1
+        lastStackError = nil
+        lastStackAffectedRows = run.stackCount
+        reload()
+        // 产物是置顶，也就是投影里这一行代表的那张 —— 选中它，用户立刻看到降噪结果。
+        if assets.contains(where: { $0.id == assetID }) { selectOnly(assetID) }
+        if let output = run.output {
+            lastDenoiseReport = DenoiseReport(output: output,
+                                              source: run.source ?? output,
+                                              width: run.width, height: run.height,
+                                              whiteLevel: run.whiteLevel, cfa: run.cfa,
+                                              tiles: run.tiles, seconds: run.seconds,
+                                              byteCount: run.byteCount,
+                                              assetID: assetID, stackTopID: run.stackTopID ?? "",
+                                              stackCount: run.stackCount)
+        }
+        lastDenoiseProgress = "降噪完成：\(run.width)×\(run.height)，\(run.tiles) 个 tile"
+    }
+
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.
     ///
     /// Only stack ids present in `visible` are asked for, so a filter that hides every member of a

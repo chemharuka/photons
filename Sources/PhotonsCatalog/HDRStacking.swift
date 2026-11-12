@@ -94,8 +94,19 @@ extension Catalog {
     ///    rank 0 without a second `setStackTop` write.
     ///
     /// Returns the new stack, whose `topID` is `resultAssetID`.
+    ///
+    /// §386 renamed the body to `makeStack(resultAssetID:participantIDs:)` because a denoised
+    /// sibling wants exactly the same two steps — this HDR-named entry point is now a one-line
+    /// forwarder, so there is still only one implementation of the ordering.
     @discardableResult
     public func makeHDRStack(resultAssetID: String, participantIDs: [String]) throws -> StackSummary? {
+        try makeStack(resultAssetID: resultAssetID, participantIDs: participantIDs)
+    }
+
+    /// 结果置顶 + 参与帧抽离旧堆叠。两个合成类功能（HDR、模型降噪）共同的**唯一**实现：
+    /// 「结果第一」这个顺序只写在这里，所以 §3 ⑪ 的反向门只有一行宽。
+    @discardableResult
+    public func makeStack(resultAssetID: String, participantIDs: [String]) throws -> StackSummary? {
         try extractFromStacks(assetIDs: participantIDs)
         return try makeStack(assetIDs: [resultAssetID] + participantIDs)
     }

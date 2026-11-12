@@ -436,6 +436,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// §384 — 「HDR 合成…」 is a sibling of 「堆叠 ▸」 and shares the same target grammar: a small
     /// `NSObject` that forwards one selector to the session.
     private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
+    /// §386 — 「模型降噪…」, built from the same three-line shape.
+    private lazy var denoiseMenuTarget = DenoiseMenuTarget(session: session)
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
@@ -1124,6 +1126,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         HDRMenuBuilder.attach(to: contextMenu.menu, session: session,
                               target: hdrMenuTarget,
                               selectedIDs: session.selectedAssets.map(\.id))
+        // §386 — 「模型降噪…」, right after it: one block of library verbs.
+        DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                  target: denoiseMenuTarget,
+                                  selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 
@@ -1505,6 +1511,110 @@ public enum HDRMenuBuilder {
         menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs),
                         at: insertAt)
         menu.insertItem(.separator(), at: insertAt + 1)
+    }
+}
+
+
+/// 右键 ▸「模型降噪…」 — §386，与 「HDR 合成…」 同一个 builder 模式、同一排位置。
+///
+/// 用户的契约（2026-11-11）：「选择单个照片，右键-"模型降噪"，会自动在原文件的同位置生成
+/// XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的放在顶部」，以及「不弹窗口」。
+/// 所以这一行只有一个动词和一个决定：*这一张能不能降噪*，不能的时候原因就写在行上。
+///
+/// 和「HDR 合成…」一样**始终出现、不满足就灰**：消失的行什么都学不到，而「缺模型」这种
+/// 情况必须把**期望的完整路径**说出来（§2.3 第 4 级），用户才能把文件放对地方。
+@MainActor
+public final class DenoiseMenuTarget: NSObject {
+    public weak var session: CatalogSession?
+
+    public init(session: CatalogSession?) {
+        self.session = session
+        super.init()
+    }
+
+    @objc func denoisePressed(_ sender: Any?) {
+        session?.denoiseSelection()
+    }
+}
+
+@MainActor
+public enum DenoiseMenuBuilder {
+
+    public static let title = "模型降噪…"
+
+    /// 这一行为什么灰，或 nil（可点）。public 是因为它就是全部规则：菜单、tooltip 和动词
+    /// 自己的复查必须说的是同一句话，测试也该能读到那句话而不必去走一棵 `NSMenu`。
+    ///
+    /// 顺序是有意的：先说选择（0 张 / >1 张），再说格式，最后说工具与模型 —— 一次只抱怨
+    /// 用户此刻真正该改的那件事。工具/模型在 `session` 上读，所以测试注入一个不存在的路径
+    /// 就能复现对应的那一条。
+    public static func unavailableReason(session: CatalogSession?, selectedIDs: [String]) -> String? {
+        guard let session else { return AnselDenoiseNotices.noLibrary }
+        guard selectedIDs.count == 1 else { return AnselDenoiseNotices.singlePhotoOnly }
+        guard let asset = session.selectedAssets.first else {
+            return AnselDenoiseNotices.singlePhotoOnly
+        }
+        guard asset.ext.lowercased() == "dng" else {
+            return AnselDenoiseNotices.onlyDNG(asset.filename)
+        }
+        guard session.isDenoiseToolAvailable else { return AnselDenoiseNotices.toolMissing }
+        guard session.isDenoiseModelAvailable else {
+            return AnselDenoiseNotices.modelMissing(session.denoiseModelPathHint)
+        }
+        return nil
+    }
+
+    /// 那一行。**永远返回**（这正是它能带原因灰掉的方式），只有 `unavailableReason` 为 nil
+    /// 时才可点。
+    public static func item(session: CatalogSession?, target: DenoiseMenuTarget,
+                            selectedIDs: [String]) -> NSMenuItem {
+        let entry = NSMenuItem(title: title,
+                               action: #selector(DenoiseMenuTarget.denoisePressed(_:)),
+                               keyEquivalent: "")
+        entry.target = target
+        if let reason = unavailableReason(session: session, selectedIDs: selectedIDs) {
+            entry.isEnabled = false
+            entry.toolTip = reason
+        } else {
+            entry.isEnabled = true
+            entry.toolTip = "在照片旁生成 \(denoisedFileNameHint(session: session))，并与原图组成堆叠（降噪结果置顶）"
+        }
+        return entry
+    }
+
+    /// 可点时的说明里那个文件名：`L1030552.dng` → `L1030552-denoised.dng`。
+    private static func denoisedFileNameHint(session: CatalogSession?) -> String {
+        guard let name = session?.selectedAssets.first?.filename else { return "<原名>-denoised.dng" }
+        let stem = (name as NSString).deletingPathExtension
+        return "\(stem)-denoised.dng"
+    }
+
+    /// 放在 「HDR 合成…」 **之后**（两者是一组库动词），所以三个浏览器的右键菜单读起来是
+    /// 同一段话。重复打开时先按标题清掉上一行，和 `HDRMenuBuilder.attach` 同一条规矩。
+    public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
+                              selectedIDs: [String]) {
+        for (index, existing) in menu.items.enumerated().reversed() where existing.title == title {
+            menu.removeItem(at: index)
+            // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
+            // one after its own row, and the previous open may have put one after ours.
+            if index > 0, index < menu.items.count,
+               menu.items[index - 1].isSeparatorItem, menu.items[index].isSeparatorItem {
+                menu.removeItem(at: index)
+            }
+        }
+        var insertAt = 0
+        if let hdrIndex = menu.items.firstIndex(where: { $0.title == HDRMenuBuilder.title }) {
+            // Right after 「HDR 合成…」, i.e. **before** the separator that builder left behind —
+            // so the two verbs share one block and no second separator appears.
+            insertAt = hdrIndex + 1
+        } else if let stackIndex = menu.items.firstIndex(where: { $0.title == StackMenuBuilder.title }) {
+            insertAt = stackIndex + 1
+            if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
+        }
+        menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs),
+                        at: insertAt)
+        let alreadySeparated = insertAt + 1 < menu.items.count && menu.items[insertAt + 1].isSeparatorItem
+        if !alreadySeparated { menu.insertItem(.separator(), at: insertAt + 1) }
     }
 }
 
