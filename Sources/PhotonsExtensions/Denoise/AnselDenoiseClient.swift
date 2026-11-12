@@ -68,11 +68,19 @@ public struct AnselDenoiseOptions: Sendable, Equatable {
     /// `out = original + strength·(denoised − original)`, applied in the same normalized domain as
     /// the input, so it cannot disturb black/white levels.
     ///
-    /// 0.85 is what Ansel ships: enough to visibly clean up, little enough that texture survives.
+    /// 0.85 was what Ansel ships — enough to visibly clean up, little enough that texture survives.
     /// Note this is **not** the same knob as `sigmaScale`. Sigma tells the network how much noise
     /// to expect (it re-runs inference and decides what to remove); strength only decides how much
     /// of the answer to keep. Lowering strength puts original noise back along with the detail.
-    public var strength: Double = 0.85
+    ///
+    /// 396 — **the default is 0.50**, per the user's own call (「模型降噪的默认强度修改为0.50，即
+    /// `--strength 0.50`」). At 0.85 the tool over-corrects: the residual is *cleaner* than the
+    /// original texture, which reads as plastic on skin and foliage. 0.50 leaves more of the
+    /// original grain in place. Measured on `L1030433.dng` by §386's dark-patch
+    /// adjacent-difference variance, both numbers are printed by
+    /// `AnselDenoiseStrength396Tests`; the value is a **default only** — the range check and the
+    /// CLI parsing are untouched, so a caller that passes `strength:` explicitly still gets it.
+    public var strength: Double = 0.50
 
     public init() {}
 }
