@@ -268,18 +268,18 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.delegate = self
         collectionView.register(FilmstripCell.self, forItemWithIdentifier: FilmstripCell.reuseIdentifier)
         collectionView.onKeyDown = { [weak self] event in self?.handleKey(event) ?? false }
-        // 352 — 按下时就把命中项交给公共的 `BrowserClickGuard`：双击窗口内第二下落到**另一格**
-        // 就是「332 的居中对齐把格子挪到指针下面」那件事，整次按下被吞（不选中、不切图、不重排）。
+        // 383 — 按下时只记命中项（双击要打开**第一下**那张），单击本身交给 AppKit 走选择。
+        // 352 的「窗口内第二下落到另一格就整次吞掉」随延迟居中一起退役：单击不再居中，格子就不会
+        // 从指针下面滑走，第二下自然还落在同一张上；点两张不同照片就是两次正常的单击。
         collectionView.onMouseDown = { [weak self] event in
             guard let self else { return false }
             let point = self.collectionView.convert(event.locationInWindow, from: nil)
             // ⇧/⌘ are the session's range gesture, not AppKit's "extend from the last clicked
             // row" — resolving them here keeps the anchor/base fixed while the range moves.
             if self.handleSelectionClick(at: point, modifiers: event.modifierFlags) { return true }
-            return self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date()) == .swallow
+            _ = self.clickGuard.mouseDown(hit: self.hit(at: point), now: Date())
+            return false
         }
-        clickGuard.onCenter = { [weak self] id in self?.performDeferredCenter(anchorID: id) }
-        clickGuard.onCenterDropped = { [weak self] id in self?.settleWithoutCentering(anchorID: id) }
 
         // 119: a double-click opens the photo under the pointer, exactly like the grid's. The strip
         // used to open only the anchor (Return); "double-click which one, open that one" needs the
@@ -354,9 +354,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         super.viewDidLayout()
         fitItemHeightToContainer()
         scheduleThumbnailReconcile()
-        // 332 — the first real viewport only exists after layout; an anchor that was set before the
-        // strip had a width centres here instead of on the next unrelated model change.
-        centerAnchorIfChanged()
+        // 383 — **布局不再是居中 door。** 332 当年在这里补了一次「第一个真实视口出现后再居中」，
+        // 但布局随时会发生（另一面换了选中、缩略图落地、窗格拖动），而锚点可能是**另一面**刚选中的
+        // 那张 —— 实测（③ 的 6 次单击）：layout → `centerAnchorIfChanged` 还会自己滚 3 次，把
+        // 「单击不居中」打回去。居中的入口只剩显式动作：双击 / Return / ←→、编辑落地，以及 ⇧/⌘ 的
+        // 范围手势（`handleSelectionClick`）。快照还没落地时 `centerAnchor()` 自己会 `deferCenterOnce()`。
     }
 
     /// `scrollDirection = .horizontal` does **not** mean "one row". A horizontal
@@ -384,11 +386,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     @objc private func clipViewBoundsChanged() {
-        // 352 — a bounds change that `Activity` did not attribute to our own animation is the user
-        // scrolling: the parked centre is dropped rather than pulled back over them.
-        let before = scrollActivity.lastUserChangeAt
+        // 332 — a bounds change that `Activity` did not attribute to our own animation is the user
+        // scrolling. 383: there is no parked centre left to drop (a click never centres), so this
+        // only records the timestamp `CenterOnEditTests` / `CenteredScroll` read.
         scrollActivity.noteChange()
-        clickGuard.noteUserScroll(scrollActivity.lastUserChangeAt != before)
         scheduleThumbnailReconcile()
     }
 
@@ -413,14 +414,16 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         let next = modelSnapshot(session)
         guard next != lastSnapshot else {
             updateSelectionAndActive()
-            // 332 — the anchor can move without the list changing (arrow keys, the menu, a model
-            // write from elsewhere): every door lands here, so this is the one anchor trigger.
-            centerAnchorIfChanged()
+            // 383 — 选择/锚点变了**不是**滚动的理由（谁写的都一样：本条的单击、侧栏的单击、方向键之外
+            // 的任何模型写回）。把锚点记为已结算，于是随后的一次 `viewDidLayout` 也不会替它居中；
+            // 居中的入口只剩显式动作 —— 双击 / Return / ←→（`centreForLoupeEntry()`）与编辑落地
+            // （303 的 0.25 s 窗口直接调 `centerAnchor()`）。
+            markAnchorSettled()
             return
         }
         lastSnapshot = next
         refresh()
-        centerAnchorIfChanged()
+        markAnchorSettled()
     }
 
     /// Selection/anchor are view state: update the rings in place, never reload the cells.
@@ -837,7 +840,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         updateSelectionAndActive()
         // The new anchor is priority ① for the next reconcile.
         scheduleThumbnailReconcile()
-        centerAnchorIfChanged()
+        // 383 — 单击只选中：把锚点记为「已结算」，于是模型那条「锚点变了」（`applyModelSnapshot`）也不会
+        // 为它居中。居中的两个入口只剩显式动作：双击 / Return（`centreForLoupeEntry()`）与编辑落地
+        // （303 的 0.25 s 窗口 → `centerAnchor()`）。
+        markAnchorSettled()
     }
 
     /// Resolve a ⇧/⌘ press against the session. Plain presses return `false` and reach AppKit,
@@ -876,7 +882,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     // MARK: 332 — keep the anchor photo in the middle of the strip
 
-    /// 352 — the press/double-click/deferred-centre rule, shared verbatim with `BrowserPaneController`.
+    /// 383 — the press/double-click rule, shared verbatim with `BrowserPaneController`. Both surfaces
+    /// 单击只选中；双击打开第一下那张。352 的延迟居中已退役。
     public let clickGuard = BrowserClickGuard()
 
     /// The user's scrolling, as a timestamp — `isUserScrolling` reads it to stand down.
@@ -937,29 +944,26 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         return true
     }
 
-    /// Centre whenever the anchor moved, whichever door moved it (click, arrow key, model change).
-    ///
-    /// 352 — **except** when the anchor is the one a click is still deciding about: that centre is
-    /// parked on `clickGuard.pendingCenter`, and a model tick inside the window must not run it early
-    /// (that early run is exactly what slid the strip under the second press).
+    /// Centre whenever the anchor moved **without a click**: an arrow key, a menu, a model write from
+    /// elsewhere, the first real layout. 383 — a click is not one of them: it marks its anchor settled
+    /// (`markAnchorSettled()`), so the model tick a click causes lands here and does nothing.
     private func centerAnchorIfChanged() {
         guard let id = session?.anchorID, id != centredAnchorID else { return }
-        guard !clickGuard.isCenterDeferred(id) else { return }
         if centerAnchor() { centredAnchorID = id }
     }
 
-    /// 352 — the parked centre fired (one double-click window after the press, or immediately on the
-    /// second press of a double-click). Centre only: the selection is not touched.
-    private func performDeferredCenter(anchorID: String) {
-        guard let session, session.anchorID == anchorID, anchorID != centredAnchorID else { return }
-        if centerAnchor() { centredAnchorID = anchorID }
+    /// 383 — 单击只选中：把当前锚点记为「已结算」，两条居中 door（模型 tick、`viewDidLayout`）都不会
+    /// 再为它滚动。这不是「假装已居中」——`centerAnchor()` 的幂等判据仍是几何（≤ 2 pt），编辑落地与
+    /// 双击都会**直接**调它，照样会滚。
+    private func markAnchorSettled() {
+        centredAnchorID = session?.anchorID
     }
 
-    /// 352 — the parked centre was dropped because the user scrolled. Record the anchor as settled so
-    /// the next model refresh does not drag the strip back to it.
-    private func settleWithoutCentering(anchorID: String) {
-        guard session?.anchorID == anchorID else { return }
-        centredAnchorID = anchorID
+    /// 383 — 双击 / Return 进了 `.loupe` 之后居中一次（幂等：已居中则 0 次）。显式动作，不需要任何
+    /// 双击窗口，也不再走 `pendingCenter`。
+    private func centreForLoupeEntry() {
+        guard let id = session?.anchorID else { return }
+        if centerAnchor() { centredAnchorID = id }
     }
 
     /// 332b — 快照还没落地时（`viewDidLoad` 第一次调用），把这次居中推迟到下一个 runloop，
@@ -979,10 +983,22 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // Same table as the grid: the strip is a second browser over the same selection.
         if RatingShortcuts.handle(event, session: session) { return true }
         switch event.keyCode {
-        case 123: return session.moveAnchor(by: -1, extend: event.modifierFlags.contains(.shift))
-        case 124: return session.moveAnchor(by: 1, extend: event.modifierFlags.contains(.shift))
+        case 123:
+            guard session.moveAnchor(by: -1, extend: event.modifierFlags.contains(.shift)) else { return true }
+            // 383 — ←/→ 是显式动作（和 Return 同一类）：锚点真的动了就居中一次，不再靠模型 tick。
+            centreForLoupeEntry()
+            return true
+        case 124:
+            guard session.moveAnchor(by: 1, extend: event.modifierFlags.contains(.shift)) else { return true }
+            centreForLoupeEntry()
+            return true
         case 36, 76:
-            if let id = session.anchorID { onActivate?(id); return true }
+            if let id = session.anchorID {
+                onActivate?(id)
+                // 383 §2.4 — Return 进了编辑视角就居中一次（幂等）。
+                centreForLoupeEntry()
+                return true
+            }
             return false
         default:
             return false
@@ -1022,21 +1038,24 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         }
         updateSelectionAndActive()
         scheduleThumbnailReconcile()
-        centerAnchorIfChanged()
+        // 383 — 单击只选中：这里以前调 `centerAnchorIfChanged()`，把「点哪张就滚到哪张」带回来了。
+        // 现在只把锚点记为已结算，居中留给双击 / Return 与编辑落地。
+        markAnchorSettled()
         return decision
     }
 
     /// Open the cell under `point` (strip coordinates). `internal` so the test can drive the same
     /// hit-testing the gesture uses instead of guessing a window-space click.
     ///
-    /// 352 — the photo a double-click means is the one the **first** press hit: after the strip slid
-    /// under the pointer, the cell the gesture resolves now is not the one the user clicked.
+    /// 352 / 383 — the photo a double-click means is the one the **first** press hit.
+    /// 383 §2.4 — 进编辑视角是显式动作：这里居中一次，不再是「窗口内挂起、第二下 flush」。
     func activateItem(at point: NSPoint) {
         guard let session,
               let indexPath = collectionView.indexPathForItem(at: point),
               let asset = session.assets[safe: indexPath.item] else { return }
         let id = clickGuard.openTargetID(fallback: asset.id)
         onActivate?(id)
+        centreForLoupeEntry()
     }
 
     /// Cells actually laid out — `--ui-smoke` asserts this against the library row count.

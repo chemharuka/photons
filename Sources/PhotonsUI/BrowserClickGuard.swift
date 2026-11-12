@@ -1,39 +1,33 @@
 import AppKit
 import Foundation
 
-/// 352 — the click rule the filmstrip and the left photo list both obey.
+/// 383 — the click rule the filmstrip and the left photo list both obey.
 ///
-/// User's report: one click already switches photo, 332's centred scroll then slides the grid so the
-/// cell sits *under the pointer*, and the second click of a double-click therefore lands on the
-/// **next** photo. So a double-click becomes "jump one photo to the right".
+/// 352 built this object for a bug that no longer exists: one click switched photo **and** 332 slid
+/// the browser to centre it, so the cell under the pointer changed between the two halves of a
+/// double-click, and the second click landed on the neighbour. 352 answered that with a deferred
+/// centre (`pendingCenter`) plus swallowing a second press that hit another cell.
 ///
-/// Two halves, one object, because both browsers need both:
+/// 383 removed the cause instead: **a click only selects — it neither centres nor changes the view
+/// mode** (the filmstrip now behaves exactly like the left photo list). The browser therefore cannot
+/// slide out from under the pointer, the second press always lands on the same photo, and the whole
+/// deferral + swallow machinery is retired together with the bug.
 ///
-/// 1. **Press-time identity + swallow.** `mouseDown` records the hit (index + asset id) and when it
-///    happened. A second press inside `NSEvent.doubleClickInterval` that hits a **different** cell is
-///    swallowed whole (`.swallow`: no selection, no photo switch, no re-layout). The same cell twice
-///    is a double-click (`.doubleClick`) and keeps its meaning (open in loupe). The window is read
-///    from `NSEvent.doubleClickInterval` every time — never a hard-coded 250 ms.
-/// 2. **Deferred centre.** A selection does not centre immediately any more: the centre is parked on
-///    `pendingCenter` for one double-click window, so the strip cannot slide out from under the
-///    second press. A double-click flushes it once (centre only, selection untouched); a manual
-///    scroll by the user drops it (`dropCount`), because 332 already decided the user wins.
-///
-/// The controllers supply three things and share everything else: the hit-test (`hit(at:)`), the
-/// verb that centres now (`onCenter`), and the verb that settles an anchor without moving anything
-/// (`onCenterDropped`). No second copy of the state machine — see `FilmstripController` and
-/// `BrowserPaneController`, whose `centerAnchorIfChanged` both ask `isCenterDeferred(_:)`.
+/// What is left is one job: remember the cell a press sequence started on, so the verb a
+/// double-click / Return runs opens the photo the **first** press hit (`openTargetID(fallback:)`).
+/// The window is read from `NSEvent.doubleClickInterval` every time — never a hard-coded 250 ms — and
+/// a second press on a *different* cell is an ordinary second click that takes effect (383 §2.3,
+/// 用户已知并接受：快速点两张不同照片 ⇒ 两张都会生效).
 @MainActor
 public final class BrowserClickGuard {
 
     /// What a press means, decided before AppKit is allowed to select anything.
     public enum Decision: String, Equatable {
-        /// A first press (or a press after the window closed): let the normal click through.
+        /// A first press (or a press after the window closed, or the second press of a pair that hit
+        /// another cell): let the normal click through.
         case forward
-        /// Second press on the **same** cell: a double-click; its verb runs as it always did.
+        /// Second press on the **same** cell: a double-click; its verb (loupe) runs as it always did.
         case doubleClick
-        /// Second press inside the window on a **different** cell: eat the whole press.
-        case swallow
     }
 
     /// The cell a press landed on, by index **and** identity — the index is what the test prints, the
@@ -54,7 +48,9 @@ public final class BrowserClickGuard {
 
     // MARK: press-time state (what the acceptance read-back quotes)
 
-    /// The cell the **current** press sequence started on — `hitItemAtMouseDown`, by identity.
+    /// The cell the **current** press sequence started on — `hitItemAtMouseDown`, by identity. It is
+    /// what `openTargetID(fallback:)` answers with, and a second press on another cell deliberately
+    /// leaves it alone: the pair's target is the photo the user first pointed at.
     public private(set) var hitAtMouseDown: Hit?
     /// When that press happened.
     public private(set) var hitAtMouseDownTime: Date?
@@ -64,30 +60,6 @@ public final class BrowserClickGuard {
     public private(set) var lastDecision: Decision?
     public private(set) var forwardCount = 0
     public private(set) var doubleClickCount = 0
-    public private(set) var swallowCount = 0
-
-    // MARK: deferred centre
-
-    /// The centre that is waiting for the click window to close. `nil` when nothing is pending.
-    public private(set) var pendingCenter: DispatchWorkItem?
-    private var pendingCenterToken = UUID()
-    /// Which anchor that pending centre is for — the id `isCenterDeferred(_:)` compares against.
-    public private(set) var pendingCenterAnchorID: String?
-    /// How long the parked centre was told to wait (== `doubleClickInterval()` at schedule time).
-    public private(set) var pendingCenterDelay: TimeInterval = 0
-    public private(set) var lastCenterScheduledAt: Date?
-    /// When the parked centre actually ran — the acceptance ③ timestamp.
-    public private(set) var lastCenterFiredAt: Date?
-    public private(set) var centerScheduledCount = 0
-    public private(set) var centerFiredCount = 0
-    public private(set) var centerFlushedCount = 0
-    public private(set) var centerDropCount = 0
-
-    /// Centre now, for this anchor. Supplied by the controller (it owns the scroll view).
-    public var onCenter: ((String) -> Void)?
-    /// The parked centre was thrown away because the user scrolled — settle this anchor so a later
-    /// model tick does not pull the view back.
-    public var onCenterDropped: ((String) -> Void)?
 
     public init() {}
 
@@ -111,27 +83,25 @@ public final class BrowserClickGuard {
                 if first.index == hit.index, first.assetID == hit.assetID {
                     doubleClickCount += 1
                     lastDecision = .doubleClick
-                    // 仍然只居中，不改选中: the pair is over, so the parked centre runs now instead
-                    // of a window later. The double-click's own verb (loupe) is AppKit's.
-                    flushCenter()
+                    // The pair is a double-click. 383: nothing is parked, nothing is flushed — the
+                    // gesture's own verb (`activateItem` / `openRowInLoupe`) opens and centres.
                     return .doubleClick
                 }
-                // The strip slid under the pointer between the two presses (332's centre, momentum,
-                // a model re-sort). Eat this press rather than switching to the photo that drifted
-                // into place.
-                swallowCount += 1
-                lastDecision = .swallow
-                return .swallow
+                // A second press on **another** cell. 383 §2.3: nothing slid under the pointer, so
+                // this is an ordinary click — it takes effect. The pair keeps its first-press target
+                // so a gesture that follows still opens the photo the user started on.
+                forwardCount += 1
+                lastDecision = .forward
+                return .forward
             }
         }
 
-        // A first press, or the window had already closed: the photo switches now, the centre waits.
+        // A first press, or the window had already closed: this cell becomes the pair's target.
         hitAtMouseDown = hit
         hitAtMouseDownTime = now
         pairResolved = false
         forwardCount += 1
         lastDecision = .forward
-        scheduleCenter(for: hit.assetID, now: now)
         return .forward
     }
 
@@ -149,74 +119,5 @@ public final class BrowserClickGuard {
         hitAtMouseDown = nil
         hitAtMouseDownTime = nil
         pairResolved = false
-    }
-
-    // MARK: - the parked centre
-
-    /// True while the centre for `anchorID` belongs to the parked one. Both controllers' anchor
-    /// trigger asks this before scrolling, so a model tick inside the window cannot jump the queue.
-    public func isCenterDeferred(_ anchorID: String?) -> Bool {
-        guard let anchorID, let pending = pendingCenterAnchorID else { return false }
-        return pending == anchorID
-    }
-
-    public var hasPendingCenter: Bool { pendingCenter != nil }
-
-    /// Park this selection's centre for one double-click window.
-    public func scheduleCenter(for anchorID: String, now: Date = Date()) {
-        pendingCenter?.cancel()
-        let delay = doubleClickInterval()
-        pendingCenterDelay = delay
-        pendingCenterAnchorID = anchorID
-        lastCenterScheduledAt = now
-        centerScheduledCount += 1
-        let token = UUID()
-        pendingCenterToken = token
-        let work = DispatchWorkItem { [weak self] in self?.firePendingCenter(token: token) }
-        pendingCenter = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-    }
-
-    /// Run the parked centre **now** — a double-click's worth of "settle this photo", still only a
-    /// centre: the selection is not touched.
-    public func flushCenter() {
-        guard pendingCenter != nil else { return }
-        pendingCenter?.cancel()
-        pendingCenter = nil
-        pendingCenterToken = UUID()
-        centerFlushedCount += 1
-        lastCenterFiredAt = Date()
-        let id = pendingCenterAnchorID
-        pendingCenterAnchorID = nil
-        if let id { onCenter?(id) }
-    }
-
-    /// Drop the parked centre: the user scrolled, and 332 already ruled that the user wins.
-    public func dropCenter() {
-        guard pendingCenter != nil else { return }
-        pendingCenter?.cancel()
-        pendingCenter = nil
-        pendingCenterToken = UUID()
-        let id = pendingCenterAnchorID
-        pendingCenterAnchorID = nil
-        centerDropCount += 1
-        if let id { onCenterDropped?(id) }
-    }
-
-    /// Called from the controllers' bounds-changed observer: the clip view moved, and `noteChange`
-    /// already decided whether that was the user or our own animation (`Activity`).
-    public func noteUserScroll(_ isUserChange: Bool) {
-        guard isUserChange else { return }
-        dropCenter()
-    }
-
-    private func firePendingCenter(token: UUID) {
-        guard token == pendingCenterToken, pendingCenter != nil else { return }
-        pendingCenter = nil
-        let id = pendingCenterAnchorID
-        pendingCenterAnchorID = nil
-        centerFiredCount += 1
-        lastCenterFiredAt = Date()
-        if let id { onCenter?(id) }
     }
 }
