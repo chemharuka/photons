@@ -139,3 +139,30 @@ ledger, `content_hash`/`quick_hash` pair) was designed from those readings and i
   nothing else changes.
 - hdrmerge-swift is itself a Swift port of HDRMerge (© 2012 Javier Celaya, GPLv3):
   <https://github.com/jcelaya/hdrmerge>
+
+## ansel-denoise-swift (vendored GPLv3 executable, not linked)
+
+Same arrangement as `hdrmerge-swift` above, for the same reason.
+
+- Upstream: <https://github.com/aurelienpierreeng/ansel-denoise> — **GPL-3.0-or-later**
+  (the training pipeline for Ansel's `rawdenoiseai` module). This is a Swift + Metal **rewrite**
+  of that network, so it carries the same licence: the UNet definition
+  (`src/ansel_denoise/model.py`), the five-plane input encoding and the σ-map convention
+  (`src/ansel_denoise/noise.py`) are derived from upstream.
+- Vendored at `Vendor/ansel-denoise-swift/` with the full GPL text in its `LICENSE` and the
+  aggregation argument in its `LICENSE-SCOPE.md`. **Not** a SwiftPM dependency — this package
+  still lists exactly one dependency (GRDB).
+- Photons spawns `ansel-denoise-swift` as a child process and exchanges float32 mosaic buffers
+  through temporary files, plus JSON on stdout. `PhotonsExtensions/Denoise/AnselDenoiseClient.swift`
+  (MIT) contains process/JSON plumbing only; `AnselDenoiseService.swift` (MIT) owns the tiling,
+  feathering and normalization, which are product logic and not derived from upstream.
+- What it computes: a **denoised RGGB mosaic**. Pair it with `DNGRawWriter` to get a legal
+  lossless DNG. Upstream uses the same design (mosaic in one full-resolution plane, CFA and noise
+  level as input planes) so one weight set serves every profiled camera without retraining.
+- Model weights (`.anselnn`) are **not** vendored. They are fetched from the upstream
+  `models/manifest.json` and verified by sha256. Upstream licenses its training corpus
+  (CC0 / per-shard CC / ATDL-1.1) in a way that permits training and commercial use of the
+  resulting weights, but places no extra restriction on the weights themselves.
+- Only the two vendored executables and their `Vendor/` trees are GPLv3. The Photons
+  application remains MIT. The feature is optional at runtime: with no tool built, the
+  denoise entry is unavailable and nothing else changes.

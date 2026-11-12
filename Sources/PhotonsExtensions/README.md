@@ -14,7 +14,7 @@
 | 目录 | 职责 |
 |---|---|
 | `HDR/` | 包围曝光合成：`HDRMergeClient.swift`（驱动外部 `hdrmerge-swift` 子进程）、`HDRMergeService.swift`（多帧 → 一张 CFA DNG，含命名/预检/错误词表） |
-| `Denoise/` | 把像素写回一个合法的 DNG（AI 降噪那条路）——`RawLosslessJPEG.swift`（SOF3 编码）、`DNGRawWriter.swift`（容器写入，tag 全量复制）、`SourceDNG.swift` / `SourceDNGDecode.swift`。详见下面「Denoise/」一节。 |
+| `Denoise/` | AI 降噪那条路：模型推理（`AnselDenoiseClient` / `AnselDenoiseService`，走 GPL 子进程）＋ 把像素写回合法 DNG（`RawLosslessJPEG` / `DNGRawWriter` / `SourceDNG` / `SourceDNGDecode`）。详见下面「Denoise/」一节。 |
 
 ## HDR/ — 多帧包围曝光 → 一张 Bayer DNG
 
@@ -78,6 +78,43 @@ let result = try DNGRawWriter.write(
 
 要读回 mosaic（例如先取像素再送模型）：`SourceDNG(data:).readMosaic(data:)`。
 
+### 降噪：模型推理（GPLv3 子进程）
+
+模型推理走 `ansel-denoise-swift`（`Vendor/ansel-denoise-swift/`，**GPL-3.0**），
+与 `hdrmerge-swift` 同样处理：编译成独立可执行文件、由这里 `Process` 调用，**不链接**。
+
+```swift
+let client = try AnselDenoiseClient()               // 或 AnselDenoiseClient(executableURL:)
+guard try client.protocolVersion() == 1 else { … }
+
+let service = AnselDenoiseService(client: client, modelURL: modelURL)
+var opts = AnselDenoiseOptions()                   // variant .quarter, tile 256, overlap 48
+opts.cfa      = "rggb"
+opts.noiseA   = [0.0004, 0.0003, 0.0004]           // Var = a·x + b，逐通道
+opts.noiseB   = [3e-6, 1e-6, 1e-6]
+opts.useGPU   = true                               // Metal，约快 30×
+
+let out = try service.denoise(mosaic: normalized, width: w, height: h, options: opts)
+// out.mosaic 是**降噪后的 mosaic**，配合上面的 DNGRawWriter 写出 DNG
+```
+
+**分工**：GPL 那一侧只知道「N 个 tile 的 float32 缓冲区」，不知道图像是什么；tiling、CFA 相位、
+羽化拼接、反归一化全在这里（MIT）。这样上游更新时改动面很小。
+
+#### 三个会导致「能跑但结果不对」的点
+
+1. **σ 必须乘校准系数。** 默认 `sigmaScale = [2.82, 3.94, 2.96]`（R/G/B），等于 Ansel 的
+   「×2（lifting-Haar 归一化）× 逐通道去马赛克衰减（1.41/1.97/1.48）」。漏掉它网络会认为噪声
+   比实际小 3–4 倍、降噪严重不足——而且**大模型退化得比小模型更厉害**（实测 large 从 93% 掉到
+   46%，看起来像「模型越大越差」）。降噪偏弱时先查 σ 量级，别先换模型。
+2. **块边长必须是 16 的倍数**（网络下采样 4 次）。否则 bottleneck 坍成 1×1。
+3. **重叠窗不能用「线性 ramp 乘四条边」。** 那样角点会被乘两次降为 0，四块交界处
+   `acc/wsum` 变成 `0/0`，每 4 块交界一颗黑点。正确做法是一维 `sin²/cos²` 互补锥形窗再取外积
+   （重叠带权重和恒为 1）。
+
+模型权重不随仓库分发，按上游 `models/manifest.json` 的 sha256 拉取；变体 `quarter/half/large`
+对应 0.48 M / 1.90 M / 7.59 M 参数，`quarter` 是默认（60 MP 全图约 78 s、σ 降 90%）。
+
 ### 三条不变量（改动这个模块前请先读）
 
 1. **tag 默认全量复制。** `preserved` 从"源文件的所有 tag"开始，然后减掉 `layoutTags`。所以没被想到的 tag 是被**保留**的，而不是被漏掉。必须逐字节保住的包括黑电平/白电平、`ActiveArea`、`DefaultCrop*`、两套 ColorMatrix、两套 ForwardMatrix、`AsShotNeutral`、**`OpcodeList2`（暗角）**、**`OpcodeList3`（WarpRectilinear 镜头畸变）**、XMP、`DNGPrivateData`、EXIF/GPS 子 IFD、预览页。几何一旦改变（裁切/缩放），`ActiveArea`/`DefaultCrop*`/`OpcodeList*` 必须一起重算——只改像素值的写入器不能用来改尺寸。
@@ -98,6 +135,8 @@ swift build --build-tests
 - `HDRMergeServiceTests` — 真跑 `hdrmerge-swift` 合成三帧 60 MP 包围曝光：产物是 CFA DNG、白电平 65535、
   RGGB 相位不变、ImageIO 可解、命名 `<最暗帧>-merged.dng`、取消不留半截文件、错误码稳定。
   工具或样例不在时跳过（不是失败）。
+- `AnselDenoiseClientTests` — 真跑 `ansel-denoise-swift`：协议版本、缺可执行文件时的错误码、
+  合成噪声图降噪后残差确实下降、小于一个 tile 的图靠补齐正常工作。工具/权重不在时跳过。
 - `Denoise/` 那三个测试（`RawLosslessJPEGTests` / `DNGRawWriterTests` / `DNGRawWriterFullSizeTests`）。
   它们的 fixture 元数据全部取自真实 Leica SL3 文件
   （真 XMP、真 OpcodeList2/3），只有像素与几何是合成的——手写的假 XMP 会让 Core Image 直接拒收整个文件。
