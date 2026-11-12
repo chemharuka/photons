@@ -432,7 +432,16 @@ public final class WorkspaceRootView: NSView {
 
         // 玻璃**最先加**：它必须在最底层（`subviews[0]`），顶栏控件和红绿灯都在它上面。
         // 红绿灯本身由 AppKit 画在 contentView 之上，所以这里只要保证不在按钮上方盖任何不透明层。
-        for v: NSView in [headerGlass, topBar, browserPane.view, browserDivider, canvasHost,
+        //
+        // 394 — **侧栏在画布之上.** `addSubview` 把视图加在最上层，所以这个数组是"从底到上"。
+        // `browserPane.view` 与 `browserDivider` 曾经排在 `canvasHost` 前面，于是画布（连它的
+        // overlay：裁切框、引导线）压在了左侧栏之上——用户看到的就是「裁剪框以及引导线都会浮在
+        // 左侧侧栏上方」。画布里的 overlay 不裁剪（用户：「超出画布边界没问题」），所以唯一的
+        // 修法是层次：把这两个视图挪到 `canvasHost` 之后，让侧栏**遮挡**越界的那部分。
+        //
+        // 面板级元素从上到下：通知/进度条 > 顶栏 = 左侧栏 = 右侧检查器 > 胶片条 > 画布及其 overlay。
+        for v: NSView in [headerGlass, topBar, canvasHost,
+                          browserPane.view, browserDivider,
                           inspectorDivider, inspectorBackdrop, inspectorHost,
                           filmstripController.view, importProgressBar, forwardCompatNotice] {
             addSubview(v)
