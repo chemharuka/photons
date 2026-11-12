@@ -274,6 +274,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// contract as the two above: `hitTest → nil`, and the positions come from `CropTool.layout`,
     /// i.e. from the one projection.
     private let cropOverlay = CropToolOverlayView()
+    /// 387 — 「降噪中」 的居中卡片: a fixed 180×74 box with three lines (降噪中 / 宽×高 / 分:秒).
+    /// Same contract as the three above (transparent, `hitTest → nil`, drawn in `draw(_:)`), and it
+    /// starts hidden — `refreshDenoiseHUD` is its only writer.
+    private let denoiseHUD = DenoiseProgressOverlay()
     /// 裁切工具条: 比例 / 拉直 / 翻转 / 九宫格 / 应用 / 取消. The only chrome on the canvas that takes
     /// clicks, and it exists only while the tool is on.
     let cropBar = CropToolBar()
@@ -1411,6 +1415,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         for token in screenTokens { NotificationCenter.default.removeObserver(token) }
         // A monitor is a block the event loop holds; without this the loupe would be kept alive by it.
         if let monitor = cropReturnMonitor { NSEvent.removeMonitor(monitor) }
+        // §387 §5.4: closing the window (or switching libraries) must not leave a 0.5 s timer ticking
+        // against a dead controller, nor a bridge re-arming an observation on a released session.
+        denoiseTicker?.invalidate()
+        denoiseTicker = nil
+        bridge.cancel()
     }
 
     // MARK: lifecycle
@@ -1441,8 +1450,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // Over the canvas, under the readout: the clipping wash, the shape-drag rubber band, and the
         // selected mask's control points. All three are `hitTest → nil`, so every click still belongs
         // to the canvas.
+        //
+        // 387 — the 「降噪中」 card rides the same stack, **before** the crop overlay so the crop frame
+        // is still the topmost chrome.
         for overlay in [highlightOverlay as NSView, draftOverlay as NSView,
-                        maskHandlesOverlay as NSView, cropOverlay as NSView] {
+                        maskHandlesOverlay as NSView, denoiseHUD as NSView,
+                        cropOverlay as NSView] {
             overlay.frame = container.bounds
             overlay.autoresizingMask = [.width, .height]
             container.addSubview(overlay)
@@ -1527,6 +1540,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         refreshCropTool()
         // 247 — the ring's points-per-radius follows the new projection too.
         refreshHealRing()
+        // 387 — a resize is a new canvas: the box' 8 pt clamp is measured against `container.bounds`,
+        // so the card has to be re-laid out (and re-centred on the photo) with the new one.
+        refreshDenoiseHUD()
         // 258 — the stand-in occupies the same `content` rect as the real frame, so a resize while it
         // is up has to re-place it too. No-op when nothing is standing in.
         refreshFirstFramePlaceholderGeometry()
@@ -1630,6 +1646,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = self?.session?.editRevision
         }, { [weak self] in
             self?.refreshHealRing()
+        })
+        // 387 — the 「降噪中」 card. Three reads, and every one of them is load-bearing:
+        //   · `isDenoiseRunning` — a run started or ended (success and failure both end it);
+        //   · `denoiseAssetID`   — **which** photo the run belongs to;
+        //   · `anchorID`         — the photo the single-photo view is showing, so switching photos
+        //                          must take the card down even while the run keeps going (⑦).
+        // `refreshDenoiseHUD` does the rest, including starting and invalidating the 0.5 s ticker.
+        bridge.observe({ [weak self] in
+            guard let self else { return }
+            _ = self.session?.isDenoiseRunning
+            _ = self.session?.denoiseAssetID
+            _ = self.session?.anchorID
+        }, { [weak self] in
+            self?.refreshDenoiseHUD()
         })
     }
 
@@ -2121,6 +2151,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if syncsMaskOverlaysOnCameraChange {
             syncMaskOverlays(progress: bridging ? 0 : nil)
         }
+        // 387 — the card is centred on the **photo**, so a pan or a zoom moves it. Cheap when no run is
+        // going (it reads two session flags and returns before touching the projection).
+        refreshDenoiseHUD()
         requestViewportRender()
     }
 
@@ -4867,6 +4900,165 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 188 — a draft change may move the **canvas**, and the frozen frame must not outlive it.
         invalidateCanvasGeometryIfMoved()
         armCropFrame(.refresh)
+    }
+
+    // MARK: - 387 · 「降噪中」 的居中卡片
+
+    // The whole ticket is three sentences of the user's, and this section is their only implementation:
+    //
+    //   1. **只有单图视图正在看的那一张**在降噪时才显示 —— 切到别的照片立刻看不到（⑦）。判据是
+    //      `isDenoiseRunning && denoiseAssetID != nil && anchorID == denoiseAssetID`；383 的锚点
+    //      语义没有第二个入口，`anchorID` 就是「单图视图在看的那张」，所以不改它。
+    //   2. 框是**固定尺寸**的（`DenoiseProgressOverlay.boxSize`），位置是照片中心，夹进画布内缩 8pt。
+    //   3. 三行只有 降噪中 / 宽×高 / 分:秒 —— 分块数量与预估时间不进 UI（用户原话：「现在不考虑
+    //      加入分块数量以及预估时间的接口」）。
+    //
+    // 时钟：`denoiseStartedAt` 在 `isDenoiseRunning` false→true 时设，回落时清；`Timer` 0.5 s，
+    // **`.common` 模式**（否则拖滑杆时冻结，§5.2），结束 `invalidate()`（⑫ 反向门 ⑲）。
+
+    /// 正在降噪的那一次从什么时候开始。`nil` = 没有在跑。
+    private var denoiseStartedAt: Date?
+    /// 0.5 s 的**已用时间**驱动器。`nil` = 没有在跑（结束后必须回到 `nil`，⑧/⑫）。
+    private var denoiseTicker: Timer?
+    /// 这一轮创建过的 ticker **对象**本身。
+    ///
+    /// ⑫ 要量的是「timer 真的作废了」，而 `denoiseTicker = nil` 也能让字段读起来是空的 —— 一个忘掉
+    /// `invalidate()` 的写法（反向门 ⑲）在字段上看不出来，runloop 却还在每 0.5 s 调一次闭包。所以这里
+    /// 留着对象引用，按 `isValid` 数**活的** ticker：不 `invalidate()` 就一定是 1。
+    private var denoiseTickerAudit: [Timer] = []
+    /// 卡片一共被铺下去几次。⑫ 用它在运行期数「1 s 内至少 2 次」，不靠数屏幕。
+    private var denoiseLaydownCount = 0
+    /// 每次铺卡片的时刻。⑫ 量的是**相邻两次的间隔**（≤1 s 即「1 s 内至少刷新 2 次」），
+    /// 所以数次数之外还要有时间戳 —— 次数会在切照片后重开，时间戳不会撒谎。
+    private var denoiseLaydownTimes: [Date] = []
+
+    /// The card's own state — the acceptance reads what was **laid down**, not a re-derivation.
+    var denoiseHUDStateForTesting: DenoiseProgressOverlay.State { denoiseHUD.state }
+    var denoiseLaydownForTesting: DenoiseProgressOverlay.Laydown? { denoiseHUD.lastLaydown }
+    var denoiseHUDViewForTesting: DenoiseProgressOverlay { denoiseHUD }
+    /// `true` while the 0.5 s ticker is armed. ⑧ needs it `false` the moment the run ends.
+    var isDenoiseTimerRunningForTesting: Bool { denoiseTicker?.isValid ?? false }
+    /// **The reverse gate ⑲ number**: how many timers this controller ever created are still valid.
+    ///
+    /// Reading `denoiseTicker` alone cannot see the bug — a controller that forgets `invalidate()`
+    /// still sets its own field to `nil`, while the run loop keeps firing the closure every 0.5 s. This
+    /// counts the objects, so 「forgot to invalidate」 reads as ≥ 1 and cannot hide.
+    var liveDenoiseTickerCountForTesting: Int { denoiseTickerAudit.filter(\.isValid).count }
+    /// How many timers were ever created (a run that never started one reads 0).
+    var denoiseTickerCountForTesting: Int { denoiseTickerAudit.count }
+    /// How many times the card was laid down — the number ⑫ counts over a second.
+    var denoiseLaydownCountForTesting: Int { denoiseLaydownCount }
+    /// The long-running refresh cadence ⑫ measures: the largest gap between two consecutive laydowns
+    /// of the current run. ≤ 1.0 s is 「1 s 内至少刷新 2 次」.
+    var denoiseLongestLaydownGapForTesting: TimeInterval {
+        guard denoiseLaydownTimes.count >= 2 else { return .infinity }
+        var longest: TimeInterval = 0
+        for (a, b) in zip(denoiseLaydownTimes, denoiseLaydownTimes.dropFirst()) {
+            longest = max(longest, b.timeIntervalSince(a))
+        }
+        return longest
+    }
+    /// Reset the cadence measurement, so a test can time one window instead of the whole run.
+    func resetDenoiseLaydownTimesForTesting() { denoiseLaydownTimes = [] }
+
+    /// **The only writer** of the card. Called from the observation bridge (a run started/finished, a
+    /// photo switch), from the 0.5 s ticker, and from `viewDidLayout` (a resize is a new canvas).
+    ///
+    /// Order matters: the session's two flags are read **first** and the ticker's life is settled
+    /// against them, so the idle case returns before `framing()` is ever touched. That is not
+    /// cosmetic — `framingCalls` is a measured number (333 ④: one wheel event = one projection), and a
+    /// hidden card must cost zero.
+    private func refreshDenoiseHUD() {
+        let running = session?.isDenoiseRunning ?? false
+        syncDenoiseClock(running: running)
+        // Three conditions, **all** required (§2.3). The last one is this ticket's core: the photo the
+        // single-photo view is showing right now has to be the photo being denoised.
+        guard running,
+              let denoisingID = session?.denoiseAssetID,
+              session?.anchorID == denoisingID else {
+            denoiseHUD.state = .hidden
+            denoiseHUD.lastLaydown = nil
+            return
+        }
+        let asset = session?.assets.first { $0.id == denoisingID }
+        let lines = DenoiseProgressOverlay.lines(width: asset?.width, height: asset?.height,
+                                                 elapsed: denoiseElapsed())
+        // The overlay is pinned to `container.bounds` (same origin, same size, `autoresizingMask`), so
+        // the clamp host is the container's own rect — the same one every other canvas overlay is laid
+        // out in, and the rect §2.5 names.
+        let laydown = DenoiseProgressOverlay.laydown(lines: lines,
+                                                   center: denoiseBoxCenter(),
+                                                   containerBounds: container.bounds)
+        denoiseHUD.lastLaydown = laydown
+        denoiseHUD.state = .running
+        denoiseLaydownCount += 1
+        denoiseLaydownTimes.append(Date())
+    }
+
+    /// Start / stop the clock and the ticker with the run itself.
+    private func syncDenoiseClock(running: Bool) {
+        guard running else {
+            denoiseStartedAt = nil
+            // ⑧ reverse gate ⑲: a hidden card is not enough — the timer has to die, or a 0.5 s
+            // closure keeps a dead run alive.
+            denoiseTicker?.invalidate()
+            denoiseTicker = nil
+            return
+        }
+        if denoiseStartedAt == nil { denoiseStartedAt = Date() }
+        guard denoiseTicker == nil else { return }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshDenoiseHUD()
+        }
+        timer.tolerance = 0
+        // `.common`, not `.default`: otherwise every slider drag (event tracking mode) freezes the
+        // elapsed time — §5.2 of the ticket, and the reason the zoom bridge's ticker does the same.
+        RunLoop.main.add(timer, forMode: .common)
+        denoiseTicker = timer
+        denoiseTickerAudit.append(timer)
+    }
+
+    /// Seconds since this run started, and `0` when there is no run (a defensive answer, never drawn).
+    private func denoiseElapsed() -> Double {
+        guard let started = denoiseStartedAt else { return 0 }
+        return max(0, Date().timeIntervalSince(started))
+    }
+
+    /// 已用时间的格式：`分:秒`，分钟不补零、秒两位、**不转小时**（3665 s ⇒ `61:05`，⑪）。
+    static func denoiseElapsed(_ seconds: Double) -> String {
+        DenoiseProgressOverlay.elapsedText(seconds)
+    }
+
+    /// **The photo's centre**, in the overlay's points: `photoRect`'s midX/midY.
+    ///
+    /// The projection is the one authority every other canvas overlay already uses (`CropTool.layout`,
+    /// `maskHandlesLayout`): `framing().mapping(of: viewState)` — the frame rect mapped to view points,
+    /// divided by the backing scale. When there is no projection yet, or one degenerate enough to be
+    /// meaningless (the first frame of a photo), the canvas' own centre is the honest fallback (§2.5:
+    /// `photoRect.width > 1 && height > 1` 才用).
+    private func denoiseBoxCenter() -> CGPoint {
+        let canvasCentre = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
+        guard let rect = denoisePhotoRectInView(), rect.width > 1, rect.height > 1 else {
+            return canvasCentre
+        }
+        return CGPoint(x: rect.midX, y: rect.midY)
+    }
+
+    /// Where the photograph is on the canvas, in view points — recomputed here rather than read off a
+    /// frame, because the box must be in the right place on the very first tick (before any frame of
+    /// this photo has landed).
+    ///
+    /// `framing()` is only asked **after** the visibility gate in `refreshDenoiseHUD`, so an idle
+    /// loupe never pays for this.
+    private func denoisePhotoRectInView() -> CGRect? {
+        guard let framing = framing() else { return nil }
+        let mapping = framing.mapping(of: viewState)
+        let scale = max(backingScale, 1e-6)
+        let a = mapping.frameView(frameX: 0, frameY: 0)
+        let b = mapping.frameView(frameX: framing.sourceWidth, frameY: framing.sourceHeight)
+        guard a.x.isFinite, a.y.isFinite, b.x.isFinite, b.y.isFinite else { return nil }
+        return CGRect(x: min(a.x, b.x) / scale, y: min(a.y, b.y) / scale,
+                      width: abs(b.x - a.x) / scale, height: abs(b.y - a.y) / scale)
     }
 
     /// 188 — **the stale rectangle's one gate.**

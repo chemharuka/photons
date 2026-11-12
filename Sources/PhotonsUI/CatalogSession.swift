@@ -1007,6 +1007,14 @@ public final class CatalogSession {
     /// 点了到结果之间为 true：第二次点击不许再起一个几十秒的任务。
     public private(set) var isDenoiseRunning = false
 
+    /// §387 — **哪一张**正在降噪，`nil` = 没有。
+    ///
+    /// 386 只在后台闭包里拿着 `participantID`，session 上没有任何判据能回答「现在降的是哪张」，
+    /// 所以「切到别的照片就看不到提示框」这条根本无从实现。写入点只有两个，
+    /// 与 `isDenoiseRunning` 同一行：`denoiseSelection()` 里置成参与的那张，`finishDenoise(_:)`
+    /// 里（成功与失败都走这里）置回 `nil`。只读，派生自当前这一次运行。
+    public private(set) var denoiseAssetID: String?
+
     /// 上一次成功的数字。失败时留 nil 并填 `lastDenoiseError`。
     public struct DenoiseReport: Sendable, Equatable {
         public let output: URL
@@ -1099,6 +1107,7 @@ public final class CatalogSession {
         let participantID = asset.id
         let rootID = asset.sourceRootId
         isDenoiseRunning = true
+        denoiseAssetID = participantID
         lastDenoiseProgress = "准备降噪…"
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in self?.lastDenoiseProgress = text }
@@ -1182,6 +1191,9 @@ public final class CatalogSession {
     /// 回到主 actor：发布结果、推进投影、选中产物。
     private func finishDenoise(_ run: DenoiseRun) {
         isDenoiseRunning = false
+        // §387 — one line beside the flag it belongs to: the success path, the failure path and the
+        // "already in the library" path all land here, so the box cannot outlive the run.
+        denoiseAssetID = nil
         denoiseCompletionCount += 1
         denoiseRanOffMain = run.ranOffMain
         lastDenoiseError = run.failure
