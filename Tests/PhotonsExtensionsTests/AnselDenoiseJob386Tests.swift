@@ -2,18 +2,22 @@ import XCTest
 import Foundation
 @testable import PhotonsExtensions
 
-/// §386 — 端到端 orchestrator（`AnselDenoiseJob`）的纯逻辑判据，**不需要真模型**。
+/// §386 / §390 — end-to-end orchestrator (`AnselDenoiseJob`) 的纯逻辑判据，**不需要真模型**。
 ///
-/// The chain is `DNG → mosaic → 归一化 → denoise → 反归一化 → DNG`, and each numbered claim here
-/// is one link that can silently be wrong:
+/// §390 把链路从「DNG → mosaic → 归一化 → f32 → 反归一化 → 写 DNG」压成「两个路径，一次调用」。
+/// 于是这个文件里每条判据的范围也随之收窄，收窄的部分由工具侧自己的测试负责：
 ///
 ///   ② 产物命名与位置 —— `/x/y/L1030552.dng` ⇒ `/x/y/L1030552-denoised.dng`；同名已存在则
 ///      `-denoised-2.dng`（策略：**递增，不覆盖** —— 一次降噪几分钟，覆盖是唯一不可撤销的失败）；
-///   ④ 数值往返 —— 取一张真实 DNG 的 mosaic，走「归一化 → 反归一化」，**逐样本与原始 UInt16
-///      相等（容差 0）**，并贴出最大偏差；
-///   ⑤ 失败不留垃圾 —— 截断/非 TIFF 文件 ⇒ 抛错，磁盘上**不出现** `-denoised.dng`；
+///   ④ 失败不留垃圾 —— 截断/非 TIFF 文件、以及**写到一半才失败的 tool**，都不许在磁盘上留下
+///      `-denoised.dng` 或 `.denoise-*.dng`；
 ///   工具/模型的四级解析 —— 显式路径不存在 ⇒ 各自的 typed 错误，模型那条**带完整期望路径**；
-///   以及一次**用假 tool 的整链**（假 tool 原样回抄 tile），证明除降噪本身之外的每一段接线都对。
+///   协议门槛 —— 不支持 `image-dng` 的旧工具必须在这里被拦住，而不是收到一张它读不懂的参数表；
+///   以及一次**用假 tool 的整链**（假 tool 只把 DNG 抄过去），证明命名/改名/报告翻译都对。
+///
+/// **被删掉的判据**（连同它们的实现）：④ 归一化往返 `MosaicNormalization`、逐相位黑电平、
+/// `cfaPattern(of:)`。那三样是宿主侧搬运的一部分，现在由工具读同一个文件、算同一份相位，
+/// 测在它自己的仓库里（`DNGPipelineTests`）。
 final class AnselDenoiseJob386Tests: XCTestCase {
 
     private var workDir: URL!
@@ -67,59 +71,7 @@ final class AnselDenoiseJob386Tests: XCTestCase {
                        "L1030552-denoised-3.dng")
     }
 
-    // MARK: - ④ 归一化往返
-
-    func testNormalizeDenormalizeIsExactForEverySample() throws {
-        let source = Self.fixtureURL
-        let data = try Data(contentsOf: source, options: .alwaysMapped)
-        let doc = try SourceDNG(data: data)
-        let mosaic = try doc.readMosaic(data: data)
-        let norm = try AnselDenoiseJob.normalization(of: doc)
-
-        print("④ 黑白电平来自文件自己：black=\(norm.blackByPhase) white=\(norm.white) "
-              + "repeat=\(norm.repeatRows)×\(norm.repeatCols)")
-
-        let normalized = norm.normalized(mosaic.samples, width: mosaic.width, height: mosaic.height)
-        let back = norm.quantized(normalized, width: mosaic.width, height: mosaic.height)
-
-        var maxDeviation = 0
-        var mismatch = 0
-        var normalizedMin = Float.greatestFiniteMagnitude
-        var normalizedMax = -Float.greatestFiniteMagnitude
-        for i in 0..<mosaic.samples.count {
-            let d = abs(Int(back[i]) - Int(mosaic.samples[i]))
-            if d != 0 { mismatch += 1 }
-            maxDeviation = max(maxDeviation, d)
-            normalizedMin = min(normalizedMin, normalized[i])
-            normalizedMax = max(normalizedMax, normalized[i])
-        }
-        print("④ 样本数=\(mosaic.samples.count) 不相等=\(mismatch) 最大偏差=\(maxDeviation) 码 "
-              + "归一化范围=[\(normalizedMin), \(normalizedMax)]")
-        XCTAssertEqual(mismatch, 0, "④ 逐样本必须相等（容差 0）")
-        XCTAssertEqual(maxDeviation, 0, "④ 最大偏差必须是 0 码")
-        // The service's contract is [0,1]: the normalized visit must stay inside it (a value above
-        // 1 would mean the white level read is wrong) and must actually spread, not sit at zero.
-        XCTAssertGreaterThanOrEqual(normalizedMin, 0)
-        XCTAssertLessThanOrEqual(normalizedMax, 1.0, "④ 归一化后不能超过 1，否则白电平读错了")
-        XCTAssertGreaterThan(normalizedMax - normalizedMin, 0.1, "④ 归一化后要有真实动态范围")
-    }
-
-    /// `BlackLevel` 4 个相位（Leica 写 2×2 的 512）必须逐相位减，不能一律减 512 —— 一旦相位错，
-    /// 反归一化也错，图就是棋盘格。这里用一个 1 码的倾斜探针证明「逐相位」真的生效。
-    func testPerPhaseBlackLevelsAreHonoured() {
-        let norm = MosaicNormalization(blackByPhase: [512, 600, 560, 640], repeatRows: 2, repeatCols: 2,
-                                       white: 16383)
-        XCTAssertEqual(norm.normalize(512, row: 0, col: 0), 0, accuracy: 1e-9)
-        XCTAssertEqual(norm.normalize(600, row: 0, col: 1), 0, accuracy: 1e-9)
-        XCTAssertEqual(norm.normalize(560, row: 1, col: 0), 0, accuracy: 1e-9)
-        XCTAssertEqual(norm.normalize(640, row: 1, col: 1), 0, accuracy: 1e-9)
-        for (row, col) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-            let black = UInt16(norm.black(row: row, col: col))
-            XCTAssertEqual(norm.denormalize(0, row: row, col: col), black)
-        }
-    }
-
-    // MARK: - ⑤ 失败不留垃圾
+    // MARK: - ④ 失败不留垃圾
 
     func testATruncatedFileThrowsAndLeavesNothingBehind() throws {
         let dir = workDir.appendingPathComponent("broken", isDirectory: true)
@@ -127,19 +79,36 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         let broken = dir.appendingPathComponent("BROKEN.dng")
         try Data([0x49, 0x49, 0x2a, 0x00, 0x08]).write(to: broken)   // header cut short
 
-        let fakeTool = try makeFakeTool()
-        let model = try makeDummyModel()
-        let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: fakeTool,
-                                                                modelURL: model))
+        // The stand-in refuses anything it cannot read, which is what the real tool does — the point
+        // here is the host's behaviour around a failed call, not the tool's parser.
+        let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
+                                                                modelURL: try makeDummyModel()))
         XCTAssertThrowsError(try job.run(source: broken)) { error in
             let message = (error as? AnselDenoiseJobError)?.description ?? "\(error)"
-            print("⑤ 截断文件 ⇒ \(message)")
-            XCTAssertTrue(message.contains("解码 RAW 失败"), "⑤ 要中文原因，实际：\(message)")
+            print("④ 截断文件 ⇒ \(message)")
+            XCTAssertTrue(message.contains("降噪失败"), "④ 必须是「降噪失败：…」，实际：\(message)")
         }
-        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
-            .filter { $0.contains("-denoised") }
-        print("⑤ 目录里剩下的产物：\(leftovers)")
-        XCTAssertTrue(leftovers.isEmpty, "⑤ 失败后不许出现 \(leftovers)")
+        try assertNoLeftovers(in: dir, besides: ["BROKEN.dng"])
+    }
+
+    /// The case the temp-name-then-rename arrangement exists for: a tool that **writes the output and
+    /// then fails**. Without the rename (§390 反向门 ⑨) this leaves a complete-looking half product
+    /// sitting where the final name would be, and nothing tells the user it is not the result.
+    func testAToolThatWritesThenFailsLeavesNothingBehind() throws {
+        let dir = workDir.appendingPathComponent("halfway", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let source = dir.appendingPathComponent("L1030552.dng")
+        try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
+
+        let tool = try makeFakeTool(failAfterWriting: true)
+        let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: tool,
+                                                                modelURL: try makeDummyModel()))
+        XCTAssertThrowsError(try job.run(source: source)) { error in
+            let message = (error as? AnselDenoiseJobError)?.description ?? "\(error)"
+            print("④ 写完后失败 ⇒ \(message)")
+            XCTAssertTrue(message.contains("降噪失败"), "④ 必须是「降噪失败：…」，实际：\(message)")
+        }
+        try assertNoLeftovers(in: dir, besides: ["L1030552.dng"])
     }
 
     func testANonDNGFileIsRefusedBeforeAnythingIsWritten() throws {
@@ -151,10 +120,23 @@ final class AnselDenoiseJob386Tests: XCTestCase {
                                                                 modelURL: try makeDummyModel()))
         XCTAssertThrowsError(try job.run(source: jpeg)) { error in
             let message = (error as? AnselDenoiseJobError)?.description ?? "\(error)"
-            print("⑤ JPEG ⇒ \(message)")
+            print("④ JPEG ⇒ \(message)")
             XCTAssertEqual(message, "只支持 DNG：IMG_1.jpg")
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["IMG_1.jpg"])
+    }
+
+    /// `-denoised.dng` 与临时名都不许留下。临时名以 `.` 开头，所以 `contentsOfDirectory` 会返回它 ——
+    /// 正好，残留必须在这里被抓到。
+    private func assertNoLeftovers(in dir: URL, besides allowed: Set<String>) throws {
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { !allowed.contains($0) }
+        print("④ 目录里剩下的（除 \(allowed.sorted())）：\(leftovers)")
+        XCTAssertTrue(leftovers.allSatisfy { !$0.contains("-denoised") },
+                      "④ 失败后不许出现产物：\(leftovers)")
+        XCTAssertTrue(leftovers.allSatisfy { !$0.hasPrefix(".denoise-") },
+                      "④ 失败后不许留下临时文件：\(leftovers)")
+        XCTAssertTrue(leftovers.isEmpty, "④ 除源文件外不该有任何东西：\(leftovers)")
     }
 
     // MARK: - 工具 / 模型的四级解析
@@ -230,7 +212,28 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         }
     }
 
-    // MARK: - 整链（假 tool：把输入 tile 原样抄成输出）
+    // MARK: - 协议门槛
+
+    /// §390 — an old tool without `image-dng` must be refused **before** anything is spawned with a
+    /// DNG argument list. The stand-in below reports the capabilities of the pre-390 tool.
+    func testAToolWithoutDNGSupportIsRefusedUpFront() throws {
+        let dir = workDir.appendingPathComponent("oldtool", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let source = dir.appendingPathComponent("L1030552.dng")
+        try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
+
+        let tool = try makeFakeTool(supportsDNG: false)
+        let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: tool,
+                                                                modelURL: try makeDummyModel()))
+        XCTAssertThrowsError(try job.run(source: source)) { error in
+            let message = (error as? AnselDenoiseJobError)?.description ?? "\(error)"
+            print("§390 旧工具（无 image-dng）⇒ \(message)")
+            XCTAssertEqual(message, AnselDenoiseNotices.toolMissing)
+        }
+        try assertNoLeftovers(in: dir, besides: ["L1030552.dng"])
+    }
+
+    // MARK: - 整链（假 tool：把 DNG 原样抄成产物）
 
     func testTheWholeChainWritesALegalSiblingDNG() throws {
         let dir = workDir.appendingPathComponent("chain", isDirectory: true)
@@ -238,32 +241,35 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         let source = dir.appendingPathComponent("L1030552.dng")
         try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
 
-        var options = AnselDenoiseOptions()
         let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
-                                                                modelURL: try makeDummyModel()),
-                                  options: options)
+                                                                modelURL: try makeDummyModel()))
         let outcome = try job.run(source: source)
         print("整链：output=\(outcome.output.lastPathComponent) \(outcome.width)×\(outcome.height) "
-              + "cfa=\(outcome.cfa) white=\(outcome.whiteLevel) tiles=\(outcome.tiles) "
-              + "bytes=\(outcome.byteCount)")
+              + "cfa=\(outcome.cfa) pieces=\(outcome.pieces) seams=\(outcome.seams) "
+              + "seconds=\(outcome.seconds) backend=\(outcome.backend) bytes=\(outcome.byteCount)")
 
         XCTAssertEqual(outcome.output.deletingLastPathComponent().path, dir.path, "产物落同目录")
         XCTAssertEqual(outcome.output.lastPathComponent, "L1030552-denoised.dng")
         XCTAssertTrue(FileManager.default.fileExists(atPath: outcome.output.path))
+        XCTAssertEqual(outcome.width, 1024)
+        XCTAssertEqual(outcome.height, 1024)
+        XCTAssertEqual(outcome.cfa, "rggb")
+        XCTAssertEqual(outcome.pieces, 1, "假 tool 自报 1 piece")
+        XCTAssertEqual(outcome.seams, 0)
+        XCTAssertEqual(outcome.seconds, 1.0, accuracy: 1e-9, "工具自报的 seconds 要原样传出来")
+        XCTAssertEqual(outcome.backend, "fake")
+        XCTAssertGreaterThan(outcome.byteCount, 0)
+        XCTAssertEqual(outcome.source, source)
 
-        // 产物能被自己的读端重新读出来，且几何/黑白电平/相位与原图一致（§3 ⑧ 的纯逻辑版）。
+        // 产物能被自己的读端重新读出来（几何不变、仍是 CFA 图）。
         let writtenData = try Data(contentsOf: outcome.output, options: .alwaysMapped)
         let written = try SourceDNG(data: writtenData)
         let writtenMosaic = try written.readMosaic(data: writtenData)
         XCTAssertEqual(writtenMosaic.width, 1024)
         XCTAssertEqual(writtenMosaic.height, 1024)
-        XCTAssertEqual(try AnselDenoiseJob.cfaPattern(of: written), "rggb", "CFA 相位不能变")
-        XCTAssertEqual(try AnselDenoiseJob.normalization(of: written).white,
-                       try AnselDenoiseJob.normalization(of: SourceDNG(data: Data(contentsOf: source, options: .alwaysMapped))).white,
-                       "白电平不能被改写")
-        XCTAssertEqual(written.ifd0[259]?.firstUInt32, 7, "压缩方式 7（lossless JPEG）")
+        XCTAssertEqual(written.ifd0[262]?.firstUInt32, 32803, "仍是 CFA 图")
 
-        // 假 tool 是恒等的，所以像素应当几乎不变（浮点羽化后最多 1 码）。
+        // 假 tool 是恒等的，所以像素应当一个不差。
         let originalData = try Data(contentsOf: source, options: .alwaysMapped)
         let original = try SourceDNG(data: originalData).readMosaic(data: originalData)
         var maxDeviation = 0
@@ -271,7 +277,24 @@ final class AnselDenoiseJob386Tests: XCTestCase {
             maxDeviation = max(maxDeviation, abs(Int(writtenMosaic.samples[i]) - Int(original.samples[i])))
         }
         print("整链：假 tool 下与原图的最大像素偏差 = \(maxDeviation) 码")
-        XCTAssertLessThanOrEqual(maxDeviation, 1)
+        XCTAssertEqual(maxDeviation, 0)
+    }
+
+    /// ② 已有产物时整链落到 `-denoised-2.dng`，且第一个产物不被覆盖。
+    func testTheWholeChainStepsToTheNextNameInsteadOfOverwriting() throws {
+        let dir = workDir.appendingPathComponent("chain2", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let source = dir.appendingPathComponent("L1030552.dng")
+        try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
+        let first = dir.appendingPathComponent("L1030552-denoised.dng")
+        try Data([0xAB]).write(to: first)
+
+        let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
+                                                                modelURL: try makeDummyModel()))
+        let outcome = try job.run(source: source)
+        print("② 整链：已存在首个产物 ⇒ 这次写到 \(outcome.output.lastPathComponent)")
+        XCTAssertEqual(outcome.output.lastPathComponent, "L1030552-denoised-2.dng")
+        XCTAssertEqual(try Data(contentsOf: first), Data([0xAB]), "首次产物必须原封不动")
     }
 
     // MARK: - ⑫ 反向门：⑨ 的度量必须有判别力
@@ -288,10 +311,8 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         let source = dir.appendingPathComponent("L1030552.dng")
         try FileManager.default.copyItem(at: Self.fixtureURL, to: source)
 
-        var options = AnselDenoiseOptions()
         let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: try makeFakeTool(),
-                                                                modelURL: try makeDummyModel()),
-                                  options: options)
+                                                                modelURL: try makeDummyModel()))
         let outcome = try job.run(source: source)
 
         let before = try SourceDNG(data: Data(contentsOf: source, options: .alwaysMapped))
@@ -315,7 +336,7 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         let x = 256, y = 256
         let beforeEnergy = adjacentDifferenceVariance(before.samples, width: before.width, x: x, y: y)
         let afterEnergy = adjacentDifferenceVariance(product.samples, width: product.width, x: x, y: y)
-        let ratio = afterEnergy / beforeEnergy
+        let ratio = beforeEnergy == 0 ? 1 : afterEnergy / beforeEnergy
         print("⑫ 恒等 tool：相邻差方差 \(beforeEnergy) → \(afterEnergy)，比值 \(ratio)")
         XCTAssertGreaterThan(ratio, 0.75,
                              "⑫ 「没降噪」时 ⑨ 的度量必须红；比值 \(ratio) 说明它没有判别力")
@@ -323,13 +344,35 @@ final class AnselDenoiseJob386Tests: XCTestCase {
 
     // MARK: - helpers
 
-    /// A stand-in for the GPL binary: it does not denoise, it copies the tile file through, which
-    /// is exactly enough to prove the host-side chain (normalize → service → writer → naming) works.
-    private func makeFakeTool() throws -> URL {
-        let url = workDir.appendingPathComponent("fake-ansel-denoise-swift")
+    /// A stand-in for the GPL binary. It does not denoise: it copies the input DNG to `--out` and
+    /// prints the JSON object the real `image in.dng --out out.dng --json` prints. That is exactly
+    /// enough to prove the host side (naming → temp → rename → report translation) works.
+    ///
+    /// - Parameters:
+    ///   - supportsDNG: `false` makes `capabilities` look like the pre-390 tool.
+    ///   - failAfterWriting: copy the file, print nothing useful, exit 7 — the 「写了半个产物然后
+    ///     失败」 case that ④ has to survive.
+    private func makeFakeTool(supportsDNG: Bool = true,
+                              failAfterWriting: Bool = false) throws -> URL {
+        let name = "fake-ansel-denoise-swift-\(UUID().uuidString)"
+        let url = workDir.appendingPathComponent(name)
+        let features = supportsDNG ? "[\"image\",\"image-dng\",\"gpu\"]" : "[\"image\",\"gpu\"]"
+        let jsonHead = "{\"width\":1024,\"height\":1024,\"cfa\":\"rggb\",\"mosaicCfa\":\"rggb\","
+            + "\"pieces\":1,\"columns\":1,\"rows\":1,\"seams\":0,\"seconds\":1.0,"
+            + "\"readSeconds\":0.0,\"inferenceSeconds\":0.0,\"writeSeconds\":0.0,"
+            + "\"backend\":\"fake\",\"outputBytes\":"
+        let tail = failAfterWriting
+            ? "echo 'model exploded on purpose' >&2; exit 7"
+            : "bytes=$(wc -c < \"$out\" | tr -d ' ')\n"
+              + "printf '%s%s}\\n' '\(jsonHead)' \"$bytes\""
         let script = """
         #!/bin/sh
-        # fake ansel-denoise-swift: copy the tile payload to --out and report one JSON line.
+        # fake ansel-denoise-swift (§390): capabilities, then DNG in → DNG out.
+        if [ "$1" = "capabilities" ]; then
+          echo '{"tool":{"name":"ansel-denoise-swift","protocol":2},"gpu":"Fake GPU","features":\(features)}'
+          exit 0
+        fi
+        if [ "$1" != "image" ]; then exit 2; fi
         input="$3"
         out=""
         while [ $# -gt 0 ]; do
@@ -337,9 +380,15 @@ final class AnselDenoiseJob386Tests: XCTestCase {
           shift
         done
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
+        # Refuse what the real tool refuses: a file too short to hold an IFD. (The real one parses
+        # tags and says so; this stand-in only has to fail on the truncated fixture.)
+        size=$(wc -c < "$input" | tr -d ' ')
+        if [ "$size" -lt 1024 ]; then
+          echo '解码 RAW 失败：文件被截断' >&2
+          exit 5
+        fi
         cp "$input" "$out" || exit 4
-        bytes=$(wc -c < "$out" | tr -d ' ')
-        echo "{\\\"pieces\\\":1,\\\"columns\\\":1,\\\"rows\\\":1,\\\"seams\\\":0,\\\"singlePass\\\":true,\\\"peakBytes\\\":$bytes,\\\"ms\\\":1.0,\\\"backend\\\":\\\"fake\\\",\\\"cfa\\\":\\\"rggb\\\"}"
+        \(tail)
         """
         try script.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
