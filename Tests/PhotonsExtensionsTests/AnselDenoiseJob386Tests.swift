@@ -182,9 +182,14 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         }
     }
 
-    /// 四级顺序：env → bundle → Application Support。bundle 那一级在测试里拿不到资源目录，
-    /// 所以这里只钉住「env 优先」和「都没有时给出第 3 级的完整路径」这两件事。
-    func testModelResolutionPrefersTheEnvironmentThenTheUserDirectory() throws {
+    /// 四级顺序：env → app bundle 的 `bin/models/` → 顶层 `Resources/models/` → Application Support。
+    /// 单测宿主里 `bundle.resourceURL` 指向 xcodebuild 目录（不是真的 app），所以「bundle 那一级」
+    /// 在这里只能验路径**怎么拼**，验不了文件真的在 —— 那个由 `DenoiseShippedModel387Tests`
+    /// 直接读磁盘上的 `.build/Photons.app` 来钉。
+    /// 名字里的「then the bundle, then the user directory」是 2026-11-12 改的：模型随 app 打包之后，
+    /// 搜索顺序不再以用户目录收尾 —— 第 2 级就是 app 内的 `bin/models/`，用户目录落到第 4 级，
+    /// 只服务「换 half/large 变体」这一种用途。
+    func testModelResolutionPrefersTheEnvironmentThenTheBundleThenTheUserDirectory() throws {
         let envModel = workDir.appendingPathComponent(AnselDenoiseVariant.quarter.modelFileName)
         try Data([0]).write(to: envModel)
         let location = AnselDenoiseLocation()
@@ -195,17 +200,31 @@ final class AnselDenoiseJob386Tests: XCTestCase {
         XCTAssertEqual(location.resolvedModel(environment: [AnselDenoiseLocation.environmentKey: envModel.path])?.path,
                        envModel.path)
 
+        // 2026-11-12 — the expected path is the **app bundle's own** location, not the user
+        // directory: the model ships inside Photons (`bundle-ansel-models.sh` puts it in
+        // `Contents/Resources/bin/models/`), so a missing model means the bundle is wrong, and the
+        // tooltip should say so rather than point at a directory the user is not expected to fill.
         let expectedPath = AnselDenoiseLocation.expectedModelPath(variant: .quarter).path
-        XCTAssertTrue(expectedPath.hasSuffix("Library/Application Support/Photons/models/"
-                                             + AnselDenoiseVariant.quarter.modelFileName),
-                      "第 3 级必须是 ~/Library/Application Support/Photons/models，实际 \(expectedPath)")
-        XCTAssertEqual(location.modelPathHint(), expectedPath, "tooltip 写的路径就是用户该放文件的地方")
+        let quarterName = AnselDenoiseVariant.quarter.modelFileName
+        if let resources = Bundle.main.resourceURL {
+            XCTAssertEqual(expectedPath,
+                           resources.appendingPathComponent("bin/models/\(quarterName)").path,
+                           "期望路径必须是 app 内的 bin/models，实际 \(expectedPath)")
+        } else {
+            XCTAssertTrue(expectedPath.hasSuffix("Library/Application Support/Photons/models/" + quarterName),
+                          "没有 bundle 时退回用户目录，实际 \(expectedPath)")
+        }
+        XCTAssertEqual(location.modelPathHint(), expectedPath, "tooltip 写的路径就是模型该在的地方")
+        // The user directory is still a legitimate *search* location — that is where someone drops
+        // a half/large variant — so keep probing it separately from the tooltip's claim.
+        let userCopy = AnselDenoiseLocation.userModelDirectory()
+            .appendingPathComponent(quarterName).path
         // A path that does not exist anywhere resolves to nil, never to a guess.
         //
         // Only assert this when nothing is actually installed: on a machine where a model has
         // been put in the user directory (the normal state after using the feature) resolving to
         // that file is correct behaviour, not a bug in the resolver.
-        let installed = FileManager.default.fileExists(atPath: expectedPath)
+        let installed = FileManager.default.fileExists(atPath: userCopy)
         if !installed {
             XCTAssertNil(location.resolvedModel(environment: [:]))
         }

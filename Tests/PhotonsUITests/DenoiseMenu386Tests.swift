@@ -292,7 +292,16 @@ final class DenoiseMenu386Tests: XCTestCase {
         pump(0.1)
 
         let expected = AnselDenoiseLocation.expectedModelPath(variant: .quarter)
-        session.denoiseLocation.modelURL = expected        // explicitly the user-directory path
+        // Point at a path that is **guaranteed** absent. Using `expectedModelPath` assumed the user
+        // directory had no weight, which stops being true the moment someone installs one — and then
+        // the resolver legitimately finds it and the menu is enabled, so the test failed on a
+        // correct behaviour. The property under test is "a missing model greys the row", not
+        // "this machine is bare".
+        let absent = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("definitely-no-model-\(UUID().uuidString).anselnn")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: absent.path),
+                       "前提：这个路径必须不存在")
+        session.denoiseLocation.modelURL = absent
 
         let menus = try self.menus(surfaces)
         for name in ["grid", "filmstrip", "browser"] {
@@ -300,8 +309,8 @@ final class DenoiseMenu386Tests: XCTestCase {
             let tooltip = try XCTUnwrap(row.toolTip)
             print("② 模型缺失 [\(name)]：enabled=\(row.isEnabled) tooltip=\(tooltip)")
             XCTAssertFalse(row.isEnabled)
-            XCTAssertTrue(tooltip.contains(expected.path), "② tooltip 必须带完整期望路径")
-            XCTAssertEqual(tooltip, "未找到降噪模型：\(expected.path)")
+            XCTAssertTrue(tooltip.contains(absent.path), "② tooltip 必须带完整期望路径")
+            XCTAssertEqual(tooltip, "未找到降噪模型：\(absent.path)")
         }
     }
 

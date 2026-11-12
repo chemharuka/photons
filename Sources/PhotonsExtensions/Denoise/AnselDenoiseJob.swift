@@ -84,10 +84,23 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
         return support.appendingPathComponent("Photons/models", isDirectory: true)
     }
 
-    /// 找不到模型时，tooltip 里必须出现的那个路径（第 3 级，用户能自己放文件的一级）。
+    /// 找不到模型时，tooltip 里必须出现的那个路径 —— **app 自带的那个位置**。
+    ///
+    /// 2026-11-12（用户口径「modelURL应该存在于photons app内部，因为现在photons打包是包含模型的」）：
+    /// 模型随 app 打包（`bundle-ansel-models.sh` 把它放进 `Contents/Resources/bin/models/`），
+    /// 所以「缺失」指的是**打包漏了**，不是「用户还没下载」。tooltip 因此要指向 app 内部，
+    /// 让人一眼看出是打包问题；告诉用户往 `~/Library/Application Support` 放文件，等于建议他用
+    /// 一个我们本来就不指望他填的位置。
+    ///
+    /// 只有在 `bundle.resourceURL` 拿不到时（单元测试的非 app 宿主）才退回用户目录 —— 那里是
+    /// 用户**换变体**（half/large/multi）时才用的位置，不是默认模型的来源。
     public static func expectedModelPath(variant: AnselDenoiseVariant,
+                                        bundle: Bundle = .main,
                                         fileManager: FileManager = .default) -> URL {
-        userModelDirectory(fileManager: fileManager)
+        if let resources = bundle.resourceURL {
+            return resources.appendingPathComponent("bin/models/\(variant.modelFileName)")
+        }
+        return userModelDirectory(fileManager: fileManager)
             .appendingPathComponent(variant.modelFileName)
     }
 
@@ -122,9 +135,11 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
             .first { fileManager.fileExists(atPath: $0.path) }
     }
 
-    /// 菜单 tooltip 用的「期望路径」：显式给了就用它，否则是第 3 级那条完整路径。
-    public func modelPathHint(fileManager: FileManager = .default) -> String {
-        (modelURL ?? Self.expectedModelPath(variant: variant, fileManager: fileManager)).path
+    /// 菜单 tooltip 用的「期望路径」：显式给了就用它，否则是 app 自带的那条完整路径。
+    public func modelPathHint(bundle: Bundle = .main,
+                              fileManager: FileManager = .default) -> String {
+        (modelURL ?? Self.expectedModelPath(variant: variant, bundle: bundle,
+                                            fileManager: fileManager)).path
     }
 
     /// `AnselDenoiseClient` 的解析结果。注意它会把一条**不存在**的显式路径原样收下，
@@ -152,7 +167,8 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
                              fileManager: FileManager = .default) throws -> URL {
         guard let model = resolvedModel(environment: environment, bundle: bundle,
                                         fileManager: fileManager) else {
-            throw AnselDenoiseJobError.modelMissing(expectedPath: modelPathHint(fileManager: fileManager))
+            throw AnselDenoiseJobError.modelMissing(
+                expectedPath: modelPathHint(bundle: bundle, fileManager: fileManager))
         }
         return model
     }

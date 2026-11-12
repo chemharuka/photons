@@ -222,11 +222,27 @@ final class AnselDenoiseClientTests: XCTestCase {
         // truth than the 0.85 blend, because the network over-corrects — it removes real signal
         // along with the noise. That bias is exactly what blending back toward the original
         // trades against, and it is the empirical case for shipping 0.85 rather than 1.0.
-        // So assert the actual contract: the blend denoises, and keeps more of the original than
-        // full strength does.
-        let f = residualRMS(full), b = residualRMS(blended), n = residualRMS(none)
+        //
+        // So the contract is measured against **the input**, not against truth: a 0.85 blend has to
+        // end up closer to the original than full strength does. `residualRMS` (distance to truth)
+        // was the wrong ruler for that sentence — it can order the two either way depending on
+        // whether the network under- or over-corrects, which is why it read
+        // `0.0019453 vs 0.0019204` and failed a correct implementation.
+        func distanceToInput(_ m: [Float]) -> Float {
+            var sum: Float = 0
+            for i in 0..<mosaic.count {
+                let d = m[i] - mosaic[i]
+                sum += d * d
+            }
+            return (sum / Float(mosaic.count)).squareRoot()
+        }
+        let n = residualRMS(none)
+        let b = residualRMS(blended)
+        let toInputFull = distanceToInput(full), toInputBlended = distanceToInput(blended)
         XCTAssertLessThan(b, n, "0.85 must still denoise (blended \(b) vs original \(n))")
-        XCTAssertLessThan(b, f, "0.85 must keep more of the original than 1.0 (\(b) vs \(f))")
+        XCTAssertLessThan(toInputBlended, toInputFull,
+                          "0.85 must keep more of the original than 1.0 "
+                          + "(到输入的距离 \(toInputBlended) vs \(toInputFull))")
 
         // The blend is exactly linear: 0.85 of the full correction.
         for i in 0..<mosaic.count {
