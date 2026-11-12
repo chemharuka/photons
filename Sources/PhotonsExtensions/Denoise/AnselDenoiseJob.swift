@@ -46,9 +46,14 @@ public enum AnselDenoiseNotices {
 ///
 /// 模型（高 → 低）：
 ///   1. `$PHOTONS_ANSEL_MODEL`
-///   2. app bundle `Contents/Resources/models/<modelFileName>`
-///   3. `~/Library/Application Support/Photons/models/<modelFileName>`
-///   4. 都没有 ⇒ 抛错，并且 **错误里带完整期望路径**（菜单的 tooltip 就要这几个字）。
+///   2. app bundle `Contents/Resources/bin/models/<modelFileName>` —— **模型的正式位置**：
+///      权重是那个 GPL 工具的数据，跟着可执行文件走（387 打包口径），不混进 Photons 自己的
+///      顶层 `Resources/`。
+///   3. app bundle `Contents/Resources/models/<modelFileName>` —— 兼容早先的位置，留着不删，
+///      因为它读起来最直观，将来若有人手工塞进去也不该失效。
+///   4. `~/Library/Application Support/Photons/models/<modelFileName>` —— 用户换变体
+///      （half/large/multi）放这里，app 不用重打包。
+///   5. 都没有 ⇒ 抛错，并且 **错误里带完整期望路径**（菜单的 tooltip 就要这几个字）。
 public struct AnselDenoiseLocation: Sendable, Equatable {
 
     /// 显式可执行文件。`nil` = 走 `AnselDenoiseClient` 的解析顺序。
@@ -96,6 +101,13 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
             out.append(URL(fileURLWithPath: (env as NSString).expandingTildeInPath))
         }
         if let resources = bundle.resourceURL {
+            // 387 — the weights ship **inside the ansel-denoise-swift module's own directory**,
+            // next to the executable. They are that GPL tool's data, not Photons' resource: the app
+            // spawns the binary and passes this path as an argument, and never reads it itself. So
+            // the bundle layout keeps the licence boundary visible — `Resources/bin/` is the
+            // aggregate, top-level `Resources/` is Photons' own.
+            out.append(resources.appendingPathComponent("bin/models/\(modelFileName)"))
+            // The pre-387 location, kept so a hand-placed weight there keeps working.
             out.append(resources.appendingPathComponent("models/\(modelFileName)"))
         }
         out.append(Self.expectedModelPath(variant: variant, fileManager: fileManager))

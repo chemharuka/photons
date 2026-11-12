@@ -83,6 +83,31 @@ for bundle in "$BUILD_DIR"/*.bundle; do
     cp -R "$bundle" "$APP/Contents/Resources/"
 done
 
+# 387 — the denoise module rides inside the bundle in **two pieces that belong together**:
+#
+#     Contents/Resources/bin/ansel-denoise-swift              ← GPL-3.0 executable
+#     Contents/Resources/bin/models/denoise-quarter-single…    ← its 1.9 MB weight
+#
+# The weight is that program's data, so it lives in the program's directory — top-level
+# `Contents/Resources/` stays Photons' own (MIT) data. Keeping the pair in one place also means the
+# whole feature can be removed or replaced as a unit.
+#
+# Ordering matters: `rm -rf "$APP"` forty lines up wipes the bundle, so both must be re-added
+# **after** that point and **before** the signature. Get it wrong and `make app` still succeeds —
+# the only symptom is a greyed-out 「模型降噪…」 menu item.
+#
+# Both steps are optional on purpose: a checkout with neither the built tool nor the weight still
+# produces a working app, and the menu explains what is missing. That keeps `make app` usable as
+# the everyday build command instead of turning it into a "you must vendor everything" gate.
+if [ -x "$ROOT/scripts/bundle-ansel-denoise.sh" ]; then
+    "$ROOT/scripts/bundle-ansel-denoise.sh" "$APP" || \
+        echo "denoise     skipped（没有构建好的 ansel-denoise-swift；「模型降噪…」会退到 Homebrew）" >&2
+fi
+if [ -x "$ROOT/scripts/bundle-ansel-models.sh" ]; then
+    "$ROOT/scripts/bundle-ansel-models.sh" "$APP" || \
+        echo "model       skipped（没有 denoise-quarter-single-v1.anselnn；「模型降噪…」会退到 ~/Library/Application Support/Photons/models）" >&2
+fi
+
 xattr -cr "$APP" 2>/dev/null || true
 
 # Ad-hoc signature: enough to launch locally and to keep Gatekeeper quiet on this machine.
