@@ -294,10 +294,12 @@ final class CropPanelTests: XCTestCase {
 
         for button in RatioButton.allCases {
             let view = try XCTUnwrap(buttons[button])
+            // 2:3's direction comes from the frame *before* the click (2026-11-12) — the click re-cuts it.
+            let expected = button.lock(landscape: tool.frameIsLandscape())
             view.performClick(nil)
             CropUITestSupport.pump(0.1)
             inspector.layoutSubtreeIfNeeded()
-            XCTAssertEqual(tool.draft.lock, button.lock,
+            XCTAssertEqual(tool.draft.lock.ratio, expected.ratio,
                            "334: 点「\(button.title)」→ 草稿锁 \(tool.draft.lock.code)")
             // 按下态：正好这一颗亮.
             for other in RatioButton.allCases {
@@ -314,7 +316,7 @@ final class CropPanelTests: XCTestCase {
         let off = try XCTUnwrap(buttons[.square])
         XCTAssertNotEqual(off.layer?.backgroundColor, NSColor.controlAccentColor.cgColor)
         print("334 buttons · " + RatioButton.allCases.map {
-            "\($0.title)→\($0.lock.code)"
+            "\($0.title)→\($0.lock(landscape: true).code)"
         }.joined(separator: " · "))
     }
 

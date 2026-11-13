@@ -79,7 +79,7 @@ final class TransformCards334Tests: XCTestCase {
         let leaves = Set(panel.identifiers(inside: card))
         print("334 ② · 裁切卡 AppKit 叶子 id 集合 \(leaves.sorted())")
 
-        // ── 四个比例 + 原始 / 自由 + 自定义字段 + 不出像素 ──────────────────────────────
+        // ── 四个比例 + 原始 / 自由 + 自定义字段 + ⇄ 交换 + 不出像素 ────────────────────────
         let required: Set<String> = [
             "inspector.crop.ratio.1x1",
             "inspector.crop.ratio.4x3",
@@ -88,10 +88,12 @@ final class TransformCards334Tests: XCTestCase {
             "inspector.crop.ratio.original",
             "inspector.crop.ratio.free",
             "inspector.crop.ratio.custom",
+            // 2026-11-12 (user): 「长宽比之前的交换按钮没了」 —— ⇄ 回来了，与自定义比例同一行.
+            "inspector.crop.ratio.swap",
             "inspector.crop.staysInsidePixels",
         ]
         XCTAssertEqual(leaves, required,
-                       "334: 裁切卡的 AppKit 叶子应正好是这八个（多 \(leaves.subtracting(required).sorted())"
+                       "334: 裁切卡的 AppKit 叶子应正好是这九个（多 \(leaves.subtracting(required).sorted())"
                        + " · 少 \(required.subtracting(leaves).sorted())）")
 
         // ── 九宫格：SwiftUI 叶子，按它所在的行认（336：取消/应用 已不在卡里）────────────────
@@ -104,7 +106,8 @@ final class TransformCards334Tests: XCTestCase {
         print("334 ② · 裁切卡行 \(rows.sorted())")
         let expectedRows: Set<String> = [CropCardID.section(.crop),
                                          CropAspectRow.probeID, CropAspectRow.extrasProbeID,
-                                         CropAspectRow.customProbeID, CropCardID.staysInsidePixels,
+                                         CropAspectRow.customProbeID, CropAspectRow.swapProbeID,
+                                         CropCardID.staysInsidePixels,
                                          CropCardID.grid]
         XCTAssertEqual(rows, expectedRows,
                        "334/336: 裁切卡的行应正好是 \(expectedRows)（多 \(rows.subtracting(expectedRows).sorted())"

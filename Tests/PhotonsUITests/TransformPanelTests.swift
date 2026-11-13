@@ -163,8 +163,11 @@ final class TransformPanelTests: XCTestCase {
         XCTAssertEqual(RatioButton.allCases.map(\.identifier),
                        ["inspector.crop.ratio.1x1", "inspector.crop.ratio.4x3",
                         "inspector.crop.ratio.16x9", "inspector.crop.ratio.2x3"])
-        // 2:3 没有 `AspectLock` 命名分支：它是显式的 custom(2/3)，和键入的那一条同一个锁.
-        XCTAssertEqual(RatioButton.allCases.map(\.lock),
+        // 2:3 没有 `AspectLock` 命名分支：它是显式的 custom，和键入的那一条同一个锁.
+        // 2026-11-12 (user): 方向由**当前裁剪框**决定 —— 横构图点 2:3 落 3:2，竖构图落 2:3.
+        XCTAssertEqual(RatioButton.allCases.map { $0.lock(landscape: true) },
+                       [.square, .fourThree, .sixteenNine, .custom(3.0 / 2.0)])
+        XCTAssertEqual(RatioButton.allCases.map { $0.lock(landscape: false) },
                        [.square, .fourThree, .sixteenNine, .custom(2.0 / 3.0)])
 
         let editor = try CropUITestSupport.makeEditor(in: workDir)
@@ -183,11 +186,14 @@ final class TransformPanelTests: XCTestCase {
             let view = try XCTUnwrap(Self.button(RatioPresetButton.self, id: button.identifier,
                                                  in: inspector),
                                      "334: 比例按钮「\(button.title)」不在树上（\(button.identifier)）")
+            // What this click must mean is read **before** the click: 2:3's direction depends on the
+            // frame as it stands right now, and the click itself re-cuts that frame.
+            let expected = button.lock(landscape: loupe.cropTool.frameIsLandscape())
             view.performClick(nil)
             pump(0.05)
             inspector.layoutSubtreeIfNeeded()
-            XCTAssertEqual(loupe.cropTool.draft.lock, button.lock,
-                           "334: 点「\(button.title)」必须把草稿锁设成 \(button.lock.code)")
+            XCTAssertEqual(loupe.cropTool.draft.lock.ratio, expected.ratio,
+                           "334: 点「\(button.title)」必须把草稿锁设成 \(expected.code)")
             codes.append(loupe.cropTool.draft.lock.code)
         }
         XCTAssertEqual(Set(codes).count, 4, "334: 四个比例不能有两个落到同一个锁上")

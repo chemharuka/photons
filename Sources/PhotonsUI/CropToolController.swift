@@ -2212,6 +2212,33 @@ public final class CropToolController {
         return true
     }
 
+    /// Is the crop frame **wider than it is tall** (in pixels), i.e. landscape?
+    ///
+    /// The ratio buttons' shared question: a "2:3" button cannot mean one fixed W:H, because the same
+    /// paper is portrait on a vertical frame and landscape on a horizontal one. It reads the frame the
+    /// user is actually looking at — the draft rect, in pixels, after the document's turn and straighten
+    /// (`effectiveCrop`) — not the photograph and not a stored flag. A frame that is exactly square is
+    /// **not** wider, so it takes the portrait spelling; the buttons agree with each other on that.
+    public func frameIsLandscape(source: ImageSize? = nil) -> Bool {
+        let source = source ?? sourceSize
+        let c = effectiveCrop(source: source)
+        let w = c.width * Double(max(source.width, 1))
+        let h = c.height * Double(max(source.height, 1))
+        return w > h
+    }
+
+    /// The reciprocal of a ratio, spelled as the **portrait** side of it — `3/2 → 2/3`, `2/3 → 3/2`,
+    /// `1 → 1`.
+    ///
+    /// The ratio buttons call this through `frameIsLandscape`: `longerSide / shorterSide` when the frame
+    /// is wider, its reciprocal when it is taller. Kept here, next to `swapAspect`, so there is one
+    /// spelling of "the other orientation of this number" instead of two.
+    nonisolated public static func oriented(_ ratio: Double, landscape: Bool) -> Double {
+        guard ratio.isFinite, ratio > 0 else { return ratio }
+        let longSide = max(ratio, 1 / ratio)
+        return landscape ? longSide : 1 / longSide
+    }
+
     /// 自定义比例 (§C2): `W:H`, parsed by `CropTool.ratio(from:)` before it gets here.
     ///
     /// The lock is `custom` — the document's own spelling — so the ratio survives a preset switch

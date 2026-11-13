@@ -563,6 +563,11 @@ struct CropAspectRow: View {
     /// 自定义比例的图标 —— **不是**画线拉直的水平仪（`level`）：334 要求两者的 LOGO 一眼分得开.
     static let customSymbol = "ruler"
 
+    /// ⇄ 交换长宽的 id 与命中尺寸 —— 344 之前的 086 版本就住在这两个名字上，spec 与验收都按它找.
+    static let swapID = "inspector.crop.ratio.swap"
+    static let swapProbeID = "aspect.swap"
+    static let swapHitSize: CGFloat = 18
+
     @State private var typed: String = ""
     /// 334: bumped on **every** commit attempt — including a refused one, whose text does not change.
     /// Without it SwiftUI sees no state change and the field would keep the junk string on screen.
@@ -617,7 +622,11 @@ struct CropAspectRow: View {
             }
             .background(CropRowProbeHost(rowID: Self.extrasProbeID))
 
-            // 自定义比例：`ruler` + 可键入字段（`5:4` / `1.85`）.
+            // 自定义比例：`ruler` + 可键入字段（`5:4` / `1.85`）+ ⇄ 交换（2026-11-12 用户）.
+            //
+            // 用户口径：「⇄ 放在九宫格上方，自定义比例同一行」. It came back here after 334 dropped the
+            // 086 version that sat next to the ratio popup: the four-button row is a full four-column
+            // grid now, so the swap lives on this row, right-aligned after the typed field.
             HStack(spacing: 6) {
                 Image(systemName: Self.customSymbol)
                     .font(.system(size: 10, weight: .medium))
@@ -633,16 +642,47 @@ struct CropAspectRow: View {
                                      })
                     .frame(width: Self.customFieldWidth, height: Self.buttonHeight)
                 Spacer(minLength: 4)
+                // ⇄ — 交换长宽 (§C1). A *value* operation on the current lock, not another preset: one
+                // press makes 2:3 into 3:2 (and back), whatever the frame's own orientation is.
+                SwapAspectButtonHost(isEnabled: tool != nil,
+                                     action: {
+                                         _ = tool?.swapAspect()
+                                         // The typed field mirrors the lock; a swap changes it (`2:3` ⇄ `3:2`).
+                                         typed = Self.fieldText(for: tool)
+                                         revision &+= 1
+                                     })
+                    .frame(width: Self.swapHitSize, height: Self.swapHitSize)
+                    .help("交换长宽")
+                    .background(CropRowProbeHost(rowID: Self.swapProbeID))
             }
             .background(CropRowProbeHost(rowID: Self.customProbeID))
         }
         .onAppear { typed = Self.fieldText(for: tool) }
     }
 
-    /// Is this button the lock in force? 2:3 is an explicit `custom(2/3)` (there is no named case).
+    /// Is this button the lock in force?
+    ///
+    /// 2:3 is an explicit `custom(2/3)` or `custom(3/2)` (there is no named case for either), and which
+    /// one it lights up for is the **document's** current lock — not the frame's orientation. That
+    /// matters: after clicking 2:3 on a landscape frame the lock is `custom(1.5)`, the button stays
+    /// lit, and pressing ⇄ once makes it `custom(2/3)` — still the same button, still lit, now portrait.
     static func isOn(_ button: RatioButton, tool: CropToolController?) -> Bool {
         guard let tool else { return false }
-        return tool.draft.lock == button.lock
+        guard let current = tool.draft.lock.ratio else { return tool.draft.lock == .original }
+        // Compare by ratio, not by spelling: `custom(1.5)` and `.threeTwo` are the same constraint, so
+        // the 2:3 button stays lit across a swap into 3:2 — and it is lit for **both** orientations of
+        // the 3:2 family, because which one the button would produce depends on the frame, not on the
+        // document's current spelling.
+        switch button {
+        case .square:
+            return abs(current - 1) <= 1e-6
+        case .fourThree:
+            return abs(current - 4.0 / 3.0) <= 1e-6
+        case .sixteenNine:
+            return abs(current - 16.0 / 9.0) <= 1e-6
+        case .twoThree:
+            return abs(abs(current) - 3.0 / 2.0) <= 1e-6
+        }
     }
 
     /// What the typed field shows: the custom ratio in force as `W:H`, else empty (the placeholder
@@ -703,17 +743,29 @@ enum RatioButton: String, CaseIterable, Sendable, Hashable {
     /// acceptance (`inspector.crop.ratio.16x9`).
     var identifier: String { "inspector.crop.ratio.\(rawValue)" }
 
-    var lock: AspectLock {
+    /// The lock this button means on a frame of a given orientation.
+    ///
+    /// 2026-11-12 (user): 「用户点击 2:3 时…进入的是 2:3 还是 3:2 取决于当前裁剪框的左右和上下高度比，
+    /// 左右长那么就是用比例中更大的（如 3）」. So 2:3 is the **3:2 family** button: it is 3:2 on a
+    /// landscape frame and 2:3 on a portrait one, read fresh on every click. The other three are
+    /// symmetric in name only — 1:1 is its own reciprocal, and 4:3 / 16:9 keep their single spelling
+    /// until the user asks for them to follow the frame too.
+    func lock(landscape: Bool) -> AspectLock {
         switch self {
         case .square: return .square
         case .fourThree: return .fourThree
         case .sixteenNine: return .sixteenNine
-        case .twoThree: return .custom(2.0 / 3.0)
+        case .twoThree:
+            return .custom(CropToolController.oriented(2.0 / 3.0, landscape: landscape))
         }
     }
 
     /// One click = that lock — through the preset verb where a named preset exists (so 原始's memory
     /// and the 🔒 rules behave exactly as they did), through `setCustomRatio` for 2:3.
+    ///
+    /// 2:3 reads the frame's orientation **at click time** (`frameIsLandscape`), so the same button
+    /// gives 3:2 on a landscape frame and 2:3 on a portrait one — and `setCustomRatio` remembers the
+    /// ratio it was given, so 🔓 brings back the orientation the user last chose, not the other one.
     @MainActor
     func apply(to tool: CropToolController?) {
         guard let tool else { return }
@@ -721,7 +773,9 @@ enum RatioButton: String, CaseIterable, Sendable, Hashable {
         case .square: tool.setAspect(.square)
         case .fourThree: tool.setAspect(.fourThree)
         case .sixteenNine: tool.setAspect(.sixteenNine)
-        case .twoThree: _ = tool.setCustomRatio(2.0 / 3.0)
+        case .twoThree:
+            _ = tool.setCustomRatio(CropToolController.oriented(2.0 / 3.0,
+                                                                landscape: tool.frameIsLandscape()))
         }
     }
 }
@@ -811,6 +865,75 @@ struct RatioPresetButtonHost: NSViewRepresentable {
         button.target = context.coordinator
         button.action = #selector(Coordinator.fire)
         button.refresh(title: title, isOn: isOn, isEnabled: isEnabled)
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
+// MARK: - 2026-11-12: the ⇄ swap button
+
+/// The ⇄ button — a real `NSButton`, for the same reason every leaf in this card is AppKit: the
+/// acceptance clicks it through `performClick(_:)` and reads its frame, and a SwiftUI `Button` does not
+/// expose either to an `NSView` walk (its identifier lands on an accessibility element, not a view).
+///
+/// 2026-11-12 (user): the swap disappeared with the 334 rewrite (it used to sit next to the ratio
+/// popup) and came back **on the custom-ratio row**: 「⇄ 放在九宫格上方，自定义比例同一行」.
+final class SwapAspectButton: NSButton {
+
+    static let font = NSFont.systemFont(ofSize: 10)
+
+    init(enabled: Bool) {
+        super.init(frame: NSRect(x: 0, y: 0, width: CropAspectRow.swapHitSize,
+                                 height: CropAspectRow.swapHitSize))
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.momentaryPushIn)
+        alignment = .center
+        wantsLayer = true
+        attributedTitle = NSAttributedString(string: "⇄", attributes: [.font: Self.font])
+        setAccessibilityLabel("交换长宽")
+        refresh(enabled: enabled)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: CropAspectRow.swapHitSize, height: CropAspectRow.swapHitSize)
+    }
+    override var isFlipped: Bool { true }
+
+    func refresh(enabled: Bool) {
+        isEnabled = enabled
+        contentTintColor = enabled ? .labelColor : .tertiaryLabelColor
+        setAccessibilityValue(enabled ? "可交换" : "无裁切工具")
+    }
+}
+
+struct SwapAspectButtonHost: NSViewRepresentable {
+
+    let isEnabled: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> SwapAspectButton {
+        let button = SwapAspectButton(enabled: isEnabled)
+        button.setAccessibilityIdentifier(CropAspectRow.swapID)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        return button
+    }
+
+    func updateNSView(_ button: SwapAspectButton, context: Context) {
+        context.coordinator.action = action
+        button.setAccessibilityIdentifier(CropAspectRow.swapID)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.refresh(enabled: isEnabled)
     }
 
     final class Coordinator: NSObject {
