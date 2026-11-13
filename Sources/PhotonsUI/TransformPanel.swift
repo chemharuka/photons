@@ -666,9 +666,13 @@ struct CropAspectRow: View {
     /// one it lights up for is the **document's** current lock — not the frame's orientation. That
     /// matters: after clicking 2:3 on a landscape frame the lock is `custom(1.5)`, the button stays
     /// lit, and pressing ⇄ once makes it `custom(2/3)` — still the same button, still lit, now portrait.
+    ///
+    /// `.original` (自由) carries **no** ratio, so none of the four is in force and all four are off.
+    /// That is not the same as 原始: 原始 writes `.matching(source:)`, a real constraint (3:2 on a 3:2
+    /// frame), and the button for it lights up. Only 自由 has nothing to show.
     static func isOn(_ button: RatioButton, tool: CropToolController?) -> Bool {
         guard let tool else { return false }
-        guard let current = tool.draft.lock.ratio else { return tool.draft.lock == .original }
+        guard let current = tool.draft.lock.ratio else { return false }
         // Compare by ratio, not by spelling: `custom(1.5)` and `.threeTwo` are the same constraint, so
         // the 2:3 button stays lit across a swap into 3:2 — and it is lit for **both** orientations of
         // the 3:2 family, because which one the button would produce depends on the frame, not on the
