@@ -364,6 +364,87 @@ final class CropPanelTests: XCTestCase {
               + " → free \(tool.draft.lock.code)")
     }
 
+    /// 399 (user): 「裁切，自由模式下，1:1 2:3这些选项都会亮起来，修复」. 自由 carries **no** ratio, so
+    /// none of the four ratio buttons is the lock in force — all four are off. 原始 is the other exit
+    /// and it *does* constrain (`.matching(source:)`), so its one button stays lit; the two must not be
+    /// conflated.
+    func testFreeTurnsEveryRatioButtonOff() throws {
+        let editor = try CropUITestSupport.makeEditor(in: workDir)
+        defer { editor.window?.orderOut(nil) }
+        let inspector = editor.rootView.inspectorHost
+        editor.rootView.inspectorWorkspaces.select(.transform)
+        CropUITestSupport.pump(0.2)
+        inspector.layoutSubtreeIfNeeded()
+        let tool = editor.rootView.loupeController.cropTool
+
+        var buttons: [RatioButton: RatioPresetButton] = [:]
+        for button in RatioButton.allCases {
+            buttons[button] = try XCTUnwrap(Self.find(RatioPresetButton.self, id: button.identifier,
+                                                      in: inspector),
+                                            "399: 比例按钮「\(button.title)」不在树上")
+        }
+        let original = try XCTUnwrap(Self.find(RatioPresetButton.self, id: CropAspectRow.originalID,
+                                               in: inspector), "399: 「原始」不在树上")
+        let free = try XCTUnwrap(Self.find(RatioPresetButton.self, id: CropAspectRow.freeID,
+                                           in: inspector), "399: 「自由」不在树上")
+
+        // Enter 自由 from a state that **has** a lock, otherwise "all off" could just be "nothing was
+        // ever on".
+        let square = try XCTUnwrap(buttons[.square])
+        square.performClick(nil)
+        CropUITestSupport.pump(0.1)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertEqual(tool.draft.lock, .square)
+        XCTAssertTrue(square.isOn, "399: 点 1:1 之后那颗自己必须是按下态")
+
+        free.performClick(nil)
+        CropUITestSupport.pump(0.1)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertTrue(tool.isAspectFree, "399: 「自由」= 没有比例约束")
+        for button in RatioButton.allCases {
+            let on = try XCTUnwrap(buttons[button]).isOn
+            XCTAssertFalse(on, "399: 自由模式下比例按钮「\(button.title)」不应亮（实际 \(on)）")
+        }
+        XCTAssertTrue(free.isOn, "399: 自由 自己是按下态")
+        XCTAssertFalse(original.isOn, "399: 原始 不是按下态")
+
+        // 原始 ≠ 自由: 「原始」 puts the sensor's own ratio back, so the button for that ratio lights.
+        original.performClick(nil)
+        CropUITestSupport.pump(0.1)
+        inspector.layoutSubtreeIfNeeded()
+        XCTAssertFalse(tool.isAspectFree, "399: 「原始」仍是约束，不是自由")
+        let frameRatio = Double(tool.sourceSize.width) / Double(max(tool.sourceSize.height, 1))
+        if tool.aspectPreset() == .threeTwo {
+            // 3:2 sensor ⇒ `.matching(source:)` is `.threeTwo`, i.e. the 2:3 button's 3:2 family.
+            let on = try XCTUnwrap(buttons[.twoThree]).isOn
+            XCTAssertTrue(on, "399: 3:2 机器上「原始」= 3:2 ⇒ 2:3 那颗亮")
+            for other in RatioButton.allCases where other != .twoThree {
+                let on = try XCTUnwrap(buttons[other]).isOn
+                XCTAssertFalse(on, "399: 3:2 机器上「原始」不该点亮「\(other.title)」")
+            }
+        } else {
+            // Any other sensor: 原始 is `.matching(source:)`, so the lit set is exactly the buttons
+            // whose ratio *is* the sensor's (often none of them).
+            for button in RatioButton.allCases {
+                let matches: Bool
+                switch button {
+                case .square: matches = abs(frameRatio - 1) <= 1e-6
+                case .fourThree: matches = abs(frameRatio - 4.0 / 3.0) <= 1e-6
+                case .sixteenNine: matches = abs(frameRatio - 16.0 / 9.0) <= 1e-6
+                case .twoThree: matches = abs(frameRatio - 3.0 / 2.0) <= 1e-6
+                }
+                let on = try XCTUnwrap(buttons[button]).isOn
+                XCTAssertEqual(on, matches,
+                               "399: 非 3:2 机器上「\(button.title)」的按下态应跟传感器比例"
+                               + "（\(tool.draft.lock.code)）走")
+            }
+        }
+        print("399 free · lock \(tool.draft.lock.code) · free \(tool.isAspectFree)"
+              + " · original " + RatioButton.allCases.map {
+                  "\($0.title)→\(buttons[$0]?.isOn == true ? "on" : "off")"
+              }.joined(separator: " "))
+    }
+
     // MARK: - 334 · 自定义键入（字段常显，不弹框）
 
     /// The typed ratio: the field is **always** in the card (no pencil, no panel), `5:4` becomes
