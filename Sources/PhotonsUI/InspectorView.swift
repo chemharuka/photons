@@ -1813,7 +1813,7 @@ public struct InspectorView: View {
     /// six read as whole numbers rounded away from zero and store what was typed (their 1 step is 1,
     /// so a drag is already whole).
     public static let lightRows: [ToneRow] = [
-        ToneRow(title: "曝光", range: -5 ... 5, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure,
+        ToneRow(title: "曝光", range: -4 ... 8, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure,
                 decimals: 2, rounding: .asIs, quantum: 0.01),
         ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast,
                 decimals: 1),
@@ -2987,7 +2987,7 @@ enum SliderValueInput {
     /// A submitted string, in the row's own travel.
     ///
     /// Out-of-range numbers are **clamped**, not rejected: a slider's travel is a fact about the
-    /// control, and refusing `12` in a ±5 EV row would leave the user with a beep and no explanation.
+    /// control, and refusing `12` in a −4…+8 EV row would leave the user with a beep and no explanation.
     static func resolve(_ text: String, in range: ClosedRange<Double>) -> Outcome {
         guard let v = parse(text) else { return .rejected }
         return .value(min(max(v, range.lowerBound), range.upperBound))

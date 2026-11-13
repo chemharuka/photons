@@ -19,7 +19,7 @@
 | 组 | 参数（范围 / 默认） | 域 | 阶段 | 说明 |
 |---|---|---|---|---|
 | 几何 | `crop`、`rotationDegrees` ±45°、`flipH/V`、`aspectLock`、`quarterTurns` 0…3、`perspectiveV/H` ±100 | 源像素 | **S0** | 几何改变像素网格，必须最先 |
-| 光线 | `exposure` −5…+5 / 0 | 场景线性 | **S1** | 纯增益 `2^EV` |
+| 光线 | `exposure` −4…+8 / 0 | 场景线性 | **S1** | 纯增益 `2^EV` |
 | 光线 | `blackOffset` ±0.01 / 0 | 场景线性 | **S1** | 加法微调，在增益**之前** |
 | 光线 | `blacks`、`whites` ±100 / 0 | 场景线性 | **S1** | 端点；EV + 电平混合（073B/C） |
 | 光线 | `highlightRecovery` 0…1 / 0 | 场景线性 | **S1** | 软肩 |

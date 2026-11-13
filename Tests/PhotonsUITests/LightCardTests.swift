@@ -21,7 +21,7 @@ final class LightCardTests: XCTestCase {
         XCTAssertTrue(InspectorView.scrollingSections.contains(.light))
 
         // The travel and the number format of each row — unchanged by 046.
-        XCTAssertEqual(rows[0].range, -5 ... 5, "曝光 is ±5 EV")
+        XCTAssertEqual(rows[0].range, -4 ... 8, "曝光 is −4…+8 EV (asymmetric: the decoder clips at white)")
         XCTAssertEqual(rows[0].format, "%.2f EV")
         for row in rows.dropFirst() {
             XCTAssertEqual(row.range, -100 ... 100, "\(row.title) is ±100")

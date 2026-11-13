@@ -1561,7 +1561,12 @@ public struct NormalizedRect: Sendable, Equatable, Codable, Hashable {
 /// Lightroom's Light panel. Splits across S1 (scene linear) and S2 (tone map).
 public struct LightGroup: Sendable, Equatable, Codable {
     /// Stops of gain applied in S1. Never a re-decode: one decode at 0 EV, then arithmetic.
-    public var exposure: Double          // -5…+5,  default 0
+    ///
+    /// **−4…+8 (2026-11-12, 用户口径).** The window is deliberately asymmetric: `CIRAWFilter` clamps
+    /// its output at the white point, so most night/interior captures come out dark and need more
+    /// headroom *up* than down. −4 EV still reaches black on any normal exposure, while +8 EV is what
+    /// a badly underexposed frame actually needs.
+    public var exposure: Double          // -4…+8,  default 0
     public var contrast: Double          // -100…100, default 0
     public var highlights: Double        // -100…100, default 0
     /// 085 — the middle zone of S2's three-window lift, between `shadows` and `highlights`.

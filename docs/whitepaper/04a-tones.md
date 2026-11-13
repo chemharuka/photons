@@ -85,7 +85,7 @@ $$
 
 | 参数 | 范围 | 默认 | 单位 |
 |---|---|---|---|
-| `exposure` | −5…+5 | 0 | EV（`Sources/PhotonsCore/EditModel.swift:1428`） |
+| `exposure` | −4…+8 | 0 | EV（`Sources/PhotonsCore/EditModel.swift`） |
 | 增益 `2^E` | 1/32…32 | 1 | 倍（`Sources/PhotonsCore/EditModel.swift:1667`） |
 | `highlightRecovery` | 0…1 | 0 | 无量纲（`Sources/PhotonsCore/EditModel.swift:1525`） |
 
@@ -102,7 +102,8 @@ $$
 
 **取舍**
 
-- kernel 不夹取 `p.a.x`。−5…+5 只是文档声明的范围（`Sources/PhotonsCore/EditModel.swift:1428`），手改文档能超出滑杆。
+- kernel 不夹取 `p.a.x`。−4…+8 只是文档声明的范围（`Sources/PhotonsCore/EditModel.swift`），手改文档能超出滑杆。
+  区间不对称是因为 `CIRAWFilter` 按白点上限限制输出亮度，多数夜间/室内片偏暗，需要更大的向上空间。
 - 高光恢复吃的是 S1 出口的值，也就是已经过 `blacks`/`whites` 的值。想把肩放在端点之前，目前没有位置。
 
 ## 4.3 高光、中间调、阴影

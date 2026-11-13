@@ -145,7 +145,7 @@ final class XMPTests: XCTestCase {
 
     func testX03NegativeValuesSurvive() throws {
         var edit = EditModel.neutral
-        edit.light.exposure = -5
+        edit.light.exposure = -4
         edit.light.contrast = -100
         edit.light.tint = -150
         edit.effects.vignetteAmount = -100
@@ -153,7 +153,7 @@ final class XMPTests: XCTestCase {
                                  count: ColorGroup.bandCount)
 
         let (m, _) = try reparse(edit)
-        assertClose(XMPReadback.double(m, "crs:Exposure2012"), -5, "Exposure2012")
+        assertClose(XMPReadback.double(m, "crs:Exposure2012"), -4, "Exposure2012")
         assertClose(XMPReadback.double(m, "crs:Contrast2012"), -100, "Contrast2012")
         for name in Self.bandNames {
             assertClose(XMPReadback.double(m, "crs:HueAdjustment\(name)"), -100, "hue \(name)")
@@ -167,7 +167,7 @@ final class XMPTests: XCTestCase {
 
     func testX04ExtremesAndRoundedEdges() throws {
         var edit = EditModel.neutral
-        edit.light.exposure = 5
+        edit.light.exposure = 8
         edit.light.temperature = 12000
         edit.light.tint = 150
         edit.detail.sharpening = 150
@@ -175,7 +175,7 @@ final class XMPTests: XCTestCase {
         cropModel(&edit)
 
         let (m, _) = try reparse(edit)
-        assertClose(XMPReadback.double(m, "crs:Exposure2012"), 5, "Exposure2012")
+        assertClose(XMPReadback.double(m, "crs:Exposure2012"), 8, "Exposure2012")
         assertClose(XMPReadback.double(m, "crs:Sharpness"), 150, "Sharpness")
         assertClose(XMPReadback.double(m, "crs:SharpenRadius"), 0.5, "SharpenRadius")
         assertClose(XMPReadback.double(m, "photons:temperature"), 12000, "photons:temperature")
