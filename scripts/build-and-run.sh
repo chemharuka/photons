@@ -38,6 +38,14 @@ fi
 # which is exactly the failure that let a stale tool answer for the app.
 scripts/build-hdrmerge.sh
 
+# Same rule for the denoise tool, and here it has already bitten once (2026-11-12): the pointer
+# protocol went 1 → 2 (`image-dng`) in `Vendor/ansel-denoise-swift`, but `bundle-ansel-denoise.sh`
+# only copies `Vendor/.build/release/ansel-denoise-swift`. A build made before that change still
+# answered `capabilities`, so `AnselDenoiseJob` refused it as "工具太旧" — the 「降噪中」框 appeared
+# and vanished in one frame with the GPU never waking up. Compile from source every time: a stale
+# binary that still runs is indistinguishable from a working one until you press the menu item.
+scripts/build-ansel-denoise.sh --to-app
+
 make app
 
 # 图标来自 Resources/AppIcon.icon（Icon Composer 文档）+ 由 scripts/appicon.py 烘出的经典 icns。
