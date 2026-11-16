@@ -200,6 +200,18 @@ enum EditParameters {
         // 408: 宽高比. Same rule again — `FieldCoverageTests` reflects over the stored properties, so
         // a missing entry is both a red test and a slider that writes nothing.
         t.field("perspectiveAspect") { areEqual($0.perspectiveAspect, $1.perspectiveAspect) }
+        // 330 — 裁切矩形量在哪个空间（`.source` / `.canvas`）. Stored in the document since 330 and read
+        // by every geometry walk (`CropMath.RotationMatrix`, `documentQuad`, `moveFeasibleSet380`), so
+        // `applyEdit` has to see a change to it: otherwise the 330 migration — which rewrites `crop`
+        // and flips this flag in one step — would be dropped as "nothing changed" while the rect's
+        // *meaning* changed under it.
+        //
+        // Registered, **not exempted**: `cropSpace` is a real stored document field with a JSON key of
+        // its own (`EditModel.swift:1377` writes it only when it is `.canvas`), not a derived value, so
+        // the exemption route would be exactly the "slider that writes nothing" this table exists to
+        // prevent. `FieldCoverageTests` reflects over the struct in both directions and is what named
+        // this field when 330 shipped without the entry.
+        t.field("cropSpace") { $0.cropSpace == $1.cropSpace }
         // 361 — 354 put the guide lines in the document, but this table did not learn about them, and
         // `applyEdit` drops every change it cannot see: 「清除引导线」 wrote nothing (and ⌘Z could not
         // bring a line back). They stay out of the render **key** material on purpose

@@ -384,18 +384,29 @@ final class ChromaticAberrationCardTests: XCTestCase {
         let graph = try RenderGraph(input: RenderInput(image: image, identity: "ca-card-fringe"))
 
         // ---- the pre-UI frame: α = 0 has one sha, and it is the recorded one -------------------
-        let neutral = try render(graph, EditModel.neutral)
+        //
+        // 420 — **the fixture is the CA-only document, and that is what makes the pinned sha still
+        // true.** 314 (`44d56f3`) moved `SharpenGroup`'s resting values from 0/1.0 to 50/2.0, so
+        // `EditModel.neutral` now renders through S3.10 and its frame is legitimately *not* the pre-UI
+        // one (measured: `07ac5926…`; the pinned `20e92c47…` comes back byte for byte with
+        // `sharpen.amount = 0`). That record was never stale — it is the frame a document with no CA
+        // and no extra passes produces — so this test states the sharpening away rather than
+        // re-recording a hash that would then no longer say anything about 029's S0 identity.
+        // It also fixes the second symptom: 314's sharpen resamples the synthetic fringe, which is
+        // why the α readings had drifted 3.5 % low (0.00482 instead of 0.005) on the same document.
+        let neutralDocument = Fringe.withoutRestingSharpen(EditModel.neutral)
+        let neutral = try render(graph, neutralDocument)
         XCTAssertEqual(neutral.sha256(), Fringe.neutralSHA256,
                        "中性帧不是未接 UI 前的那一帧（029 的 α = 0 必须逐字节是恒等拷贝）")
 
         // What the two rows write when they are at 0 is **the** neutral document, not merely a
         // document that renders the same: `alpha(fromSlider: 0)` is 0, so nothing is appended to the
         // geometry key either.
-        var uiZero = EditModel.neutral
+        var uiZero = neutralDocument
         uiZero.optics.caRed = OpticsGroup.alpha(fromSlider: 0)
         uiZero.optics.caBlue = OpticsGroup.alpha(fromSlider: 0)
-        XCTAssertEqual(uiZero, EditModel.neutral, "两根行在 0 时文档必须逐字段等于中性文档")
-        XCTAssertEqual(uiZero.keyMaterial(.geometry), EditModel.neutral.keyMaterial(.geometry),
+        XCTAssertEqual(uiZero, neutralDocument, "两根行在 0 时文档必须逐字段等于中性文档")
+        XCTAssertEqual(uiZero.keyMaterial(.geometry), neutralDocument.keyMaterial(.geometry),
                        "…缓存键也一样（`;car=` 只在非零时追加）")
         let uiZeroFrame = try render(graph, uiZero)
         XCTAssertEqual(uiZeroFrame.sha256(), neutral.sha256(), "0 → 中性帧，逐字节")
@@ -414,7 +425,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
         // ---- ±100: both channels, both directions ---------------------------------------------
         var measured: [String: Double] = [:]
         for position in [100.0, -100.0] {
-            var edit = EditModel.neutral
+            var edit = neutralDocument
             edit.optics.caRed = OpticsGroup.alpha(fromSlider: position)
             edit.optics.caBlue = OpticsGroup.alpha(fromSlider: position)
             let frame = try render(graph, edit)
@@ -441,7 +452,7 @@ final class ChromaticAberrationCardTests: XCTestCase {
         XCTAssertLessThan(measured["B@-100"] ?? 0, 0, "反向的滑杆值必须反向移动")
 
         // ---- the correction: +57 / −57 put both edges back on green's ---------------------------
-        var corrected = EditModel.neutral
+        var corrected = neutralDocument
         corrected.optics.caRed = OpticsGroup.alpha(fromSlider: 57)
         corrected.optics.caBlue = OpticsGroup.alpha(fromSlider: -57)
         let fixed = try render(graph, corrected)
@@ -650,6 +661,19 @@ final class ChromaticAberrationCardTests: XCTestCase {
         /// branch produces the identical digest, so 「两根滑杆在 0 = 未接 UI 前的那一帧，逐字节」 is a
         /// measurement of two commits, not an inference.
         static let neutralSHA256 = "20e92c47bd5c862d588edce11f1ddce172fb8547bc27c9de0473261eeca1ad29"
+
+        /// **420 — the document the pinned sha is a frame of.**
+        ///
+        /// 314 (`44d56f3`) gave `SharpenGroup` a resting 50 / 2.0, so `EditModel.neutral` renders
+        /// through S3.10 and its frame is not the 029 record's (it predates that stage by four
+        /// months). Stating the sharpening away is what makes the comparison a measurement of the
+        /// **CA** identity rather than of 314's default; measured with a probe, `amount = 0` returns
+        /// the pinned digest byte for byte and restores the ±100 α readings to 0.005.
+        static func withoutRestingSharpen(_ model: EditModel) -> EditModel {
+            var v = model
+            v.sharpen = SharpenGroup(amount: 0)
+            return v
+        }
 
         static func image() -> LinearImage {
             var rgba = [Float16](repeating: 0, count: w * h * 4)
