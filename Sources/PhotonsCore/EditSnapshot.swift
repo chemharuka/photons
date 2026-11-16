@@ -509,6 +509,9 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     /// geometry card) and stay `nil` when 0, exactly like `rotationDegrees`.
     public var perspectiveVertical: Double?
     public var perspectiveHorizontal: Double?
+    /// **407** — 切变 `k`. Rides with the two keystones (one `PerspectiveMap`, one S0 stage) and
+    /// stays `nil` when 0, exactly like the pair above, so a shear-free clipboard keeps its bytes.
+    public var perspectiveShear: Double?
     /// 330 — the space the four crop edges were measured in. `nil` (absent) means the pre-330 answer,
     /// `.source`; carried only when it is `.canvas`, so a keystone-free clipboard re-encodes byte for
     /// byte. A pasted rect is interpreted in the space it was copied in — the receiving document then
@@ -521,7 +524,7 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
         [cropX != nil, cropY != nil, cropWidth != nil, cropHeight != nil,
          rotationDegrees != nil, flipHorizontal != nil, flipVertical != nil,
          aspectLock != nil, quarterTurns != nil,
-         perspectiveVertical != nil, perspectiveHorizontal != nil,
+         perspectiveVertical != nil, perspectiveHorizontal != nil, perspectiveShear != nil,
          cropSpace != nil].filter { $0 }.count
     }
 
@@ -529,7 +532,8 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
 
     /// Leaf count of the whole group in a full document (see `EditSnapshot.fullDocumentFieldCount`).
     /// 183's two perspective leaves are optional extras: they stay outside this historical
-    /// denominator (and its `84` assertion) but do count in `fieldCount` when carried.
+    /// denominator (and its `84` assertion) but do count in `fieldCount` when carried. 407's `shear`
+    /// follows the same rule for the same reason — it is one more optional leaf, not a new section.
     public static let fullFieldCount = 9
 }
 
@@ -902,6 +906,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.geometry.perspectiveHorizontal, 0) {
             geometry.perspectiveHorizontal = edit.geometry.perspectiveHorizontal
         }
+        // 407: 0 is identity, so an untouched shear is not carried (and adds no history row).
+        if differs(edit.geometry.perspectiveShear, 0) {
+            geometry.perspectiveShear = edit.geometry.perspectiveShear
+        }
         if edit.geometry.aspectLock != .original { geometry.aspectLock = edit.geometry.aspectLock }
         // 330 — the crop's space travels with the crop. Carried only for `.canvas`, so a keystone-free
         // clipboard keeps its pre-330 bytes (`nil` = `.source`).
@@ -1190,9 +1198,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             }
             if on(.straighten) {
                 p.rotationDegrees = g.rotationDegrees
-                // 183: the two perspective knobs ride with the 角度 section.
+                // 183: the two perspective knobs ride with the 角度 section. 407: the shear does too —
+                // it is the fourth number of the same map, so a copy that carries two of three would
+                // paste a keystone the source never had.
                 p.perspectiveVertical = g.perspectiveVertical
                 p.perspectiveHorizontal = g.perspectiveHorizontal
+                p.perspectiveShear = g.perspectiveShear
             }
             if on(.flips) {
                 p.flipHorizontal = g.flipHorizontal
@@ -1394,6 +1405,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.rotationDegrees { out.geometry.rotationDegrees = v }
             if let v = p.perspectiveVertical { out.geometry.perspectiveVertical = v }
             if let v = p.perspectiveHorizontal { out.geometry.perspectiveHorizontal = v }
+            if let v = p.perspectiveShear { out.geometry.perspectiveShear = v }
             if let v = p.flipHorizontal { out.geometry.flipHorizontal = v }
             if let v = p.flipVertical { out.geometry.flipVertical = v }
             if let v = p.aspectLock { out.geometry.aspectLock = v }

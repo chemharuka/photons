@@ -164,6 +164,7 @@ public struct FrameTransform: Sendable, Equatable {
                                   quarterTurns: 0,
                                   perspectiveVertical: perspective?.vertical ?? 0,
                                   perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                  perspectiveShear: perspective?.shear ?? 0,
                                   cropSpace: cropSpace)
         group.crop = crop.normalizedRect
         // **The full-resolution S3.** The rung moves no geometry (231): the loupe's hit test, the

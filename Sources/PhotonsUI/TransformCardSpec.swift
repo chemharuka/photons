@@ -17,6 +17,9 @@ public enum GeometryField: String, CaseIterable, Sendable, Hashable {
     case flipVertical
     case perspectiveVertical
     case perspectiveHorizontal
+    /// **407** — 切变. A field of the 透视 section, so it shares that section's reset, the card
+    /// title's double-click and the field-coverage guard (`PanelResetScopeTests` iterates all cases).
+    case perspectiveShear
 }
 
 /// A set of `GeometryField`s. Set algebra (not strings, not closures) is what makes the card scope
@@ -76,7 +79,7 @@ extension CropSection {
         switch self {
         case .crop: return [.cropRect, .aspectLock]
         case .angle: return [.straightenDegrees]
-        case .perspective: return [.perspectiveVertical, .perspectiveHorizontal]
+        case .perspective: return [.perspectiveVertical, .perspectiveHorizontal, .perspectiveShear]
         case .rotation: return [.quarterTurns]
         case .mirror: return [.flipHorizontal, .flipVertical]
         }

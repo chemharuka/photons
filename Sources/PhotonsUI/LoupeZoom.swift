@@ -734,6 +734,7 @@ public struct LoupeFraming: Equatable, Sendable {
                                   quarterTurns: 0,
                                   perspectiveVertical: perspective?.vertical ?? 0,
                                   perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                  perspectiveShear: perspective?.shear ?? 0,
                                   cropSpace: .canvas)
         group.crop = crop.normalizedRect
         let cg = CropGeometry(geometry: group, source: sourceSizeForPerspective)

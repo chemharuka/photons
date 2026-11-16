@@ -237,6 +237,9 @@ public struct GuideLineSolution: Equatable, Sendable {
     public var vertical: Double
     /// The document's `perspectiveHorizontal` the fit asks for.
     public var horizontal: Double
+    /// **407** — the document's `perspectiveShear` the fit asks for. Always 0 except on the 2 横 2 竖
+    /// path (`fitPairwiseWithShear`); the other shapes keep the three degrees of freedom they had.
+    public var shear: Double
     /// The document's `straighten` the fit asks for — 348's second step. Equal to the angle the
     /// document already had when `rotationFailure` is set (the turn is what got skipped).
     public var straighten: Double
@@ -264,9 +267,11 @@ public struct GuideLineSolution: Equatable, Sendable {
                 rotationFailure: GuideLineFailure? = nil,
                 residuals: [Double], pairwiseResiduals: [Double] = [],
                 axes: [GuideLineAxis], iterations: Int, smallestSingularValue: Double,
-                lineCount: Int, previousStraighten: Double = 0) {
+                lineCount: Int, previousStraighten: Double = 0,
+                shear: Double = 0) {
         self.vertical = vertical
         self.horizontal = horizontal
+        self.shear = shear
         self.straighten = straighten
         self.straightenRequested = straightenRequested
         self.rotationFailure = rotationFailure
@@ -303,6 +308,12 @@ public struct GuideLineSolution: Equatable, Sendable {
         var text = String(format: "%@ · 残差 %.2f°", values, worstResidual)
         if rotationFailure == nil, abs(straightenDelta) >= 0.05 {
             text += String(format: " · 摆正 %+.1f°", straightenDelta)
+        }
+        // 407 — 切变 is printed only when the fit used it, so every existing readout is unchanged
+        // character for character. `k × 100` is the slider's own reading (the row is 0…±50, i.e.
+        // `k` 0…±0.5), which is ART's convention: bare numbers, no unit.
+        if abs(shear) >= 0.0005 {
+            text += String(format: " · 切变 %+.1f", shear * 100)
         }
         return text
     }
@@ -455,9 +466,10 @@ public enum GuideLinesSolve {
     /// mean the screen.
     public static func mapped(_ point: CGPoint, source: ImageSize,
                               vertical: Double, horizontal: Double,
-                              straightenDegrees: Double) -> CGPoint {
+                              straightenDegrees: Double,
+                              shear: Double = 0) -> CGPoint {
         let w = Double(max(source.width, 1)), h = Double(max(source.height, 1))
-        let map = PerspectiveMap(vertical: vertical, horizontal: horizontal)
+        let map = PerspectiveMap(vertical: vertical, horizontal: horizontal, shear: shear)
         let warped = map.forward(x: Double(point.x) / w, y: Double(point.y) / h)
         let px = warped.x * w - w / 2, py = warped.y * h - h / 2
         let radians = (straightenDegrees.isFinite ? straightenDegrees : 0) * .pi / 180
@@ -469,11 +481,12 @@ public enum GuideLinesSolve {
     /// deviation and the pair angle are built from.
     public static func mappedAngle(of line: GuideLine, source: ImageSize,
                                    vertical: Double, horizontal: Double,
-                                   straightenDegrees: Double) -> Double {
+                                   straightenDegrees: Double,
+                                   shear: Double = 0) -> Double {
         let a = mapped(line.sourceStart, source: source, vertical: vertical,
-                       horizontal: horizontal, straightenDegrees: straightenDegrees)
+                       horizontal: horizontal, straightenDegrees: straightenDegrees, shear: shear)
         let b = mapped(line.sourceEnd, source: source, vertical: vertical,
-                       horizontal: horizontal, straightenDegrees: straightenDegrees)
+                       horizontal: horizontal, straightenDegrees: straightenDegrees, shear: shear)
         return fold(degrees(dx: Double(b.x - a.x), dy: Double(b.y - a.y)))
     }
 
@@ -481,18 +494,20 @@ public enum GuideLinesSolve {
     /// to the target, so a 竖 group's −88° and +88.5° are −2° and +1.5° and not 176° apart.
     public static func deviation(of line: GuideLine, source: ImageSize,
                                  vertical: Double, horizontal: Double,
-                                 straightenDegrees: Double) -> Double {
+                                 straightenDegrees: Double,
+                                 shear: Double = 0) -> Double {
         fold(mappedAngle(of: line, source: source, vertical: vertical, horizontal: horizontal,
-                         straightenDegrees: straightenDegrees) - line.axis.targetDegrees)
+                         straightenDegrees: straightenDegrees, shear: shear) - line.axis.targetDegrees)
     }
 
     /// The name 337 gave the same number (「线到轴的残差」). Kept because it is the readout's word;
     /// since 348 it is no longer what the fit minimises or accepts — `pairs(of:)` is.
     public static func residual(of line: GuideLine, source: ImageSize,
                                 vertical: Double, horizontal: Double,
-                                straightenDegrees: Double) -> Double {
+                                straightenDegrees: Double,
+                                shear: Double = 0) -> Double {
         deviation(of: line, source: source, vertical: vertical, horizontal: horizontal,
-                  straightenDegrees: straightenDegrees)
+                  straightenDegrees: straightenDegrees, shear: shear)
     }
 
     // MARK: grouping (§2.3, §348)
@@ -608,9 +623,36 @@ public enum GuideLinesSolve {
                                    straightenDegrees: straightenDegrees, tolerance: tolerance,
                                    maxIterations: maxIterations)
         }
+        // **407 — 2 横 2 竖 is now a 4-unknown system, with one escape hatch.**
+        //
+        // Four absolute rows over `(v, h, s)` cannot reach zero in general — that is the 1.59° the
+        // user reported. Adding the shear `k` makes it 4 rows over 4 unknowns and the same fixture
+        // solves to 1e−11°. But the *old* answer must not move: 348's two pair-rows plus one turn is
+        // what today's documents were corrected with, and `testTwoPlusTwoIsUnchangedBitForBit` is a
+        // hard gate.
+        //
+        // So the legacy answer is computed first and, when it already puts every line on its own axis
+        // (its worst line deviation is inside `tolerance`), it is returned **unchanged, bit for bit**.
+        // Only a set the 3-DOF answer leaves visibly off-axis is re-solved with `k`. This is why the
+        // new path cannot perturb 337/348/367's fixtures — measured, they all land at `0.0e+00` on
+        // the legacy answer, and only 407's mixed fixture (1.59°) enters the 4-DOF solve.
+        if isTwoByTwo(lines) {
+            return fitTwoByTwoWithShear(lines: lines, current: current, source: source,
+                                        straightenDegrees: straightenDegrees, tolerance: tolerance,
+                                        maxIterations: maxIterations)
+        }
         return fitPairwise(lines: lines, current: current, source: source,
                            straightenDegrees: straightenDegrees, tolerance: tolerance,
                            maxIterations: maxIterations)
+    }
+
+    /// 407 — the shape the shear exists for: exactly two lines on each axis, no lone group. Written as
+    /// a predicate rather than as `!hasLoneGroup(lines)` so a four-line set that happens to hold a
+    /// lone line (`3 + 1`, which the card cannot produce) keeps 348's path.
+    static func isTwoByTwo(_ lines: [GuideLine]) -> Bool {
+        guard lines.count == 4 else { return false }
+        let groups = groups(of: lines)
+        return groups.count == 2 && groups.allSatisfy { $0.indices.count == 2 }
     }
 
     /// 348's fit, unchanged and named: **pair rows only**, the two keystone knobs, then one turn.
@@ -797,6 +839,179 @@ public enum GuideLinesSolve {
                                          lineCount: lines.count,
                                          previousStraighten: previousStraighten))
     }
+
+    // MARK: - 407: 2 横 2 竖 with the shear as the fourth unknown
+
+    /// **407 — the shape 348 could only approximate.** Four lines, two per axis: four absolute rows
+    /// over four unknowns `(v, h, s, k)`.
+    ///
+    ///     φᵢ(v, h, s, k) = fold(θ(P(v,h)·S(k)·R(s)·lineᵢ) − targetᵢ) = 0      for all four lines
+    ///
+    /// The residual is **per line to its own axis**, not per pair: 348's pair rows are what a keystone
+    /// can satisfy with two knobs, and the whole point of the fourth unknown is that four lines can
+    /// each be *upright*, not merely parallel. `s` is the absolute dial value, as in mode II.
+    ///
+    /// **The legacy answer wins whenever it is good enough** (§2.3's hard boundary). `fitPairwise` is
+    /// run first; if its worst line deviation from the axis is already inside `tolerance`, the set is
+    /// returned **unchanged and bit for bit** — `GuideLinesParallel348Tests.testTwoPlusTwoIsUnchangedBitForBit`
+    /// is that promise, and it also keeps 337/348/367's fixtures exact (measured: all of them land at
+    /// 0.0e+00 on the legacy answer, and only 407's mixed fixture is left at 1.59°). The alternative —
+    /// always solving four rows — was measured to move the 8°+8° fixture's `v` by 1e−6, i.e. enough
+    /// to turn that test red for no gain.
+    ///
+    /// `k` is seeded from a small grid (`shearSeedStep` over ±`shearLimit`) around the legacy `(v,h,s)`
+    /// because the 4-row objective is not convex in `k`: a keystone and a shear both tip a vertical
+    /// line, and a Gauss–Newton started at `k = 0` can walk into a keystone-only basin. The grid is
+    /// the cheapest thing that fixes it — 21 evaluations of four line maps — and every fixture in the
+    /// acceptance lands in the same basin from every seed, which is what makes the answer unique
+    /// rather than lucky.
+    static func fitTwoByTwoWithShear(lines: [GuideLine],
+                                     current: PerspectiveMap,
+                                     source: ImageSize,
+                                     straightenDegrees: Double,
+                                     tolerance: Double,
+                                     maxIterations: Int) -> GuideLineFit {
+        let legacy = fitPairwise(lines: lines, current: current, source: source,
+                                 straightenDegrees: straightenDegrees, tolerance: tolerance,
+                                 maxIterations: maxIterations)
+        // 348's answer already puts every line on its axis: the document has no shear and must keep
+        // the bytes and the numbers it had before 407.
+        if let solution = legacy.solution,
+           worstAxisDeviation(lines: lines, vertical: solution.vertical,
+                              horizontal: solution.horizontal, straighten: solution.straighten,
+                              shear: 0, source: source) <= tolerance {
+            return legacy
+        }
+
+        let previousStraighten = straightenDegrees
+        let travel = PerspectiveMap.limit
+        let shearTravel = PerspectiveMap.shearLimit
+
+        func rows(_ values: [Double]) -> [Double] {
+            lines.map {
+                deviation(of: $0, source: source, vertical: values[0], horizontal: values[1],
+                          straightenDegrees: values[2], shear: values[3])
+            }
+        }
+        func worst(_ values: [Double]) -> Double {
+            rows(values).map(abs).max() ?? .infinity
+        }
+        /// The `s` that centres the four residuals at a given `(v, h, k)` — mode II's seed rule.
+        func centredTurn(_ vertical: Double, _ horizontal: Double, _ shear: Double) -> Double {
+            let d = lines.map {
+                deviation(of: $0, source: source, vertical: vertical, horizontal: horizontal,
+                          straightenDegrees: 0, shear: shear)
+            }
+            let mean = d.reduce(0, +) / Double(max(d.count, 1))
+            return min(max(-mean, -straightenLimit), straightenLimit)
+        }
+
+        let seedVertical = legacy.solution?.vertical ?? current.vertical
+        let seedHorizontal = legacy.solution?.horizontal ?? current.horizontal
+
+        // The seed sweep: `k` on a grid, `(v, h)` at the legacy answer, `s` centred for each.
+        var seed = [seedVertical, seedHorizontal,
+                    legacy.solution?.straighten ?? previousStraighten, 0]
+        var seedWorst = worst(seed)
+        var k = -shearTravel
+        while k <= shearTravel + 1e-12 {
+            let turn = centredTurn(seedVertical, seedHorizontal, k)
+            let candidate = [seedVertical, seedHorizontal, turn, k]
+            let value = worst(candidate)
+            if value < seedWorst { seedWorst = value; seed = candidate }
+            k += shearSeedStep
+        }
+
+        let lower = [-travel, -travel, -straightenLimit, -shearTravel]
+        let upper = [travel, travel, straightenLimit, shearTravel]
+        let result = dampedNewton(start: seed, free: [0, 1, 2, 3],
+                                  lower: lower, upper: upper,
+                                  maxIterations: maxIterations,
+                                  target: shearSolveTargetDegrees,
+                                  rows: rows)
+        let values = result.x
+        let r = rows(values)
+        let achieved = r.map(abs).max() ?? .infinity
+
+        // §367 — a parameter pinned at the travel's end is not an answer. For `k` that is the whole
+        // content of `.outOfRange`: a set that needs more shear than ±`shearLimit` is refused rather
+        // than written, so the slider and the fit cannot disagree about what is reachable.
+        //
+        // There is deliberately **no fallback to the legacy answer** here: reaching this point means
+        // the early return above did *not* fire, i.e. 348's answer already leaves some line off its
+        // axis by more than `tolerance`. Returning it would report a solve the ticket exists to fix.
+        let keystonePinned = abs(values[0]) >= endpointFraction * travel
+            || abs(values[1]) >= endpointFraction * travel
+        let shearPinned = abs(values[3]) >= shearTravel - 1e-9
+        if keystonePinned || shearPinned {
+            return .rejected(.outOfRange, measured: achieved)
+        }
+        if abs(values[0]) + abs(values[1]) > PerspectiveMap.coupledTravelBudget {
+            return .rejected(.outOfRange, measured: achieved)
+        }
+        if achieved > tolerance {
+            // The two knobs are what the user can still move by hand; a set the shear cannot save is
+            // 「行程不够」 only when something is at its end (handled above), otherwise the lines
+            // disagree.
+            return .rejected(.inconsistent, measured: achieved)
+        }
+
+        let jacobian = numericJacobian(at: values, free: [0, 1, 2, 3],
+                                       lower: lower, upper: upper, rows: rows)
+        let sigmaMin = smallestSingularValue(of: jacobian)
+        guard sigmaMin > minimumSingularValue else {
+            return .rejected(.degenerate, measured: achieved)
+        }
+
+        let axes = groups(of: lines).map(\.axis)
+        // The paired residual the card prints is still 「线与线之间」 (348's readout): the fit solves
+        // per-line rows, but `worstResidual` must stay the same quantity it was, or every acceptance
+        // threshold that reads it would silently change meaning.
+        let deviations = r
+        var pairResiduals: [Double] = []
+        for group in groups(of: lines) {
+            for i in group.indices {
+                for j in group.indices where j > i {
+                    pairResiduals.append(fold(deviations[i] - deviations[j]))
+                }
+            }
+        }
+
+        return .solved(GuideLineSolution(vertical: values[0], horizontal: values[1],
+                                         straighten: values[2],
+                                         straightenRequested: values[2],
+                                         rotationFailure: nil,
+                                         residuals: r, pairwiseResiduals: pairResiduals,
+                                         axes: axes, iterations: result.iterations,
+                                         smallestSingularValue: sigmaMin,
+                                         lineCount: lines.count,
+                                         previousStraighten: previousStraighten,
+                                         shear: values[3]))
+    }
+
+    /// The worst single line's deviation from **its own axis** at a given parameter set — the number
+    /// that decides whether 348's answer can be kept (`fitTwoByTwoWithShear`'s early return).
+    static func worstAxisDeviation(lines: [GuideLine], vertical: Double, horizontal: Double,
+                                   straighten: Double, shear: Double,
+                                   source: ImageSize) -> Double {
+        lines.map {
+            abs(deviation(of: $0, source: source, vertical: vertical, horizontal: horizontal,
+                          straightenDegrees: straighten, shear: shear))
+        }.max() ?? .infinity
+    }
+
+    /// 407 — the coarse grid the shear is seeded on, in `k` units. 0.05 is ten steps across the whole
+    /// travel: fine enough that the mixed fixture's answer (−0.052) is inside one step of a seed, and
+    /// coarse enough that the sweep is 21 maps.
+    static let shearSeedStep: Double = 0.05
+
+    /// 407 — how flat this path drives the four rows. **1e−9°**, not `solveTargetDegrees` (1e−4°):
+    /// the acceptance asks the truth-recovery case for a residual ≤ 1e−6°, and 4 rows over 4 unknowns
+    /// is square, so it converges quadratically and reaches 1e−9 in two or three more iterations. The
+    /// shipped 1e−4 is right for 348/400 (their tolerance is 0.05° and their unknowns are 2–3); using
+    /// it here would leave a visible 2e−5° on the strongest test in the ticket for no saving worth
+    /// having.
+    static let shearSolveTargetDegrees: Double = 1e-9
 
     // MARK: - 400: the lone line enters the fit
 
@@ -1093,9 +1308,13 @@ public enum GuideLinesSolve {
     /// Damped Gauss–Newton (`(JᵀJ + λI)δ = −Jᵀr`) over the **free** parameter indices of `x`, with
     /// every step clamped to `lower … upper`. The same shape as mode I's loop, but over an arbitrary
     /// residual vector (mode II's rows are per line, not per pair) and up to three unknowns.
+    /// `target` is the residual the iteration stops at. Its default is the shipped
+    /// `solveTargetDegrees`; 407's four-unknown square system passes `shearSolveTargetDegrees` because
+    /// its acceptance is stated to 1e−6° (see that constant). One parameter, not a second solver.
     private static func dampedNewton(start: [Double], free: [Int],
                                      lower: [Double], upper: [Double],
                                      maxIterations: Int,
+                                     target: Double = GuideLinesSolve.solveTargetDegrees,
                                      rows: ([Double]) -> [Double])
         -> (x: [Double], r: [Double], iterations: Int) {
         var x = start
@@ -1109,7 +1328,7 @@ public enum GuideLinesSolve {
 
         for step in 0..<max(maxIterations, 1) {
             iterations = step + 1
-            if (r.map(abs).max() ?? .infinity) <= solveTargetDegrees { break }
+            if (r.map(abs).max() ?? .infinity) <= target { break }
 
             let jacobian = numericJacobian(at: x, free: free, lower: lower, upper: upper, rows: rows)
             let n = free.count
@@ -1292,6 +1511,7 @@ public enum GuideLinesSolve {
         guard let solution = fit.solution else { return .insufficient }
         let writesNothing = abs(solution.vertical - current.vertical) <= toleranceDegrees
             && abs(solution.horizontal - current.horizontal) <= toleranceDegrees
+            && abs(solution.shear - current.shear) <= toleranceDegrees
             && abs(solution.straighten - straightenDegrees) <= toleranceDegrees
         return writesNothing ? .insufficient : .corrected(solution)
     }

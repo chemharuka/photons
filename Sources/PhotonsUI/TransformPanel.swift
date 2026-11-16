@@ -95,14 +95,14 @@ extension InspectorView {
 
     // MARK: - 第二张卡：校正 —— 拉直 + 画线拉直 + 透视（334）
 
-    /// 「校正」: 拉直 → 画线拉直 → 垂直透视 → 水平透视.
+    /// 「校正」: 拉直 → 画线拉直 → 垂直透视 → 水平透视 → 切变.
     ///
     /// 334: the four geometry *repairs*. 328's 画线拉直 lives here now — the user asked where it was
     /// while it sat between two perspective sliders inside 裁切, so it gets its own row, under the
     /// slider it is the shortcut for, before the two keystone knobs.
     ///
-    /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal`; the
-    /// crop rect and the turn keep what they hold.
+    /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal +
+    /// .perspectiveShear` (407); the crop rect and the turn keep what they hold.
     var correctionTransformCard: some View {
         let tool = loupe?.cropTool
         let spec = TransformCardSpec.correctionCard
@@ -333,6 +333,36 @@ extension InspectorView {
                           else { session.endToolGesture(label: "透视", coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
+            // **407 — 切变.** The document stores `k` (±0.5); the row reads and writes `k × 100`
+            // (±50), which is ART's convention and the unit the fit's readout prints. The conversion
+            // is the two closures below and nothing else — there is no second stored number.
+            //
+            // `%.0f` because the row's grid is a whole unit (0.01 of `k`), and `quantized` puts every
+            // drag on that grid so a cache key cannot see 0.0000001 of a slide.
+            sliderRow(CorrectionCardRow.perspectiveShear.title,
+                      Binding(get: { session.edit.geometry.perspectiveShear * 100 },
+                              set: { value in
+                                  session.applyEdit {
+                                      $0.geometry.perspectiveShear =
+                                          InspectorView.quantized(value / 100, quantum: 0.01)
+                                  }
+                              }),
+                      -PerspectiveMap.shearLimit * 100 ... PerspectiveMap.shearLimit * 100,
+                      "%+.0f",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.shear",
+                      onReset: {
+                          session.applyEdit { $0.geometry.perspectiveShear = 0 }
+                          _ = session.commitEdit(label: "透视", coalesce: false)
+                      },
+                      onEditingChanged: { editing in
+                          // The same gesture class as the two keystones: a shear drag and a keystone
+                          // drag are both 「透视」, so one release is one history row.
+                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
+                          else { session.endToolGesture(label: "透视", coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveShear.probeID))
         }
     }
 
@@ -414,6 +444,11 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
     case guideLines = "guideLines"
     case perspectiveVertical = "perspective.vertical"
     case perspectiveHorizontal = "perspective.horizontal"
+    /// **407** — 切变, the fourth knob of the same section. It is the first row since 183 that is not
+    /// a keystone, so its label says what it is (「切变」) rather than borrowing 透视's name: the two
+    /// keystones bend the frame projectively, this slides rows sideways, and the readout is a bare
+    /// number like ART's.
+    case perspectiveShear = "perspective.shear"
 
     /// The row's display name — what the card prints next to its slider / button.
     public var title: String {
@@ -423,6 +458,7 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
         case .guideLines: return "引导线"
         case .perspectiveVertical: return "垂直透视"
         case .perspectiveHorizontal: return "水平透视"
+        case .perspectiveShear: return "切变"
         }
     }
 
@@ -1797,6 +1833,8 @@ enum CropCardID {
     /// 183: the two keystone sliders' frames.
     static let perspectiveVertical = "perspective.vertical"
     static let perspectiveHorizontal = "perspective.horizontal"
+    /// 407: 切变's frame, in the same section.
+    static let perspectiveShear = "perspective.shear"
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"

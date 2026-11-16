@@ -921,6 +921,17 @@ public struct EditModel: Sendable, Equatable, Codable {
             if geometry.perspectiveHorizontal != 0 {
                 s += ";phx=\(Int((geometry.perspectiveHorizontal * 10).rounded()))"
             }
+            // 407: the shear, **only when non-zero** (`asp`/`car`/`q` discipline). A document that never
+            // moved the slider keeps the pre-407 geometry material byte for byte, so every pinned key
+            // vector and recorded golden holds and the neutral document's cache entry is untouched.
+            //
+            // The unit is **thousandths of `k`**: the slider's own grid is 0…100 for `k` 0…0.5, i.e.
+            // 0.005 per position, so thousandths cannot collide (`;shk=5` is position 1, `;shk=500`
+            // the travel's end). `k()`'s `%.5f` would also be fine here, but the integer spelling is
+            // the one `;pvy`/`;phx`/`;car` already use for "a slider position in the key".
+            if geometry.perspectiveShear != 0 {
+                s += ";shk=\(Int((geometry.perspectiveShear * 1000).rounded()))"
+            }
             // 330: the crop's space. Appended **only for the canvas**, so every pre-330 document (and
             // every keystone-free one, where the two spaces are the same picture) keeps the geometry
             // material — and therefore the whole chain — byte for byte.
@@ -1159,6 +1170,22 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     public var perspectiveVertical: Double
     public var perspectiveHorizontal: Double
 
+    /// **407 — 切变**, the fourth geometry degree of freedom: the coefficient `k` of the horizontal
+    /// shear `(x, y) → (x + k·y, y)` in the normalized frame. It rides with the two keystones (one
+    /// `PerspectiveMap`, one S0 stage), and 0 is the identity.
+    ///
+    /// **Why a scalar and not a direction.** 407 §0 measured it: `shear(φ, k)` is `R(−φ)·shear(0, k′)·R(φ)`,
+    /// and `s` (摆正) is free, so a direction would be the same dimension counted twice — the fit with
+    /// and without φ lands on the same 0.00000° residual. Fixed horizontal is the whole feature.
+    ///
+    /// Range ±`PerspectiveMap.shearLimit` (0.5), the clamp in `PerspectiveMap`. Written **only when
+    /// non-zero** (the `quarterTurns`/`pvy` discipline), so every document written before 407 — and
+    /// every document that never touches the new slider — re-encodes byte for byte, keeps its
+    /// geometry key material, and renders through the pre-407 `forwardMatrix` (`S(0)`'s early
+    /// return). That is what makes 407 an **additive** schema change with no
+    /// `StageAlgorithmVersion.geometry` bump.
+    public var perspectiveShear: Double
+
     /// 330 — **which space `crop` is measured in.** `.source` (0) is every document written before
     /// 330 and keeps that meaning byte for byte; `.canvas` (1) says the rect is a rectangle of the
     /// **document canvas** (324's `photoCanvas`, i.e. the photograph after `P → R`), which is what
@@ -1199,6 +1226,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                 quarterTurns: Int = 0,
                 perspectiveVertical: Double = 0,
                 perspectiveHorizontal: Double = 0,
+                perspectiveShear: Double = 0,
                 cropSpace: CropSpace = .source,
                 guideLines: [StoredGuideLine] = []) {
         self.crop = crop
@@ -1209,6 +1237,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         self.quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns)
         self.perspectiveVertical = perspectiveVertical
         self.perspectiveHorizontal = perspectiveHorizontal
+        self.perspectiveShear = perspectiveShear
         self.cropSpace = cropSpace
         self.guideLines = guideLines
     }
@@ -1237,6 +1266,9 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         // 183: absent on every document written before this task, which reads as 0 (= no warp).
         v.perspectiveVertical = c.val("perspectiveVertical", v.perspectiveVertical)
         v.perspectiveHorizontal = c.val("perspectiveHorizontal", v.perspectiveHorizontal)
+        // 407: absent on every document written before this task, which reads as 0 (= no shear, and
+        // the pre-407 matrix). Additive — the version is not stamped.
+        v.perspectiveShear = c.val("perspectiveShear", v.perspectiveShear)
         // 330: absent on every document written before this task, which reads as `.source` (= the
         // crop is a rectangle of the photograph, the pre-330 meaning). The *conversion* of such a
         // rect to a canvas rect needs the image's pixel size, so it is not done here — see
@@ -1271,6 +1303,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         }
         if perspectiveHorizontal != 0 {
             try c.encode(perspectiveHorizontal, forKey: AnyCodingKey("perspectiveHorizontal"))
+        }
+        // 407: the shear, **only when non-zero** — the same discipline, so every document that never
+        // touched the slider keeps its bytes (and its key) exactly.
+        if perspectiveShear != 0 {
+            try c.encode(perspectiveShear, forKey: AnyCodingKey("perspectiveShear"))
         }
         // 330: the crop's space, **only when it is the canvas** — the `quarterTurns`/`pvy` discipline.
         // A `.source` document (every document written before 330, and every keystone-free one — the
@@ -1381,8 +1418,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// entirely (the flag in `S0Params` is 0), the canvas is the crop's own pixel size, and the key
     /// material grows no token. The clamp lives in `PerspectiveMap` (finite, ±200 — 347).
     public var perspective: PerspectiveMap? {
-        guard perspectiveVertical != 0 || perspectiveHorizontal != 0 else { return nil }
-        return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal)
+        guard perspectiveVertical != 0 || perspectiveHorizontal != 0 || perspectiveShear != 0 else {
+            return nil
+        }
+        return PerspectiveMap(vertical: perspectiveVertical, horizontal: perspectiveHorizontal,
+                              shear: perspectiveShear)
     }
 
     /// **The one geometry fingerprint** of the low-resolution whole picture — `344`'s key half and
@@ -1416,7 +1456,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     var hasNeutralGeometry: Bool {
         !flipHorizontal && !flipVertical
             && straightenDegrees == 0 && quarterTurns == 0
-            && perspectiveVertical == 0 && perspectiveHorizontal == 0
+            && perspectiveVertical == 0 && perspectiveHorizontal == 0 && perspectiveShear == 0
             && cropSpace == .source && cropRect.coversFrame
     }
 
@@ -1431,6 +1471,11 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         }
         if perspectiveHorizontal != 0 {
             s += ";phx=\(Int((perspectiveHorizontal * 10).rounded()))"
+        }
+        // 407: the shear. Same token as the key material, and for the same reason — `344`/`366` ask
+        // this string to name *every* dimension the renderer reads, and `S(k)` moves pixels.
+        if perspectiveShear != 0 {
+            s += ";shk=\(Int((perspectiveShear * 1000).rounded()))"
         }
         if let token = cropSpace.keyToken { s += ";\(token)" }
         return s
@@ -1487,6 +1532,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
                                     quarterTurns: 0,
                                     perspectiveVertical: perspectiveVertical,
                                     perspectiveHorizontal: perspectiveHorizontal,
+                                    perspectiveShear: perspectiveShear,
                                     cropSpace: .canvas),
             source: oriented)
         let e = geometry.photoQuadExtent

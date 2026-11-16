@@ -188,6 +188,7 @@ final class PanelResetScopeTests: XCTestCase {
         case .flipVertical: return "\(geometry.flipVertical)"
         case .perspectiveVertical: return String(format: "%.12f", geometry.perspectiveVertical)
         case .perspectiveHorizontal: return String(format: "%.12f", geometry.perspectiveHorizontal)
+        case .perspectiveShear: return String(format: "%.12f", geometry.perspectiveShear)
         }
     }
 
@@ -214,6 +215,8 @@ final class PanelResetScopeTests: XCTestCase {
             geometry.perspectiveVertical = 12
         case .perspectiveHorizontal:
             geometry.perspectiveHorizontal = -9
+        case .perspectiveShear:
+            geometry.perspectiveShear = 0.12
         }
     }
 }

@@ -320,10 +320,46 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// of the travel, 200 units is `0.42`, i.e. 12.39° of convergence.
     public static let tangentPerUnit = 0.21
 
+    /// **407 — the third degree of freedom, as one number.** `shear` is the coefficient `k` of the
+    /// normalized-frame map
+    ///
+    ///     S(k):  (x, y) ↦ (x + k·y, y)
+    ///
+    /// i.e. a **horizontal** shear: rows slide sideways in proportion to their height, y unchanged.
+    /// It is the fourth unknown the 2 横 2 竖 fit needed (two keystone knobs + 摆正 can only make a
+    /// group parallel, not put four lines on four axes), and it is *one* scalar: 407 §0 established
+    /// that a shear *direction* φ is not a new dimension — `shear(φ, k) = R(−φ)·shear(0, k′)·R(φ)`,
+    /// and `s` already carries the rotation, so φ would be absorbed.
+    ///
+    /// Why horizontal and not vertical: the frame is wider than tall in the pictures this repairs,
+    /// the horizontal slide is the one the user can see (a leaning row of windows), and it is the
+    /// axis darktable's ashift spends its first shear step on. A vertical shear is the transpose of
+    /// this one and would be a second knob, which 407 §2.5 forbids.
+    ///
+    /// `k` is a *millimetre* here, not a slider unit: 0.5 means a row at `y = 1` has slid half the
+    /// frame's width. See `shearLimit`.
+    public var shear: Double
+
+    /// **407 — the shear travel, `k ∈ ±0.5`.** The fit that needed it (407 §2.1's fixture) asked for
+    /// `k = −0.052`, i.e. a tenth of this; 0.5 is the point where the two sides of the frame are
+    /// offset by half a width, which is already extreme on screen (an ART/C1 slider at its end).
+    ///
+    /// Deliberately **not** derived from `limit`/`tangentPerUnit`: those describe the keystone's
+    /// projective scale, and `k` is an affine coefficient — sharing a constant would make widening
+    /// one silently widen the other. It is also not part of `coupledTravelBudget`: a shear does not
+    /// touch the homography's third row, so it cannot create a pole (`w` is unchanged by `S`).
+    public static let shearLimit = 0.5
+
     public var vertical: Double      // clamped −500…500 (353b; 353 was ±400)
     public var horizontal: Double
 
+    /// The 3-parameter initializer — every caller that predates 407 keeps this spelling, and a
+    /// document with no shear is bit-for-bit the pre-407 map (`forwardMatrix`'s early return).
     public init(vertical: Double, horizontal: Double) {
+        self.init(vertical: vertical, horizontal: horizontal, shear: 0)
+    }
+
+    public init(vertical: Double, horizontal: Double, shear: Double) {
         // 353b — **one axis gives way to the other.** `limit` is a *per-axis* clamp, but the two
         // strengths enter one homography (`M = M_horizontal · M_vertical`) and the corner that
         // matters reads
@@ -347,10 +383,12 @@ public struct PerspectiveMap: Sendable, Equatable {
             let k = budget / sum
             self.vertical = v * k
             self.horizontal = h * k
+            self.shear = PerspectiveMap.clampShear(shear)
             return
         }
         self.vertical = v
         self.horizontal = h
+        self.shear = PerspectiveMap.clampShear(shear)
     }
 
     /// The largest `|v| + |h|` the pair may reach. **900** (用户 2026-11-12：「上限设置为900好了」)
@@ -382,8 +420,14 @@ public struct PerspectiveMap: Sendable, Equatable {
         return min(max(value, -limit), limit)
     }
 
+    /// 407 — the same rule for `shear`: finite and inside ±`shearLimit`.
+    static func clampShear(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, -shearLimit), shearLimit)
+    }
+
     /// 0/0 — no warp, no canvas change, no uniform, no key token.
-    public var isIdentity: Bool { vertical == 0 && horizontal == 0 }
+    public var isIdentity: Bool { vertical == 0 && horizontal == 0 && shear == 0 }
 
     /// `true` when this map changes no pixel — the one predicate the renderer, the key and the UI ask.
     public var hasWarp: Bool { !isIdentity }
@@ -428,7 +472,25 @@ public struct PerspectiveMap: Sendable, Equatable {
         let m2: [[Double]] = [[1 + 0.5 * h, 0, -0.25 * h],
                               [0.5 * h, 1, -0.25 * h],
                               [h, 0, 1 - 0.5 * h]]
-        return PerspectiveMap.multiply(m2, m1)
+        let keystone = PerspectiveMap.multiply(m2, m1)
+        // **407 — `S(k)` goes on the *outside*, i.e. after the keystone.** `M = S(k) · M_h · M_v`.
+        //
+        // The order is darktable's (`xy swap → rotate → shear → shift`): its shear is applied to the
+        // already-rotated, already-keystoned plane, so the shear's axis is the **frame's** horizontal
+        // rather than an axis the keystone made. That is the only reading under which 「方向固定为水平」
+        // means one thing for every document: a shear *inside* the keystone would be dragged along by
+        // `v`/`h` and two documents with the same `k` would shear along different screen directions.
+        //
+        // The early return is not an optimisation: `S(0)` is the identity, so `multiply` would return
+        // the same nine doubles (`0·a + 1·b + 0·c` is exact in IEEE-754), but the *statement* this
+        // type is built on is 「a document with no shear renders through the pre-407 matrix」, and a
+        // structural early return is what makes that a fact rather than a floating-point coincidence.
+        // `PerspectiveMapShear407Tests.testAZeroShearMapIsBitIdenticalToToday` pins both halves.
+        guard shear != 0 else { return keystone }
+        let s: [[Double]] = [[1, shear, 0],
+                             [0, 1, 0],
+                             [0, 0, 1]]
+        return PerspectiveMap.multiply(s, keystone)
     }
 
     /// The sampling map, `warped frame → frame`: what S0 multiplies the sample coordinate by.
