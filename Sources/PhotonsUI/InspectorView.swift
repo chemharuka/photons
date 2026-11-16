@@ -3831,6 +3831,9 @@ public struct PanelResets {
             case .perspectiveShear:
                 guard geometry.perspectiveShear != defaults.perspectiveShear else { continue }
                 geometry.perspectiveShear = defaults.perspectiveShear
+            case .perspectiveAspect:
+                guard geometry.perspectiveAspect != defaults.perspectiveAspect else { continue }
+                geometry.perspectiveAspect = defaults.perspectiveAspect
             }
             changed = true
         }

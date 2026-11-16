@@ -512,6 +512,9 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     /// **407** — 切变 `k`. Rides with the two keystones (one `PerspectiveMap`, one S0 stage) and
     /// stays `nil` when 0, exactly like the pair above, so a shear-free clipboard keeps its bytes.
     public var perspectiveShear: Double?
+    /// **408** — 宽高比 `a`. Rides with the three perspective numbers and stays `nil` when `1.0` (the
+    /// identity), so an aspect-free clipboard keeps its bytes.
+    public var perspectiveAspect: Double?
     /// 330 — the space the four crop edges were measured in. `nil` (absent) means the pre-330 answer,
     /// `.source`; carried only when it is `.canvas`, so a keystone-free clipboard re-encodes byte for
     /// byte. A pasted rect is interpreted in the space it was copied in — the receiving document then
@@ -525,7 +528,7 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
          rotationDegrees != nil, flipHorizontal != nil, flipVertical != nil,
          aspectLock != nil, quarterTurns != nil,
          perspectiveVertical != nil, perspectiveHorizontal != nil, perspectiveShear != nil,
-         cropSpace != nil].filter { $0 }.count
+         perspectiveAspect != nil, cropSpace != nil].filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
@@ -910,6 +913,10 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.geometry.perspectiveShear, 0) {
             geometry.perspectiveShear = edit.geometry.perspectiveShear
         }
+        // 408: 1.0 is identity, so an untouched 宽高比 is not carried (and adds no history row).
+        if differs(edit.geometry.perspectiveAspect, 1) {
+            geometry.perspectiveAspect = edit.geometry.perspectiveAspect
+        }
         if edit.geometry.aspectLock != .original { geometry.aspectLock = edit.geometry.aspectLock }
         // 330 — the crop's space travels with the crop. Carried only for `.canvas`, so a keystone-free
         // clipboard keeps its pre-330 bytes (`nil` = `.source`).
@@ -1204,6 +1211,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 p.perspectiveVertical = g.perspectiveVertical
                 p.perspectiveHorizontal = g.perspectiveHorizontal
                 p.perspectiveShear = g.perspectiveShear
+                // 408: and 宽高比, for exactly the same reason — four numbers of one map.
+                p.perspectiveAspect = g.perspectiveAspect
             }
             if on(.flips) {
                 p.flipHorizontal = g.flipHorizontal
@@ -1406,6 +1415,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.perspectiveVertical { out.geometry.perspectiveVertical = v }
             if let v = p.perspectiveHorizontal { out.geometry.perspectiveHorizontal = v }
             if let v = p.perspectiveShear { out.geometry.perspectiveShear = v }
+            if let v = p.perspectiveAspect { out.geometry.perspectiveAspect = v }
             if let v = p.flipHorizontal { out.geometry.flipHorizontal = v }
             if let v = p.flipVertical { out.geometry.flipVertical = v }
             if let v = p.aspectLock { out.geometry.aspectLock = v }

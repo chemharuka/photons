@@ -196,6 +196,10 @@ extension EditHistory {
         // 407: 切变 — same rule, and the same group, so its row is 「透视」's neighbour in the timeline.
         num("geometry.perspectiveShear", .geometry,
             before.geometry.perspectiveShear, after.geometry.perspectiveShear)
+        // 408: 宽高比 — same rule and the same group; 1.0 is identity, so `num` writes no row for an
+        // untouched document.
+        num("geometry.perspectiveAspect", .geometry,
+            before.geometry.perspectiveAspect, after.geometry.perspectiveAspect)
         // 2026-10-28 (P0-10): the 90° turn is a number, not a flag — "旋转 90° ×2" is a step a user
         // wants to see named, and the history row reads its label from here.
         if before.geometry.quarterTurns != after.geometry.quarterTurns {
@@ -639,6 +643,7 @@ extension EditHistory {
         "geometry.perspectiveVertical": "透视垂直",
         "geometry.perspectiveHorizontal": "透视水平",
         "geometry.perspectiveShear": "切变",
+        "geometry.perspectiveAspect": "宽高比校正",
         "geometry.quarterTurns": "旋转 90°",
         "geometry.aspectLock": "比例",
         "light.exposure": "曝光",

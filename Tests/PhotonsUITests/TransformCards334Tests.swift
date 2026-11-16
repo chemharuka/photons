@@ -158,9 +158,11 @@ final class TransformCards334Tests: XCTestCase {
 
         // 337 inserted 「引导线」 between 画线拉直 and the two keystone sliders (the user: 「校正包括
         // 旋转、透视、以及新做的引导线UI」); the other four rows keep 334's order. 407 appended
-        // 「切变」 after the two keystones — it is the same 透视 section's fourth number.
+        // 「切变」 after the two keystones — it is the same 透视 section's fourth number — and 408
+        // appended 「宽高比」 after it (the section's fifth). The list is the enum's own, so this is
+        // the one place a new row has to be *named*.
         XCTAssertEqual(CorrectionCardRow.allCases.map(\.title),
-                       ["拉直", "画线拉直", "引导线", "垂直透视", "水平透视", "切变"])
+                       ["拉直", "画线拉直", "引导线", "垂直透视", "水平透视", "切变", "宽高比校正"])
         let correction = try XCTUnwrap(panel.row(CropCardID.correctionCard))
         var rows: [(String, CGRect)] = []
         for row in CorrectionCardRow.allCases {

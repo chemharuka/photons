@@ -88,6 +88,7 @@ public struct GuideLineProjection: Sendable, Equatable {
                                     perspectiveVertical: perspective?.vertical ?? 0,
                                     perspectiveHorizontal: perspective?.horizontal ?? 0,
                                     perspectiveShear: perspective?.shear ?? 0,
+                                    perspectiveAspect: perspective?.aspect ?? 1,
                                     cropSpace: .source),
             source: source)
     }

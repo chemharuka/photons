@@ -95,14 +95,16 @@ extension InspectorView {
 
     // MARK: - 第二张卡：校正 —— 拉直 + 画线拉直 + 透视（334）
 
-    /// 「校正」: 拉直 → 画线拉直 → 垂直透视 → 水平透视 → 切变.
+    /// 「校正」: 拉直 → 画线拉直 → 引导线 → 垂直透视 → 水平透视 → 切变 → 宽高比校正.
     ///
     /// 334: the four geometry *repairs*. 328's 画线拉直 lives here now — the user asked where it was
     /// while it sat between two perspective sliders inside 裁切, so it gets its own row, under the
     /// slider it is the shortcut for, before the two keystone knobs.
     ///
     /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal +
-    /// .perspectiveShear` (407); the crop rect and the turn keep what they hold.
+    /// .perspectiveShear` (407) `+ .perspectiveAspect` (408); the crop rect and the turn keep what
+    /// they hold. Every one of them is derived from `CropSection.perspective.fields`, so the list is
+    /// not spelled twice.
     var correctionTransformCard: some View {
         let tool = loupe?.cropTool
         let spec = TransformCardSpec.correctionCard
@@ -363,7 +365,68 @@ extension InspectorView {
                           else { session.endToolGesture(label: "透视", coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveShear.probeID))
+            // **408 — 宽高比校正.** The document stores `a` itself (0.5…2.0); the row reads and writes
+            // `a × 100` (50…200 %), because 「105%」 is what a user can compare against the picture.
+            // The conversion is the two closures below and nothing else.
+            //
+            // The grid is 0.01 of `a` (one percentage point), i.e. the same `quantized` discipline as
+            // 407's shear: a drag cannot put 0.0000001 of a slide into the cache key.
+            sliderRow(CorrectionCardRow.perspectiveAspect.title,
+                      Binding(get: { session.edit.geometry.perspectiveAspect * 100 },
+                              set: { value in
+                                  session.applyEdit {
+                                      $0.geometry.perspectiveAspect =
+                                          InspectorView.quantized(value / 100, quantum: 0.01)
+                                  }
+                              }),
+                      100 / PerspectiveMap.aspectLimit ... PerspectiveMap.aspectLimit * 100,
+                      "%.0f%%",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.aspect",
+                      onReset: {
+                          // The row's default is **100 %**, not 0: a is a scale, and 1 is its
+                          // identity (`PerspectiveMap.clampAspect` reads anything else as exactly
+                          // that). Double-clicking the label is the same act as every other row's.
+                          session.applyEdit { $0.geometry.perspectiveAspect = 1 }
+                          _ = session.commitEdit(label: "透视", coalesce: false)
+                      },
+                      onEditingChanged: { editing in
+                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
+                          else { session.endToolGesture(label: "透视", coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveAspect.probeID))
+            // **408 — 自动**, the one computed value this ticket adds. It writes
+            // `a_auto = a · canvasHeight / canvasWidth` (`PerspectiveMap.compensatingAspect`), i.e.
+            // the aspect that makes the inscribed canvas square again. Disabled when there is
+            // nothing to correct (no warp) or when the document already sits on that value — it
+            // never silently rewrites a number the user chose.
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                CropPerspectiveAspectAutoButton(action: applyCompensatingAspect,
+                                                enabled: compensatingAspect != nil)
+            }
         }
+    }
+
+    /// The 自动 value for the document as it stands — `nil` when there is no keystone (nothing to
+    /// compensate) or when the canvas is degenerate. Read from `PerspectiveMap`, never re-derived
+    /// here: the one implementation of the formula is `compensatingAspect`.
+    private var compensatingAspect: Double? {
+        guard let map = session.edit.geometry.perspective,
+              let a = map.compensatingAspect else { return nil }
+        // Already there: the button has nothing to say (`a_auto` is what the picture shows).
+        guard abs(a - map.aspect) > 1e-9 else { return nil }
+        return a
+    }
+
+    /// One document write, one history row, and the crop draft reseeded so the overlay, the frame
+    /// and 应用 all see the new aspect (the same tail every geometry command uses).
+    private func applyCompensatingAspect() {
+        guard let a = compensatingAspect else { return }
+        session.applyEdit { $0.geometry.perspectiveAspect = a }
+        guard session.commitEdit(label: "宽高比校正", coalesce: false) else { return }
+        loupe?.afterCropGeometryReset()
     }
 
     // MARK: 旋转
@@ -449,6 +512,14 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
     /// keystones bend the frame projectively, this slides rows sideways, and the readout is a bare
     /// number like ART's.
     case perspectiveShear = "perspective.shear"
+    /// **408** — 宽高比校正, the fifth knob of the 透视 section.
+    ///
+    /// The name is **宽高比校正**, not 宽高比, for a measured reason: the 裁切 card's own section is
+    /// already titled 宽高比 (`CropSection.crop.title`, 334's 「裁切只含宽高比」), and that one is the
+    /// *crop* lock (`AspectLock`, `;asp=`). Two controls with one name would be exactly the confusion
+    /// 408 §0 is about, so this row says what it does — it *corrects* the picture's proportions — and
+    /// the crop's stays a ratio preset. `PerspectiveAspect408UITests` pins that the two differ.
+    case perspectiveAspect = "perspective.aspect"
 
     /// The row's display name — what the card prints next to its slider / button.
     public var title: String {
@@ -459,6 +530,7 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
         case .perspectiveVertical: return "垂直透视"
         case .perspectiveHorizontal: return "水平透视"
         case .perspectiveShear: return "切变"
+        case .perspectiveAspect: return "宽高比校正"
         }
     }
 
@@ -1633,6 +1705,79 @@ struct CropDrawStraightenToggle: NSViewRepresentable {
     }
 }
 
+// MARK: - 408 「自动」（宽高比）
+
+/// **408** — the 宽高比校正 row's 自动 button: writes `PerspectiveMap.compensatingAspect`, the aspect that
+/// makes the inscribed canvas square again.
+///
+/// A real `NSButton` rather than a SwiftUI `Button` for the same reason as 334's 画线拉直 and 337's
+/// 引导线: the acceptance reads the button (its title, its `isEnabled`, and the document it wrote)
+/// back from an `NSView`, and a SwiftUI leaf has none.
+final class PerspectiveAspectAutoButton: NSButton {
+
+    static let title = "自动"
+    static let help = "把宽高比设为让画布恢复原比例的值（可撤销；不会静默覆盖你手调的数字）"
+    static let identifierID = "inspector.crop.perspective.aspect.auto"
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: 48, height: 18)))
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.momentaryPushIn)
+        title = Self.title
+        font = .systemFont(ofSize: 10, weight: .medium)
+        contentTintColor = .secondaryLabelColor
+        toolTip = Self.help
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        setAccessibilityIdentifier(Self.identifierID)
+        target = self
+        action = #selector(fire)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 48, height: 18) }
+
+    /// Assigned by the coordinator on every update, so the click writes the *current* document.
+    var onPress: () -> Void = {}
+
+    @objc private func fire() { onPress() }
+}
+
+struct CropPerspectiveAspectAutoButton: NSViewRepresentable {
+
+    let action: () -> Void
+    var enabled: Bool = true
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> PerspectiveAspectAutoButton {
+        let button = PerspectiveAspectAutoButton()
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.onPress = action
+        button.isEnabled = enabled
+        return button
+    }
+
+    func updateNSView(_ button: PerspectiveAspectAutoButton, context: Context) {
+        context.coordinator.action = action
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.onPress = action
+        button.isEnabled = enabled
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
 // MARK: - 337 「引导线」
 
 /// 337 — the 校正 card's **引导线** switch: a `perspective` glyph (the same picture-plane idiom the
@@ -1835,6 +1980,8 @@ enum CropCardID {
     static let perspectiveHorizontal = "perspective.horizontal"
     /// 407: 切变's frame, in the same section.
     static let perspectiveShear = "perspective.shear"
+    /// 408: 宽高比's frame, and its 自动 button, in the same section.
+    static let perspectiveAspect = "perspective.aspect"
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"

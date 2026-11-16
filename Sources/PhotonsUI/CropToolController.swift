@@ -125,6 +125,11 @@ public final class CropToolController {
         /// `CropGeometry` from, so a missing `k` here would make a sheared document's frame a
         /// `k = 0` frame on screen and write it back flattened.
         public var perspectiveShear: Double = 0
+        /// **408** — 宽高比 `a`, the fourth number of the same map. Carried like the three above:
+        /// the draft's `perspective` is what the overlay, both clamps, the inscription and 应用 build
+        /// their `CropGeometry` from, so a missing `a` here would show (and write back) an
+        /// aspect-free frame.
+        public var perspectiveAspect: Double = 1
         /// 330 — the space `crop` is measured in. `.canvas` for any document that carries a keystone
         /// (the crop is a rectangle of the document canvas); `.source` for everything else, which is
         /// where the two spaces are the same picture anyway.
@@ -135,7 +140,7 @@ public final class CropToolController {
 
         public init(crop: CropRect = .full, straighten: Double = 0, lock: AspectLock = .original,
                     perspectiveVertical: Double = 0, perspectiveHorizontal: Double = 0,
-                    perspectiveShear: Double = 0,
+                    perspectiveShear: Double = 0, perspectiveAspect: Double = 1,
                     cropSpace: CropSpace = .source,
                     guideLines: [StoredGuideLine] = []) {
             self.crop = crop
@@ -144,16 +149,18 @@ public final class CropToolController {
             self.perspectiveVertical = perspectiveVertical
             self.perspectiveHorizontal = perspectiveHorizontal
             self.perspectiveShear = perspectiveShear
+            self.perspectiveAspect = perspectiveAspect
             self.cropSpace = cropSpace
             self.guideLines = guideLines
         }
 
         public var perspective: PerspectiveMap? {
             guard perspectiveVertical != 0 || perspectiveHorizontal != 0
-                || perspectiveShear != 0 else { return nil }
+                || perspectiveShear != 0 || perspectiveAspect != 1 else { return nil }
             return PerspectiveMap(vertical: perspectiveVertical,
                                   horizontal: perspectiveHorizontal,
-                                  shear: perspectiveShear)
+                                  shear: perspectiveShear,
+                                  aspect: perspectiveAspect)
         }
 
         /// The draft as a document group, carrying `document`'s flips (the one field, §F) **and its
@@ -171,6 +178,7 @@ public final class CropToolController {
                           perspectiveVertical: perspectiveVertical,
                           perspectiveHorizontal: perspectiveHorizontal,
                           perspectiveShear: perspectiveShear,
+                          perspectiveAspect: perspectiveAspect,
                           cropSpace: cropSpace,
                           guideLines: guideLines)
         }
@@ -184,6 +192,7 @@ public final class CropToolController {
                       perspectiveVertical: geometry.perspectiveVertical,
                       perspectiveHorizontal: geometry.perspectiveHorizontal,
                       perspectiveShear: geometry.perspectiveShear,
+                      perspectiveAspect: geometry.perspectiveAspect,
                       cropSpace: geometry.cropSpace,
                       guideLines: geometry.guideLines)
         }
@@ -411,6 +420,7 @@ public final class CropToolController {
         group.perspectiveVertical = livePerspective?.vertical ?? 0
         group.perspectiveHorizontal = livePerspective?.horizontal ?? 0
         group.perspectiveShear = livePerspective?.shear ?? 0
+        group.perspectiveAspect = livePerspective?.aspect ?? 1
         return group
     }
 
@@ -428,6 +438,7 @@ public final class CropToolController {
         geometry.perspectiveVertical = livePerspective?.vertical ?? 0
         geometry.perspectiveHorizontal = livePerspective?.horizontal ?? 0
         geometry.perspectiveShear = livePerspective?.shear ?? 0
+        geometry.perspectiveAspect = livePerspective?.aspect ?? 1
         geometry.crop = effectiveCrop(source: sourceSize)
             .clamped(allowsOutsideSource: true).normalizedRect
         return geometry
@@ -458,6 +469,7 @@ public final class CropToolController {
         next.perspectiveVertical = live?.vertical ?? 0
         next.perspectiveHorizontal = live?.horizontal ?? 0
         next.perspectiveShear = live?.shear ?? 0
+        next.perspectiveAspect = live?.aspect ?? 1
         next.cropSpace = liveCropSpace
         guard next != draft else { return false }
         draft = next                     // one write: one `publishDraft`, no half-synced turn
@@ -1655,6 +1667,9 @@ public final class CropToolController {
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
         draft.perspectiveHorizontal = session.edit.geometry.perspectiveHorizontal
         draft.perspectiveShear = session.edit.geometry.perspectiveShear
+        // 408 — 宽高比 is **not** the fit's: the 4 lines cannot identify it (408 §6.3), so it is the
+        // user's number and the draft simply follows the document it was never part of.
+        draft.perspectiveAspect = session.edit.geometry.perspectiveAspect
         draft.guideLines = session.edit.geometry.guideLines
         // 348 — and the turn, so the angle dial and the overlay agree with the picture on screen.
         draft.straighten = CropTool.clampStraighten(session.edit.geometry.rotationDegrees)
@@ -1671,7 +1686,8 @@ public final class CropToolController {
     private var documentPerspective: PerspectiveMap {
         PerspectiveMap(vertical: session?.edit.geometry.perspectiveVertical ?? draft.perspectiveVertical,
                        horizontal: session?.edit.geometry.perspectiveHorizontal ?? draft.perspectiveHorizontal,
-                       shear: session?.edit.geometry.perspectiveShear ?? draft.perspectiveShear)
+                       shear: session?.edit.geometry.perspectiveShear ?? draft.perspectiveShear,
+                       aspect: session?.edit.geometry.perspectiveAspect ?? draft.perspectiveAspect)
     }
 
     /// §2.2 — the finished line stays at full opacity for 0.3 s, then fades; the rejected one does
@@ -3169,6 +3185,7 @@ public final class CropToolController {
                                         perspectiveVertical: perspective?.vertical ?? 0,
                                         perspectiveHorizontal: perspective?.horizontal ?? 0,
                                         perspectiveShear: perspective?.shear ?? 0,
+                                        perspectiveAspect: perspective?.aspect ?? 1,
                                         cropSpace: .canvas),
                 source: source)
             let e = geometry.photoQuadExtent
@@ -3189,7 +3206,8 @@ public final class CropToolController {
                                         quarterTurns: 0,
                                         perspectiveVertical: perspective.vertical,
                                         perspectiveHorizontal: perspective.horizontal,
-                                        perspectiveShear: perspective.shear),
+                                        perspectiveShear: perspective.shear,
+                                        perspectiveAspect: perspective.aspect),
                 source: source)
             return geometry.photoNormalized(documentX: document.x, document.y)
         }

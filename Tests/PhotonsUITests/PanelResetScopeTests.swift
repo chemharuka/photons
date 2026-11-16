@@ -189,6 +189,7 @@ final class PanelResetScopeTests: XCTestCase {
         case .perspectiveVertical: return String(format: "%.12f", geometry.perspectiveVertical)
         case .perspectiveHorizontal: return String(format: "%.12f", geometry.perspectiveHorizontal)
         case .perspectiveShear: return String(format: "%.12f", geometry.perspectiveShear)
+        case .perspectiveAspect: return String(format: "%.12f", geometry.perspectiveAspect)
         }
     }
 
@@ -217,6 +218,8 @@ final class PanelResetScopeTests: XCTestCase {
             geometry.perspectiveHorizontal = -9
         case .perspectiveShear:
             geometry.perspectiveShear = 0.12
+        case .perspectiveAspect:
+            geometry.perspectiveAspect = 1.08
         }
     }
 }

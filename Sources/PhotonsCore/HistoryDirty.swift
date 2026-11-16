@@ -197,6 +197,9 @@ enum EditParameters {
         // stored properties, so a field missing here is both a red test and a slider that writes
         // nothing (`applyEdit` drops every change this table cannot see — the 078 B8 色差 bug).
         t.field("perspectiveShear") { areEqual($0.perspectiveShear, $1.perspectiveShear) }
+        // 408: 宽高比. Same rule again — `FieldCoverageTests` reflects over the stored properties, so
+        // a missing entry is both a red test and a slider that writes nothing.
+        t.field("perspectiveAspect") { areEqual($0.perspectiveAspect, $1.perspectiveAspect) }
         // 361 — 354 put the guide lines in the document, but this table did not learn about them, and
         // `applyEdit` drops every change it cannot see: 「清除引导线」 wrote nothing (and ⌘Z could not
         // bring a line back). They stay out of the render **key** material on purpose

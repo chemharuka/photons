@@ -748,6 +748,8 @@ private extension EditHistory {
             if let v = number(change.from) { doc.geometry.perspectiveHorizontal = v }
         case "geometry.perspectiveShear":
             if let v = number(change.from) { doc.geometry.perspectiveShear = v }
+        case "geometry.perspectiveAspect":
+            if let v = number(change.from) { doc.geometry.perspectiveAspect = v }
         case "geometry.quarterTurns":
             if let v = integer(change.from) { doc.geometry.quarterTurns = v }
         case "geometry.aspectLock":
