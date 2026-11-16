@@ -1155,6 +1155,21 @@ public struct LoupeFraming: Equatable, Sendable {
 
     // MARK: mapping
 
+    /// 419 — can this projection take the camera window **continuously** (`FrameTransform`'s
+    /// `cameraWindow` branch) instead of as the renderer's integer `outputWindow`?
+    ///
+    /// Only when the two agree about where S3's origin is:
+    ///   · a `.source`-spaced crop measures its origin on the turned photograph, and
+    ///   · the `.export` canvas *is* the crop frame, so `canvasInset` is zero and `cropOriginX` is the
+    ///     same number on both sides.
+    ///
+    /// A `.canvas`-spaced crop subtracts a document-canvas origin the transform does not know about,
+    /// and `.document` adds the AABB inset, so neither may be re-expressed this way — they keep the
+    /// integer window, which is the geometry their goldens were written against.
+    private var usesContinuousCameraWindow: Bool {
+        !usesCanvasSpace && canvasRole == .export
+    }
+
     public func mapping(of state: LoupeViewState) -> LoupeMapping {
         let size = windowSize(of: state)
         let centre = windowCenter(of: state)
@@ -1174,9 +1189,26 @@ public struct LoupeFraming: Equatable, Sendable {
             zoom: zoom(of: state),
             cameraOffset: .zero,
             cameraWindowSize: nil,
-            cameraWindow: nil,
-            cameraWindowInS5: state.mode == .fit
-                ? nil : outputWindow(of: state, decodeScale: decodeScale),
+            // 419 — the camera window is handed over **continuously**, not as the renderer's integer
+            // `outputWindow`. `outputWindow` is an `ImageRect`: its origin is rounded to a whole
+            // device pixel because that is what S0 indexes, but the *projection* must not be. Handing
+            // the rounded rect to `FrameTransform` made every hit test inherit that rounding, so the
+            // fixed point `zooming` computed was off by up to half a device pixel (per axis) — and at
+            // zoom `z` that is `0.5 / z` source pixels, i.e. 1.41 src px at 1/3 and 3.16 at 1/4 once
+            // the error compounds across stops (`PointerAnchorTests.testZoomOutAnchorsOnThePointer`).
+            // The `cameraWindow` branch takes the same rect un-rounded, so the anchored pixel is the
+            // similarity's fixed point exactly rather than to within the renderer's grid.
+            //
+            // Only where both sides mean the same S3 origin: a `.canvas`-spaced crop measures its
+            // origin on the document canvas, and the `.document` role carries an AABB inset, so those
+            // keep the integer window they have always used.
+            cameraWindow: usesContinuousCameraWindow && state.mode != .fit
+                ? CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
+                         width: size.width, height: size.height)
+                : nil,
+            cameraWindowInS5: !usesContinuousCameraWindow && state.mode != .fit
+                ? outputWindow(of: state, decodeScale: decodeScale)
+                : nil,
             allowsUpscale: false,
             canvasRole: canvasRole)
         let contentInS5 = transform.contentInS5

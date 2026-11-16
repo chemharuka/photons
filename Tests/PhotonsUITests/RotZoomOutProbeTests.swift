@@ -149,14 +149,19 @@ final class RotZoomOutProbeTests: XCTestCase {
             }
             let clipped = canvasRect.intersected(in: Self.viewport)
 
-            // 0F share inside the canvas rect, step 8, plus the least distance to a canvas edge.
+            // 315 — the matte is a **setting** (`CanvasBackdrop.current`, `#202020` at the default
+            // stop), never the literal `0F0F0F` this probe was written against. Read it, don't type it.
+            let matte = Int(CanvasBackdrop.current.eightBitValue)
+            let matteTriple = (matte, matte, matte)
+
+            // Matte share inside the canvas rect, step 8, plus the least distance to a canvas edge.
             var total = 0, grey = 0
             var minEdge = Int.max
             for y in stride(from: clipped.y + 1, to: clipped.y + clipped.height - 1, by: 8) {
                 for x in stride(from: clipped.x + 1, to: clipped.x + clipped.width - 1, by: 8) {
                     total += 1
                     let p = pixelTriple(target, x, y)
-                    if p == (15, 15, 15) {
+                    if p == matteTriple {
                         grey += 1
                         let d = min(x - clipped.x, clipped.y + clipped.height - 1 - y,
                                     clipped.x + clipped.width - 1 - x, y - clipped.y)
@@ -165,11 +170,12 @@ final class RotZoomOutProbeTests: XCTestCase {
                 }
             }
             let share = total > 0 ? 100.0 * Double(grey) / Double(total) : -1
-            // The symptom itself: no `0F0F0F` may be inside the canvas at any framing.
-            XCTAssertEqual(share, 0, accuracy: 0.001, "\(f.name): 0F inside the canvas")
+            // The symptom itself: no matte may be inside the canvas at any framing.
+            XCTAssertEqual(share, 0, accuracy: 0.001, "\(f.name): matte inside the canvas")
 
             // The two colours either side of the canvas' own edge: inside the margin it is the
-            // canvas' `000000`, outside the canvas it is still the matte `0F0F0F`.
+            // canvas' `000000`, outside the canvas it is still the matte — `CanvasBackdrop.current`
+            // since 315, which is `#202020` (32) at the default stop and not the old `0F0F0F` (15).
             let margin = (x: max(clipped.x, result.drawnRect.x - 3),
                           y: clipped.y + clipped.height / 2)
             let outside = (x: max(0, clipped.x - 4), y: clipped.y + clipped.height / 2)
@@ -204,13 +210,14 @@ final class RotZoomOutProbeTests: XCTestCase {
                 max(0, quad.y + quad.height - Self.viewport.height)))
             print("PROBE \(f.name) · margin \(margin)=(\(marginPixel.0),\(marginPixel.1),\(marginPixel.2))"
                   + " inside canvas · outside \(outside)=(\(outsidePixel.0),\(outsidePixel.1),\(outsidePixel.2))"
-                  + " (0F = 15,15,15)")
+                  + " (matte = \(matte),\(matte),\(matte))")
             if marginPixel.0 >= 0 {
                 XCTAssertEqual([marginPixel.0, marginPixel.1, marginPixel.2], [0, 0, 0],
                                "\(f.name): the canvas margin is not 000000")
             }
             if outsidePixel.0 >= 0 {
-                XCTAssertEqual([outsidePixel.0, outsidePixel.1, outsidePixel.2], [15, 15, 15],
+                XCTAssertEqual([outsidePixel.0, outsidePixel.1, outsidePixel.2],
+                               [matte, matte, matte],
                                "\(f.name): the matte outside the canvas")
             }
 
