@@ -107,11 +107,6 @@ final class ChromaticAberrationTests: XCTestCase {
         return edit
     }
 
-    // MARK: - the two sides of the uniform
-
-    /// The Swift mirror and the `.metal` struct must be the same bytes. A mismatch does not throw —
-    /// it reads the wrong uniform — so the number is asserted on both sides, and the `.metal` file is
-    /// parsed rather than trusted.
     /// **420 — the CA-only document these pins are records of.**
     ///
     /// 314 (`44d56f3`) gave `SharpenGroup` a resting 50 / 2.0, so `EditModel.neutral` now renders
@@ -130,6 +125,11 @@ final class ChromaticAberrationTests: XCTestCase {
         return v
     }
 
+    // MARK: - the two sides of the uniform
+
+    /// The Swift mirror and the `.metal` struct must be the same bytes. A mismatch does not throw —
+    /// it reads the wrong uniform — so the number is asserted on both sides, and the `.metal` file is
+    /// parsed rather than trusted.
     func testS0ParamsIsSevenFloat4OnBothSides() throws {
         XCTAssertEqual(MemoryLayout<S0Params>.stride, 224,
                        "S0Params must be 10 × float4 + float4x4 (097 lens + 183 keystone)")
