@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
@@ -243,6 +244,8 @@ public final class AssetCardView: NSView {
     public var thumbnail: CGImage? {
         didSet {
             thumbnailView.image = thumbnail
+            needsLayout = true
+            needsDisplay = true
             overlay.needsDisplay = true
         }
     }
@@ -297,7 +300,12 @@ public final class AssetCardView: NSView {
     public override func layout() {
         super.layout()
         let rect = swatchRect
-        thumbnailView.frame = rect
+        if let thumbnail {
+            let scale = min(rect.width / CGFloat(thumbnail.width), rect.height / CGFloat(thumbnail.height))
+            let size = NSSize(width: CGFloat(thumbnail.width) * scale, height: CGFloat(thumbnail.height) * scale)
+            thumbnailView.frame = NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2,
+                                        width: size.width, height: size.height)
+        } else { thumbnailView.frame = rect }
         overlay.frame = bounds
     }
 
@@ -317,7 +325,12 @@ public final class AssetCardView: NSView {
         path.addClip()
         let primary = PlaceholderSwatch.color(for: asset.contentHash)
         let secondary = PlaceholderSwatch.secondaryColor(for: asset.contentHash)
-        NSGradient(starting: primary, ending: secondary)?.draw(in: path, angle: -90)
+        if thumbnail == nil {
+            NSGradient(starting: primary, ending: secondary)?.draw(in: path, angle: -90)
+        } else {
+            NSColor.canvasMatte.setFill()
+            path.fill()
+        }
 
         if thumbnail == nil {
             // A thin "this is a placeholder" rule set: one diagonal + the extension, no image work.
@@ -429,6 +442,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     public let scrollView = NSScrollView()
     /// The filter strip: 星级 ≥ N / 旗标 / 色标 / 相机 + one chip per active facet.
     public let filterBar = FilterBarView()
+    public let thumbnailSizeSlider: NSSlider = AdjustmentNSSlider(value: 150, minValue: 100, maxValue: 420, target: nil, action: nil)
+    private let thumbnailSizeLabel = NSTextField(labelWithString: L10n.tr("grid.thumbnailSize"))
+    private let gridFooter = FlippedView()
+    private static let sizePreference = "photons.grid.thumbnailWidth"
+    private var resizeSettledAt: TimeInterval = 0
     /// 右键：从库中删除… / 查找丢失的文件… — shared code, one instance per browser.
     public let contextMenu = AssetContextMenu()
     /// §378 — the verbs behind the 「堆叠 ▸」 submenu the shared menu carries.
@@ -528,6 +546,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // where the event landed), and let the verbs run through the session.
         contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
         contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
+        contextMenu.onReveal = { [weak self] ids in self?.session?.revealAssetsInFinder(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         // 相册（078 B10）：同一个 `AssetContextMenu` 对象在三个面共用，所以三个面拿到的
         // 「加入相册 / 移出相册」是同一份代码，不是三份。写入走 session（一次事务），
@@ -577,6 +596,19 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         container.addSubview(filterBar)
         container.addSubview(scroll)
+        let saved = UserDefaults.standard.double(forKey: Self.sizePreference)
+        thumbnailSizeSlider.doubleValue = saved > 0 ? min(420, max(100, saved)) : 150
+        thumbnailSizeSlider.target = self
+        thumbnailSizeSlider.action = #selector(thumbnailSizeChanged(_:))
+        thumbnailSizeSlider.isContinuous = true
+        thumbnailSizeSlider.controlSize = .small
+        thumbnailSizeSlider.setAccessibilityLabel(L10n.tr("grid.thumbnailSize"))
+        thumbnailSizeSlider.setAccessibilityIdentifier("grid.thumbnailSize")
+        thumbnailSizeLabel.font = .systemFont(ofSize: 11)
+        thumbnailSizeLabel.textColor = .secondaryLabelColor
+        gridFooter.addSubview(thumbnailSizeLabel)
+        gridFooter.addSubview(thumbnailSizeSlider)
+        container.addSubview(gridFooter)
         view = container
     }
 
@@ -592,7 +624,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let h = FilterBarView.height
         let b = view.bounds
         filterBar.frame = NSRect(x: 0, y: 0, width: b.width, height: h)
-        scrollView.frame = NSRect(x: 0, y: h, width: b.width, height: max(0, b.height - h))
+        scrollView.frame = NSRect(x: 0, y: h, width: b.width, height: max(0, b.height - h - 32))
+        gridFooter.frame = NSRect(x: 0, y: max(h, b.height - 32), width: b.width, height: 32)
+        let sliderWidth = min(180, max(80, b.width - 100))
+        thumbnailSizeSlider.frame = NSRect(x: max(16, b.width - sliderWidth - 20), y: 7, width: sliderWidth, height: 18)
+        thumbnailSizeLabel.frame = NSRect(x: max(8, thumbnailSizeSlider.frame.minX - 80), y: 8, width: 74, height: 16)
         filterBar.needsLayout = true
     }
 
@@ -756,12 +792,20 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    @objc private func thumbnailSizeChanged(_ sender: NSSlider) {
+        UserDefaults.standard.set(sender.doubleValue, forKey: Self.sizePreference)
+        resizeSettledAt = ProcessInfo.processInfo.systemUptime + 0.2
+        lastWanted = []
+        updateMetrics()
+        scheduleThumbnailReconcile()
+    }
+
     private func updateMetrics() {
         guard isViewLoaded else { return }
         let width = collectionView.bounds.width > 1
             ? collectionView.bounds.width
             : max(1, view.bounds.width)
-        let m = GridLayout.metrics(forWidth: width)
+        let m = GridLayout.metrics(forWidth: width, preferredWidth: CGFloat(thumbnailSizeSlider.doubleValue))
         guard m != metrics else { return }
         metrics = m
         flow.itemSize = m.itemSize
@@ -955,7 +999,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         reconcileWork = work
         // One frame of coalescing: a live scroll fires this dozens of times per second and the
         // answer only changes when the visible *row range* changes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.04, resizeSettledAt - ProcessInfo.processInfo.systemUptime), execute: work)
     }
 
     /// Visible items plus exactly one row either side (006 §5: prefetch is "visible + one row",
@@ -987,7 +1031,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
               cell.cardView.asset?.id == id else { return }
         // An in-flight request still carries the pre-edit key. Letting it land after the new one
         // would repaint the old frame, so it is cancelled before the re-request.
-        thumbRequests[index]?.cancel()
+        thumbRequests[index]?.cancel(preservingStartedWork: false)
         thumbRequests.removeValue(forKey: index)
         applyThumbnail(to: cell, index: index, asset: session.assets[index])
     }
@@ -1349,10 +1393,10 @@ public final class StackMenuTarget: NSObject {
 @MainActor
 public enum StackMenuBuilder {
 
-    public static let title = "堆叠"
-    public static let makeTitle = "堆叠所选照片"
-    public static let ungroupTitle = "取消堆叠"
-    public static let setTopTitle = "设为置顶"
+    public static let title = L10n.tr("be8f84d4ac37")
+    public static let makeTitle = L10n.tr("93fa7e05b300")
+    public static let ungroupTitle = L10n.tr("b5b27507401e")
+    public static let setTopTitle = L10n.tr("4f8fea909caf")
 
     public static func menu(session: CatalogSession?, target: StackMenuTarget,
                             selectedIDs: [String]) -> NSMenu? {
@@ -1456,21 +1500,21 @@ public final class HDRMenuTarget: NSObject {
 @MainActor
 public enum HDRMenuBuilder {
 
-    public static let title = "HDR 合成…"
+    public static let title = L10n.tr("ef5561181489")
 
     /// Why the item is grey for this selection, or nil when it is usable. Public because it is the
     /// whole rule: the menu, its tooltip and the verb's own re-check must agree, and a test should be
     /// able to read the sentence without walking an `NSMenu`.
     public static func unavailableReason(session: CatalogSession?, selectedIDs: [String]) -> String? {
-        guard let session else { return "未打开库" }
-        guard selectedIDs.count >= 2 else { return "至少需要选中两张 DNG" }
+        guard let session else { return L10n.tr("a306ecabb07b") }
+        guard selectedIDs.count >= 2 else { return L10n.tr("def1e7dad5ec") }
         let nonRaw = session.selectedAssets.first {
             !HDRMergeService.mergeableExtensions.contains($0.ext.lowercased())
         }
-        if let nonRaw { return "只支持 DNG：\(nonRaw.filename)" }
+        if let nonRaw { return L10n.tr("b63d1d1a7229" , String(describing: (nonRaw.filename))) }
         // Checked **last** so the reason names the real blocker: a missing tool with one photo
         // selected should complain about the selection first.
-        guard session.isHDRMergeAvailable else { return "未找到 hdrmerge-swift" }
+        guard session.isHDRMergeAvailable else { return L10n.tr("948a32dc1e4d") }
         return nil
     }
 
@@ -1487,7 +1531,7 @@ public enum HDRMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            entry.toolTip = "把选中的 \(selectedIDs.count) 张 DNG 合成一张，结果与参与的照片组成新堆叠"
+            entry.toolTip = L10n.tr("c056d3a05da4" , String(describing: (selectedIDs.count)))
         }
         return entry
     }
@@ -1540,7 +1584,7 @@ public final class DenoiseMenuTarget: NSObject {
 @MainActor
 public enum DenoiseMenuBuilder {
 
-    public static let title = "模型降噪…"
+    public static let title = L10n.tr("6dba134c867c")
 
     /// 这一行为什么灰，或 nil（可点）。public 是因为它就是全部规则：菜单、tooltip 和动词
     /// 自己的复查必须说的是同一句话，测试也该能读到那句话而不必去走一棵 `NSMenu`。
@@ -1577,14 +1621,14 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            entry.toolTip = "在照片旁生成 \(denoisedFileNameHint(session: session))，并与原图组成堆叠（降噪结果置顶）"
+            entry.toolTip = L10n.tr("abf5439e2277" , String(describing: (denoisedFileNameHint(session: session))))
         }
         return entry
     }
 
     /// 可点时的说明里那个文件名：`L1030552.dng` → `L1030552-denoised.dng`。
     private static func denoisedFileNameHint(session: CatalogSession?) -> String {
-        guard let name = session?.selectedAssets.first?.filename else { return "<原名>-denoised.dng" }
+        guard let name = session?.selectedAssets.first?.filename else { return L10n.tr("b1a4ef613179") }
         let stem = (name as NSString).deletingPathExtension
         return "\(stem)-denoised.dng"
     }

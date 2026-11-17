@@ -146,8 +146,11 @@ final class LowResFullFrame344Tests: XCTestCase {
         // The literal, character for character. `f444fd3255cbdb05` is `Histogram.editDigest(.neutral)`
         // on this base (the picture half did not move with 344 — only the geometry half was added, and
         // only when it is non-neutral), so a change to this string is a change to the pre-344 key.
+        //
+        // 409 moved the recipe token to `v4-auto409`: a document that asks for no decoder version now
+        // gets the EXIF/threshold rule at decode time, so every `nil`-document buffer must miss once.
         XCTAssertEqual(neutral.identity,
-                       "344|recipe=v3-lens;ver=auto;scale=1.0000|f444fd3255cbdb05|ceil=4.9246")
+                       "344|recipe=v4-auto409;ver=auto;scale=1.0000|f444fd3255cbdb05|ceil=4.9246")
         // The literal above is not a magic string: it is the two halves the key already had.
         let document = try XCTUnwrap(controller.frameSource).edit
         XCTAssertEqual(neutral.develop, document.decodeInputs.key)

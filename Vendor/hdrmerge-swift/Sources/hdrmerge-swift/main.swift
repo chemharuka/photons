@@ -61,6 +61,7 @@ struct Parsed {
     var feather = 3
     var white: Int?
     var metadataFrom: String?
+    var fileGrants: String?
 }
 
 func parse(_ argv: [String]) throws -> Parsed {
@@ -117,6 +118,14 @@ func parse(_ argv: [String]) throws -> Parsed {
                 throw CLIError("usage", "--metadata-from needs a path", exit: .usage)
             }
             p.metadataFrom = argv[i + 1]; i += 2
+        case "--file-grants":
+            // The manifest of security-scoped bookmarks for the files the host's user picked.
+            // A child process does not inherit the parent's sandbox extensions, so without this
+            // every input path is EPERM inside a sandbox.
+            guard i + 1 < argv.count else {
+                throw CLIError("usage", "--file-grants needs a path", exit: .usage)
+            }
+            p.fileGrants = argv[i + 1]; i += 2
         case "-h", "--help":
             throw CLIError("help", usage(), exit: .ok)
         default:
@@ -300,6 +309,36 @@ do {
 }
 
 guard let p = parsed else { exit(ExitCode.internalError.rawValue) }
+
+// Security-scoped file grants from the host, taken out before anything is read.
+//
+// The helper is a separate process and does not inherit the host app's sandbox extensions, so a
+// file the user authorised in an open panel is readable by the host and EPERM here. The host
+// passes a manifest of base64 bookmarks instead of copying the bytes.
+//
+// `--file-grants` is the documented way in; the environment variable is honoured as well because
+// hosts that already ship set it, and a host not rebuilt against this version should not silently
+// lose its grants. Neither present (an ordinary command-line run) is a no-op.
+let grantsPath = p.fileGrants ?? ProcessInfo.processInfo.environment["PHOTONS_HELPER_BOOKMARKS"]
+let grants: SandboxFileGrants
+do {
+    grants = try SandboxFileGrants(manifestPath: grantsPath)
+} catch {
+    // A manifest that cannot be read is the host's problem, not a pixel problem: say which file
+    // and stop, rather than opening the inputs and failing one by one with permission errors.
+    let wrapped = CLIError.wrap(error)
+    if p.json {
+        Response(ok: false, command: p.command.rawValue, payload: [:],
+                 warnings: [], error: (wrapped.code, wrapped.message)).emit()
+    } else {
+        FileHandle.standardError.write(Data((wrapped.message + "\n").utf8))
+    }
+    exit(wrapped.exit.rawValue)
+}
+// A top-level binding is alive until `exit()`, which every path below reaches, so the grants
+// cover every read and are released only by process teardown.
+_ = grants
+
 let progress = ProgressReporter(enabled: p.progress)
 
 do {

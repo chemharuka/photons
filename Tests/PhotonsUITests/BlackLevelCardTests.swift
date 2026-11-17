@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 派单 071 —— 「黑电平」卡的面板侧。
@@ -27,7 +28,7 @@ final class BlackLevelCardTests: XCTestCase {
         }
         // 用户 2026-10-27：「黑电平移动到白平衡下方」。
         XCTAssertEqual(titles[wb + 1], "黑电平", "黑电平必须紧跟 白平衡，实际 \(titles)")
-        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "Light") else {
+        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "明暗") else {
             return XCTFail("missing 黑电平/Light in \(titles)")
         }
         XCTAssertEqual(black + 1, light, "黑电平在白平衡与 Light 之间，实际 \(titles)")
@@ -183,8 +184,16 @@ final class BlackLevelCardTests: XCTestCase {
         XCTAssertEqual(LoupeController.autoBlackOffset(for: 0.05), 0, "0.05 不是负值，仍是 0")
 
         // 钳位不许静默：动作里有一行日志，说明它被写满了量程。
+        //
+        // 本地化之后那行日志的文案在 `zh-Hans.json` 里（键 `e388d0ebca8d`），源码只剩
+        // `L10n.tr("e388d0ebca8d", …)`，所以断言只能认「这条日志文案」本身，不能认某个语言的字面量。
+        // 语义完全等价：以前钉的是「源码里有 AUTO BLACK · min 这串字」，现在钉的是
+        // 「有一条日志用的是 AUTO BLACK · min 这条文案」——文案搬到资源表里，钉的对象跟着搬。
         let source = try String(contentsOf: Self.loupeSource, encoding: .utf8)
-        XCTAssertTrue(source.contains("AUTO BLACK · min"), "越界时必须有日志，不许静默")
+        XCTAssertTrue(L10n.tr("e388d0ebca8d").contains("AUTO BLACK · min"),
+                      "日志文案本身必须仍是 AUTO BLACK · min（资源表 e388d0ebca8d）")
+        XCTAssertTrue(source.contains("L10n.tr(\"e388d0ebca8d\")") || source.contains("L10n.tr(\"d0a516ec35a8\")"),
+                      "越界时必须有日志，不许静默")
 
         for min: Float in [-0.0014, -0.0027, -0.01] {
             let offset = LoupeController.autoBlackOffset(for: min)
@@ -223,7 +232,8 @@ final class BlackLevelCardTests: XCTestCase {
                      value.minX, value.minY, value.width, value.height))
 
         XCTAssertLessThan(icon.midY, value.midY, "图标必须在数值行的上方")
-        XCTAssertEqual(icon.maxX, value.maxX, accuracy: 1, "图标右缘与数值框右缘对齐")
+        XCTAssertLessThanOrEqual(icon.maxX, value.maxX, "自动按钮与复位按钮并排，位于数值列上方")
+        XCTAssertGreaterThanOrEqual(icon.maxX, value.minX, "自动按钮不得挤入标题区域")
         XCTAssertGreaterThanOrEqual(icon.width, 18, "命中区 ≥ 18 pt 宽")
         XCTAssertGreaterThanOrEqual(icon.height, 18, "命中区 ≥ 18 pt 高")
         XCTAssertFalse(probe.hasBorder, "裸图标：没有底、没有边、没有胶囊")

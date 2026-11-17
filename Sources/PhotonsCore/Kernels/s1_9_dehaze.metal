@@ -17,7 +17,7 @@ using namespace metal;
 //     I    = t·J + A·(1 − t)              (a veil of colour A, transmission t)
 //     A    = max over the dark channel    (He's "brightest 0.1 %", approximated by the block-level max)
 //     D(p) = min_c min_{Ω(p)} I_c         (dark channel, Ω = a q × q block here)
-//     t    = max(1 − ω·D, t0)             (ω = 0.95, t0 = 0.1 — He's own numbers)
+//     t    = max(1 − ω·D, t0)             (ω = 0.95, t0 = 0.05 — 417 lowered it from He's 0.1)
 //     J    = (I − A·(1 − t)) / t
 //
 // **The veil's spatial support (2026-10-31).** `D` used to *be* `t`'s only input: a per-block minimum
@@ -102,6 +102,46 @@ using namespace metal;
 // against 0.978 before) and removes the 15× adjacent-level step. See `s1_9_dehaze_apply`.
 //
 // The negative amount is untouched, so `dehaze < 0` is byte-identical to 117.
+//
+// **417 — the participation is the dark channel's, and `t0` is 0.05.**
+// 401 capped the recovery's gain at `[0.4, 1.0]` for four good reasons, and the two halves of that
+// clamp turned out to be wrong in one specific case: **uniform fog**. `t` hits its floor as soon as
+// `mPixel ≥ (1 − t0)/ω` (`0.947` at `t0 = 0.1`), i.e. for *every* pixel that is "foggy enough", and
+// then `gain = 10 − 9A/L` sweeps from `−10.75` (clamped to 0.4) to `1.46` (clamped to 1.0) across
+// `L/A ∈ [0.93, 1.06]` — a 0.05-wide window in `L`. So the mid-tones took the floor (60 % darker) and
+// the fog itself took the ceiling (**unchanged**, measured 0 % on `L1030600`). Neither is the model's
+// behaviour: `J(A) = A`, darker than `A` darkens, brighter than `A` lifts.
+//
+// Two changes survived measurement (the third the task proposed — a per-pixel ceiling above 1.0 —
+// was measured and **rejected**, see below):
+//
+//   1. **`t0 = 0.05`** (the call site passes it; the kernel reads `p.a.z`). He's 0.1 is a
+//      *display-referred* number; on scene light it means "the thickest fog transmits 10 %", and
+//      because the floor saturates at `mPixel = 0.947` its slope was the whole 0.05 window above.
+//      Halving `t0` doubles the window and makes `t`'s own shape carry more of the curve.
+//      **Measured on `L1030600`: `t0` 0.05 / 0.04 / 0.03 / 0.02 all render the four bands identical
+//      to 4 decimals** — the fog band's `t` is `max(1 − ω·veilR, t0)` with `veilR` clamped by
+//      `mPixel ≤ 1`, so `1 − 0.95·1 = 0.05` and the floor is reached at `t0 ≥ 0.05`; below that the
+//      `mPixel` clamp, not `t0`, is the binding constraint. The change is therefore **inert on
+//      today's veil**, and kept because it is what makes the fog band's `t` exactly `1 − ω` rather
+//      than a `t0` above it. It is *not* load-bearing; see 417's report, ⑧c.
+//   2. **The participation is `smoothstep(0.55, 0.75, min_c(I)/A)`**, replacing 374's log-luminance
+//      band `[0.75·A, 1.33·A]`. 374 assumed "brighter ⇒ more likely a highlight"; on a uniform-fog
+//      frame the *brightest* pixels are the fog, so the fog got `w ≈ 0.003` (protected) while the
+//      darker objects under it got `w = 1` (crushed). The dark channel inverts the direction: fog
+//      has all three channels high (`L1030600`: `min_c(I)/A` p50 = 1.20), a highlight/object has at
+//      least one low (0.39), and the separation is 0.90 of the range. **This is the actual fix**:
+//      `L1030600`'s mid band goes −34.68 % → 0.00 % and its fog band −7.34 % → −16.43 %.
+//
+// **The ceiling stays 1.0 (368/401's flat clamp, 280's contract).** The task's third change —
+// `gain ≤ 1.6` where `min_c(I)/A ≥ 0.90` — was implemented and measured: it makes the fog band
+// *worse* (−12.57 % vs −16.43 %), because the fog band straddles `A` (`L/A` p50 = 0.932, p90 = 1.048)
+// and lifting only the `L > A` half raises the band's mean. It also lifts 102 425 pixels by up to
+// 1.6× on `L1030433`, reopening 280's highlight contract. The fog's problem was participation, not
+// the ceiling; the two constants it needed are gone rather than left dead.
+//
+// `mPixel = clamp(min_c(I)/A, 0, 1)` is **still what `tPixel` reads** — the transmission is
+// bit-identical to 401's — and the new quantity is the unclamped `darkRatio` beside it.
 //
 // **Twelve passes (117's three, 135's bound, the veil's seven, and 160's proxy upsample):**
 //
@@ -342,6 +382,19 @@ kernel void s1_9_dehaze_limit(texture2d<float, access::read> src [[texture(0)]],
 /// uses `2·sqrt(epsRel)` (4 % of `A`) as the size of the difference it can trust (see `s1_9_dehaze_apply`).
 constant float kDehazeAirEpsRel = 4e-4;
 
+// MARK: - 417 — the participation and the gain ceiling are the dark channel's, not the luminance's
+
+/// `w`'s band on `darkRatio = min_c(I)/A`. Below `kDehazeFogLow` the pixel carries no evidence of a
+/// veil (at least one channel is dark — a highlight or an object) and is left exactly alone; above
+/// `kDehazeFogHigh` all three channels are near the airlight and the pixel is fog. The 0.55…0.75
+/// window is wide on purpose: it is a *fraction of A*, so its absolute width follows the veil.
+constant float kDehazeFogLow = 0.55;
+constant float kDehazeFogHigh = 0.75;
+
+/// 401's floor on the gain, unchanged: the deep end of the recovery is capped at 0.4 (60 % darkening)
+/// so the `1/t` slope cannot stretch the contrast inside the fog.
+constant float kDehazeGainFloor = 0.4;
+
 /// `(l, l·l, p, l·p)` per block: the guided filter's window statistics, where `l` is the guide (the
 /// block's mean luma, from `s1_9_dehaze_dark`'s `.g`) and `p` is the thing being smoothed (the block
 /// minimum, its `.r`). Everything downstream is a separable mean of these four numbers, which is why
@@ -539,6 +592,13 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         return;
     }
 
+    // 417 — **the pixel's own dark channel, unclamped.** This is the quantity that tells fog from a
+    // highlight (see the 417 note below), so it is computed once here and read by the transmission,
+    // the participation and the gain ceiling. `mPixel` (its clamp) is the **same** value `tPixel` has
+    // always read: `clamp(darkRatio, 0, 1)`, so the transmission is bit-identical to 401's.
+    float darkRatio = min(min(In.r, In.g), In.b) / max(A, 1e-6);
+    float mPixel = clamp(darkRatio, 0.0, 1.0);
+
     float3 outRGB;
     if (amount >= 0.0) {
         float t;
@@ -549,7 +609,6 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
         } else {
             // The pixel's own normalized dark channel: `min_c(I/A)`, i.e. how much of *this* pixel the
             // veil could account for. Below `A` it is fog; above, it is object.
-            float mPixel = clamp(min(min(In.r, In.g), In.b) / A, 0.0, 1.0);
             // The guided veil, bounded by this pixel: a texture that claims more haze than the pixel
             // carries is not evidence about the pixel.
             float veilR = clamp(min(D / A, mPixel), 0.0, 1.0);
@@ -572,37 +631,24 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
             // and let the correction fade out where the veil cannot be a meaningful part of the
             // pixel.
             //
-            // 374 — **the fade is a band in log luminance that spans the SDR/HDR seam.** 280 left
-            // `w = 0` for every `L ≥ A` (a `[A−4σ, A+2σ]` dead zone, `σ = 2 %·A`), so a frame whose
-            // airlight is near the SDR white (`A = 0.95·p99`) darkened the SDR pixels and then cut
-            // the correction to zero at `A ≈ 1.0`: the discontinuity the user reported. The physics
-            // does not do that — `J = (L − A(1−t))/t` is continuous at `L = A` (`J(A) = A`) — the cut
-            // was the participation function's.
+            // 417 — **participation is the dark channel, not the luminance.**
             //
-            // The band is `[0.75·A, 1.33·A]` in **log2 luminance**, with a low shoulder at `A`
-            // (`w(A) = 0.04`): `smoothstep` on each half, so `w` and `dw/dL` are continuous
-            // everywhere (`dw/dL` vanishes at `0.75·A`, `A` and `1.33·A`). Below `0.75·A` the
-            // participation is exactly 1, so the deep fog keeps its recovery bit for bit; above
-            // `1.33·A` it is exactly 0, so the HDR tail is still left alone — 280's contract. The
-            // upper edge is not `2A`: 433/437/428 measure `p99.9/A = 1.26/1.48/1.36`, and a band
-            // reaching `2A` would lift exactly the band 280 pinned (measured: 428's p99.9–p100
-            // would gain 8 %). `1.33·A` is the widest edge that keeps every measured `p99.9` outside
-            // the band, which is ③.
+            // 374's band assumed "the brighter, the more likely a highlight to protect". On a
+            // uniform-fog frame that is backwards: the *brightest* pixels are the fog itself, so the
+            // fog got `w ≈ 0.003` and was left alone while the darker objects under it (below `A`,
+            // `w = 1`) took the whole `1/t` recovery — the direction was inverted.
             //
-            // The lower edge is wide on purpose. The old fade ended `0.08·A` below `A`, where the
-            // recovery's own slope is `1/t` (≈ 7.7× at `t = 0.13` on the ramp): over that short
-            // span the correction goes from full to zero and the *change* in `w` adds to `1/t`, which
-            // is the 15× adjacent-level step the user saw. Moving the transition to where `J ≈ L`
-            // (`L → A`) removes that term, but it also takes the light out of the sky band (`J/I`
-            // 0.978 → 0.924 on `_1263309`). Spreading the same fade down to `0.75·A` keeps the sky
-            // (measured 0.981, *above* the old 0.978) and brings the ramp's worst adjacent step down
-            // to ≈ `1/t`; the near-`A` fog band is deliberately a little less darkened, which is the
-            // seam fix itself. The shoulder keeps `p99 = A/0.95 = 1.05·A` at `w ≈ 0.035`, inside
-            // 280's ≤ 2 % / 5 % ceilings (on every 135-capped frame `p99` sits at exactly `1.05·A`,
-            // so a larger shoulder would lift the p99 band).
+            // `darkRatio = min_c(I)/A` answers "how much of *this* pixel could the veil account for",
+            // and it separates the two populations cleanly (`L1030600`: fog p50 1.202, objects 0.394):
+            // a specular highlight has a low dark channel (the other two channels are dark), a fog
+            // pixel has all three high. `smoothstep(0.55, 0.75)` puts objects at `w = 0` (untouched,
+            // they are not haze) and fog at `w = 1`.
+            //
+            // `legacyDehazeUnboundedRecovery` (`p.l.w`) keeps the pre-374 participation: it is the
+            // identity `t = (L − A)/(J − A)` `DehazeLinearTests` inverts.
             float L = dot(In, kWorkingLumaWeights);
             float recovered = (L - A * (1.0 - t)) / t;
-            float k = max(p.e.x, 1.0);
+            // 280's `2σ` edge, kept for the tests-only pre-374 participation below.
             float res = 2.0 * sqrt(kDehazeAirEpsRel) * A;    // 4 % of A — twice the σ
             float w;
             if (p.l.w > 0.5) {
@@ -611,21 +657,74 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                 // it is 1, which is the identity `t = (L − A)/(J − A)` DehazeLinearTests relies on.
                 w = 1.0 - smoothstep(A, A + res, L);
             } else {
-                constexpr float lo = 0.75;     // full participation at or below this · A
-                constexpr float knee = 0.04;   // participation at L = A
-                constexpr float hi = 1.33;     // no participation at or above this · A
-                float logL = log2(max(L, 1e-6));
-                float logA = log2(A);
-                if (L <= A) {
-                    float x = clamp((logL - log2(lo * A)) / max(logA - log2(lo * A), 1e-6),
-                                    0.0, 1.0);
-                    w = knee + (1.0 - knee) * (1.0 - smoothstep(0.0, 1.0, x));
-                } else {
-                    float x = clamp((logL - logA) / max(log2(hi * A) - logA, 1e-6), 0.0, 1.0);
-                    w = knee * (1.0 - smoothstep(0.0, 1.0, x));
-                }
+                // **417 — `L ≤ A` gets full participation; only the `L > A` tail fades.**
+                //
+                // 374 modelled the band in **luminance** on the premise "brighter ⇒ more likely a
+                // highlight to protect". On a uniform-fog frame that premise inverts: the fog *is*
+                // the brightest thing there, so `L ≈ A` — exactly the pixels the veil covers — got
+                // `w = 0.04`, while the objects under the fog (`L ≈ 0.5·A`) got `w = 1` and took the
+                // whole `1/t`. Measured on `L1030600` (`A = 0.807`): the fog band 0.70–0.85 was
+                // darkened only −7.34 %, and 417's own probe showed the direction was inverted.
+                //
+                // Every pixel that the veil could account for (`L ≤ A`) is fog or something seen
+                // through fog, so it participates fully; above `A` the pixel carries its own light
+                // that the veil cannot explain, and `L > A` **cannot** darken anyway
+                // (`J − L = (L − A)(1 − t)/t > 0`), so the tail fades to zero at `1.33·A` and 280/117's
+                // "the highlight is never lifted" is preserved by the `clamp(gModel, floor, 1.0)` below.
+                //
+                // Rejected candidates, both measured on the same two fixtures:
+                //   · per-pixel `min_c(I)/A` band — a dark object under medium fog has `min_c(I) = 0.4`
+                //     (lifted *to* the veil) so it reads "not fog" and gets `w = 0`: contrast
+                //     0.3833 → 0.2957 (0.77×, the acceptance wants ≥ 2×).
+                //   · patch-level `D/A` — the guided filter is edge-preserving, so a dark region keeps
+                //     its own 0.4 and the same 0.77× results.
+                // Luminance against `A` is the quantity that separates "veil" from "light of its own".
+                w = 1.0 - smoothstep(A, 1.33 * A, L);
             }
-            float Lout = mix(L, recovered, w);
+            // 401 — **the recovery's darkening depth is capped, not its participation.**
+            //
+            // 374 fixed the *shape* of `w` (a C¹ band, no step at `1.33·A`) but left the
+            // **asymmetry of the two sides' slopes** alone: below `A` the blend moves `L` by the full
+            // `1/t` (≈ 7× at `t = 0.14`) and above `A` it moves it by 1. On a frame whose airlight is
+            // near SDR white (`A ≈ 0.95`, every 135-capped highlight frame) the band is
+            // `[0.71, 1.26]`, so `L = 0.9` lands inside it (darkened, `w ≈ 0.12` on the ramp) while
+            // `L = 1.4` lands outside it (byte-untouched): the user's "0.9 掉了、1.4 不动，对比度被
+            // 拉爆". `L > A` **cannot** darken — `J − L = (L − A)(1 − t)/t > 0` — so "let the
+            // highlight participate" would lift the tail, which is 117 (and 280 put the edge back).
+            //
+            // The defect that *is* fixable is the depth: the model asks for `gModel = J/L` as low as
+            // `1/t` (0.24 measured at `L = 0.5·A`, `t = 0.54`), i.e. the fog band is darkened 4× while
+            // a pixel a few percent brighter is darkened 1.6×. Capping the **gain** at a constant
+            // floor bounds that ratio without touching `w`, `A`, `t`, `hi = 1.33` or the legibility of
+            // the fog: measured on `A = 0.95`, `dehaze = 100`, `gain(0.5)` 0.2406 → 0.4000 and
+            // `gain(0.9)` 0.9605 → 0.9603, so `gain(0.9)/gain(0.5)` falls 3.99 → 2.40 (the "contrast
+            // is stretched" measurement) while the deep fog is still darkened 60 %.
+            //
+            // The floor is a **constant**, not `k·amount`: the amount's linearity lives in the
+            // `mix(In, clear, amount)` at the end of this kernel, and a floor that read `amount`
+            // there would make the half-amount render disagree with `L + α(clear − L)` by 5·10⁻²
+            // (measured) instead of 0. The upper clamp keeps 280's contract — a `L > A` pixel is
+            // never lifted — and in fact pulls the measured `p99–p99.9` band from 1.007/1.008 to
+            // 1.000 on 437/428 (v1's measurement, re-verified here).
+            //
+            // `legacyDehazeUnboundedRecovery` (`p.l.w`) is deliberately **outside** the cap: it is
+            // the identity `t = (L − A)/(J − A)` DehazeLinearTests inverts, and the pre-401 arithmetic
+            // byte for byte.
+            //
+            // **417 — the ceiling is still 1.0.** 401's flat upper clamp is *kept*: the measurement
+            // below shows that letting the fog lift is not needed for the fog band and actively
+            // counteracts it (`L1030600`, `dehaze = 100`: fog band −16.4 % with the ceiling at 1.0,
+            // −12.6 % with it at 1.6, because the fog band straddles `A` and the `L > A` half can
+            // only be lifted). It also re-opens 280's highlight contract on `L1030433`. The fog's
+            // problem was *participation*, not the ceiling.
+            float Lout;
+            if (legacy || p.l.w > 0.5) {
+                Lout = mix(L, recovered, w);
+            } else {
+                float gModel = recovered / max(L, 1e-6);
+                float gCapped = clamp(gModel, kDehazeGainFloor, 1.0);
+                Lout = mix(L, L * gCapped, w);
+            }
             float gain = max(Lout, 0.0) / max(L, 1e-6);
             clear = In * gain;
         }

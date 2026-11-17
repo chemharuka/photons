@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import SwiftUI
 import PhotonsCore
 
@@ -127,7 +128,7 @@ public struct MaskListPanel: View {
             .buttonStyle(.borderless)
             .controlSize(.mini)
             .disabled(session.selectedMaskID == nil)
-            .help("删除选中的蒙版")
+            .help(L10n.tr("45664d5e4aba"))
         }
     }
 
@@ -163,7 +164,7 @@ public struct MaskListPanel: View {
         .fixedSize()
         .controlSize(.mini)
         .disabled(masks.count >= Mask.maxCount || session.anchorAsset == nil)
-        .help("新建蒙版：画笔 / 线性 / 径向 / 颜色范围 / 亮度范围 / 语义")
+        .help(L10n.tr("5a2fe7372486"))
     }
 
     // MARK: the list
@@ -172,7 +173,7 @@ public struct MaskListPanel: View {
         if masks.isEmpty {
             // 221: the card stays (header + 新建 menu are outside this branch); only the body says
             // there is nothing yet.
-            Text("还没有蒙版")
+            Text(L10n.tr("7e3362f3584b"))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -213,7 +214,7 @@ public struct MaskListPanel: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.mini)
-            .help(mask.isEnabled ? "停用" : "启用")
+            .help(mask.isEnabled ? L10n.tr("4e6fd0e28c55") : L10n.tr("f4f0ead1116b"))
         }
         .padding(.vertical, 2)
         .padding(.horizontal, 3)
@@ -236,7 +237,7 @@ public struct MaskListPanel: View {
     private func maskSection(_ mask: Mask) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text("蒙版级")
+                Text(L10n.tr("cb3d3d457531"))
                     .font(.system(size: 10, weight: .bold))
                 Spacer(minLength: 4)
                 Button {
@@ -247,7 +248,7 @@ public struct MaskListPanel: View {
                 .buttonStyle(.borderless)
                 .controlSize(.mini)
                 .disabled(!session.canMoveMask(mask.id, by: -1))
-                .help("上移（列表与 develop_json 的数组顺序）")
+                .help(L10n.tr("24bf5f9844a9"))
                 Button {
                     session.moveMask(mask.id, by: 1)
                 } label: {
@@ -256,11 +257,11 @@ public struct MaskListPanel: View {
                 .buttonStyle(.borderless)
                 .controlSize(.mini)
                 .disabled(!session.canMoveMask(mask.id, by: 1))
-                .help("下移（列表与 develop_json 的数组顺序）")
+                .help(L10n.tr("bffa4a78e1ea"))
             }
 
             HStack(spacing: 4) {
-                TextField("名称", text: $nameDraft)
+                TextField(L10n.tr("d44e9b3d3b31"), text: $nameDraft)
                     .textFieldStyle(.plain)
                     .font(.system(size: 10))
                     .controlSize(.mini)
@@ -273,7 +274,7 @@ public struct MaskListPanel: View {
                 .buttonStyle(.borderless)
                 .controlSize(.mini)
                 .disabled(nameDraft == mask.name)
-                .help("重命名（⏎ 亦可）：改名不进任何键，不重渲，但会进一次历史——Core 的语义比较按值比 masks，名字在内")
+                .help(L10n.tr("b3c59c2149c6"))
             }
             .padding(.horizontal, 3)
             .padding(.vertical, 1)
@@ -288,16 +289,16 @@ public struct MaskListPanel: View {
             }
 
             Toggle(isOn: invertBinding(mask)) {
-                Text("反转")
+                Text(L10n.tr("1c487acf1801"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             .toggleStyle(.checkbox)
             .controlSize(.mini)
-            .help("作用在合成后的选区上：1 − a。覆盖面积会翻过来（蒙版内变外）")
+            .help(L10n.tr("b45416fd1c8d"))
 
             HStack(spacing: 5) {
-                Text("混合")
+                Text(L10n.tr("1b76c104f489"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
@@ -312,7 +313,7 @@ public struct MaskListPanel: View {
                 .fixedSize()
                 .disabled(mask.components.count < 2)
                 .help(mask.components.count < 2
-                      ? "只有一个组件时 Core 忽略 op（第一个组件的运算没有左值）——再加一个组件才生效"
+                      ? L10n.tr("46eaa2def491")
                       : (mask.components.last?.op.help ?? ""))
             }
         }
@@ -328,10 +329,10 @@ public struct MaskListPanel: View {
     private func adjustmentsSection(_ mask: Mask) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text("局部调整")
+                Text(L10n.tr("fb7d1789e217"))
                     .font(.system(size: 10, weight: .bold))
                 Spacer(minLength: 4)
-                Text("\(MaskRowSummary.adjustmentCount(mask)) 项")
+                Text(L10n.tr("8af892e81407" , String(describing: (MaskRowSummary.adjustmentCount(mask)))))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
@@ -366,7 +367,7 @@ public struct MaskListPanel: View {
     /// Read off the same table the card iterates (`MaskSliderRow`), so the smoke's list cannot drift
     /// from the rows on screen.
     private var parameterLabels: [String] {
-        MaskSliderRow.level.map(\.title) + ["反转", "混合"] + MaskSliderRow.adjustments.map(\.title)
+        MaskSliderRow.level.map(\.title) + [L10n.tr("1c487acf1801"), L10n.tr("1b76c104f489")] + MaskSliderRow.adjustments.map(\.title)
     }
 
     /// The rows that belong to the shape the mask actually holds.
@@ -395,13 +396,13 @@ public struct MaskListPanel: View {
                 shapeParameters(for: mask, component: entry.index, shape: entry.component.shape)
                 if kind.isAdjustable {
                     Toggle(isOn: adjustBinding) {
-                        Text("拖动画面调整形状")
+                        Text(L10n.tr("11229de6c967"))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .toggleStyle(.checkbox)
                     .controlSize(.mini)
-                    .help("选中线/径向蒙版时，画布上的拖拽改形状（起点↔终点、中心→半径），不再平移画面")
+                    .help(L10n.tr("74b8d7dcc694"))
                 }
             }
         }
@@ -423,14 +424,14 @@ public struct MaskListPanel: View {
             MaskRangeBar(shape: l0) { next, commit in
                 session.setMaskComponentShape(
                     mask.id, component: component, shape: .luminanceRange(next),
-                    commit: commit, label: "亮度范围条", coalesce: false)
+                    commit: commit, label: L10n.tr("d76384870e04"), coalesce: false)
             }
         }
         if case .colorRange(let c) = shape {
             maskEyedropperRow(.colour)
             sampleSwatches(c)
             colourRangePreview(c)
-            Text("样本与选择范围是并集：加样本扩大覆盖，减小选择范围收缩")
+            Text(L10n.tr("c2df9bb34d16"))
                 .font(.system(size: 8))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -499,7 +500,7 @@ public struct MaskListPanel: View {
             .overlay(RoundedRectangle(cornerRadius: 2)
                 .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
             .accessibilityIdentifier("mask.color.rangePreview")
-            .help("选择范围：样本色 → 中性；容差越大，带越宽")
+            .help(L10n.tr("8c67206c7d45"))
     }
 
     /// What a colour-range mask was sampled from: up to eight swatches, and how many samples it holds.
@@ -516,7 +517,7 @@ public struct MaskListPanel: View {
                         .strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
             }
             Spacer(minLength: 4)
-            Text("\(c.samples.count) 个样本")
+            Text(L10n.tr("e3ad34dc8afa" , String(describing: (c.samples.count))))
                 .font(.system(size: 8, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }
@@ -536,11 +537,11 @@ public struct MaskListPanel: View {
         case .luminanceRange(let l):
             return String(format: "%.2f – %.2f", l.low, l.high)
         case .semantic(let s):
-            return "\(s.kind.displayName) · \(s.rasterDigest == nil ? "未生成" : "已生成")"
+            return "\(s.kind.displayName) · \(s.rasterDigest == nil ? L10n.tr("278e5034a88e") : L10n.tr("11448fff91a4"))"
         case .brush(let b):
             return String(format: "size %.3f", b.size)
         case .unsupported(let kind, _):
-            return "未知 \(kind)"
+            return L10n.tr("00a0072b2541" , String(describing: (kind)))
         }
     }
 
@@ -637,24 +638,24 @@ public struct MaskListPanel: View {
                 .disabled(session.selectedMaskID == nil)
             }
             Toggle(isOn: showBinding) {
-                Text("显示蒙版")
+                Text(L10n.tr("bd5f5b4afc9d"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             .toggleStyle(.checkbox)
             .controlSize(.mini)
             .disabled(session.selectedMaskID == nil)
-            .help("红色叠加来自蒙版自己的选区图（S1.5 atlas），不是第二次求值；不产生历史")
+            .help(L10n.tr("3f90d28034e8"))
         }
     }
 
     private var dividers: some View {
         VStack(alignment: .leading, spacing: 4) {
-            brushRow("大小", value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f",
+            brushRow(L10n.tr("50db7447b966"), value: brushSizeBinding, range: 0.01 ... 0.5, format: "%.3f",
                      decimals: 3, reset: { session.brushSize = CatalogSession.defaultBrushSize })
-            brushRow("硬度", value: brushHardnessBinding, range: 0 ... 1, format: "%.2f",
+            brushRow(L10n.tr("3f8950eeb398"), value: brushHardnessBinding, range: 0 ... 1, format: "%.2f",
                      decimals: 2, reset: { session.brushHardness = CatalogSession.defaultBrushHardness })
-            brushRow("流量", value: brushFlowBinding, range: 0.05 ... 1, format: "%.2f",
+            brushRow(L10n.tr("81a9d0b5a2a2"), value: brushFlowBinding, range: 0.05 ... 1, format: "%.2f",
                      decimals: 2, reset: { session.brushFlow = CatalogSession.defaultBrushFlow })
         }
     }

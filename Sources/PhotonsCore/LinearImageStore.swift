@@ -13,8 +13,22 @@ import CryptoKit
 /// `v3-lens` = 103: a Panasonic RW2's `0x0119` distortion now turns Apple's lens correction off and
 /// is applied by S0 like a DNG warp. The decoded pixels therefore differ for every RW2, and old
 /// buffers must not be reused; the profile's own `lens=panasonic:…` also enters the key.
+///
+/// `v4-auto409` = 409: a document that asks for no decoder version (`nil`) is no longer fixed at
+/// Apple's default — `DecoderAutoVersion` reads the file's EXIF ISO and crop factor and asks for v9
+/// when the **equivalent** ISO (`ISO · crop²`) exceeds the full-frame 800 reference, provided the file
+/// whitelists `9.dng` / `9`. The crop is `FocalLenIn35mmFilm / FocalLength`; unreadable EXIF means
+/// full frame. Consequence: every `decoderVersion == nil` document is re-decoded once (the token
+/// moved), and exactly the ones above their format's threshold change pixels. Documents with an
+/// explicit version, and every document at or below the threshold, decode to the same pixels as
+/// before.
+///
+/// Changing **any** constant of `DecoderAutoVersion` (the base ISO, the crop range, the v9 spellings,
+/// the threshold itself) must bump this token in the same change: the automatic rule does not appear
+/// in the decode key (`ver=auto` only), so this token is the one thing that separates buffers decoded
+/// by the old rule from the ones the new rule asks for.
 public enum DecodeRecipe {
-    public static let current = "v3-lens"
+    public static let current = "v4-auto409"
 }
 
 /// Identity of a decode result: everything that can change the pixels.

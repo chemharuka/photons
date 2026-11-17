@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 
 /// 顶栏右端那一块状态文本 —— 一条线上的**四段**，从左到右：
@@ -170,14 +171,14 @@ public final class TopBarStatusCluster: NSView {
 
     /// 库名（未命名时为 `未打开库`）：只有它会被截断，全名永远在 tooltip 里。
     public var fullName: String {
-        (libraryName?.isEmpty == false) ? libraryName! : "未打开库"
+        (libraryName?.isEmpty == false) ? libraryName! : L10n.tr("a306ecabb07b")
     }
 
     public func update(assetCount: Int, selectionCount: Int, libraryName: String?) {
         self.libraryName = libraryName
         revision = BuildStamp.revision
-        selectionLabel.stringValue = "已选 \(Metrics.padded(selectionCount, digits: Metrics.selectionDigits))"
-        countLabel.stringValue = "\(Metrics.padded(assetCount, digits: Metrics.countDigits)) 张"
+        selectionLabel.stringValue = L10n.tr("bee92e28f9f7" , String(describing: (Metrics.padded(selectionCount, digits: Metrics.selectionDigits))))
+        countLabel.stringValue = L10n.tr("6373a0c6419a" , String(describing: (Metrics.padded(assetCount, digits: Metrics.countDigits))))
         revisionLabel.stringValue = revision
         nameLabel.stringValue = fullName
         nameLabel.toolTip = fullName

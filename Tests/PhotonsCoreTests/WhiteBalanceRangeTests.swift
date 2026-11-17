@@ -1,18 +1,7 @@
 import XCTest
 @testable import PhotonsCore
 
-/// 派单 242 — **the mired slider's properties, as arithmetic**.
-///
-/// The owner's two constraints are the whole contract: the temperature ceiling is 50000 K, but the
-/// track cannot be linear Kelvin or 12000–50000 K would eat 80 % of it. So:
-///
-///   · **left = 2000 K** (`fraction 0`), **right = 50000 K** (`fraction 1`);
-///   · the position in between is uniform in **mired** (10⁶/T), which is the perceptual spacing;
-///   · the document is still Kelvin — `TemperatureScale` is the control's coordinate only, and
-///     `WhiteBalance.quantized()` writes Kelvin back.
-///
-/// Test ④ is the reverse gate: a linear-Kelvin mapping fails the 5000 K / 12000 K assertions by more
-/// than half the track, so the test cannot pass by accident if someone "simplifies" the scale back.
+/// White-balance range, reciprocal slider mapping and persisted Kelvin compatibility.
 final class WhiteBalanceRangeTests: XCTestCase {
 
     private static var repoRoot: URL {
@@ -25,7 +14,7 @@ final class WhiteBalanceRangeTests: XCTestCase {
     /// 200 points across the whole travel, endpoints included.
     private func samplePoints() -> [Double] {
         (0...199).map { i in
-            2000 + Double(i) / 199 * (50000 - 2000)
+            800 + Double(i) / 199 * (14000 - 800)
         }
     }
 
@@ -46,8 +35,8 @@ final class WhiteBalanceRangeTests: XCTestCase {
 
     func testFractionIsStrictlyMonotonicInKelvin() {
         // 242: the *mired* coordinate decreases as Kelvin rises, so the fraction
-        // ((miredMax − mired)/span) **increases**. The owner's ask and the formula both put 2000 K
-        // at 0 and 50000 K at 1; what matters is that the relation is strictly one-way.
+        // ((miredMax − mired)/span) **increases**. The owner's ask and the formula both put 800 K
+        // at 0 and 14000 K at 1; what matters is that the relation is strictly one-way.
         let points = samplePoints()
         for i in 1..<points.count {
             let cooler = TemperatureScale.fraction(forKelvin: points[i - 1])
@@ -76,39 +65,15 @@ final class WhiteBalanceRangeTests: XCTestCase {
                      worstRelative * 100))
     }
 
-    // MARK: - ④ the owner's key points (and the linear-map reverse gate)
-
-    func testKeyPointsPut2000AtTheLeftAnd50000AtTheRight() {
-        let points: [(kelvin: Double, fraction: Double)] = [
-            (2000, 0.000),
-            (5000, 0.625),
-            (12000, 0.868),
-            (50000, 1.000),
-        ]
-        for point in points {
-            XCTAssertEqual(TemperatureScale.fraction(forKelvin: point.kelvin), point.fraction,
-                           accuracy: 0.01,
-                           "\(point.kelvin) K must sit at \(point.fraction)")
-        }
-
-        let highEnd = TemperatureScale.fraction(forKelvin: 50000)
-            - TemperatureScale.fraction(forKelvin: 12000)
-        XCTAssertLessThanOrEqual(highEnd, 0.15,
-                                 "12000–50000 K takes \(highEnd) of the track; the cap is 15 %")
-
-        // Reverse gate: if this mapping were linear Kelvin, these three would be the values, and
-        // every key-point assertion above would fail by far more than its 0.01 tolerance.
-        func linear(_ kelvin: Double) -> Double { (kelvin - 2000) / (50000 - 2000) }
-        XCTAssertGreaterThan(abs(linear(5000) - 0.625), 0.5)
-        XCTAssertGreaterThan(abs(linear(12000) - 0.868), 0.5)
-        XCTAssertGreaterThan(abs(linear(20000) - TemperatureScale.fraction(forKelvin: 20000)), 0.5)
-
-        print(String(format: "242 ④ key points: 2000→0 · 5000→%.3f · 12000→%.3f · 50000→%.3f "
-                     + "· 12000–50000 = %.1f%% of the track",
-                     TemperatureScale.fraction(forKelvin: 5000),
-                     TemperatureScale.fraction(forKelvin: 12000),
-                     TemperatureScale.fraction(forKelvin: 50000),
-                     highEnd * 100))
+    func testAdjustmentRangeAndDecoderClampingAgree() {
+        XCTAssertEqual(TemperatureScale.kelvinRange,800...14000)
+        XCTAssertEqual(WhiteBalance.temperatureRange,TemperatureScale.kelvinRange)
+        XCTAssertEqual(WhiteBalance(temperature: 300).clamped().temperature,800)
+        XCTAssertEqual(WhiteBalance(temperature: 50000).clamped().temperature,14000)
+        XCTAssertNil(WhiteBalance.asShot.clamped().temperature)
+        XCTAssertEqual(TemperatureScale.fraction(forKelvin: 800),0)
+        XCTAssertEqual(TemperatureScale.fraction(forKelvin: 14000),1)
+        XCTAssertEqual(TemperatureScale.fraction(forKelvin: 5000),0.8909,accuracy: 0.001)
     }
 
     // MARK: - ⑤ quantization
@@ -133,10 +98,10 @@ final class WhiteBalanceRangeTests: XCTestCase {
 
         // Endpoints stay exact, and a value beyond them clamps onto the endpoint, not onto a mired
         // value outside the travel.
-        XCTAssertEqual(TemperatureScale.quantizedKelvin(2000), 2000)
-        XCTAssertEqual(TemperatureScale.quantizedKelvin(50000), 50000)
-        XCTAssertEqual(TemperatureScale.quantizedKelvin(99_999), 50000)
-        XCTAssertEqual(TemperatureScale.quantizedKelvin(10), 2000)
+        XCTAssertEqual(TemperatureScale.quantizedKelvin(800), 800)
+        XCTAssertEqual(TemperatureScale.quantizedKelvin(14000), 14000)
+        XCTAssertEqual(TemperatureScale.quantizedKelvin(99_999), 14000)
+        XCTAssertEqual(TemperatureScale.quantizedKelvin(10), 800)
 
         print("242 ⑤ quantization: idempotent over 200 points · 5000 K step "
               + "\(at5000 - cooler) K / \(warmer - at5000) K")

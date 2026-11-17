@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 
@@ -16,9 +17,9 @@ final class ChromaticAberrationProbe: NSView {
 
     /// The 校正 card's own frame, probed from the card's `.background` so the layout test can say
     /// 「行在卡里」 (096: the rows moved here from 细节).
-    static let cardID = "校正卡"
+    static let cardID = L10n.tr("328011393a8a")
     /// The 细节 card's frame — the negative control: the two rows must be **outside** it.
-    static let detailCardID = "细节卡"
+    static let detailCardID = L10n.tr("91439ce969a6")
 
     private(set) var rowID: String = ""
 

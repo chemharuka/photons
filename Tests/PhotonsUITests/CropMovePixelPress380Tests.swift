@@ -229,19 +229,19 @@ final class CropMovePixelPress380Tests: XCTestCase {
         let corners: [CGPoint]
         /// worst corner inset to the photo quad, in points (= px at this zoom)
         let minInset: Double
-        /// 归一化「出界」量：`[0,1]²` 之外多少。`.source` 的合法区域就是这个式子（§6.2），
-        /// `.canvas` 的合法区域是画布（同一个式子，两种空间都以自己的归一化单位表示）。
+        /// 归一化「出界」量。`.source` 的合法区域是**旋转后的照片**（420：380 曾经错写成 `[0,1]²`），
+        /// `.canvas` 的是画布。两种空间都以自己的归一化单位表示。
         let outside: Double
         let pressed: Bool
     }
 
-    private func tick(_ loupe: LoupeController, quad: [CGPoint],
+    private func tick(_ loupe: LoupeController, quad: [CGPoint], g: Geometry,
                       pressesBefore: Int) throws -> MoveTick {
         let corners = try drawn(loupe)
         return MoveTick(crop: loupe.cropTool.draft.crop,
                         corners: corners,
                         minInset: corners.map { inset($0, quad: quad) }.min() ?? 0,
-                        outside: outsideUnitSquare(loupe.cropTool.draft.crop),
+                        outside: outsideOf(loupe.cropTool.draft.crop, g),
                         pressed: loupe.cropTool.pixelPresses > pressesBefore)
     }
 
@@ -267,15 +267,15 @@ final class CropMovePixelPress380Tests: XCTestCase {
     }
 
     private func outward(_ loupe: LoupeController, from start: CGPoint,
-                         quad: [CGPoint]) throws -> (ticks: [MoveTick], mouse: CGPoint) {
+                         quad: [CGPoint], g: Geometry) throws -> (ticks: [MoveTick], mouse: CGPoint) {
         var mouse = start
-        var ticks = [try tick(loupe, quad: quad, pressesBefore: Int.max)]
+        var ticks = [try tick(loupe, quad: quad, g: g, pressesBefore: Int.max)]
         for _ in 1...Self.outwardTicks {
             mouse.x += CGFloat(Self.outwardStep)
             mouse.y += CGFloat(Self.outwardStep)
             let before = loupe.cropTool.pixelPresses
             loupe.continueCropDrag(atViewPoint: mouse)
-            ticks.append(try tick(loupe, quad: quad, pressesBefore: before))
+            ticks.append(try tick(loupe, quad: quad, g: g, pressesBefore: before))
         }
         return (ticks, mouse)
     }
@@ -286,7 +286,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
         for g in Self.geometries {
             let (loupe, quad, start) = try startMove(g)
             _ = KeystoneTranslationProbe380.takeDirectionScans()
-            let run = try outward(loupe, from: start, quad: quad)
+            let run = try outward(loupe, from: start, quad: quad, g: g)
             let ticks = run.ticks
             loupe.endCropDrag()
             let scans = KeystoneTranslationProbe380.takeDirectionScans()
@@ -310,7 +310,8 @@ final class CropMovePixelPress380Tests: XCTestCase {
             // ② 每个 tick 都量，不只量终点。
             //
             // 两种空间量的是**两种区域**，都要量：
-            //   · 归一化越界（`[0,1]²`）—— `.source` 的全部判据就是这个（§6.2），`.canvas` 是画布；
+            //   · 归一化越界 —— `.source` 的合法区域是**旋转后的照片**（420 修正了 380 的 `[0,1]²`），
+            //     `.canvas` 的是画布 `[0,1]²`；
             //   · 视图空间的四角内距（照片四边形）—— 这是 `.canvas` 的判据（框 = `documentQuad`，与照片
             //     同一个旋转网格）。`.source` 的框是**不旋转**的（overlay 画的就是它），把它拿来跟
             //     **旋转后**的照片四边形比，是 §6.3 指出的那个错位 —— 所以 `.source` 不量这条。
@@ -330,7 +331,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
             XCTAssertEqual(maxFrozenDelta, 0,
                            "\(g.label): 钉住之后 Δleft/Δtop 不是逐位 0（\(maxFrozenDelta)）")
             XCTAssertLessThanOrEqual(outside, 1e-9,
-                "\(g.label): 轨迹里有一 tick 的框跑出合法区域 \(outside)（归一化，[0,1]²）")
+                "\(g.label): 轨迹里有一 tick 的框跑出合法区域 \(outside)（归一化；.source 是旋转后的照片，.canvas 是画布）")
             if g.space == .canvas {
                 XCTAssertGreaterThanOrEqual(overflow, -0.5,
                     "\(g.label): 轨迹里有一 tick 的角跑出照片四边形 \(overflow) px —— 这就是「出界」")
@@ -346,7 +347,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
         let step = hypot(Self.outwardStep, Self.outwardStep)
         for g in Self.geometries {
             let (loupe, quad, start) = try startMove(g)
-            let outwardRun = try outward(loupe, from: start, quad: quad)
+            let outwardRun = try outward(loupe, from: start, quad: quad, g: g)
             let pinned = try XCTUnwrap(outwardRun.ticks.firstIndex { $0.pressed },
                                        "\(g.label): 没有夹住 —— 回拖验收没有判别力")
             _ = pinned
@@ -410,7 +411,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
         // (b) 真实路径：同一个屏幕点连喂两次，`draft.crop` 逐位相同；每 tick 一次指针投影。
         for g in Self.geometries {
             let (loupe, quad, start) = try startMove(g)
-            let run = try outward(loupe, from: start, quad: quad)
+            let run = try outward(loupe, from: start, quad: quad, g: g)
             _ = quad
             var mouse = run.mouse
             var worstProjections = 0
@@ -499,13 +500,14 @@ final class CropMovePixelPress380Tests: XCTestCase {
                     // The frame's own four corners, in the space it lives in (§5.2/§6.3):
                     // · `.canvas` — `documentQuad`, i.e. turned exactly like the picture, so the
                     //   photo's quad in document pixels is the right region;
-                    // · `.source` — the frame is **not** turned (§6.3): its legality is the plain
-                    //   `[0,1]²` of the photograph's own normalized grid. Measuring it against the
-                    //   turned quad would be this task's own bug, in a test.
+                    // · `.source` — the frame is **not** turned (§6.3). 420: the *picture* is what
+                    //   turns (088's 「图不转、框转」), so the region is the **turned sensor quad**, not
+                    //   plain `[0,1]²`. `[0,1]²` is the pre-420 spelling, and it calls a frame legal
+                    //   236 px outside the picture at 9° — which is how this assertion stayed green
+                    //   against a law 317 §2/§3 had already refuted.
                     let photoInset: Double
                     if g.vertical == 0, g.space == .source {
-                        photoInset = -max(0, -moved.left, -moved.top,
-                                          moved.right - 1, moved.bottom - 1)
+                        photoInset = -outsideTurnedPhoto(moved, degrees: g.degrees)
                             * Double(Self.source.width)
                     } else {
                         photoInset = probe.documentQuad(of: moved).map { region.inset($0) }.min() ?? 0
@@ -566,7 +568,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
         let g = Self.geometries[3]                     // 9° + v60：搜索式在这里最坏
         let (loupe, quad, start) = try startMove(g)
         loupe.cropTool.searchesMoves380 = true
-        let run = try outward(loupe, from: start, quad: quad)
+        let run = try outward(loupe, from: start, quad: quad, g: g)
         let ticks = run.ticks
 
         // 判别力就在这里：搜索式被钉住之后**不是**逐位冻结的 —— 它每 tick 从候选重新扫一个方向、
@@ -640,11 +642,32 @@ final class CropMovePixelPress380Tests: XCTestCase {
                  right: r.right + t.x, bottom: r.bottom + t.y)
     }
 
-    /// 一个裁切 rect 离开 `[0,1]²` 的量，归一化单位。`.source` 的 rect 是照片自己的归一化坐标、
-    /// `.canvas` 的 rect 是画布的归一化坐标 —— 两条都是「自己空间里的轴对齐矩形」，判据同一个式子
-    /// （§6.2：`.source` 的合法区域就是 `0 ≤ left, top` 且 `right, bottom ≤ 1`）。
+    /// 一个裁切 rect 离开 `[0,1]²` 的量，归一化单位。`.canvas` 的 rect 是画布的归一化坐标
+    /// —— 「自己空间里的轴对齐矩形」，判据就是这个式子。
     private func outsideUnitSquare(_ r: CropRect) -> Double {
         max(0, -r.left, -r.top, r.right - 1, r.bottom - 1)
+    }
+
+    /// **420 — `.source` 的合法区域是「旋转后的照片」，不是 `[0,1]²`。**
+    ///
+    /// 380 把 `.source` 的框和 `[0,1]²` 比，理由是「overlay 画的是不旋转的框」。前提对、结论错：
+    /// 框不转，但照片转了（088 的「图不转、框转」），所以 15° 时照片的底角落在 frame y = 1.177，
+    /// `[0,1]²` 里仍有黑角。这里用测试自己的闭式（`R(−θ)` 把四角转回照片自己的轴，再与
+    /// ±w/2、±h/2 比 —— 与 `CropPixelClamp317Tests.worstCornerDistance` 同一个式子），不读实现。
+    private func outsideTurnedPhoto(_ r: CropRect, degrees: Double) -> Double {
+        let w = Double(Self.source.width), h = Double(Self.source.height)
+        let m = CropGeometry.RotationMatrix(degrees: degrees)
+        var worst = Double.infinity
+        for (u, v) in [(r.left, r.top), (r.right, r.top), (r.right, r.bottom), (r.left, r.bottom)] {
+            let sensor = m.invert(x: u * w - w / 2, y: v * h - h / 2)
+            worst = min(worst, (w / 2 - abs(sensor.x)) / w, (h / 2 - abs(sensor.y)) / h)
+        }
+        return max(0, -worst)
+    }
+
+    /// 这条几何的「出界」量：`.source` 是旋转后的照片，`.canvas` 是画布 `[0,1]²`。
+    private func outsideOf(_ r: CropRect, _ g: Geometry) -> Double {
+        g.space == .source ? outsideTurnedPhoto(r, degrees: g.degrees) : outsideUnitSquare(r)
     }
 
     /// 一条 30 tick 的外推轨迹，逐 tick 与 `CropToolController.projectedMove380` **逐字同构**：
@@ -706,7 +729,7 @@ final class CropMovePixelPress380Tests: XCTestCase {
             }
         }
         return MoveLaw380(ticks: ticks,
-                          worstOutside: ticks.map(outsideUnitSquare).max() ?? 0,
+                          worstOutside: ticks.map { outsideOf($0, g) }.max() ?? 0,
                           frozen: frozen, frozenTotal: frozenTotal,
                           frozenAfterPin: frozenAfterPin, ticksAfterPin: ticksAfterPin,
                           pinnedAt: pinnedAt,
@@ -806,11 +829,11 @@ final class CropMovePixelPress380Tests: XCTestCase {
     func testEightSourceSpaceHoldsUnderTheRealDrag() throws {
         let g = Geometry(label: "9° v0 source", degrees: 9, vertical: 0, space: .source)
         let (loupe, quad, start) = try startMove(g)
-        let run = try outward(loupe, from: start, quad: quad)
+        let run = try outward(loupe, from: start, quad: quad, g: g)
         let ticks = run.ticks
         loupe.endCropDrag()
 
-        let outside = ticks.map { outsideUnitSquare($0.crop) }.max() ?? 0
+        let outside = ticks.map { outsideOf($0.crop, g) }.max() ?? 0
         var frozen = 0, frozenTotal = 0
         for i in 1..<ticks.count {
             if ticks[i].crop == ticks[i - 1].crop {

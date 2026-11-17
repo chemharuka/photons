@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import GRDB
 
@@ -60,10 +61,10 @@ public enum AlbumError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .emptyName: return "相册名不能为空"
-        case .duplicateName(let n): return "已经有一个叫「\(n)」的相册"
-        case .noSuchAlbum(let id): return "没有这个相册: \(id)"
-        case .noLibrary: return "没有打开的库"
+        case .emptyName: return L10n.tr("6444f5bbc642")
+        case .duplicateName(let n): return L10n.tr("b8b1ccee45e0" , String(describing: (n)))
+        case .noSuchAlbum(let id): return L10n.tr("eb5b0feed7b8" , String(describing: (id)))
+        case .noLibrary: return L10n.tr("430f02218d7c")
         }
     }
 }

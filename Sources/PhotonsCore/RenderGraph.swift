@@ -386,6 +386,7 @@ public enum MaskTiling: String, Sendable, Codable, CaseIterable {
 public struct SDRToneMap: Sendable, Equatable {
     public var measurementRatio: Float
     public var maxHeadroom: Float
+    public var standardProjection = false
 
     public init(measurementRatio: Float = 3, maxHeadroom: Float = 6) {
         self.measurementRatio = Swift.max(1, measurementRatio)
@@ -394,6 +395,7 @@ public struct SDRToneMap: Sendable, Equatable {
 
     /// `-r 3`, `-R 6` — what the export uses unless a caller says otherwise.
     public static let global = SDRToneMap()
+    public static let standard: SDRToneMap = {var value=SDRToneMap();value.standardProjection=true;return value}()
 }
 
 /// 100 — extended-range **linear** pixels from `s4_display_linear`: same primaries as the SDR base,
@@ -469,6 +471,7 @@ public struct LinearPixels: Sendable {
     /// cannot produce the map — all three mean "use the byte-identical hard clamp".
     private static func toneMapped(_ rgba: [Float16], width: Int, height: Int,
                                    primaries: OutputPrimaries, map: SDRToneMap) -> [Float16]? {
+        if map.standardProjection {return SDRProjection.pixels(rgba)}
         guard #available(macOS 15.0, *) else { return nil }
 
         var peak: Float = 0
@@ -1647,6 +1650,16 @@ public final class RenderGraph {
     /// included, both of which now have slots of their own).
     public private(set) var stageRuns: [RenderStage: Int] = [:]
     public private(set) var stageHits: [RenderStage: Int] = [:]
+    /// 417 — the transmission floor **the shipped path passes** (`DehazeParamsU.a.z`, `t0`).
+    ///
+    /// One number with two readers: `s1_9_dehaze_apply`'s `t0`, and the acceptance tests that state
+    /// their bounds in closed form rather than as literals — the adjacent-level slope ceiling
+    /// `(1 − kDehazeGainFloor·t0)/(t0·A)` (`DehazeContrast401Tests`) and the model's own slope at `A`
+    /// (`DehazeSeamTests`). Reading the literal in a test was what let 374's shoulder hide a slope
+    /// that the shipped `t0` does not satisfy; tying both to this constant keeps them from drifting
+    /// apart again.
+    public static let dehazeTransmissionFloor: Double = 0.05
+
     /// **Tests only** — the airlight `A` S1.9 estimated on the last frame, when
     /// `RenderOptions.probesDehazeAirlight` asked for it. `nil` when the stage did not run or the flag
     /// is off, which is what makes "the production path never reads it back" checkable.
@@ -3054,8 +3067,9 @@ public final class RenderGraph {
                     let pixels = edit.geometry.outputPixels(in: sourceSize)
                     let own = ImageRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
                     let binStart = DispatchTime.now().uptimeNanoseconds
-                    var measured = Histogram.compute(sample, bins: bins, rect: nil,
-                                                     headroom: options.display.headroom)
+                    var measured = options.display.sdrProof
+                        ? SDRProjection.histogram(sample,bins:bins,rect:nil,primaries:options.display.primaries)
+                        : Histogram.compute(sample, bins: bins, rect: nil, headroom: options.display.headroom)
                     if let coverage = histogramCoverage {
                         measured = coverage.removingExcludedSamples(
                             from: measured, rgba: sample.rgba, width: sample.width,
@@ -3069,8 +3083,9 @@ public final class RenderGraph {
                 pool.recycle(grid.texture)
             } else if options.collectHistogram {
                 let sample = readSample(source)
-                histogramPayload = Histogram.compute(sample, bins: bins, rect: picture,
-                                                     headroom: options.display.headroom)
+                histogramPayload = (options.display.sdrProof
+                    ? SDRProjection.histogram(sample,bins:bins,rect:picture,primaries:options.display.primaries)
+                    : Histogram.compute(sample, bins: bins, rect: picture, headroom: options.display.headroom))
                     .relabelled(canvas: plan.canvas, roi: picture)
             }
         }
@@ -3242,7 +3257,7 @@ public final class RenderGraph {
     ///   +2.3 EV, so a caller that has no preference to hand keeps the card's number.
     public func measureHistogram(_ edit: EditModel, bins: Int = 256,
                                  headroom: Double = 1,
-                                 ceiling: Double = HighlightCeiling.defaultLinear) throws -> Histogram {
+                                 ceiling: Double = HighlightCeiling.defaultLinear, sdrProof:Bool = false) throws -> Histogram {
         let cropPixels = edit.geometry.outputPixels(in: sourceSize)
         let picture = ImageRect(x: 0, y: 0, width: cropPixels.width, height: cropPixels.height)
         let options = RenderOptions(
@@ -3251,7 +3266,7 @@ public final class RenderGraph {
             // more, it only decides what `clippedCeiling` reports for this screen. 320's `ceiling`
             // is the opposite case — it *is* the pixels, so it arrives as the display option the
             // render clamps and measures with.
-            display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: headroom,
+            display: DisplayOptions(primaries: sdrProof ? .displayP3:.sRGB, bitDepth: 16, headroom: headroom, sdrProof:sdrProof,
                                     highlightCeiling: ceiling),
             useCache: false, wantsPixels: false,
             collectHistogram: true, histogramBins: bins)
@@ -4546,7 +4561,7 @@ public final class RenderGraph {
             let matrix = RenderGraph.primariesMatrix(from: ColorPrimaries.working, to: target)
             var params = DisplayParams(m: matrix,
                                        a: SIMD4(ColorPrimaries.working == target ? 1 : 0,
-                                                Float(options.display.headroom), 0, 0))
+                                                Float(options.display.headroom), options.display.sdrProof ? 1:0, 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
@@ -5489,7 +5504,10 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         let veilH = max(1, (h + qTex - 1) / qTex)
 
         var params = DehazeParamsU(
-            a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, 0.1, 0.02),
+            // 417 — `t0 = RenderGraph.dehazeTransmissionFloor` (0.05; was a literal 0.1). See the 417
+            // note in `s1_9_dehaze.metal`: on scene light `t = t0` is where *every* foggy pixel lands,
+            // and at 0.1 the gain's whole swing happened inside a 0.05-wide luminance window.
+            a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, Float(Self.dehazeTransmissionFloor), 0.02),
             b: SIMD4(plan.origin.x, plan.origin.y,
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(proxyW), Int32(proxyH), Int32(qProxy), Int32(qW)),

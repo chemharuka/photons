@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
+import PhotonsLocalization
 @testable import PhotonsCore
 @testable import PhotonsExport
 @testable import PhotonsUI
@@ -460,6 +461,12 @@ final class ExportSheetTruncationTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/PhotonsUI/ExportSheet.swift")
         let text = try String(contentsOf: source, encoding: .utf8)
+        // 本地化之后 ExportSheet.swift 里只剩 `L10n.tr("<hash>")`，中文都搬进了
+        // `zh-Hans.json`。所以「表 ↔ 源码」要验的是：表里那串文案**确实**由源码里
+        // 某个 `L10n.tr` 键在运行时产出 —— 而不是源码里还留着那串字面量。
+        // 语义完全等价：以前钉「源码字面量 = 表里的字」，现在钉「源码引用了一条文案，
+        // 这条文案的运行时值是表里的字」。文案搬走，钉的对象跟着搬。
+        let referenced = Set(Self.l10nKeys(in: text))
         var checked = 0
         for cell in state(model: ExportSheetModel()) where cell.literal {
             guard cell.role == .label || cell.role == .toggle || cell.role == .hint else { continue }
@@ -469,8 +476,11 @@ final class ExportSheetTruncationTests: XCTestCase {
                 .flatMap { $0.components(separatedBy: "  ") }
                 .filter { $0.count > 1 }
             for part in parts {
-                XCTAssertTrue(text.contains(part),
-                              "322 · 表里的「\(part)」在 ExportSheet.swift 里找不到（表与界面脱节）")
+                let inSourceText = text.contains(part)
+                let fromResource = referenced.contains { L10n.tr($0) == part }
+                XCTAssertTrue(inSourceText || fromResource,
+                              "322 · 表里的「\(part)」既不在 ExportSheet.swift 里，"
+                              + "也不是它引用的任何资源键在运行时的值（表与界面脱节）")
                 checked += 1
             }
         }
@@ -479,5 +489,14 @@ final class ExportSheetTruncationTests: XCTestCase {
         // 表里说「说明允许两行」，源码里就得真有 lineLimit(2) —— 否则表比界面宽松。
         let twoLines = text.components(separatedBy: ".lineLimit(2)").count - 1
         XCTAssertGreaterThanOrEqual(twoLines, 3, "说明类文字必须允许两行（现在 \(twoLines) 处）")
+    }
+
+    /// `ExportSheet.swift` 里所有 `L10n.tr("<hash>")` 的键。
+    private static func l10nKeys(in source: String) -> [String] {
+        let pattern = try! NSRegularExpression(pattern: "L10n\\.tr\\(\"([^\"]+)\"")
+        let range = NSRange(source.startIndex..., in: source)
+        return pattern.matches(in: source, range: range).compactMap { match in
+            Range(match.range(at: 1), in: source).map { String(source[$0]) }
+        }
     }
 }

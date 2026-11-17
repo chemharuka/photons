@@ -83,7 +83,7 @@ public struct AnselDenoiseLocation: Sendable, Equatable {
         fileManager: FileManager = .default
     ) -> URL {
         let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return support.appendingPathComponent("Photons/models", isDirectory: true)
     }
 

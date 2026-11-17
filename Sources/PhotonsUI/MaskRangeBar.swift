@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import SwiftUI
 import PhotonsCore
 
@@ -283,7 +284,7 @@ public struct MaskRangeBar: View {
                         }
                 )
                 .accessibilityIdentifier("mask.luminance.rangebar")
-                .help("拖动把手改边界；拖中间整体平移；拖斜纹改羽化；双击把手复位该端")
+                .help(L10n.tr("fcc31c39d5a1"))
             }
             .frame(height: 28)
 
@@ -297,7 +298,7 @@ public struct MaskRangeBar: View {
             HStack(spacing: 0) {
                 Text(String(format: "%.2f", LuminanceRangeShape.default.low))
                 Spacer(minLength: 2)
-                Text(String(format: "亮度 0…%.2f（与吸管同一量纲）", LuminanceRangeShape.hdrMax))
+                Text(String(format: L10n.tr("d4f6eb859980"), LuminanceRangeShape.hdrMax))
                 Spacer(minLength: 2)
                 Text(String(format: "%.2f", LuminanceRangeShape.default.high))
             }

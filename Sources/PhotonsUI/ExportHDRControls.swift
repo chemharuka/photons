@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsExport
@@ -14,7 +15,7 @@ struct ExportHDRRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Toggle(isOn: enabledBinding) {
-                Text("HDR（HEIC + 增益图）")
+                Text(L10n.tr("43a57d0f50bc"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(isHEIC ? AnyShapeStyle(.secondary)
                                             : AnyShapeStyle(.tertiary))
@@ -24,13 +25,13 @@ struct ExportHDRRow: View {
             .disabled(locked)
             Spacer(minLength: 8)
             Menu {
-                Picker("增益图", selection: gainMapBinding) {
+                Picker(L10n.tr("a26f95b6e25d"), selection: gainMapBinding) {
                     Text("ISO RGB").tag(HDRExport.GainMap.iso)
                     Text("ISO mono").tag(HDRExport.GainMap.mono)
                     Text("Apple").tag(HDRExport.GainMap.apple)
                 }
                 .pickerStyle(.inline)
-                Toggle("半尺寸增益图", isOn: halfSizeBinding)
+                Toggle(L10n.tr("fbbf2846665b"), isOn: halfSizeBinding)
             } label: {
                 HStack(spacing: 3) {
                     Text(model.preset.hdr?.gainMap.displayName ?? "ISO RGB")
@@ -42,7 +43,7 @@ struct ExportHDRRow: View {
             .controlSize(.mini)
             .fixedSize()
             .disabled(model.phase == .running || !model.hdrEnabled)
-            .help("增益图类型与尺寸")
+            .help(L10n.tr("5a346a2d5ba7"))
         }
         .background(ExportLayoutProbeHost(kind: .hdrRow))
     }

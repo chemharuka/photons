@@ -114,6 +114,13 @@ public struct ThumbPayload: Sendable {
 /// `maxConcurrency` of them, §4 "并发上限 3").
 public protocol ThumbnailProducer: AnyObject {
     func produce(_ key: ThumbKey, source: URL) throws -> ThumbPayload
+    func produce(_ key: ThumbKey, source: URL, cacheGeneration: UInt64) throws -> ThumbPayload
+}
+
+public extension ThumbnailProducer {
+    func produce(_ key: ThumbKey, source: URL, cacheGeneration: UInt64) throws -> ThumbPayload {
+        try produce(key, source: source)
+    }
 }
 
 public enum ThumbServiceError: LocalizedError {
@@ -165,8 +172,8 @@ public final class ThumbTicket: @unchecked Sendable {
     }
 
     /// Idempotent. Safe from any thread.
-    public func cancel() {
-        service?.cancel([self])
+    public func cancel(preservingStartedWork: Bool = false) {
+        service?.cancel([self], preservingStartedWork: preservingStartedWork)
     }
 
     func markCancelled() {
@@ -181,8 +188,8 @@ public final class ThumbTicket: @unchecked Sendable {
 }
 
 /// "The view went away" in one call: cancels a whole visible set at once (§5 generation cancel).
-public func cancel(_ tickets: [ThumbTicket]) {
-    for t in tickets { t.cancel() }
+public func cancel(_ tickets: [ThumbTicket], preservingStartedWork: Bool = false) {
+    for t in tickets { t.cancel(preservingStartedWork: preservingStartedWork) }
 }
 
 // MARK: - service
@@ -197,9 +204,9 @@ public func cancel(_ tickets: [ThumbTicket]) {
 /// * **Priority.** Highest priority first, FIFO inside a priority (job sequence).
 /// * **No main thread.** `request` only takes a lock, appends to an array and dispatches; every
 ///   cache read, producer call, disk write and completion callback happens on a worker queue.
-/// * **Cancel means no write.** A cancelled job never produces bytes that reach the disk. An
-///   in-flight decode still runs to completion (CIRAWFilter cannot be interrupted) but its bytes are
-///   dropped — the stricter of §5's "写盘不浪费" and the acceptance rule "取消后不再写盘".
+/// * Explicit cancellation discards in-flight bytes. View recycling opts into preserving started
+///   work so scrolling back can reuse the disk preview. Clearing the cache invalidates publication
+///   by every job admitted before the clear.
 /// * **Every live subscriber reaches a terminal state.** A job is booked exactly once (`hit`,
 ///   `generated`, `cancelled`, `failed`); a subscriber that did not cancel itself always gets its
 ///   callback; and a producer that never returns is booked `failed` with a reason when
@@ -339,6 +346,7 @@ public final class ThumbnailService: @unchecked Sendable {
         let key: ThumbKey
         let source: URL
         let sequence: Int64
+        var cacheGeneration: UInt64 = 0
         let generation: Int
         var priority: ThumbPriority
         var subscribers: [Subscription] = []
@@ -401,6 +409,7 @@ public final class ThumbnailService: @unchecked Sendable {
     private var sequence: Int64 = 0
     private var subscriptionID: Int64 = 0
     private var activeCount = 0
+    private var concurrencyLimit: Int
     private var currentGeneration = 0
     private var paused = false
     private var summaries: [Int64: ThumbResult] = [:]
@@ -409,6 +418,7 @@ public final class ThumbnailService: @unchecked Sendable {
                 producer: ThumbnailProducer? = nil) {
         self.cache = cache
         self.config = config
+        self.concurrencyLimit = config.maxConcurrency
         self.producer = producer
         lock.lock()
         counters.maxConcurrency = config.maxConcurrency
@@ -416,6 +426,16 @@ public final class ThumbnailService: @unchecked Sendable {
     }
 
     // MARK: knobs
+
+    /// Existing jobs finish normally; only admission changes. Raising the limit immediately
+    /// drains pending work. All scheduler state shares the same lock.
+    public func setConcurrencyLimit(_ value: Int) {
+        lock.lock()
+        concurrencyLimit = max(1, value)
+        counters.maxConcurrency = concurrencyLimit
+        lock.unlock()
+        pump()
+    }
 
     /// §4: no thumbnail job is posted while the user is dragging or zooming.
     ///
@@ -583,7 +603,8 @@ public final class ThumbnailService: @unchecked Sendable {
                              completion: ((ThumbResult) -> Void)?) -> Job? {
         counters.requests += 1
 
-        if let existing = jobs[spec.key] {
+        let epoch = cache.generation
+        if let existing = jobs[spec.key], existing.cacheGeneration == epoch {
             // Single flight: same key, same bytes, one producer call.
             //
             // Adoption: if every earlier subscriber left while this decode was already running,
@@ -611,6 +632,7 @@ public final class ThumbnailService: @unchecked Sendable {
         sequence += 1
         let job = Job(key: spec.key, source: spec.source, sequence: sequence,
                       generation: gen, priority: priority)
+        job.cacheGeneration = epoch
         job.subscribers.append(Subscription(id: ticket.id, completion: completion))
         pending.append(job)
         jobs[spec.key] = job
@@ -696,8 +718,9 @@ public final class ThumbnailService: @unchecked Sendable {
 
     // MARK: cancel
 
-    /// Cancel specific handles. If every subscriber of a key cancels, the job dies with them.
-    public func cancel(_ tickets: [ThumbTicket]) {
+    /// Cancel subscriptions and queued work. View recycling can retain an already-started
+    /// render for disk reuse; explicit cancellation and superseded edits still discard its bytes.
+    public func cancel(_ tickets: [ThumbTicket], preservingStartedWork: Bool = false) {
         guard !tickets.isEmpty else { return }
         lock.lock()
         for ticket in tickets {
@@ -715,6 +738,7 @@ public final class ThumbnailService: @unchecked Sendable {
             guard job.subscribers.allSatisfy({ $0.cancelled }) else { continue }
             guard !job.suppressWrite else { continue } // already dead: count the job once
             if job.started {
+                if preservingStartedWork { continue }
                 // Uninterruptible decode: let it finish, throw the bytes away (§5 + "取消后不写盘").
                 // A later request for the same key adopts the job and rescinds both flags.
                 job.suppressWrite = true
@@ -762,7 +786,7 @@ public final class ThumbnailService: @unchecked Sendable {
     private func pump() {
         var batch: [Job] = []
         lock.lock()
-        while activeCount < config.maxConcurrency, let job = takeNextLocked() {
+        while activeCount < concurrencyLimit, let job = takeNextLocked() {
             job.started = true
             activeCount += 1
             counters.active = activeCount
@@ -792,9 +816,12 @@ public final class ThumbnailService: @unchecked Sendable {
     }
 
     private func execute(_ job: Job) {
+        let cacheGeneration = job.cacheGeneration
         // A job cancelled between `pump` and the worker actually starting must not touch the disk.
         lock.lock()
-        let abortEarly = job.suppressWrite
+        let clearedBeforeStart = cacheGeneration != cache.generation
+        let abortEarly = job.suppressWrite || clearedBeforeStart
+        if clearedBeforeStart && !job.suppressWrite && !job.finished { counters.missCancelled += 1 }
         lock.unlock()
         if abortEarly {
             finish(job, origin: .cancelled, data: nil, payload: nil, error: nil)
@@ -832,7 +859,7 @@ public final class ThumbnailService: @unchecked Sendable {
             }
         }
         do {
-            payload = try producer.produce(job.key, source: job.source)
+            payload = try producer.produce(job.key, source: job.source, cacheGeneration: cacheGeneration)
             guard !payload.data.isEmpty else { throw ThumbServiceError.producerReturnedEmpty(job.key) }
         } catch {
             finish(job, origin: .failed, data: nil, payload: nil, error: error.localizedDescription)
@@ -842,7 +869,9 @@ public final class ThumbnailService: @unchecked Sendable {
 
         lock.lock()
         job.producerMilliseconds = producedMs
-        let dropBytes = job.suppressWrite
+        let clearedDuringProduction = cacheGeneration != cache.generation
+        let dropBytes = job.suppressWrite || clearedDuringProduction
+        if clearedDuringProduction && !job.suppressWrite && !job.finished { counters.missCancelled += 1 }
         lock.unlock()
 
         if dropBytes {
@@ -857,7 +886,11 @@ public final class ThumbnailService: @unchecked Sendable {
             // one-file-per-photo prune). Measured, because "render+encode+write" is the number the
             // acceptance asks for and an estimate would hide the disk.
             let writeStart = DispatchTime.now()
-            try cache.store(payload.data, for: job.key)
+            guard try cache.store(payload.data, for: job.key, generation: cacheGeneration) else {
+                lock.lock(); counters.missCancelled += 1; lock.unlock()
+                finish(job, origin: .cancelled, data: nil, payload: nil, error: nil)
+                return
+            }
             let writeMs = Double(DispatchTime.now().uptimeNanoseconds
                                  - writeStart.uptimeNanoseconds) / 1e6
             lock.lock()
@@ -1019,7 +1052,7 @@ public final class ThumbnailService: @unchecked Sendable {
     public func resetStats() {
         lock.lock()
         counters = Stats()
-        counters.maxConcurrency = config.maxConcurrency
+        counters.maxConcurrency = concurrencyLimit
         counters.active = activeCount
         counters.queued = pending.count
         lock.unlock()

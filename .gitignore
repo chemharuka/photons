@@ -3,6 +3,11 @@
 .DS_Store
 *.xcodeproj
 *.xcworkspace
+!Apps/iPad/PhotonsIPad.xcodeproj/
+!Apps/iPad/PhotonsIPad.xcodeproj/project.xcworkspace/
+Apps/iPad/PhotonsIPad.xcodeproj/project.xcworkspace/*
+!Apps/iPad/PhotonsIPad.xcodeproj/project.xcworkspace/xcshareddata/
+xcuserdata/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # local/ — everything a session produces that must NOT be published:
@@ -19,6 +24,8 @@ out/
 *.linear.json
 
 # RAW fixtures are the user's own photos — never vendored
+*.3FR
+*.3fr
 *.dng
 *.cr3
 *.cr2

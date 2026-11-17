@@ -31,7 +31,7 @@ final class DetailSectionTests: XCTestCase {
         XCTAssertEqual(titles.firstIndex(of: "色彩分级").map { $0 + 4 }, develop)
         XCTAssertEqual(titles.firstIndex(of: "点颜色").map { $0 + 5 }, develop)
         XCTAssertEqual(titles.firstIndex(of: "HSL").map { $0 + 6 }, develop)
-        XCTAssertEqual(titles.firstIndex(of: "Color").map { $0 + 7 }, develop)
+        XCTAssertEqual(titles.firstIndex(of: "色彩").map { $0 + 7 }, develop)
         XCTAssertEqual(titles.filter { $0 == "开发" }.count, 1, "one 开发 card, not two")
 
         // 164: the new 细节 card sits between 校正 and 效果.
@@ -115,8 +115,8 @@ final class DetailSectionTests: XCTestCase {
 
         let style = InspectorView.SliderRowStyle.standard
         XCTAssertEqual(style.controlSize, .mini, "every card's slider is .mini")
-        XCTAssertEqual(style.labelSize, 10, "the tone rows' label size")
-        XCTAssertEqual(style.readoutSize, 10, "the tone rows' readout size")
+        XCTAssertEqual(style.labelSize, 11, "the tone rows' label size")
+        XCTAssertEqual(style.readoutSize, 11, "the tone rows' readout size")
         XCTAssertEqual(style.rowSpacing, 1)
         XCTAssertEqual(style.headSpacing, 6)
     }

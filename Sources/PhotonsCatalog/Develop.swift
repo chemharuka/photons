@@ -246,11 +246,21 @@ extension Catalog {
 
     /// The whole stack with its persisted cursor — what a document open wants, instead of
     /// `EditHistory(baseline:)`, which would flatten history to a single "Original" row.
-    public func editHistory(forAsset id: String) throws -> EditHistory {
+    public func editHistory(forAsset id: String, maxDepth: Int = EditHistory.defaultMaxDepth) throws -> EditHistory {
         let state = try developState(forAsset: id)
         let rows = try historyRows(forAsset: id)
         let cursor = rows.contains { $0.seq == state.historyEnd } ? state.historyEnd : nil
-        return EditHistory(rows: rows, cursorSeq: cursor)
+        var history = EditHistory(rows: rows, cursorSeq: cursor, maxDepth: max(rows.count,maxDepth))
+        history.setMaxDepthPreservingCurrent(maxDepth)
+        return history
+    }
+
+    /// Import state is archived independently of the visible undo window.
+    public func importedDevelop(forAsset id:String) throws -> EditModel? {
+        let json = try dbQueue.read {try String.fetchOne($0,sql:"SELECT develop_json FROM asset_history WHERE asset_id = ? ORDER BY seq LIMIT 1",arguments:[id])}
+        guard let json else {return nil}
+        if case .decoded(let edit) = Self.decodeDevelop(json) {return edit}
+        return nil
     }
 
     // MARK: quarantine

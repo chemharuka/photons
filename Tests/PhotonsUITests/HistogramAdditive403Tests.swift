@@ -173,6 +173,29 @@ final class HistogramAdditive403Tests: XCTestCase {
                                  "白是中性：三路差 ≤ 0.06，实测 \(formatted(p))")
     }
 
+    func testOverlapStaysNeutralSDRWhiteInExtendedLinearDisplayP3() throws {
+        let card = HistogramCardView()
+        card.frame = NSRect(x: 0, y: 0, width: cardWidth, height: cardHeight)
+        card.histogram = histogram(red: 1000, green: 1000, blue: 1000, headroom: 4)
+        let width = Int(cardWidth * scale), height = Int(cardHeight * scale)
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height,
+            bitsPerComponent: 32, bytesPerRow: width * 16,
+            space: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue))
+        context.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        card.draw(card.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        let point = plotColumn(card)
+        let pixels = try XCTUnwrap(context.data).assumingMemoryBound(to: Float.self)
+        let index = (point.y * width + point.x) * 4
+        let rgb = (0..<3).map { pixels[index + $0] }
+        XCTAssertGreaterThan(rgb.min()!, 0.95)
+        XCTAssertLessThanOrEqual(rgb.max()!, 1.01, "UI white must not become an EDR highlight")
+        XCTAssertLessThan(rgb.max()! - rgb.min()!, 0.015, "RGB overlap must remain neutral on a P3 HDR display")
+    }
+
     // MARK: - ④ the luma line is gone
 
     func testTheLumaLineIsGone() {

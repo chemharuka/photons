@@ -2,13 +2,15 @@
 
 <h1 align="center">Photons</h1>
 
-<p align="center">macOS 原生 RAW 工作流：导入文件夹、挑片、非破坏性显影、导出。用 Swift 写的，MIT 许可。</p>
+<p align="center">macOS 原生 HDR / RAW 工作流，提供实验性 iPadOS 开发预览。共享 Swift 图像引擎、图库、LCC 与全景拼接。</p>
 
 <p align="center">
   <a href="https://chemharuka.github.io/photons/"><strong>白皮书</strong></a> ·
   <a href="docs/architecture-decisions.md">架构决策</a> ·
   <a href="docs/STATUS.md">项目状态</a> ·
-  <a href="#构建与运行">构建</a>
+  <a href="#构建与运行">构建</a> ·
+  <a href="docs/ipad-preview.md">iPad 开发预览</a> ·
+  <a href="docs/mac-ipad-development.md">双端开发建议（非强制）</a>
 </p>
 
 Photons 自己不带 RAW 解码器。去马赛克、镜头校正、机器学习降噪这些跟相机强相关的事，交给 **Apple**：`CIRAWFilter` 调用系统里的 `RawCamera`。这之上全是我们自己写的：SQLite 目录、Metal 渲染图、蒙版、色彩管理、XMP 和导出。
@@ -17,15 +19,15 @@ Photons 自己不带 RAW 解码器。去马赛克、镜头校正、机器学习�
 
 ## 已经能做什么
 
-1.0 之前项目动得很快。下面每一条都被 `make verify` / `make ui-smoke` 实际跑过，没有一条停在「计划中」。
+下面概述桌面版的主要功能。项目仍在快速开发，验收命令不代表当前分支的所有检查都已通过；具体结果以对应 PR 的验证记录为准。iPad 目前覆盖的功能与限制单独列在 [开发预览说明](docs/ipad-preview.md)。
 
-**素材库** 是一个 `.photonslibrary` 包（SQLite/WAL）。导入可以按复制，也可以按引用；文件按内容哈希去重，导入中途被 `kill -9` 杀掉再重来，会续传到同一批素材，不产生重复。库里还有文件夹树、15 个维度的筛选栏（星级、旗标、颜色标签、相机、镜头、ISO、焦距、快门、光圈、月/日、扩展名、序列号、闪光、GPS）、星级/选用/排除/颜色标签、右键「移出照片库 / 移出并删除」、缺失文件查找、下次启动恢复上次的库，以及内容寻址的缩略图和 1920 px HDR 预览缓存。
+**素材库** 是一个 `.photonslibrary` 包（SQLite/WAL）。导入可以按复制，也可以按引用；导入默认按内容哈希去重，取消“不重复导入”可保留独立副本；导入中途被 `kill -9` 杀掉再重来，会续传到同一批素材，不产生重复。库里还有文件夹树、15 个维度的筛选栏（星级、旗标、颜色标签、相机、镜头、ISO、焦距、快门、光圈、月/日、扩展名、序列号、闪光、GPS）、星级/选用/排除/颜色标签、右键「移出照片库 / 移出并删除」、缺失文件查找、下次启动恢复上次的库，以及内容寻址的缩略图和 1920 px HDR 预览缓存。
 
 **显影** 是一份非破坏性文档，带五个检查器工作区：
 
 | 工作区 | 卡片 |
 |---|---|
-| 调整 | 白平衡（mired 滑杆，2000–50000 K）· 黑电平 · Light（曝光/对比/高光/中间调/阴影/白色/黑色 · 最高亮度）· Color（自然饱和/饱和）· 曲线（HDR 域控制点）· 开发（机身降噪/色彩降噪/锐化/细节/去摩尔纹）· 校正（色差 R/B · 暗角）· 细节（纹理/清晰度 · 去噪/去彩噪 · 锐化）· 效果（去雾 · 颗粒） |
+| 调整 | 白平衡（mired 滑杆，800–14000 K）· 黑电平 · Light（曝光/对比/高光/中间调/阴影/白色/黑色 · 最高亮度）· Color（自然饱和/饱和）· 曲线（HDR 域控制点）· 开发（机身降噪/色彩降噪/锐化/细节/去摩尔纹）· 校正（色差 R/B · 暗角）· 细节（纹理/清晰度 · 去噪/去彩噪 · 锐化）· 效果（去雾 · 颗粒） |
 | 变换 | 裁切（比例、翻转、九宫格、不出像素）· 校正（拉直 ±45°、画线拉直、引导线、透视 ±400）· 变换（90°、镜像、旋转） |
 | 色彩 | HSL 八色带 · 点颜色（OKLCh 平台 + 肩）· 色彩分级（阴影/中间调/高光 × 色相/饱和/亮度）· 校准（阴影色调 + R/G/B 色相/饱和）· 黑白（每色相混合） |
 | 蒙版 | 蒙版（画笔 · 线性渐变 · 径向渐变 · 颜色范围 · 亮度范围 · 语义/Vision 主体；每张蒙版有强度/透明度/羽化/refine/反相/混合与 12 个局部滑杆：曝光/对比/高光/阴影/白色/黑色/色温/色调/色相/饱和/纹理/锐化）· 修复（修复/克隆 + 红眼，跑在 S0 之前的源像素上） |
@@ -37,11 +39,37 @@ Photons 自己不带 RAW 解码器。去马赛克、镜头校正、机器学习�
 
 这些都走同一个 `RenderGraph` 批处理，所以屏幕上的图和导出的文件是同一套算术。同一份文档在两个进程里渲染两次，得到同样的字节，这条有测试守着。
 
+**社交媒体切片输出** 位于「工具」菜单，使用图库中选中的照片与当前显影设置，在独立窗口里显示整组画框、切片预览和输出参数。支持 3:4 / 4:3 三档分辨率、逐张画面占比、六种重采样选项、HDR / SDR JPEG 和批量取消；默认输出到原图旁的 `slice_原文件名` 文件夹，也可另选位置。整个功能用 Swift、Core Image 和 ImageIO 实现，不依赖 Python。HDR 的 SDR 底图先对整张照片做统一映射，缩放和锐化后再切片；各片共用白点、增益范围和色彩空间，白边固定为漫反射白。macOS 15+ 使用 ISO RGB 增益图，14.1–14.x 使用 Apple 增益图。替换输出时保留其他文件，并通过 `slices.json` 记录参数及清理旧切片。重采样与 JPEG 编码由系统框架实现，像素不承诺与原 Pillow 编码逐字节一致。
+
+## iPadOS 开发预览
+
+预览版直接使用现有的图库、Metal 显影、LCC、全景和编码模块，提供独立的触控工作区。当前重点是验证真实处理流程，尚未覆盖完整桌面 UI。私人 TestFlight beta 使用独立的 **Photons Studio Preview** 应用记录；签名、上传流程和当前状态见 [iPad TestFlight 说明](docs/ipad-testflight.md)。
+
+```sh
+python3 scripts/ipad-preview.py run --samples
+python3 scripts/ipad-preview.py test
+```
+
+也可以在 Xcode 中打开 `Apps/iPad/PhotonsIPad.xcodeproj`，选择 **Photons iPad Preview** 和一台 iPad。真机运行需要在工程中选择自己的签名团队。
+
+43XL 开发者镜头配置文件随预览提供。本机可把四张 Boston 原片放入 `local/ipad-samples/`，用 `python3 scripts/ipad-preview.py run --release --boston` 构建并载入；原片不会提交到 Git。详情见 [测试素材说明](docs/ipad-preview.md#local-boston-sample-build)。
+
+网格用双指缩放；单点照片展开/折叠检查器，长按进入多选，选择至少两张后显示拼接入口。左侧素材栏可隐藏，顶部工作区放工具与设置按钮（Control-comma），设置采用通用/照片库/镜头配置全屏标签页；网格/单图使用井字/矩形图标，不设胶片条。星级和旋转在右侧检查器。
+
+全景使用全屏预览工作区，先选择移轴或透视接片。移轴模式显示机身行程与可拖拽画幅；拖动围绕画幅几何中心，在松手后提交位置；布局旁的 Revert 可即时恢复上次成功配准的位置。修改后重新配准，确认有效后才能导出。透视模式直接估计画面透视变换，目前采用平面投影，尚非球面/360° 拼接。
+
+预览支持两种 LCC 校正、镜头配置文件导入/创建、全景相对位置查看、HDR/SDR 输出与无损线性 DNG。导出可选择原尺寸或 2048/4096/6000 px，并检查当前可用内存，完成后自动入库，可通过系统分享保存到其他位置。HDR 预览与缩略图缓存保留浮点高光，屏幕仅支持 SDR 时会提示。完整触控蒙版/修复、外部 AI/HDR 助手与后台恢复等仍待后续阶段；大图原尺寸导出的真机内存表现还需验证。
+
+- [当前覆盖、限制与验证方法](docs/ipad-preview.md)
+- [Mac/iPad 并行开发建议](docs/mac-ipad-development.md)：**可调整的建议，不是必须遵守的规则**；创建 iPad 工程不要求每次 Mac 构建或发布都同步完成 iPad 版本。
+
+**全景与 LCC（桌面版）**：Control+M 打开全景，支持自动配准、移轴位置引导、镜头配置文件校正、独立任务进度、导出后自动入库；LCC 支持严格匹配平场和镜头配置文件两种方式，保留在导出图中的接片信息可用于后续校正。渲染格式的后期校正不能保证完全复现 RAW 拼接前校正。
+
 ## 环境要求
 
 - macOS 14 或更新。最新的 `RawCamera` 解码版本要求最新的 macOS；本仓库在 macOS 27 / Xcode 27 / Swift 6 上构建和测量。
 - 第三方依赖只有一个，由 SwiftPM 解析：[GRDB](https://github.com/groue/GRDB.swift) 7（MIT），用来接 SQLite。见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- 仓库里没有 `.xcodeproj`。Metal kernel 当**资源**发布，启动时由 `Metal.framework` 编译。原因是 SwiftPM 没有可靠的 `.metal` 构建步骤。
+- Mac 继续使用 SwiftPM 与现有打包脚本；iPad 入口在 `Apps/iPad/PhotonsIPad.xcodeproj`，要求 iPadOS 18+。Metal kernel 仍作为资源由 `Metal.framework` 编译。
 - 测试素材得自己备一张 RAW，仓库不附带照片：`PHOTONS_TEST_RAW=…` 或 `make verify RAW=…`。
 
 ## 构建与运行
@@ -53,7 +81,7 @@ open .build/Photons.app
 
 `make app` 跑 release 构建、打包、ad-hoc 签名，产物落在 `.build/Photons.app`。
 
-首次启动走 文件 ▸ 打开库… 新建一个 `.photonslibrary`，再用 ⇧⌘I 导入文件夹。缓存（解码后的线性缓冲、缩略图）按库分开，放在 `~/Library/Caches/Photons/<library-hash>/`。
+首次启动走 文件 ▸ 打开库… 新建一个 `.photonslibrary`，再用 ⇧⌘I 导入文件夹。缓存（解码后的线性缓冲、缩略图）按库分开，放在 `~/Library/Caches/Photons/<library-hash>/`。设置 ▸ 缓存可查看预览占用、打开目录，并按图库或全部删除缩略图与直方图缓存；原片与调整保留。预览会跨启动复用，照片调整后按新版本更新。工具 ▸ LCC矫正… 的快捷键为 Control+L。
 
 ## 验收门
 
@@ -183,4 +211,4 @@ local/                     不入库的会话工作区（笔记、探针、样�
 
 ## 许可
 
-MIT 许可，见 [LICENSE](LICENSE)。第三方声明：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Photons 核心采用 MIT 许可，见 [LICENSE](LICENSE)。可选第三方助手及其源码按各自许可证分发，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [扩展模块说明](Sources/PhotonsExtensions/README.md)。iPad 预览不打包或启动 macOS 可执行助手。

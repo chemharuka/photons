@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import SwiftUI
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 2026-10-28 (078 P0-1 / B9) — 修复画笔's UI surface: **one button, one click, one snapshot**.
@@ -172,10 +173,16 @@ final class HealToolTests: XCTestCase {
         XCTAssertTrue(healProbe.isEmpty, "空的修复卡真的没有修复点")
 
         // Both empty-state lines are part of the shipped sources (Text has no AppKit leaf).
+        //
+        // 本地化之后这两句进了资源表（`7e3362f3584b` / `863106085475`），源码只剩 `L10n.tr(...)`。
+        // 等价改写：钉「这条资源文案就是那句话」+「面板用的就是这条资源」，
+        // 与原来「源码里有这句话」要保证的东西相同（文案没变、且只有一个来源），只是不再依赖语言字面量。
         let maskSource = try Self.source("Sources/PhotonsUI/MaskListPanel.swift")
         let healSource = try Self.source("Sources/PhotonsUI/HealCardPanel.swift")
-        XCTAssertTrue(maskSource.contains("还没有蒙版"))
-        XCTAssertTrue(healSource.contains("还没有修复点"))
+        XCTAssertEqual(L10n.tr("7e3362f3584b"), "还没有蒙版")
+        XCTAssertEqual(L10n.tr("863106085475"), "还没有修复点")
+        XCTAssertTrue(maskSource.contains("L10n.tr(\"7e3362f3584b\")"))
+        XCTAssertTrue(healSource.contains("L10n.tr(\"863106085475\")"))
         XCTAssertTrue(maskSource.contains("inspector.card.masks.title"))
         XCTAssertTrue(healSource.contains("inspector.card.heal.title"))
         XCTAssertTrue(maskSource.contains("newMaskMenu"), "空蒙版卡仍保留新建入口")

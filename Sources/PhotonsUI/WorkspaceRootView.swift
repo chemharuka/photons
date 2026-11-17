@@ -1,4 +1,6 @@
+import PhotonsLocalization
 import AppKit
+import PhotonsFileAccess
 import SwiftUI
 import PhotonsCatalog
 import PhotonsCore
@@ -21,7 +23,7 @@ public enum ForwardCompatNotice {
     /// `该文件来自更新的版本 v14，未知设置已原样保留` — or `nil` when there is nothing to say.
     public static func text(for version: Int?) -> String? {
         guard let version else { return nil }
-        return "该文件来自更新的版本 v\(version)，未知设置已原样保留"
+        return L10n.tr("8eed626f0186" , String(describing: (version)))
     }
 }
 
@@ -37,7 +39,7 @@ public final class ToolButton: NSButton {
         self.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         imagePosition = .imageLeading
         imageHugsTitle = true
-        font = .systemFont(ofSize: 10.5, weight: .semibold)
+        font = .systemFont(ofSize: 11, weight: .medium)
         isBordered = false
         bezelStyle = .regularSquare
         focusRingType = .none
@@ -58,7 +60,9 @@ public final class ToolButton: NSButton {
 
     public override func draw(_ dirtyRect: NSRect) {
         let color: NSColor
-        if isActive {
+        if isHighlighted {
+            color = NSColor.labelColor.withAlphaComponent(0.16)
+        } else if isActive {
             color = NSColor.controlAccentColor.withAlphaComponent(0.14)
         } else if hovering {
             color = NSColor.labelColor.withAlphaComponent(0.07)
@@ -109,10 +113,13 @@ public final class TopBarView: NSView {
     /// 排序按钮（`新→旧 / 旧→新`）。One click flips the order the grid, the browser and the strip read.
     public var onToggleSort: (() -> Void)?
 
-    private let openButton = ToolButton(title: "打开", symbol: "folder")
-    private let modeControl = NSSegmentedControl(labels: ["网格", "单图"],
+    private let tasksButton = BackgroundTaskButton()
+    private let openButton = ToolButton(title: L10n.tr("c771248e511f"), symbol: "folder")
+    private let importButton = ToolButton(title: L10n.tr("576d81bb0631"), symbol: "square.and.arrow.down")
+    private let exportButton = ToolButton(title: L10n.tr("76420433f22d"), symbol: "square.and.arrow.up")
+    private let modeControl = NSSegmentedControl(labels: [L10n.tr("e41ecc67ca28"), L10n.tr("e71b76b45a24")],
                                                  trackingMode: .selectOne, target: nil, action: nil)
-    private let stripButton = ToolButton(title: "胶片条", symbol: "rectangle.split.1x2")
+    private let stripButton = ToolButton(title: L10n.tr("38559373577e"), symbol: "rectangle.split.1x2")
     /// 胶片条按钮右边那一个：同款 `ToolButton`、同高、10 pt 间距。
     ///
     /// 文字是**当前顺序**（`新→旧` / `旧→新`），图标是通用的 `arrow.up.arrow.down` 且不随方向变——
@@ -133,7 +140,7 @@ public final class TopBarView: NSView {
     /// 顶栏最后一个可交互控件的右边缘。公开给测试：簇的左边缘永远在它右边
     /// （`TopBarStatusCluster.Metrics.minimumGapFromControls` 之外），再长的库名也压不到按钮上。
     /// 排序按钮排在胶片条按钮后面，所以它是这一行最右的一个。
-    public var controlsTrailingEdge: CGFloat { sortButton.frame.maxX }
+    public var controlsTrailingEdge: CGFloat { tasksButton.frame.maxX }
 
     public override var isFlipped: Bool { true }
 
@@ -143,6 +150,15 @@ public final class TopBarView: NSView {
 
         openButton.target = self
         openButton.action = #selector(openTapped)
+        openButton.toolTip = L10n.tr("4422e24b23e8")
+        importButton.target = nil
+        importButton.action = #selector(EditorWindowController.importAction(_:))
+        importButton.toolTip = L10n.tr("fad39b265c7a")
+        importButton.setAccessibilityIdentifier("toolbar.import")
+        exportButton.target = nil
+        exportButton.action = #selector(EditorWindowController.exportAction(_:))
+        exportButton.toolTip = L10n.tr("1c8f057e276d")
+        exportButton.setAccessibilityIdentifier("toolbar.export")
         stripButton.target = self
         stripButton.action = #selector(stripTapped)
         sortButton.target = self
@@ -153,10 +169,14 @@ public final class TopBarView: NSView {
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
         modeControl.segmentStyle = .rounded
+        // 423 — 顺序有讲究：`controlSize` 会顺手把字体换成该系统号的默认字体，所以字体必须钉在它**之后**。
+        // `.small` 保留（它决定段内边距与分段高度，改了回去会变矮），只把字号与字重对齐到邻居
+        // `ToolButton` 的 11 pt medium —— 用户的原话是「网格单图相比其他文字更高」。
         modeControl.controlSize = .small
+        modeControl.font = .systemFont(ofSize: 11, weight: .medium)
         modeControl.selectedSegment = 0
 
-        for v: NSView in [openButton, modeControl, stripButton, sortButton, statusCluster] {
+        for v: NSView in [openButton, importButton, exportButton, modeControl, stripButton, sortButton, tasksButton, statusCluster] {
             addSubview(v)
         }
         addSeparator()
@@ -193,6 +213,8 @@ public final class TopBarView: NSView {
                        libraryName: String?, filmstrip: Bool) {
         modeControl.selectedSegment = mode == .grid ? 0 : 1
         stripButton.isActive = filmstrip
+        importButton.isEnabled = libraryName != nil
+        exportButton.isEnabled = libraryName != nil && selectionCount > 0
         // 047: the corner carries the **build** revision, so a glance answers "is this the build with
         // my merge?" without going back to a commit list. Since 2026-10-27 the four facts are one
         // block of one type (`TopBarStatusCluster`), left to right:
@@ -220,6 +242,14 @@ public final class TopBarView: NSView {
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
     public var filmstripButtonView: ToolButton { stripButton }
 
+    /// 423 — 顶栏**七个**控件，按从左到右。统一性（11 pt medium / 28 pt 命中高 / 无系统边框）就是
+    /// 拿这一串量出来的：一个一个读 `font` 与 `frame.height`，不靠「看着一样」。
+    var chromeControlViews: (open: NSButton, importButton: NSButton, exportButton: NSButton,
+                             mode: NSSegmentedControl, strip: NSButton, sort: NSButton,
+                             tasks: BackgroundTaskButton) {
+        (openButton, importButton, exportButton, modeControl, stripButton, sortButton, tasksButton)
+    }
+
     public override func layout() {
         super.layout()
         let h = bounds.height
@@ -231,11 +261,15 @@ public final class TopBarView: NSView {
         }
 
         place(openButton, width: openButton.intrinsicContentSize.width)
+        x += 4
+        place(importButton, width: importButton.intrinsicContentSize.width)
+        x += 4
+        place(exportButton, width: exportButton.intrinsicContentSize.width)
         x += 10
         separators[0].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += 11
-        place(modeControl, width: 112)
+        place(modeControl, width: max(112,modeControl.intrinsicContentSize.width))
         x += 10
         separators[1].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
@@ -245,6 +279,11 @@ public final class TopBarView: NSView {
         // 分段控件↔胶片条用的是同一个数），顶栏里排在最后，所以不压住右上角的状态簇。
         x += 10
         place(sortButton, width: sortButton.intrinsicContentSize.width)
+        x += 10
+        // 423 — 宽度不再写死 86：字号/外观换成 `ToolButton` 同款之后，86 是否贴合内容取决于本地化文案。
+        // 取 `max(86, intrinsic)`：更宽的文案不被截断，更窄的文案也不会把状态簇往左挪（86 是原来的下界）。
+        // `controlsTrailingEdge` 就是它的右边缘，所以这条下界也是状态簇左移与否的判据。
+        place(tasksButton, width: max(86, tasksButton.intrinsicContentSize.width))
 
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
@@ -361,7 +400,7 @@ public final class WorkspaceRootView: NSView {
     private let canvasHost = NSView()
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
-    private let inspectorBackdrop = NSVisualEffectView()
+    private let inspectorBackdrop = StudioPanelView()
     /// 402 — 胶片条那一条的底板（与 `inspectorBackdrop` 同款材质）。
     ///
     /// 胶片条自己的 `view` 是一个 `drawsBackground = false` 的 `NSScrollView`，`collectionView` 的
@@ -433,9 +472,6 @@ public final class WorkspaceRootView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        inspectorBackdrop.material = .underWindowBackground
-        inspectorBackdrop.blendingMode = .behindWindow
-        inspectorBackdrop.state = .followsWindowActiveState
 
         // 402 — same material as the inspector's plate, for the same reasons (light/dark and inactive
         // windows follow the system, nothing is hard-coded, and `.behindWindow` samples the window
@@ -843,7 +879,7 @@ public final class WorkspaceRootView: NSView {
         coordinator.onError = { [weak self] _ in
             // The only throw here is "the folder is gone"; a whole-import failure is one word, not
             // a paragraph.
-            self?.importProgressBar.show("导入失败")
+            self?.importProgressBar.show(L10n.tr("01aaebc96af1"))
         }
         importProgressBar.onCancel = { [weak coordinator] in coordinator?.cancel() }
 
@@ -857,10 +893,11 @@ public final class WorkspaceRootView: NSView {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.message = "打开 .photonslibrary"
-        panel.prompt = "打开"
+        panel.message = L10n.tr("fd913946f0df")
+        panel.prompt = L10n.tr("c771248e511f")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
+            try FileAccessStore.shared.rememberSelection(url)
             try session.open(url)
             window?.title = "Photons — \(url.deletingPathExtension().lastPathComponent)"
         } catch {

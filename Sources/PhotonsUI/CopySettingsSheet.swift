@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCore
 
@@ -80,8 +81,8 @@ final class CopySettingsAccessoryView: NSView {
 
         var title: String {
             switch self {
-            case .copy: return "选择要复制的设置"
-            case .paste: return "选择要粘贴的设置"
+            case .copy: return L10n.tr("c1a4158ec2b5")
+            case .paste: return L10n.tr("9cb5bfcecb9e")
             }
         }
 
@@ -89,8 +90,8 @@ final class CopySettingsAccessoryView: NSView {
         /// that the checklist comes back next time.
         var confirmTitle: String {
             switch self {
-            case .copy: return "复制（记住本次选择）"
-            case .paste: return "粘贴"
+            case .copy: return L10n.tr("fe4a71e4bf42")
+            case .paste: return L10n.tr("335179267471")
             }
         }
 
@@ -98,9 +99,9 @@ final class CopySettingsAccessoryView: NSView {
             switch self {
             case .copy:
                 // 2026-10-30（用户）：这行说明太长，改成一句结论。
-                return "不包含默认值"
+                return L10n.tr("e27f2e88b080")
             case .paste:
-                return "勾选要粘贴的卡片或单个参数。目标照片里没被点名的卡片一个字段都不会动。"
+                return L10n.tr("0a1e52b0c3f0")
             }
         }
     }
@@ -354,8 +355,8 @@ final class CopySettingsAccessoryView: NSView {
         // shape, and it never touches `selection`.
         triangle.state = collapsedCards.contains(section) ? .off : .on
         triangle.toolTip = collapsedCards.contains(section)
-            ? "展开「\(section.title)」的参数"
-            : "收起「\(section.title)」的参数"
+            ? L10n.tr("2dfe2465b7f6" , String(describing: (section.title)))
+            : L10n.tr("df35f91c7ce9" , String(describing: (section.title)))
         return triangle
     }
 
@@ -373,8 +374,8 @@ final class CopySettingsAccessoryView: NSView {
         box.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let rows = child.panelRows
         box.toolTip = rows.count > 1
-            ? "只复制这一组：\(rows.map(\.title).joined(separator: " / "))（\(child.section.title) 卡）"
-            : "只复制这一个参数（\(child.section.title) 卡）"
+            ? L10n.tr("efb4d7b551f3" , String(describing: (rows.map(\.title).joined(separator: " / "))), String(describing: (child.section.title)))
+            : L10n.tr("540016b41bc2" , String(describing: (child.section.title)))
         childCheckboxes[child] = box
 
         // The indent is measured from the card's **checkbox**, which itself starts right of the
@@ -399,9 +400,9 @@ final class CopySettingsAccessoryView: NSView {
 
     private func presetPopUpControl() -> NSPopUpButton {
         presetPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-        presetPopUp.addItem(withTitle: "组合：自定义")
+        presetPopUp.addItem(withTitle: L10n.tr("4a9bedceb01f"))
         for preset in CopySettingsSelection.Preset.allCases {
-            presetPopUp.addItem(withTitle: "组合：\(preset.title)")
+            presetPopUp.addItem(withTitle: L10n.tr("127e42e99e1d" , String(describing: (preset.title))))
         }
         presetPopUp.target = self
         presetPopUp.action = #selector(presetChanged(_:))
@@ -409,19 +410,19 @@ final class CopySettingsAccessoryView: NSView {
     }
 
     private func selectAllControl() -> NSButton {
-        selectAllButton = NSButton(title: "全选", target: self, action: #selector(chooseAll(_:)))
+        selectAllButton = NSButton(title: L10n.tr("3a5040b68abf"), target: self, action: #selector(chooseAll(_:)))
         selectAllButton.bezelStyle = .rounded
         return selectAllButton
     }
 
     private func selectNoneControl() -> NSButton {
-        selectNoneButton = NSButton(title: "全不选", target: self, action: #selector(chooseNone(_:)))
+        selectNoneButton = NSButton(title: L10n.tr("ab9084a640fb"), target: self, action: #selector(chooseNone(_:)))
         selectNoneButton.bezelStyle = .rounded
         return selectNoneButton
     }
 
     private func expandAllControl() -> NSButton {
-        expandAllButton = NSButton(title: "展开全部", target: self,
+        expandAllButton = NSButton(title: L10n.tr("695704a261cb"), target: self,
                                    action: #selector(expandAll(_:)))
         expandAllButton.bezelStyle = .rounded
         expandAllButton.controlSize = .small
@@ -429,7 +430,7 @@ final class CopySettingsAccessoryView: NSView {
     }
 
     private func collapseAllControl() -> NSButton {
-        collapseAllButton = NSButton(title: "收起全部", target: self,
+        collapseAllButton = NSButton(title: L10n.tr("0321ddbc1fe9"), target: self,
                                      action: #selector(collapseAll(_:)))
         collapseAllButton.bezelStyle = .rounded
         collapseAllButton.controlSize = .small
@@ -442,13 +443,13 @@ final class CopySettingsAccessoryView: NSView {
         confirmButton.bezelStyle = .rounded
         confirmButton.keyEquivalent = "\r"
 
-        cancelButton = NSButton(title: "取消", target: self, action: #selector(cancelPressed(_:)))
+        cancelButton = NSButton(title: L10n.tr("2cd0f3be8738"), target: self, action: #selector(cancelPressed(_:)))
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
 
         var views: [NSView] = [NSView()]
         if purpose == .copy {
-            let save = NSButton(title: "保存为预设…", target: self,
+            let save = NSButton(title: L10n.tr("86e9ed365cd4"), target: self,
                                 action: #selector(savePresetPressed(_:)))
             save.bezelStyle = .rounded
             savePresetButton = save
@@ -574,8 +575,8 @@ final class CopySettingsAccessoryView: NSView {
         for (section, triangle) in disclosureButtons {
             triangle.state = collapsedCards.contains(section) ? .off : .on
             triangle.toolTip = collapsedCards.contains(section)
-                ? "展开「\(section.title)」的参数"
-                : "收起「\(section.title)」的参数"
+                ? L10n.tr("2dfe2465b7f6" , String(describing: (section.title)))
+                : L10n.tr("df35f91c7ce9" , String(describing: (section.title)))
         }
         if let preset = selection.matchingPreset,
            let index = Self.popUpPresets.firstIndex(where: { $0 == preset }) {

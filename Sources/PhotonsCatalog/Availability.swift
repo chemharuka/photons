@@ -1,4 +1,6 @@
+import PhotonsLocalization
 import Foundation
+import PhotonsFileAccess
 import GRDB
 
 // The library stores *references*. Once a file is moved or renamed outside Photons, the row points
@@ -20,7 +22,7 @@ import GRDB
 //  2. **Offline roots are skipped, not marked.** "The drive is unplugged" and "the file moved" are
 //     different sentences; only the second one is actionable, and marking a whole unplugged volume
 //     missing would be a lie the user cannot clear without plugging it back in.
-//  3. **Relinking is identity-checked.** `content_hash` is the identity (v1's `UNIQUE`), so a
+//  3. **Relinking is identity-checked.** `content_hash` identifies the original bytes, so a
 //     candidate file whose hash differs is not "the moved file" — it is a different photo that
 //     happens to share a name. The caller gets a typed error, not a silent overwrite.
 //  4. **Deletion is one transaction, and the cache is cleaned after it.** Rows and history land
@@ -81,13 +83,13 @@ public enum AvailabilityError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .contentMismatch(let id, let expected, let found):
-            return "文件内容与库中记录不一致（\(id)）：期望 \(expected.prefix(12))…，实际 \(found.prefix(12))…"
+            return L10n.tr("e17c2ae071b3" , String(describing: (id)), String(describing: (expected.prefix(12))), String(describing: (found.prefix(12))))
         case .notRegularFile(let url):
-            return "不是一个文件：\(url.path)"
+            return L10n.tr("de03f6d02cc4" , String(describing: (url.path)))
         case .assetNotFound(let id):
-            return "库中没有这个条目：\(id)"
+            return L10n.tr("27e785b57bd2" , String(describing: (id)))
         case .relinkConflict(let path):
-            return "已有另一个条目指向 \(path)"
+            return L10n.tr("291122de4189" , String(describing: (path)))
         }
     }
 }
@@ -264,7 +266,7 @@ extension Catalog {
         let url = folder.standardizedFileURL
         if let existing = try roots().first(where: { $0.pathHint == url.path }) { return existing }
         let volumeUUID = (try? url.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) ?? nil
-        let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        let bookmark = try FileAccessStore.bookmark(for: url)
         let root = SourceRoot(volumeUuid: volumeUUID,
                               bookmark: bookmark,
                               displayName: url.lastPathComponent,
@@ -272,6 +274,7 @@ extension Catalog {
                               managementMode: .reference,
                               status: .online)
         try dbQueue.write { db in try root.insert(db) }
+        retainSourceAccess(root)
         return root
     }
 
@@ -321,7 +324,7 @@ extension Catalog {
         }
 
         if let thumbnails {
-            for row in doomed {
+            for row in doomed where (try? asset(contentHash: row.contentHash)) == nil {
                 report.thumbnailFiles += thumbnails.removeAll(contentHash: row.contentHash,
                                                              developJSONs: [row.developJSON, "{}"])
             }
@@ -388,7 +391,7 @@ extension Catalog {
             try db.execute(sql: "DELETE FROM source_roots WHERE id = ?", arguments: [id])
         }
         if let thumbnails {
-            for row in doomed {
+            for row in doomed where (try? asset(contentHash: row.contentHash)) == nil {
                 report.thumbnailFiles += thumbnails.removeAll(contentHash: row.contentHash,
                                                              developJSONs: [row.developJSON, "{}"])
             }

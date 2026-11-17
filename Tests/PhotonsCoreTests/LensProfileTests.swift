@@ -211,7 +211,9 @@ final class LensProfileTests: XCTestCase {
                                         lens: ours.recipeComponent).digest
         XCTAssertNotEqual(appleDigest, oursDigest,
                           "switching from Apple's correction to ours must miss the old buffer")
-        XCTAssertEqual(DecodeRecipe.current, "v3-lens")
+        XCTAssertEqual(DecodeRecipe.current, "v4-auto409",
+                       "409: a nil-document's version is no longer fixed at Apple's default, so every "
+                       + "nil-document buffer must miss once (the token names the decode recipe, not one consumer)")
     }
 
     /// The S0 Metal entry point gets a real warp (not the identity), and the frame is no longer a

@@ -1,4 +1,6 @@
+import PhotonsLocalization
 import AppKit
+import PhotonsFileAccess
 import PhotonsCatalog
 
 /// 文件 ▸ 导入照片… — panel, then a *background* import, then reload + select.
@@ -66,9 +68,11 @@ public final class ImportCoordinator {
     public func start(_ request: ImportRequest, completion: ((ImportSummary) -> Void)? = nil) {
         guard !isImporting else { return }
         guard let service = session.makeImportService() else {
-            lastError = "未打开库"
+            lastError = L10n.tr("a306ecabb07b")
             return
         }
+        do { for url in request.sources { try FileAccessStore.shared.rememberSelection(url) } }
+        catch { lastError = L10n.tr("29b1acd9fb6e" , String(describing: (error.localizedDescription))); onError?(lastError!); return }
         isImporting = true
         runCount += 1
         lastError = nil
@@ -127,6 +131,7 @@ public final class ImportCoordinator {
         // Reload first, then select: `selectImported` does both, and an empty `addedAssetIDs`
         // (duplicates only, or cancelled before the first file) leaves the selection untouched.
         session.selectImported(summary.addedAssetIDs)
+        session.prepareImportedPreviews(summary.addedAssetIDs)
 
         if let message = lastError { onError?(message) }
         completion?(summary)

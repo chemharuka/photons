@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 
@@ -17,7 +18,7 @@ final class EffectsRowProbe: NSView {
 
     /// The id the card itself is probed under (`effectsCard`'s own `.background`): a row probe measures
     /// a row, and the layout test also needs the card's frame to say 「行在卡里」.
-    static let cardID = "效果卡"
+    static let cardID = L10n.tr("35ce8e8e8945")
 
     private(set) var rowID: String = ""
 

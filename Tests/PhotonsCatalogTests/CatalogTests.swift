@@ -123,7 +123,16 @@ final class CatalogTests: XCTestCase {
 
     // MARK: - identity
 
-    func testContentHashIsUnique() throws {
+    func testContentHashIsNotUniqueButIdentityStaysTheFile() throws {
+        // v7（随 pr/1 合入，用户裁定「沙盒合并」一并进来的独立导入）**故意去掉**了
+        // `UNIQUE(content_hash)`：同一份原始字节可以有意导入两次，各自有自己的编辑与评分。
+        // 所以这条测试不能再断言「插入重复 content_hash 会抛」——那是 v6 的契约。
+        //
+        // 等价改写（判据不收窄，只跟着 schema 走）：v7 仍然要求
+        //   1. `content_hash` 表示「同一份原始文件」，所以两行必须共享同一个哈希；
+        //   2. 有索引支撑按哈希查找（去重判断靠它，不能退化成全表扫描）；
+        //   3. 身份仍然是整份文件 —— 行是资产，不是字节。
+        // 这三点正是原来那条断言真正想守住的东西。
         let catalog = try newLibrary()
         let dir = try sourceDir()
         let a = try makeJPEG(at: dir.appendingPathComponent("a.jpg"), rating: 1, label: "Red", keywords: ["x"], seed: 1)
@@ -131,10 +140,24 @@ final class CatalogTests: XCTestCase {
         let asset = try XCTUnwrap(try catalog.assets(AssetFilter()).first)
 
         let hash = try FileHasher.sha256(of: a)
+        XCTAssertEqual(asset.contentHash, hash, "content_hash 是整份文件的 sha256")
+
         let duplicate = Asset(sourceRootId: asset.sourceRootId, relPath: "other.jpg", filename: "other.jpg",
                               ext: "jpg", kind: .jpeg, size: 1, mtime: 0, contentHash: hash)
-        XCTAssertThrowsError(try catalog.dbQueue.write { db in try duplicate.insert(db) },
-                            "content_hash must be unique — identity is the whole file")
+        // v7: 允许（独立副本），且两行共享同一 content_hash。
+        try catalog.dbQueue.write { db in try duplicate.insert(db) }
+        let sameHash = try catalog.dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM assets WHERE content_hash = ?", arguments: [hash])
+        }
+        XCTAssertEqual(sameHash, 2, "v7 允许同一原始字节有两行资产，且它们共用一个 content_hash")
+        // 去重仍然是要按哈希查的，索引必须在。
+        let index = try catalog.dbQueue.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'assets' AND sql LIKE '%content_hash%'
+                """)
+        }
+        XCTAssertNotNil(index, "content_hash 必须有索引：导入去重按它查")
     }
 
     func testQuickHashIsNotIdentity() throws {
