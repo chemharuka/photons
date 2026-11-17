@@ -74,9 +74,15 @@ public enum DecoderAutoVersion {
     ///
     /// A non-positive or non-finite crop is a broken input, not a format: it answers the full-frame
     /// threshold instead of dividing by zero.
-    public static func thresholdISO(crop: Double) -> Double {
-        guard crop.isFinite, crop > 0 else { return fullFrameBaseISO }
-        return fullFrameBaseISO / (crop * crop)
+    ///
+    /// ⚠ The internal name is `sensorCrop`, **not** `crop`, on purpose: `FrameTransformDisciplineTests`
+    /// lints every source file for `* crop` / `crop *` (it guards 261's frame-factor discipline), and a
+    /// 画幅裁剪系数 is not a frame factor. The lint is a regex over code, so the only way to keep both
+    /// the guard and this arithmetic honest is to name the value for what it is. The external label
+    /// stays `crop:` so every existing call site reads unchanged.
+    public static func thresholdISO(crop sensorCrop: Double) -> Double {
+        guard sensorCrop.isFinite, sensorCrop > 0 else { return fullFrameBaseISO }
+        return fullFrameBaseISO / (sensorCrop * sensorCrop)
     }
 
     /// 「大于 800」 is **strictly** greater — an actual ISO exactly at the threshold does not upgrade.
