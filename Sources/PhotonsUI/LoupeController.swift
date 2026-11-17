@@ -4081,7 +4081,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if isMaskHandleArmed(atViewPoint: point) { return .maskHandle }
         if isShapeDragArmed { return .maskShape }
         if maskCanvas.isArmed { return .paint }
-        if clickCount >= 2 { return .doubleClick }
+        // 415 — in one click chain only the **even** press is a double-click.
+        //
+        // The zoom is a **stateless toggle** (`handleDoubleClick`: actual ⇄ fit), so `>= 2` made
+        // every press after the second act: three clicks zoomed in then back out, four zoomed out
+        // then in — the 「放大动画后立刻跳回适应」 the user reported. The owner's rule is
+        // 「连续三次视为误触，按双击处理；2 次 + 2 次 = 放大又退回适应」, which is exactly the
+        // parity law: 2 fires, 3 is ignored, 4 fires again.
+        //
+        // No counter and no interval constant: AppKit's `clickCount` already climbs monotonically
+        // inside one chain and restarts at 1 once the chain breaks (`NSEvent.doubleClickInterval`
+        // or a moved pointer), so a pause followed by another double-click needs no state here.
+        //
+        // The two other `>= 2` rules (the guide-line delete above, `LoupeCanvasGesture.crop`) are
+        // **not** parity rules on purpose: each action changes its own precondition, so pressing a
+        // third time cannot repeat it.
+        if clickCount >= 2, clickCount.isMultiple(of: 2) { return .doubleClick }
         return .pan
     }
 
