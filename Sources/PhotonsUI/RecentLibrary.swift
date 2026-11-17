@@ -17,6 +17,7 @@ public enum RecentLibrary {
     }
 
     public static func remember(_ url: URL, in store: Store = UserDefaults.standard) {
+        LibraryHistory.remember(url,in:store)
         store.set(url.standardizedFileURL.path, forKey: defaultsKey)
     }
 

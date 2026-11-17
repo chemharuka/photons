@@ -17,6 +17,9 @@ public enum AssetKind: String, Codable, Sendable {
     case raw
     case jpeg
     case heic
+    case tiff
+    case png
+    case avif
 
     public static func detect(_ ext: String) -> AssetKind? {
         switch ext.lowercased() {
@@ -27,6 +30,12 @@ public enum AssetKind: String, Codable, Sendable {
             return .jpeg
         case "heic", "heif":
             return .heic
+        case "tif", "tiff":
+            return .tiff
+        case "png":
+            return .png
+        case "avif":
+            return .avif
         default:
             return nil
         }

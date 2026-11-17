@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import Foundation
 import PhotonsCore
@@ -100,13 +101,13 @@ public struct DisplayHeadroom: Equatable, Sendable {
             let why: String
             switch source {
             case .sdr: why = ""
-            case .layerRefusedEDR: why = "（8-bit 图层）"
-            case .unknown: why = "（无窗口）"
+            case .layerRefusedEDR: why = L10n.tr("fa8d0c1aaee6")
+            case .unknown: why = L10n.tr("71fcd682fb6a")
             case .extendedRange: why = ""
             }
-            return "SDR 显示器 · headroom \(number)×\(why)"
+            return L10n.tr("8c502b50fbd5" , String(describing: (number)), String(describing: (why)))
         }
-        return "HDR 显示器 · headroom \(number)×"
+        return L10n.tr("eb3108333cd4" , String(describing: (number)))
     }
 
     /// Everything a frame carries about the display, one line, for logs and `--ui-smoke`.
@@ -122,7 +123,7 @@ public struct DisplayHeadroom: Equatable, Sendable {
     /// The chip the card paints next to the ceiling tick: `屏 1.70×`. One formatter, because the
     /// number on screen and the number in the log/report have to be the same string.
     public static func ceilingLabel(_ headroom: Double) -> String {
-        String(format: "屏 %.2f×", headroom)
+        String(format: L10n.tr("8a7704ad6bc8"), headroom)
     }
 }
 

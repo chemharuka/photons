@@ -1,5 +1,5 @@
 {
-  "originHash" : "54be7cbd50375f53205fbd589294fe7c8909c0c227028e807c1011f103658169",
+  "originHash" : "a90f0f295f3e46f0440b0a041907d9b54bba74c4f0f54c5c405c092318d5366d",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
         "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "nonlocal-matchfilter-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/chemharuka/nonlocal-matchfilter-swift.git",
+      "state" : {
+        "revision" : "52a6e4f4edd48f6b9b34882327e3a838a0f69d54",
+        "version" : "1.0.0"
       }
     }
   ],

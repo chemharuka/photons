@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import simd
 
@@ -129,7 +130,7 @@ public enum HSLBands {
     /// wording* — a 黑白混合 row reads 「黑白混合[红]」 (S3.4), which is `EditHistory.parameterName`'s
     /// job, and that table lives in this module. Two tables would let the card say 红 while the
     /// timeline said band 0.
-    public static let bandNames: [String] = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "品红"]
+    public static let bandNames: [String] = [L10n.tr("0eb7ee7e38ef"), L10n.tr("1ad702b18a4d"), L10n.tr("c732e4d7e380"), L10n.tr("84b34ffba5aa"), L10n.tr("dc06463a46eb"), L10n.tr("52f354ecfccb"), L10n.tr("3d0158cb7cfd"), L10n.tr("e2d7f32e6c98")]
 
     /// The eight band centres, in **OKLCh hue degrees**, as `Float` — the type the kernel is handed, so
     /// the CPU reference and the GPU see the same numbers bit for bit.

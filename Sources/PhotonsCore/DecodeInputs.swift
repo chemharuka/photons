@@ -100,12 +100,24 @@ public struct DecodeInputs: Sendable, Hashable {
     /// thing that ever moved the picture was an unrelated decode input (a detail slider, which adds
     /// `dt=…`), which is exactly the workaround the user reported. `key` had `ver=` all along; the
     /// identity did not.
+    ///
+    /// 409: the **automatic** rule (`DecoderAutoVersion`) does **not** enter this component. The key
+    /// spells a document that asked for nothing as `ver=auto`, exactly as before, because the rule is a
+    /// deterministic function of one file (ISO, crop, the file's offered spellings, and an explicit
+    /// request that is by definition `nil` here): the same file always resolves to the same version, so
+    /// `ver=auto` can never name two different buffers. The rule's **generation** — the thing that does
+    /// have to invalidate old buffers when a constant moves — is carried by `DecodeRecipe.current`.
     public var versionComponent: String? { decoderVersion.map { "ver=\($0)" } }
+
+    /// What `key` spells for the version: `9.dng`, or `auto` when the document asks for nothing.
+    public var versionSpelling: String {
+        decoderVersion ?? "auto"
+    }
 
     /// A stable, order-independent string for this development. Only decode inputs may enter it.
     public var key: String {
         var parts = ["recipe=\(recipe)",
-                     "ver=\(decoderVersion ?? "auto")",
+                     "ver=\(versionSpelling)",
                      String(format: "scale=%.4f", scale)]
         if let wb = whiteBalanceComponent { parts.append(wb) }
         if let dt = detailComponent { parts.append(dt) }

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import GRDB
 import PhotonsCore
@@ -79,7 +80,7 @@ public struct SettingsPasteReport: Sendable, Equatable {
 
     /// 「曝光 +2、对比 +10」 — the one line a test failure and a status bar can both read.
     public var summary: String {
-        changed ? fields.map(\.summary).joined(separator: "、") : "无改动"
+        changed ? fields.map(\.summary).joined(separator: "、") : L10n.tr("d7df93601eab")
     }
 }
 
@@ -341,7 +342,7 @@ extension Catalog {
     public func pasteSettings(_ snapshot: EditSnapshot,
                               intoAsset id: String,
                               sections: Set<EditSnapshotSection>,
-                              label: String = "粘贴设置",
+                              label: String = L10n.tr("d24cf4a6b02b"),
                               destinationAspect: Double? = nil) throws -> SettingsPasteReport {
         let payload = snapshot.filtered(to: sections)
         let current = try develop(forAsset: id)
@@ -375,7 +376,7 @@ extension Catalog {
     public func pasteSettings(_ snapshot: EditSnapshot,
                               intoAssets ids: [String],
                               sections: Set<EditSnapshotSection>,
-                              label: String = "粘贴设置",
+                              label: String = L10n.tr("d24cf4a6b02b"),
                               destinationAspect: (String) -> Double? = { _ in nil }) throws -> [SettingsPasteReport] {
         try ids.map {
             try pasteSettings(snapshot, intoAsset: $0, sections: sections, label: label,

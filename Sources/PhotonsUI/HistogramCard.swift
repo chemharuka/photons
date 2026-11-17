@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -309,7 +310,7 @@ public final class HistogramCardView: NSView {
     /// the 11 pt the highlight-warning dot occupies (2 pt gap + 5 pt dot). The *percentage* starts here,
     /// on every column, so a dash and a `100%` sit at the same x.
     public static let clipLabelSlot: CGFloat = {
-        let widest = ["过白", "削顶", "削底"]
+        let widest = [L10n.tr("4a992de52aca"), L10n.tr("c08de948f396"), L10n.tr("63b98ddec268")]
             .map { ($0 as NSString).size(withAttributes: [.font: clipLabelFont]).width }
             .max() ?? 0
         return widest + 3 + 11
@@ -415,7 +416,7 @@ public final class HistogramCardView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityIdentifier("histogram-card")
-        setAccessibilityLabel("直方图")
+        setAccessibilityLabel(L10n.tr("50c884e953ed"))
         setAccessibilityRole(.group)
         installAppHeadroomObservers()
         updateAccessibilityHelp()
@@ -431,7 +432,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B 三组曲线，重叠处按光叠加（R+G 为黄，三路齐为白）；亮度仍测量并用于过白/削顶/削底读数，但不再画线。横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（画面本身的光，不是屏幕渲染后的值：SDR 区为 0–255 码值，超白通道为 +x.x 档并画成削顶品红），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。")
+        setAccessibilityHelp(L10n.tr("6270304d33b8", String(bins), String(tail)))
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -851,54 +852,43 @@ public final class HistogramCardView: NSView {
         // **Three series, added like light** (403). The owner's rule: 「直方图取消白色线，只绘制 RGB，RGB
         // 重叠部分的颜色按光叠加展示——即都有的话白色，R+G 就是黄色」. So the luma outline is gone from the
         // *paint* (its bins, its clipping numbers and the pointer readout are all untouched) and the three
-        // colour curves are filled with `plusLighter`, each at full strength: red + green = yellow, and all
-        // three = white. Coefficients below 1.0 would add up to grey instead, which is not what was asked.
+        // colour curves are painted additively: red + green = yellow, all three = white.
         //
-        // The **transparency layer is load-bearing, not an optimisation**: `plusLighter` on the card would
-        // mix the curves with the bed, so the sum would depend on the appearance (and a single channel would
-        // wash out on a light bed). Inside a layer the sums start from transparent black — the overlap
-        // colour is a function of the data only — and the finished layer is composited over the bed once.
-        // Nothing opaque goes in the layer: the bed, the grid and the ticks are painted *before* it and the
-        // axis chrome *after* it.
+        // 406c — **不要 `plusLighter`**。在 sRGB 里算出每列该是什么颜色，再普通填充画出去。
+        // `plusLighter` 在**当前（未知）目标空间**的编码值上相加：sRGB 原色在 P3 上下文里是
+        // (0.9176, 0.2003, 0.1386)，三个相加得 (1.3759, 1.1856, 1.3964)，超过 1。8-bit 表面会
+        // clamp 成白（所以 403 的测量都对、也都没看见），浮点/扩展表面保留它，归一后是淡品红 ——
+        // 这就是 owner 报的「淡粉色」，也是「截图回退 SDR 就正常」的原因。
         //
-        // Both segments are still **one** path per series, so the curve crosses the SDR/tail boundary
-        // without a seam.
+        // 所以「目标空间是哪个」这个变量被整个拿掉了（406b 的教训：真实窗口里 `cg.colorSpace`
+        // 是 nil，问它等于问不到）。sRGB 的三个原色是**轴对齐**的，R+G 在 sRGB 里就是 `(1,1,0)`，
+        // B 分量天生是 0；三路齐是 `(1,1,1)`；单路是 `(1,0,0)`。**没有任何分量能超过 1**，因为它是
+        // 构造出来的，不是累加出来的。之后 `NSColor(srgbRed:green:blue:)` 交给 CG 转进目标空间 ——
+        // 任何包含 sRGB 色域的空间（P3 / Rec.2020 / 设备宽色域）里，sRGB 颜色的坐标都 ≤ 1
+        // （色域包含 ⟹ 坐标在单位立方体内），所以不需要知道目标空间、不依赖表面是否保留 >1、
+        // 数学上也构造不出可 clamp 的溢出。
+        //
+        // 一列最多三段（§1.2）：`0…h_min` 三路齐（白）、`h_min…h_mid` 两路（黄/品红/青）、
+        // `h_mid…h_max` 只剩一路（红/绿/蓝）。三段全为 0 的列不画，所以空白还是空白。
+        // 高度按相邻 bin **线性插值**（`points` 的折线就是它），不取整 bin 的值，否则会阶梯化。
+        // 两端仍是同一条折线跨过 SDR/尾段边界，所以交界处没有缝。
         lastDrawnSeries = 0
         lastDrawnBins = 0
         lastDrawnHDRBins = 0
         if let histogram {
             let bins = histogram.binCount
-            let series: [(channel: Histogram.Channel, color: NSColor)] = [
-                (.red, NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)),
-                (.green, NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1)),
-                (.blue, NSColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)),
-            ]
-            if let context = NSGraphicsContext.current {
-                let cg = context.cgContext
-                cg.saveGState()
-                cg.beginTransparencyLayer(auxiliaryInfo: nil)
-                context.compositingOperation = .plusLighter
-                for (channel, color) in series {
-                    let c = histogram[channel]
-                    let points = HistogramCardFormat.points(c, binCount: bins, axis: axis,
-                                                            peak: HistogramCardFormat.scalePeak(c))
-                    guard points.count > 2 else { continue }
-                    let path = NSBezierPath()
-                    path.move(to: points[0])
-                    for p in points.dropFirst() { path.line(to: p) }
-                    path.close()
-                    color.setFill()
-                    path.fill()
-                    lastDrawnSeries += 1
-                    lastDrawnBins = max(lastDrawnBins, points.count - 2)
-                    lastDrawnHDRBins = max(lastDrawnHDRBins, c.hdrBins.count)
-                }
-                // Back to sourceOver *before* the layer is flattened: the layer as a whole goes onto the
-                // bed normally, so only the curves inside it were added to each other.
-                context.compositingOperation = .sourceOver
-                cg.endTransparencyLayer()
-                cg.restoreGState()
+            var envelopes: [[CGPoint]?] = [nil, nil, nil]   // R, G, B
+            for (index, channel) in [Histogram.Channel.red, .green, .blue].enumerated() {
+                let c = histogram[channel]
+                let points = HistogramCardFormat.points(c, binCount: bins, axis: axis,
+                                                        peak: HistogramCardFormat.scalePeak(c))
+                guard points.count > 2 else { continue }
+                envelopes[index] = points
+                lastDrawnSeries += 1
+                lastDrawnBins = max(lastDrawnBins, points.count - 2)
+                lastDrawnHDRBins = max(lastDrawnHDRBins, c.hdrBins.count)
             }
+            drawAdditiveCurves(envelopes, in: axis)
             // The 0.999 / 0.001 thresholds as tick marks: they are what the numbers below mean.
             drawThresholdTicks(in: axis)
             // The stop grid's numbers and the ceiling tick go on top of the curves — they are the
@@ -907,7 +897,7 @@ public final class HistogramCardView: NSView {
             drawCeilingTick(axis)
         } else {
             drawStopLabels(axis)
-            drawText("还没有可测的帧", at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
+            drawText(L10n.tr("e419b0ff536a"), at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
                      font: .systemFont(ofSize: 9), color: Self.plotLabelColor)
         }
 
@@ -934,6 +924,188 @@ public final class HistogramCardView: NSView {
     private func rowSlot(below plot: NSRect, in bounds: NSRect) -> NSRect {
         NSRect(x: bounds.minX, y: plot.maxY + Self.clipRowGap + Self.clipRowHeight,
                width: bounds.width, height: Self.readoutRowHeight)
+    }
+
+    // MARK: - 406c: the additive paint, computed in sRGB
+
+    /// Paints the three envelopes as additive columns: one opaque `sourceOver` fill per band, no
+    /// transparency layer, no `plusLighter` (406c §1.2).
+    ///
+    /// The strips are **one device pixel wide** (0.5 pt at 2×, 1 pt at 1×), so neighbouring strips
+    /// share an edge instead of overlapping at fractional coverage — a seam would otherwise mix each
+    /// strip with the bed twice and dim the curve. A 400 pt plot is 800 strips of at most three
+    /// opaque rects each.
+    ///
+    /// The rects are collected **per colour** and each colour is filled with one path, so the seven
+    /// masks cost at most seven `fill()` calls for the whole plot instead of up to 2400. The rects of
+    /// one mask never overlap, so a path fill and one fill per rect give the same picture. (Measured
+    /// on an 800 × 186 px P3 surface: 0.7 ms for the card without curves, 3.8 ms with them at the
+    /// inspector's real 244 pt width.)
+    private func drawAdditiveCurves(_ envelopes: [[CGPoint]?], in axis: HistogramAxis) {
+        let plot = axis.plot
+        guard plot.width > 1, plot.height > 1 else { return }
+        let deviceScale = min(max(NSGraphicsContext.current?.cgContext.ctm.a ?? 1, 1), 4)
+        let stripWidth = 1 / deviceScale
+        let columns = Int((plot.width / stripWidth).rounded(.up))
+        var cursors = [Int](repeating: 0, count: envelopes.count)
+        var byMask = [[NSRect]](repeating: [], count: Self.additiveColors.count)
+        for column in 0..<columns {
+            let x = plot.minX + CGFloat(column) * stripWidth
+            let width = min(stripWidth, plot.maxX - x)
+            guard width > 0 else { break }
+            // 413 — the strip claims the **highest point of the polyline it covers**, not the point at
+            // its centre. At 2× the SDR half is 122 pt for 256 bins, i.e. 1.05 bins per device pixel,
+            // so a one-bin spike is about one pixel wide: centre sampling hits its apex or lands on a
+            // slope depending on where the histogram happens to sit, and the same spike then reads
+            // anywhere between 51 % and 100 % of full after an EV change (the owner's report). The
+            // covered interval also keeps a sloped edge from being biased by half a pixel.
+            for band in additiveColumn(fromX: x, width: width, envelopes: envelopes,
+                                       cursors: &cursors, in: axis) {
+                // The band's rect starts at the strip's own left edge, not at the sample.
+                var rect = band.rect
+                rect.origin.x = x
+                rect.size.width = width
+                // Flat stretches — which is most of a histogram — repeat the identical band column
+                // after column, so extend the previous rect instead of appending another one. This
+                // is what keeps the path small: a plateau of 200 strips becomes one rect, not 200.
+                if var last = byMask[band.mask].last, last.maxX == rect.minX,
+                   last.minY == rect.minY, last.height == rect.height {
+                    last.size.width += width
+                    byMask[band.mask][byMask[band.mask].count - 1] = last
+                } else {
+                    byMask[band.mask].append(rect)
+                }
+            }
+        }
+        // The bed is a rounded rect, so the ink is clipped to it exactly as the old polygon fill was.
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: plot, xRadius: 4, yRadius: 4).addClip()
+        for (mask, rects) in byMask.enumerated() where !rects.isEmpty {
+            let path = NSBezierPath()
+            for rect in rects { path.appendRect(rect) }
+            Self.additiveColors[mask].setFill()
+            path.fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// One column of the additive plot, decomposed into **at most three** opaque bands.
+    ///
+    /// Each envelope is a height measured from the plot's bottom (`axis.plot.maxY`), so a column asks
+    /// "which channels reach at least this far up?" From the bottom the bands are 3 channels /
+    /// 2 channels / 1 channel, and a band's colour is exactly the mask of the channels still present:
+    /// R+G = `(1,1,0)`, all three = `(1,1,1)`, R alone = `(1,0,0)`. **No component can exceed 1,
+    /// because the mask *is* the colour** — that construction is what replaces `plusLighter` (406c §1.1).
+    ///
+    /// `cursors` are per-envelope positions that only ever advance: the caller walks `x` left to right
+    /// and a polyline's vertices are sorted by x, so each column costs one look-ahead.
+    ///
+    /// 413: the column claims its **whole strip** (`[x, x + width]`), not its centre point — see
+    /// `envelopeMax`. The two segments are one polyline here, so the SDR half and the tail half both
+    /// get the rule without a second code path.
+    private func additiveColumn(fromX x: CGFloat, width: CGFloat,
+                                envelopes: [[CGPoint]?], cursors: inout [Int],
+                                in axis: HistogramAxis) -> [(rect: NSRect, mask: Int)] {
+        let bottom = axis.plot.maxY
+        var present: [(channel: Int, top: CGFloat)] = []
+        present.reserveCapacity(envelopes.count)
+        for (channel, points) in envelopes.enumerated() {
+            guard let points else { continue }
+            let top = Self.envelopeMax(points, from: x, to: x + width, cursor: &cursors[channel])
+            // A channel that does not reach this column has no band; `top == bottom` is the same
+            // statement with a zero-height band, so both are "not present".
+            if top < bottom - 1e-9 { present.append((channel, top)) }
+        }
+        guard !present.isEmpty else { return [] }
+
+        // Shortest channel first — its top is the lowest edge, and it bounds the widest (bottom) band.
+        present.sort { $0.top > $1.top }
+        var mask = 0
+        for entry in present { mask |= 1 << entry.channel }
+        var bands: [(rect: NSRect, mask: Int)] = []
+        bands.reserveCapacity(present.count)
+        for (index, entry) in present.enumerated() {
+            let upper = index == 0 ? bottom : present[index - 1].top
+            let rect = NSRect(x: x, y: entry.top, width: width, height: upper - entry.top)
+            bands.append((rect, mask))
+            mask &= ~(1 << entry.channel)
+        }
+        return bands
+    }
+
+    /// The y of `segment`'s line at `x`, **linearly interpolated** between its two vertices.
+    ///
+    /// This is the pre-413 point sampler's arithmetic (it was `envelopeTop(points, atX:)`, one lookup
+    /// per column, and it still defines both of `envelopeMax`'s ends): taking a bin's own value
+    /// instead would step the curve (406c §1.2's warning), because the drawn silhouette has to stay
+    /// the same polyline the fill used to close. Split out so `envelopeMax` reuses the segment it has
+    /// already located instead of walking to it a second time.
+    private static func interpolated(_ points: [CGPoint], segment i: Int, atX x: CGFloat) -> CGFloat {
+        let a = points[i], b = points[i + 1]
+        let dx = b.x - a.x
+        guard dx > 0 else { return b.y }
+        let t = min(max((x - a.x) / dx, 0), 1)
+        return a.y + (b.y - a.y) * t
+    }
+
+    /// The polyline's **highest** y (smallest value, y is down) over the interval `[from, to]`.
+    ///
+    /// 413 — why not the value at the strip's centre: the plot is a down-sampling. At 2× the code half
+    /// is 122 pt for 256 bins, so one bin is ~1.05 device px and a one-bin spike is about one pixel
+    /// wide. A centre sample hits that apex or misses it depending on where the histogram happens to
+    /// sit, so after an EV change (a pan of less than one pixel) the same spike painted anywhere
+    /// between 51 % and 100 % of its height. The strip that covers the apex must claim it.
+    ///
+    /// Why the *vertices* and not just the two ends: a one-bin spike's apex is a vertex whose x can
+    /// lie strictly between `from` and `to`, and both endpoints' interpolations lie on the slopes, so
+    /// "the larger end" would still lose it (§3.3 ⑧c). The ends are kept too, because a plateau's
+    /// top is not a vertex inside every strip — with them the result is *identical* to the old point
+    /// sample wherever the polyline is flat.
+    ///
+    /// `cursor` stays monotone: it is the index of the segment that contains the strip's right edge,
+    /// which is where the next strip begins, and the only backward walk is the one from the previous
+    /// strip's edge to this one (one or two steps: a strip is ~1 px, a bin is ~0.95 px).
+    /// The whole interval costs **one** forward walk — the vertices inside it plus the two end
+    /// interpolations — not a second scan of the bins.
+    static func envelopeMax(_ points: [CGPoint], from: CGFloat, to: CGFloat,
+                            cursor: inout Int) -> CGFloat {
+        guard let first = points.first, let last = points.last else { return .nan }
+        // Outside the path the ends answer, exactly as the old point sample clamped them. (`to <=
+        // first.x` also covers the left end of a strip that starts before the plot is drawn.)
+        if to <= first.x { return first.y }
+        if from >= last.x { return last.y }
+
+        let lo = max(from, first.x)
+        let hi = min(to, last.x)
+
+        // The segment that contains `lo` (and therefore where the walk forward starts).
+        var i = min(max(cursor, 0), points.count - 2)
+        while i > 0 && points[i].x > lo { i -= 1 }
+        while i < points.count - 2 && points[i + 1].x < lo { i += 1 }
+
+        // ① the left end, on the same linear interpolation the point sample used, so a flat top is
+        //    bit-identical to the pre-413 value.
+        var best = interpolated(points, segment: i, atX: lo)
+        // ② every vertex up to `hi` — the apex of a one-bin spike is one of these and no endpoint
+        //    interpolation can see it (§3.3 ⑧c).
+        var k = i
+        while k < points.count - 1 && points[k + 1].x <= hi {
+            k += 1
+            best = min(best, points[k].y)
+        }
+        // ③ the right end.
+        best = min(best, k == points.count - 1 ? points[k].y : interpolated(points, segment: k, atX: hi))
+        cursor = k
+        return best
+    }
+
+    /// The seven additive results, indexed by channel mask (`1 = R`, `2 = G`, `4 = B`): the whole
+    /// colour of a band is `(R present, G present, B present)` and nothing else.
+    private static let additiveColors: [NSColor] = (0..<8).map { mask in
+        NSColor(srgbRed: mask & 1 == 0 ? 0 : 1,
+                green: mask & 2 == 0 ? 0 : 1,
+                blue: mask & 4 == 0 ? 0 : 1,
+                alpha: 1)
     }
 
     /// The two-segment surface: a flat SDR bed, a tinted tail, the quarter-tone guides inside the
@@ -1110,7 +1282,7 @@ public final class HistogramCardView: NSView {
         // three x's the `R`/`G`/`B` letters below sit on, so the two rows read as one table and the
         // numbers' widths cannot push anything sideways. Each percentage starts at
         // `columnStart + clipLabelSlot`, a fixed slot, so a `—` and a `100%` land on the same pixel.
-        let highLabel = drawText("过白", at: CGPoint(x: starts[0], y: y), font: labelFont,
+        let highLabel = drawText(L10n.tr("4a992de52aca"), at: CGPoint(x: starts[0], y: y), font: labelFont,
                                  color: .secondaryLabelColor)
         if showsHighlightWarning {
             NSColor.systemOrange.setFill()
@@ -1123,14 +1295,14 @@ public final class HistogramCardView: NSView {
         clipHighHitRect = NSRect(x: highLabel.minX, y: y - 2,
                                  width: highNumber.maxX - highLabel.minX, height: 14)
 
-        let ceilLabel = drawText("削顶", at: CGPoint(x: starts[1], y: y),
+        let ceilLabel = drawText(L10n.tr("c08de948f396"), at: CGPoint(x: starts[1], y: y),
                                  font: labelFont, color: .secondaryLabelColor)
         let ceilNumber = drawText(clipCeilingText,
                                   at: CGPoint(x: starts[1] + Self.clipLabelSlot, y: y),
                                   font: numberFont,
                                   color: clipCeilingText == "0.0%" ? .labelColor : .systemRed)
 
-        let lowLabel = drawText("削底", at: CGPoint(x: starts[2], y: y),
+        let lowLabel = drawText(L10n.tr("63b98ddec268"), at: CGPoint(x: starts[2], y: y),
                                 font: labelFont, color: .secondaryLabelColor)
         let lowNumber = drawText(clipLowText, at: CGPoint(x: starts[2] + Self.clipLabelSlot, y: y),
                                  font: numberFont, color: .labelColor)

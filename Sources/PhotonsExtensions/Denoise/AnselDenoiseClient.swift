@@ -16,6 +16,7 @@
 //
 
 import Foundation
+import PhotonsFileAccess
 
 // MARK: - Public model
 
@@ -180,6 +181,14 @@ public struct AnselDenoiseClient: Sendable {
     public init(resolvingExplicit explicit: URL? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 bundle: Bundle = .main) throws {
+        if SandboxEnvironment.isSandboxed {
+            guard let url = bundle.resourceURL?.appendingPathComponent("bin/ansel-denoise-swift"),
+                  FileManager.default.isExecutableFile(atPath: url.path) else {
+                throw AnselDenoiseFailure(code: "tool_missing", message: "应用内缺少 ansel-denoise-swift，请重新安装完整应用。", exitCode: nil)
+            }
+            self.executableURL = url
+            return
+        }
         if let explicit {
             self.executableURL = explicit
             return
@@ -350,12 +359,16 @@ public struct AnselDenoiseClient: Sendable {
     }
 
     private func runJSON(arguments: [String]) throws -> [String: Any] {
+        #if os(macOS)
         var env = ProcessInfo.processInfo.environment
         env["LC_ALL"] = "C"
 
+        let grants = SandboxEnvironment.isSandboxed ? try HelperFileAccess(arguments: arguments) : nil
+        defer { withExtendedLifetime(grants) {} }
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
+        if let grants { env[HelperFileAccess.environmentKey] = grants.manifest.path }
         process.environment = env
 
         let outPipe = Pipe()
@@ -403,5 +416,8 @@ public struct AnselDenoiseClient: Sendable {
                                       exitCode: 0)
         }
         return obj
+        #else
+        throw AnselDenoiseFailure(code: "platform_unavailable", message: "This external helper is available on macOS only.", exitCode: nil)
+        #endif
     }
 }

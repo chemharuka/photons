@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsFileAccess
 import GRDB
 
 public struct ImportOptions: Sendable {
@@ -21,19 +22,21 @@ public struct ImportOptions: Sendable {
     /// Default `true`: the CLI's documented behaviour — and every photo app's — is a recursive
     /// import, so the switch has to be opted **out** of, not into.
     public var recursive: Bool
+    public var skipDuplicates: Bool
 
     public init(mode: ManagementMode = .reference,
                 rootID: String? = nil,
                 renameTemplate: String? = nil,
                 interruptAfter: Int? = nil,
                 skipExtensions: Set<String> = ["xmp", "aae", "thm", "lrv"],
-                recursive: Bool = true) {
+                recursive: Bool = true, skipDuplicates: Bool = true) {
         self.mode = mode
         self.rootID = rootID
         self.renameTemplate = renameTemplate
         self.interruptAfter = interruptAfter
         self.skipExtensions = skipExtensions
         self.recursive = recursive
+        self.skipDuplicates = skipDuplicates
     }
 }
 
@@ -69,6 +72,9 @@ public final class ImportService: @unchecked Sendable {
                     options: ImportOptions,
                     onFile: ((Int, Int) -> Void)? = nil,
                     progress: ((String) -> Void)? = nil) throws -> ImportSummary {
+        let access = sources.map { FileAccessStore.shared.access(to: $0) }
+        defer { withExtendedLifetime(access) {} }
+        let sources = access.map(\.url)
         let started = CFAbsoluteTimeGetCurrent()
         guard !sources.isEmpty else { throw CatalogError.importSourceMissing(URL(fileURLWithPath: ".")) }
 
@@ -218,7 +224,7 @@ public final class ImportService: @unchecked Sendable {
         // matched *is this very file*. A byte-identical copy elsewhere must fall through to the
         // full hash, otherwise it would be recorded as "unchanged" while no row points at it.
         let quick = try? FileHasher.quickHash(of: url, size: size, mtime: mtime)
-        if let quick, let hit = try catalog.assetUnchangedCandidate(quickHash: quick, size: size, mtime: mtime),
+        if options.skipDuplicates, let quick, let hit = try catalog.assetUnchangedCandidate(quickHash: quick, size: size, mtime: mtime),
            let hitURL = try? catalog.fileURL(for: hit),
            hitURL.standardizedFileURL.path == url.standardizedFileURL.path {
             try record(file: url, outcome: .unchanged, reason: "same path, size+mtime+quick_hash match",
@@ -228,7 +234,7 @@ public final class ImportService: @unchecked Sendable {
 
         // 2. Identity: full-file SHA-256.
         let hash = try FileHasher.sha256(of: url)
-        if let existing = try catalog.asset(contentHash: hash) {
+        if options.skipDuplicates, let existing = try catalog.asset(contentHash: hash) {
             // Same bytes. If the row's file is gone and the bytes turned up elsewhere, it moved —
             // keep the row (its rating, its develop_json, its history) and just re-point it.
             let newRelPath = root.managementMode == .reference

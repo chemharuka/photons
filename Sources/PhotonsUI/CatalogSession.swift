@@ -1,3 +1,5 @@
+import AppKit
+import PhotonsLocalization
 import Foundation
 import Observation
 import PhotonsCatalog
@@ -120,6 +122,9 @@ public final class CatalogSession {
     /// The undo stack (D10: snapshots plus a cursor, not a command log). Seeded with the state the
     /// document was opened in, so the floor of undo is "Original", never "neutral".
     public private(set) var history = EditHistory()
+    public private(set) var importedEdit: EditModel?
+    @ObservationIgnored private var historyPreferences: ApplicationPreferences
+    @ObservationIgnored private var historyPreferenceObserver: NSObjectProtocol?
 
     /// The asset whose document is loaded in `edit` / `history`.
     public private(set) var loadedEditAssetID: String?
@@ -393,7 +398,9 @@ public final class CatalogSession {
     public init(filterStore: FilterPersistence.Store = UserDefaults.standard,
                 sortPreferenceStore: PhotoSortPreferences.Store = UserDefaults.standard,
                 recentLibraryStore: RecentLibrary.Store = UserDefaults.standard,
-                remembersRecentLibrary: Bool = true) {
+                remembersRecentLibrary: Bool = true,
+                preferences: ApplicationPreferences = .shared) {
+        historyPreferences = preferences
         filterPersistence = FilterPersistence.Writer(store: filterStore)
         self.sortPreferenceStore = sortPreferenceStore
         self.recentLibraryStore = recentLibraryStore
@@ -401,16 +408,30 @@ public final class CatalogSession {
         // Restored before the first `open()`, so a session's very first query already lands in the
         // order the user chose last time — there is no "restore after the first paint" flicker.
         sortOrder = PhotoSortPreferences.recall(from: sortPreferenceStore)
+        history.setMaxDepthPreservingCurrent(preferences.historyDepth)
+        historyPreferenceObserver = NotificationCenter.default.addObserver(forName:.photonsPreferencesDidChange,object:preferences,queue:.main) { [weak self] note in
+            guard note.userInfo?["key"] as? String == ApplicationPreferences.Key.historyDepth else {return}
+            MainActor.assumeIsolated {self?.history.setMaxDepthPreservingCurrent(preferences.historyDepth)}
+        }
     }
+
+    deinit {if let historyPreferenceObserver {NotificationCenter.default.removeObserver(historyPreferenceObserver)}}
 
     // MARK: lifecycle
 
     public var isOpen: Bool { catalog != nil }
 
+    public func authorizePhotoFolder(_ url: URL) throws {
+        guard let catalog else { return }
+        try catalog.authorizeSourceFolder(url)
+        lastAvailability = try catalog.refreshAvailability()
+        reload()
+    }
+
     public func open(_ url: URL) throws {
         let c = try Catalog.open(at: url)
         catalog = c
-        libraryURL = url.standardizedFileURL
+        libraryURL = c.layout.packageURL
         // A missing cache directory is created by the initialiser; a failure here only means the
         // grid falls back to placeholders, which must not stop the library from opening.
         thumbnailCache = try? ThumbnailCache(layout: c.layout)
@@ -625,17 +646,17 @@ public final class CatalogSession {
     @discardableResult
     public func stackSelection() -> StackSummary? {
         guard let catalog else {
-            lastStackError = "未打开库"
+            lastStackError = L10n.tr("a306ecabb07b")
             return nil
         }
         let ids = selectedAssets.map(\.id)
         guard ids.count >= 2 else {
-            lastStackError = "堆叠至少需要选中两张照片"
+            lastStackError = L10n.tr("49b2f0995f89")
             return nil
         }
         do {
             guard let summary = try catalog.makeStack(assetIDs: ids) else {
-                lastStackError = "选中的照片已经不在库里"
+                lastStackError = L10n.tr("a3d97653c061")
                 return nil
             }
             lastStackError = nil
@@ -662,7 +683,7 @@ public final class CatalogSession {
     @discardableResult
     public func ungroupSelection() -> Int {
         guard let catalog else {
-            lastStackError = "未打开库"
+            lastStackError = L10n.tr("a306ecabb07b")
             return 0
         }
         let ids = metadataTargetIDs
@@ -704,13 +725,13 @@ public final class CatalogSession {
     @discardableResult
     public func setStackTop(assetID: String) -> Bool {
         guard let catalog else {
-            lastStackError = "未打开库"
+            lastStackError = L10n.tr("a306ecabb07b")
             return false
         }
         let stackID = stacksByTopID.values.first(where: { $0.memberIDs.contains(assetID) })?.id
             ?? (try? catalog.stackID(ofAsset: assetID)).flatMap { $0 }
         guard let stackID else {
-            lastStackError = "这张照片不在任何堆叠里"
+            lastStackError = L10n.tr("07652a0ef5f9")
             return false
         }
         do {
@@ -834,11 +855,11 @@ public final class CatalogSession {
         hdrMergeRanOffMain = nil
 
         guard let catalog else {
-            lastHDRMergeError = "未打开库"
+            lastHDRMergeError = L10n.tr("a306ecabb07b")
             return []
         }
         guard !isHDRMergeRunning else {
-            lastHDRMergeError = "已有一次 HDR 合成在进行"
+            lastHDRMergeError = L10n.tr("f10e47df4740")
             return []
         }
         guard isHDRMergeAvailable else {
@@ -869,7 +890,7 @@ public final class CatalogSession {
         guard let importService = makeImportService(),
               let rootID = chosen.first?.sourceRootId
         else {
-            lastHDRMergeError = "未打开库"
+            lastHDRMergeError = L10n.tr("a306ecabb07b")
             return []
         }
 
@@ -879,7 +900,7 @@ public final class CatalogSession {
         // 392 — 卡片的两行（张数 + 显示条件）都读这一份 id 列表；它与 `participants` 是同一组，
         // 只是活到运行结束。
         hdrMergeParticipantIDs = participants
-        lastHDRMergeProgress = "准备合成…"
+        lastHDRMergeProgress = L10n.tr("7fa3da0f7171")
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in self?.lastHDRMergeProgress = text }
         }
@@ -922,7 +943,7 @@ public final class CatalogSession {
         var run = HDRMergeRun()
         run.ranOffMain = !Thread.isMainThread
         do {
-            progress("预检 \(frames.count) 帧…")
+            progress(L10n.tr("3d89918342b7" , String(describing: (frames.count))))
             if let issue = try service.compatibilityIssue(frames) {
                 run.failure = issue
                 return run
@@ -941,7 +962,7 @@ public final class CatalogSession {
                                                                                recursive: false))
                     importedID = summary.addedAssetIDs.first
                     if importedID == nil {
-                        importFailure = "合成结果已经在库里（内容相同），没有新建照片"
+                        importFailure = L10n.tr("acb5e38e6e67")
                     }
                 } catch {
                     importFailure = error.localizedDescription
@@ -957,12 +978,12 @@ public final class CatalogSession {
                 return run
             }
             guard let importedID else {
-                run.failure = "合成结果未能加入照片库"
+                run.failure = L10n.tr("69094ff50483")
                 return run
             }
             run.assetID = importedID
 
-            progress("加入堆叠…")
+            progress(L10n.tr("2f94b35412f1"))
             let summary = try catalog.makeHDRStack(resultAssetID: importedID,
                                                   participantIDs: participantIDs)
             run.stackTopID = summary?.topID
@@ -1004,7 +1025,7 @@ public final class CatalogSession {
                                                 assetID: assetID, stackTopID: run.stackTopID ?? "",
                                                 stackCount: run.stackCount)
         }
-        lastHDRMergeProgress = "合成完成：\(run.width)×\(run.height)，\(run.frameCount) 帧"
+        lastHDRMergeProgress = L10n.tr("ded76e19c722" , String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.frameCount)))
     }
 
     // MARK: 模型降噪 (§386) — 右键菜单一个动词，不弹窗口
@@ -1136,13 +1157,15 @@ public final class CatalogSession {
             return []
         }
 
-        let job = AnselDenoiseJob(location: denoiseLocation)
+        var denoiseOptions = AnselDenoiseOptions()
+        denoiseOptions.useGPU = ApplicationPreferences.shared.denoiseGPU
+        let job = AnselDenoiseJob(location: denoiseLocation, options: denoiseOptions)
         let queue = denoiseQueue
         let participantID = asset.id
         let rootID = asset.sourceRootId
         isDenoiseRunning = true
         denoiseAssetID = participantID
-        lastDenoiseProgress = "准备降噪…"
+        lastDenoiseProgress = L10n.tr("67c1e05bb305")
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in self?.lastDenoiseProgress = text }
         }
@@ -1180,7 +1203,7 @@ public final class CatalogSession {
     /// 396 之后它同时**包住三项覆写**（解码器 v9.dng、两根降噪归零），因为整件事是一个 payload
     /// 一次 `appendDevelop`。改这个名字等于改两单的验收（395 的 ④ 与 396 的 ⑥ 都按字符串断言），
     /// 所以 396 沿用它而不是新起一条 —— 用户看到的是「产物的编辑 = 原图编辑 + 三项调整」一个步骤。
-    nonisolated static let denoiseInheritLabel = "模型降噪：继承编辑"
+    nonisolated static let denoiseInheritLabel = L10n.tr("284118e67705")
 
     /// §396 B — 这个产物文件**自己**认不认 `"9.dng"`。
     ///
@@ -1224,14 +1247,14 @@ public final class CatalogSession {
             run.seconds = outcome.seconds
             run.byteCount = outcome.byteCount
 
-            progress("加入照片库…")
+            progress(L10n.tr("7e5e6742f6d5"))
             // `ImportService` 按内容哈希去重，重跑不会造出第二行。
             let summary = try importService.run(sources: [outcome.output],
                                                options: ImportOptions(mode: .reference,
                                                                       rootID: rootID,
                                                                       recursive: false))
             guard let importedID = summary.addedAssetIDs.first else {
-                run.failure = "降噪结果已经在库里（内容相同），没有新建照片"
+                run.failure = L10n.tr("dc3fcda0c135")
                 return run
             }
             run.assetID = importedID
@@ -1251,7 +1274,7 @@ public final class CatalogSession {
             // 失败**不许**拖垮降噪：这段只是「产物带着原图的编辑」的加分项，降噪本身已经成功
             // （文件在磁盘、已入库）。所以 catch 只记 `inheritFailure`，绝不设 `run.failure`
             // —— 后者会让 `finishDenoise` 判整单失败、清掉报告。`participantID` 就是原图的 id。
-            progress("继承编辑…")
+            progress(L10n.tr("da4bb4c0be39"))
             do {
                 let inherited = try catalog.copySettings(fromAsset: participantID)
                 let current = try catalog.develop(forAsset: importedID)
@@ -1279,7 +1302,7 @@ public final class CatalogSession {
                 run.inheritFailure = error.localizedDescription
             }
 
-            progress("组成堆叠…")
+            progress(L10n.tr("3d187f00165f"))
             let summary2 = try catalog.makeStack(resultAssetID: importedID,
                                                  participantIDs: [participantID])
             run.stackTopID = summary2?.topID
@@ -1326,7 +1349,7 @@ public final class CatalogSession {
                                               assetID: assetID, stackTopID: run.stackTopID ?? "",
                                               stackCount: run.stackCount)
         }
-        lastDenoiseProgress = "降噪完成：\(run.width)×\(run.height)，\(run.tiles) 个 tile"
+        lastDenoiseProgress = L10n.tr("43a02908556a" , String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
     }
 
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.
@@ -2184,7 +2207,8 @@ public final class CatalogSession {
     public func loadEditForAnchor(force: Bool = false) {
         guard let a = anchorAsset else {
             edit = .neutral
-            history = EditHistory(baseline: .neutral)
+            history = EditHistory(baseline: .neutral,maxDepth:historyPreferences.historyDepth)
+            importedEdit = nil
             loadedEditAssetID = nil
             selectedMaskID = nil
             pendingMaskShape = nil
@@ -2196,7 +2220,7 @@ public final class CatalogSession {
         var stack: EditHistory?
         if let catalog {
             model = (try? catalog.develop(forAsset: a.id)) ?? .neutral
-            stack = try? catalog.editHistory(forAsset: a.id)
+            stack = try? catalog.editHistory(forAsset: a.id,maxDepth:historyPreferences.historyDepth)
         } else if let data = a.developJson.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
             model = decoded
@@ -2209,8 +2233,9 @@ public final class CatalogSession {
         if let stack, !stack.isEmpty {
             history = stack
         } else {
-            history = EditHistory(baseline: model)
+            history = EditHistory(baseline: model,maxDepth:historyPreferences.historyDepth)
         }
+        importedEdit = catalog.flatMap {try? $0.importedDevelop(forAsset:a.id)} ?? (stack == nil || stack?.isEmpty == true ? model:nil)
         loadedEditAssetID = a.id
         selectedMaskID = edit.masks.first?.id
         maskTool = .off
@@ -2218,6 +2243,20 @@ public final class CatalogSession {
         // describe the picture that is no longer on screen.
         pendingMaskShape = nil
         recordHistogram(nil)
+    }
+
+    /// Restore every develop parameter as one ordinary, undoable edit. Ratings and source files
+    /// remain catalog data, outside the photo's develop history.
+    @discardableResult
+    public func resetToImportedState() -> Bool {
+        guard let importedEdit,loadedEditAssetID != nil else {return false}
+        endToolSession()
+        let original=MaskViewState.documentOnly(importedEdit)
+        guard !EditHistory.isSemanticallyIdentical(edit,original) else {return false}
+        applyEdit {$0=original}
+        let committed=commitEdit(label:L10n.tr("history.resetImport"),coalesce:false)
+        selectedMaskID=edit.masks.first?.id;maskTool = .off;pendingMaskShape=nil
+        return committed
     }
 
     /// 249 — convert a legacy (`canvasV1`) heal document to S1 source coordinates once the **exact**
@@ -2339,7 +2378,7 @@ public final class CatalogSession {
     @discardableResult
     public func applyPreset(named name: String) -> Bool {
         guard let catalog, anchorAsset != nil else {
-            lastPresetError = "先打开库并选中一张照片"
+            lastPresetError = L10n.tr("01f13cf91d31")
             return false
         }
         do {
@@ -2355,8 +2394,8 @@ public final class CatalogSession {
             // `nil` and the preset moves the document with no row (⌘Z then cannot take it back).
             endToolSession()
             applyEditInPlace { $0 = merged }
-            let committed = commitEdit(label: "预设 \(record.name)")
-            lastPresetError = committed ? nil : "预设没有落地"
+            let committed = commitEdit(label: L10n.tr("d30256810c6e" , String(describing: (record.name))))
+            lastPresetError = committed ? nil : L10n.tr("dcd8f7fb1891")
             return committed
         } catch {
             lastPresetError = error.localizedDescription
@@ -2375,16 +2414,16 @@ public final class CatalogSession {
                                         sections: Set<EditSnapshotSection>? = nil)
         -> PresetRecord? {
         guard let catalog else {
-            lastPresetError = "未打开库"
+            lastPresetError = L10n.tr("a306ecabb07b")
             return nil
         }
         guard anchorAsset != nil else {
-            lastPresetError = "未选择照片"
+            lastPresetError = L10n.tr("3d9bad4499f0")
             return nil
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            lastPresetError = "预设需要一个名字"
+            lastPresetError = L10n.tr("34c9dd6890e4")
             return nil
         }
         do {
@@ -2412,7 +2451,7 @@ public final class CatalogSession {
         guard let catalog else { return false }
         do {
             let removed = try catalog.deletePreset(named: name)
-            lastPresetError = removed ? nil : "没有名为“\(name)”的预设"
+            lastPresetError = removed ? nil : L10n.tr("36582f53f40a" , String(describing: (name)))
             reloadPresets()
             return removed
         } catch {
@@ -2505,7 +2544,7 @@ public final class CatalogSession {
     @discardableResult
     public func copySettingsFromAnchor(selection: CopySettingsSelection? = nil) -> EditSnapshot? {
         guard let asset = anchorAsset else {
-            lastSettingsError = "先选中一张照片"
+            lastSettingsError = L10n.tr("40614bd1732b")
             return nil
         }
         let choice = selection ?? copySelection
@@ -2525,7 +2564,7 @@ public final class CatalogSession {
         // selection then simply comes back as 全部 next time.
         if let catalog { try? catalog.storeCopySelection(choice) }
         lastSettingsError = payload.isEmpty
-            ? "这张照片在所选组里没有非默认设置：粘贴不会改动任何字段"
+            ? L10n.tr("bab4a56245d2")
             : nil
         settingsRevision &+= 1
         return payload
@@ -2556,18 +2595,18 @@ public final class CatalogSession {
         let targets = ids ?? metadataTargetIDs
         lastPasteReports = []
         guard let copied = copiedSettings else {
-            lastSettingsError = "剪贴板里没有设置：先按 ⌘C 复制"
+            lastSettingsError = L10n.tr("450f52d15bfd")
             settingsRevision &+= 1
             return []
         }
         let payload = narrowed ?? copied
         guard !payload.isEmpty else {
-            lastSettingsError = "所选组里没有可粘贴的设置"
+            lastSettingsError = L10n.tr("09a7365110f1")
             settingsRevision &+= 1
             return []
         }
         guard !targets.isEmpty else {
-            lastSettingsError = "没有目标照片"
+            lastSettingsError = L10n.tr("dd90071981ee")
             settingsRevision &+= 1
             return []
         }
@@ -2582,7 +2621,7 @@ public final class CatalogSession {
                     reports.append(report)
                     if report.changed { changedTargets.insert(id) }
                 } else {
-                    failures.append("当前照片在工具会话里：先应用或取消裁切/蒙版工具再粘贴")
+                    failures.append(L10n.tr("ba060fa6bd72"))
                 }
                 continue
             }
@@ -2590,7 +2629,7 @@ public final class CatalogSession {
             do {
                 let report = try catalog.pasteSettings(payload, intoAsset: id,
                                                        sections: Set(EditSnapshotSection.copyable),
-                                                       label: "粘贴设置",
+                                                       label: L10n.tr("d24cf4a6b02b"),
                                                        destinationAspect: frameAspect(of: id))
                 reports.append(report)
                 if report.changed { changedTargets.insert(id) }
@@ -2600,7 +2639,7 @@ public final class CatalogSession {
         }
         lastPasteReports = reports
         lastSettingsError = failures.isEmpty
-            ? (reports.contains(where: \.changed) ? nil : "目标照片已经是这些值：没有改动")
+            ? (reports.contains(where: \.changed) ? nil : L10n.tr("0e6a8fa0869c"))
             : failures.joined(separator: "；")
         // 165: a paste is a command, not a slider tick. Rebuild the open photo's bottom image now;
         // the other targets are only named, never rendered (their backdrops are made when opened).
@@ -2664,7 +2703,7 @@ public final class CatalogSession {
                                        requiresDecode: payload.requiresDecode, historyRows: nil)
         }
         applyEditInPlace { $0 = MaskViewState.restoring(merged, keeping: $0.showMaskID) }
-        let committed = commitEdit(label: "粘贴设置", coalesce: false)
+        let committed = commitEdit(label: L10n.tr("d24cf4a6b02b"), coalesce: false)
         return SettingsPasteReport(assetID: loadedEditAssetID ?? "", changed: committed,
                                    fields: fields, sections: payload.sections,
                                    requiresDecode: payload.requiresDecode,
@@ -2875,7 +2914,7 @@ public final class CatalogSession {
         }
         let report = deleteAssets(toDelete)
         if !toDelete.isEmpty, report == nil {
-            failures.append("移出条目失败：\(lastAvailabilityError ?? "未知错误")")
+            failures.append(L10n.tr("132cba10c735" , String(describing: (lastAvailabilityError ?? L10n.tr("13a46616e16f")))))
         }
         return RemovalOutcome(removed: report, filesTrashed: filesTrashed,
                               keptIDs: keptIDs, failures: failures)
@@ -2895,6 +2934,8 @@ public final class CatalogSession {
         var outcome = RelinkOutcome()
         guard !targets.isEmpty else { return outcome }
 
+        do { try catalog.authorizeSourceFolder(folder) }
+        catch { outcome.failures.append(L10n.tr("29b1acd9fb6e" , String(describing: (error.localizedDescription)))); outcome.failed = chosen.map(\.id); return outcome }
         let found = LostFileFinder.find(folder: folder, targets: targets)
         outcome.unmatched = found.unmatched
         outcome.rejected = found.rejected
@@ -2955,6 +2996,27 @@ public final class CatalogSession {
 
     public func fileURL(for asset: Asset) -> URL? {
         try? catalog?.fileURL(for: asset)
+    }
+
+    public func prepareImportedPreviews(_ ids: [String]) {
+        guard let catalog, let cache = thumbnailCache else { return }
+        let imported = ids.compactMap { try? catalog.asset(id: $0) }
+        BackgroundTasks.shared.preparePreviews(assets: imported, provider: ThumbnailProvider.shared(for: cache)) {
+            try? catalog.fileURL(for: $0)
+        }
+    }
+
+    public func folderURL(rootID: String, path: String) -> URL? {
+        try? catalog?.folderURL(rootID: rootID, path: path)
+    }
+
+    public func revealAssetsInFinder(_ ids: [String]) {
+        guard let catalog else { return }
+        let urls = ids.compactMap { id -> URL? in
+            guard let asset = try? catalog.asset(id: id), !asset.isMissing else { return nil }
+            return try? catalog.fileURL(for: asset)
+        }
+        if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
 
     public var currentPhotoURL: URL? {

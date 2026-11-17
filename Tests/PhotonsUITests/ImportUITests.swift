@@ -166,7 +166,7 @@ final class ImportUITests: XCTestCase {
 
     // MARK: - 2. panel
 
-    func testPanelTakesFilesAndFoldersAndCarriesOneCheckbox() {
+    func testPanelTakesFilesAndFoldersAndCarriesImportOptions() {
         let (panel, include) = ImportPanel.make(ImportPanelConfiguration(includeSubfolders: false))
         XCTAssertTrue(panel.canChooseFiles, "几张照片也是一次导入")
         XCTAssertTrue(panel.canChooseDirectories)
@@ -177,7 +177,12 @@ final class ImportUITests: XCTestCase {
         let accessory = panel.accessoryView
         XCTAssertNotNil(accessory, "the box lives in the panel, not in an alert after it")
         XCTAssertEqual(accessory?.frame.height, ImportPanel.accessorySize.height)
-        XCTAssertEqual(accessory?.subviews.count, 1, "exactly one checkbox, no explanatory copy")
+        XCTAssertEqual(accessory?.subviews.count, 2)
+        let duplicate = accessory?.subviews.first { $0.identifier?.rawValue == "import.skipDuplicates" } as? NSButton
+        XCTAssertNotNil(duplicate)
+        XCTAssertEqual(duplicate?.state, .on)
+        XCTAssertTrue(ImportRequest(sources: [], includeSubfolders: true).options.skipDuplicates)
+        XCTAssertFalse(ImportRequest(sources: [], includeSubfolders: true, skipDuplicates: false).options.skipDuplicates)
         XCTAssertEqual(include.title, "包含子文件夹")
         XCTAssertEqual(include.state, .off, "the remembered value is applied at construction")
         XCTAssertFalse(include.isEnabled, "nothing is picked yet — the watcher enables it")

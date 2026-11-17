@@ -408,7 +408,9 @@ public final class CanvasPresenter {
         layer.wantsExtendedDynamicRangeContent = wantsEDR
         layer.framebufferOnly = true
         layer.isOpaque = true
+        #if os(macOS)
         layer.displaySyncEnabled = true
+        #endif
     }
 
     /// Draw one request into `layer`. Returns true when a frame was actually presented.

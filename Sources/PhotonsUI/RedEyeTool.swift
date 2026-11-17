@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import PhotonsCore
 
@@ -14,8 +15,8 @@ public enum HealToolMode: String, Sendable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .heal: return "修复"
-        case .redeye: return "红眼"
+        case .heal: return L10n.tr("37a693925054")
+        case .redeye: return L10n.tr("87b1166498f9")
         }
     }
 }
@@ -76,7 +77,7 @@ extension CatalogSession {
         var landed: HealSpot?
         applyEdit { landed = $0.addHealSpot(spot) }
         guard let landed else { return nil }
-        commitEdit(label: "红眼", coalesce: false)
+        commitEdit(label: L10n.tr("87b1166498f9"), coalesce: false)
         selectedHealSpotID = landed.id
         setLastHealSource(source)
         setLastRedEyeDetection(detection)

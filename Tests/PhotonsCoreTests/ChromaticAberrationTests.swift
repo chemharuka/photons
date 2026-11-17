@@ -101,10 +101,28 @@ final class ChromaticAberrationTests: XCTestCase {
     }
 
     private func ca(_ red: Double, _ blue: Double) -> EditModel {
-        var edit = EditModel.neutral
+        var edit = caBase
         edit.optics.caRed = red
         edit.optics.caBlue = blue
         return edit
+    }
+
+    /// **420 — the CA-only document these pins are records of.**
+    ///
+    /// 314 (`44d56f3`) gave `SharpenGroup` a resting 50 / 2.0, so `EditModel.neutral` now renders
+    /// through S3.10 and its frame is legitimately *not* the pre-029 one. Every pixel baseline in this
+    /// file was recorded before that stage existed, and the sharpen pass resamples a synthetic ramp,
+    /// so it moved the frame **and** the measured alpha (0.001274 / -0.000816 instead of 0.0013 /
+    /// -0.0009 — 2 % low, which is the `testOffsetIsAlphaTimesRadius` red).
+    ///
+    /// Stating the sharpening away restores the pinned bytes exactly (measured: `cd1229e2...` /
+    /// `88ea6900...` for the whole frame, alpha back to 0.001298 / -0.000903). The alternative —
+    /// re-recording the hashes against a sharpened frame — would make these gates measure 314's
+    /// default instead of 029's S0 identity, which is what they exist to guard.
+    private var caBase: EditModel {
+        var v = EditModel.neutral
+        v.sharpen = SharpenGroup(amount: 0)
+        return v
     }
 
     // MARK: - the two sides of the uniform
@@ -154,7 +172,7 @@ final class ChromaticAberrationTests: XCTestCase {
                      (1201, 1201, Pristine.ramp1201, Pristine.ramp1201Green)]
         for (w, h, allHash, expectedGreen) in sizes {
             let g = try graph(rampImage(width: w, height: h))
-            let px = try render(g, EditModel.neutral)
+            let px = try render(g, caBase)
             XCTAssertEqual(px.sha256(), allHash, "\(w)x\(h): a CA-off document moved")
             XCTAssertEqual(greenHash(px), expectedGreen, "\(w)x\(h): green moved")
         }
@@ -164,13 +182,16 @@ final class ChromaticAberrationTests: XCTestCase {
         // `pv=2` since 派单 030 (the curve moved to S1.7 and changed the meaning of a document's
         // pixels, so the process version bumped). Nothing about this material's *shape* changed —
         // the version is the only token that moved.
-        let neutral = EditModel.neutral
+        let neutral = caBase
         // P1f: `params` is the material without the algorithm token (the pre-029/pre-P1f text — where
         // "only non-zero is appended" is a claim about *parameters*), `material` is the live one.
         let params = neutral.keyMaterial(.geometry, algorithmVersion: false)
         XCTAssertEqual(params, "pv=2;crop=0.00000,0.00000,1.00000,1.00000;rot=0.00000;flip=00")
         let material = neutral.keyMaterial(.geometry)
-        XCTAssertEqual(material, params + ";alg=3")
+        // 420 — `alg=5`, not `alg=3`: 307 (`613c344`) bumped `StageAlgorithmVersion.geometry` 4→5 and
+        // 301 (`7f8f686`) took it 3→4 before that. The *parameters* asserted around this line are
+        // unchanged, which is what the test is about; only the algorithm token moved, on purpose.
+        XCTAssertEqual(material, params + ";alg=5")
         XCTAssertEqual(neutral.keyMaterial(.geometry, algorithmVersion: false), params,
                        "the parameters are byte-identical to the pre-P1f material")
         XCTAssertFalse(material.contains("car="))
@@ -180,13 +201,13 @@ final class ChromaticAberrationTests: XCTestCase {
         redOnly.optics.caRed = 0.002
         // 084: the token is integer tenths of a slider unit, not `k()`: 0.002 = position 40 = 400.
         XCTAssertEqual(redOnly.keyMaterial(.geometry, algorithmVersion: false), params + ";car=400")
-        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=3")
+        XCTAssertEqual(redOnly.keyMaterial(.geometry), params + ";car=400;alg=5")
 
         var both = redOnly
         both.optics.caBlue = -0.0015
         XCTAssertEqual(both.keyMaterial(.geometry, algorithmVersion: false),
                        params + ";car=400;cab=-300")
-        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=3")
+        XCTAssertEqual(both.keyMaterial(.geometry), params + ";car=400;cab=-300;alg=5")
 
         // Only non-zero is appended: setting a slider back to zero is the old document again.
         var backToZero = both
@@ -249,7 +270,7 @@ final class ChromaticAberrationTests: XCTestCase {
         let sizes = [(2731, 1501, Pristine.ramp2731Green), (1201, 1201, Pristine.ramp1201Green)]
         for (w, h, green) in sizes {
             let g = try graph(rampImage(width: w, height: h))
-            let off = try g.render(EditModel.neutral,
+            let off = try g.render(caBase,
                                    options: RenderOptions(scale: 1, useCache: false, wantsPixels: true))
             let on = try g.render(ca(0.002, -0.0015),
                                   options: RenderOptions(scale: 1, useCache: false, wantsPixels: true))
@@ -410,9 +431,9 @@ final class ChromaticAberrationTests: XCTestCase {
         let g = try graph(rampImage(width: 401, height: 301))
         let opts = RenderOptions(scale: 1, useCache: true, wantsPixels: false)
 
-        let first = try g.render(EditModel.neutral, options: opts)
+        let first = try g.render(caBase, options: opts)
         if let t = first.output { g.recycle(output: t) }
-        let again = try g.render(EditModel.neutral, options: opts)
+        let again = try g.render(caBase, options: opts)
         if let t = again.output { g.recycle(output: t) }
         XCTAssertEqual(again.trace.executed, [.display], "an unchanged document must be a full hit")
         XCTAssertTrue(again.trace.skipped.contains(.geometry))
@@ -434,10 +455,10 @@ final class ChromaticAberrationTests: XCTestCase {
 
         // Back to α = 0: the pre-029 key comes back (the cache slot now holds the CA frame, so this
         // re-runs — what a full hit means here is that the *key* is the old one).
-        let back = try g.render(EditModel.neutral, options: opts)
+        let back = try g.render(caBase, options: opts)
         if let t = back.output { g.recycle(output: t) }
         XCTAssertEqual(back.keys.geometry, first.keys.geometry)
-        let backAgain = try g.render(EditModel.neutral, options: opts)
+        let backAgain = try g.render(caBase, options: opts)
         if let t = backAgain.output { g.recycle(output: t) }
         XCTAssertEqual(backAgain.trace.executed, [.display])
     }

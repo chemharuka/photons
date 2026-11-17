@@ -1,6 +1,7 @@
 import Foundation
 import ImageIO
 import PhotonsCore
+import PhotonsPanorama
 
 // MARK: - 107 · source metadata carried into the export
 //
@@ -87,6 +88,8 @@ public struct ExportMetadataContext {
     /// 206 — pixels per inch to write. `nil` = write no resolution (pre-206 output, byte for byte).
     /// Clamped to `ExportPreset.ppiRange` by the batch; re-clamped here for direct callers.
     public var ppi: Int?
+    /// Structural panorama provenance, independent of personal EXIF / GPS policy.
+    public var panoramaData: Data? = nil
 
     public init(level: ExportMetadataLevel = .all, source: SourceMetadata? = nil,
                 edit: EditModel? = nil, author: String? = nil, copyright: String? = nil,
@@ -157,14 +160,18 @@ public struct ExportMetadataContext {
 
     /// The XMP packet to embed, or `nil` when this export must not carry one.
     public func xmpMetadata(outputWidth width: Int, outputHeight height: Int) -> CGImageMetadata? {
-        guard level == .all, embedXMP, let edit else { return nil }
-        // Merge into the source packet so rating/label/keywords and other people's namespaces
-        // survive; only our `crs:`/`photons:` keys are overwritten (docs/xmp-mapping.md §4.2).
-        guard let built = try? XMPWriter.makeMetadata(for: edit,
-                                                      existing: source?.xmp,
-                                                      context: XMPWriteContext(exifOrientation: 1)).metadata,
-              let metadata = CGImageMetadataCreateMutableCopy(built) else {
-            return nil
+        let metadata: CGMutableImageMetadata
+        if level == .all, embedXMP, let edit,
+           let built = try? XMPWriter.makeMetadata(for:edit, existing:source?.xmp,
+                context:XMPWriteContext(exifOrientation:1)).metadata,
+           let copy = CGImageMetadataCreateMutableCopy(built) { metadata = copy }
+        else if panoramaData != nil { metadata = CGImageMetadataCreateMutable() }
+        else { return nil }
+        if let panoramaData {
+            CGImageMetadataRegisterNamespaceForPrefix(metadata, "https://photons.app/ns/panorama/1.0/" as CFString,
+                                                       "photonsPano" as CFString, nil)
+            CGImageMetadataSetValueWithPath(metadata, nil, "photonsPano:Manifest" as CFString,
+                                            PanoramaMetadataPacket.string(panoramaData) as CFString)
         }
         // A source packet written by ImageIO carries the *source's* EXIF dimensions. The file we are
         // about to write has different ones (crop/scale), and ImageIO prefers the XMP over the
@@ -173,7 +180,7 @@ public struct ExportMetadataContext {
         setNumber(metadata, "exif:PixelYDimension", height)
         // Same for the camera's orientation: neutral geometry has already been baked into pixels,
         // and a stale `tiff:Orientation = 6` would rotate the output again in Lightroom.
-        let g = edit.geometry
+        let g = edit?.geometry ?? .identity
         if !g.flipHorizontal && !g.flipVertical && g.quarterTurns == 0 {
             _ = CGImageMetadataRemoveTagWithPath(metadata, nil, "tiff:Orientation" as CFString)
         }

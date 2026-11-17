@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import PhotonsCore
@@ -95,14 +96,16 @@ extension InspectorView {
 
     // MARK: - 第二张卡：校正 —— 拉直 + 画线拉直 + 透视（334）
 
-    /// 「校正」: 拉直 → 画线拉直 → 垂直透视 → 水平透视.
+    /// 「校正」: 拉直 → 画线拉直 → 引导线 → 垂直透视 → 水平透视 → 切变 → 宽高比校正.
     ///
     /// 334: the four geometry *repairs*. 328's 画线拉直 lives here now — the user asked where it was
     /// while it sat between two perspective sliders inside 裁切, so it gets its own row, under the
     /// slider it is the shortcut for, before the two keystone knobs.
     ///
-    /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal`; the
-    /// crop rect and the turn keep what they hold.
+    /// The title reset is `.straightenDegrees + .perspectiveVertical + .perspectiveHorizontal +
+    /// .perspectiveShear` (407) `+ .perspectiveAspect` (408); the crop rect and the turn keep what
+    /// they hold. Every one of them is derived from `CropSection.perspective.fields`, so the list is
+    /// not spelled twice.
     var correctionTransformCard: some View {
         let tool = loupe?.cropTool
         let spec = TransformCardSpec.correctionCard
@@ -157,8 +160,8 @@ extension InspectorView {
                 .fixedSize()
                 .background(CropRowProbeHost(rowID: CropCardID.staysInsidePixels))
             Spacer(minLength: 8)
-            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
-                     help: "裁切框上的三分线（视图态，不进文档）",
+            CropChip(title: L10n.tr("f9edbf5994a5"), on: tool?.showsGrid ?? true,
+                     help: L10n.tr("561266708d88"),
                      action: { loupe?.cropTool.toggleGrid() })
                 .background(CropRowProbeHost(rowID: CropCardID.grid))
         }
@@ -169,8 +172,8 @@ extension InspectorView {
     @ViewBuilder
     private func cropGridRow(_ tool: CropToolController?) -> some View {
         HStack(spacing: 6) {
-            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
-                     help: "裁切框上的三分线（视图态，不进文档）",
+            CropChip(title: L10n.tr("f9edbf5994a5"), on: tool?.showsGrid ?? true,
+                     help: L10n.tr("561266708d88"),
                      action: { loupe?.cropTool.toggleGrid() })
             Spacer(minLength: 4)
         }
@@ -205,7 +208,7 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           // 356 — press opens the gesture's session; the release writes the angle and
                           // closes it (`commitStraighten` → one row). Neither end asks the history.
-                          if editing { session.beginToolGesture(tool: "裁切", label: "转动") }
+                          if editing { session.beginToolGesture(tool: L10n.tr("e9f8face2f69"), label: L10n.tr("0cf81e4c2481")) }
                           else { _ = tool?.commitStraighten() }
                       })
         }
@@ -262,7 +265,7 @@ extension InspectorView {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("清除引导线")
+                .help(L10n.tr("29ff7128a14f"))
                 .accessibilityIdentifier(CorrectionCardRow.guideLines.clearID)
             }
             if let status = tool?.guideLineStatusText {
@@ -304,13 +307,13 @@ extension InspectorView {
                       accessibilityID: "inspector.crop.perspective.vertical",
                       onReset: {
                           session.applyEdit { $0.geometry.perspectiveVertical = 0 }
-                          _ = session.commitEdit(label: "透视", coalesce: false)
+                          _ = session.commitEdit(label: L10n.tr("17e14283a497"), coalesce: false)
                       },
                       onEditingChanged: { editing in
                           // 356 — the drag is the gesture: press opens its session, release closes it
                           // with one row. Nothing has to know whether a session happened to be open.
-                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
-                          else { session.endToolGesture(label: "透视", coalesce: true) }
+                          if editing { session.beginToolGesture(tool: L10n.tr("17e14283a497"), label: L10n.tr("17e14283a497")) }
+                          else { session.endToolGesture(label: L10n.tr("17e14283a497"), coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveVertical.probeID))
             sliderRow(CorrectionCardRow.perspectiveHorizontal.title,
@@ -325,15 +328,106 @@ extension InspectorView {
                       accessibilityID: "inspector.crop.perspective.horizontal",
                       onReset: {
                           session.applyEdit { $0.geometry.perspectiveHorizontal = 0 }
-                          _ = session.commitEdit(label: "透视", coalesce: false)
+                          _ = session.commitEdit(label: L10n.tr("17e14283a497"), coalesce: false)
                       },
                       onEditingChanged: { editing in
                           // 356 — the same two ends as 垂直透视.
+                          if editing { session.beginToolGesture(tool: L10n.tr("17e14283a497"), label: L10n.tr("17e14283a497")) }
+                          else { session.endToolGesture(label: L10n.tr("17e14283a497"), coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
+            // **407 — 切变.** The document stores `k` (±0.5); the row reads and writes `k × 100`
+            // (±50), which is ART's convention and the unit the fit's readout prints. The conversion
+            // is the two closures below and nothing else — there is no second stored number.
+            //
+            // `%.0f` because the row's grid is a whole unit (0.01 of `k`), and `quantized` puts every
+            // drag on that grid so a cache key cannot see 0.0000001 of a slide.
+            sliderRow(CorrectionCardRow.perspectiveShear.title,
+                      Binding(get: { session.edit.geometry.perspectiveShear * 100 },
+                              set: { value in
+                                  session.applyEdit {
+                                      $0.geometry.perspectiveShear =
+                                          InspectorView.quantized(value / 100, quantum: 0.01)
+                                  }
+                              }),
+                      -PerspectiveMap.shearLimit * 100 ... PerspectiveMap.shearLimit * 100,
+                      "%+.0f",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.shear",
+                      onReset: {
+                          session.applyEdit { $0.geometry.perspectiveShear = 0 }
+                          _ = session.commitEdit(label: L10n.tr("17e14283a497"), coalesce: false)
+                      },
+                      onEditingChanged: { editing in
+                          // The same gesture class as the two keystones: a shear drag and a keystone
+                          // drag are both 「透视」, so one release is one history row.
+                          if editing { session.beginToolGesture(tool: L10n.tr("17e14283a497"), label: L10n.tr("17e14283a497")) }
+                          else { session.endToolGesture(label: L10n.tr("17e14283a497"), coalesce: true) }
+                      })
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveShear.probeID))
+            // **408 — 宽高比校正.** The document stores `a` itself (0.5…2.0); the row reads and writes
+            // `a × 100` (50…200 %), because 「105%」 is what a user can compare against the picture.
+            // The conversion is the two closures below and nothing else.
+            //
+            // The grid is 0.01 of `a` (one percentage point), i.e. the same `quantized` discipline as
+            // 407's shear: a drag cannot put 0.0000001 of a slide into the cache key.
+            sliderRow(CorrectionCardRow.perspectiveAspect.title,
+                      Binding(get: { session.edit.geometry.perspectiveAspect * 100 },
+                              set: { value in
+                                  session.applyEdit {
+                                      $0.geometry.perspectiveAspect =
+                                          InspectorView.quantized(value / 100, quantum: 0.01)
+                                  }
+                              }),
+                      100 / PerspectiveMap.aspectLimit ... PerspectiveMap.aspectLimit * 100,
+                      "%.0f%%",
+                      decimals: 0,
+                      enabled: true,
+                      accessibilityID: "inspector.crop.perspective.aspect",
+                      onReset: {
+                          // The row's default is **100 %**, not 0: a is a scale, and 1 is its
+                          // identity (`PerspectiveMap.clampAspect` reads anything else as exactly
+                          // that). Double-clicking the label is the same act as every other row's.
+                          session.applyEdit { $0.geometry.perspectiveAspect = 1 }
+                          _ = session.commitEdit(label: "透视", coalesce: false)
+                      },
+                      onEditingChanged: { editing in
                           if editing { session.beginToolGesture(tool: "透视", label: "透视") }
                           else { session.endToolGesture(label: "透视", coalesce: true) }
                       })
-                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveAspect.probeID))
+            // **408 — 自动**, the one computed value this ticket adds. It writes
+            // `a_auto = a · canvasHeight / canvasWidth` (`PerspectiveMap.compensatingAspect`), i.e.
+            // the aspect that makes the inscribed canvas square again. Disabled when there is
+            // nothing to correct (no warp) or when the document already sits on that value — it
+            // never silently rewrites a number the user chose.
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                CropPerspectiveAspectAutoButton(action: applyCompensatingAspect,
+                                                enabled: compensatingAspect != nil)
+            }
         }
+    }
+
+    /// The 自动 value for the document as it stands — `nil` when there is no keystone (nothing to
+    /// compensate) or when the canvas is degenerate. Read from `PerspectiveMap`, never re-derived
+    /// here: the one implementation of the formula is `compensatingAspect`.
+    private var compensatingAspect: Double? {
+        guard let map = session.edit.geometry.perspective,
+              let a = map.compensatingAspect else { return nil }
+        // Already there: the button has nothing to say (`a_auto` is what the picture shows).
+        guard abs(a - map.aspect) > 1e-9 else { return nil }
+        return a
+    }
+
+    /// One document write, one history row, and the crop draft reseeded so the overlay, the frame
+    /// and 应用 all see the new aspect (the same tail every geometry command uses).
+    private func applyCompensatingAspect() {
+        guard let a = compensatingAspect else { return }
+        session.applyEdit { $0.geometry.perspectiveAspect = a }
+        guard session.commitEdit(label: "宽高比校正", coalesce: false) else { return }
+        loupe?.afterCropGeometryReset()
     }
 
     // MARK: 旋转
@@ -414,15 +508,30 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
     case guideLines = "guideLines"
     case perspectiveVertical = "perspective.vertical"
     case perspectiveHorizontal = "perspective.horizontal"
+    /// **407** — 切变, the fourth knob of the same section. It is the first row since 183 that is not
+    /// a keystone, so its label says what it is (「切变」) rather than borrowing 透视's name: the two
+    /// keystones bend the frame projectively, this slides rows sideways, and the readout is a bare
+    /// number like ART's.
+    case perspectiveShear = "perspective.shear"
+    /// **408** — 宽高比校正, the fifth knob of the 透视 section.
+    ///
+    /// The name is **宽高比校正**, not 宽高比, for a measured reason: the 裁切 card's own section is
+    /// already titled 宽高比 (`CropSection.crop.title`, 334's 「裁切只含宽高比」), and that one is the
+    /// *crop* lock (`AspectLock`, `;asp=`). Two controls with one name would be exactly the confusion
+    /// 408 §0 is about, so this row says what it does — it *corrects* the picture's proportions — and
+    /// the crop's stays a ratio preset. `PerspectiveAspect408UITests` pins that the two differ.
+    case perspectiveAspect = "perspective.aspect"
 
     /// The row's display name — what the card prints next to its slider / button.
     public var title: String {
         switch self {
-        case .straighten: return "拉直"
-        case .drawStraighten: return "画线拉直"
-        case .guideLines: return "引导线"
-        case .perspectiveVertical: return "垂直透视"
-        case .perspectiveHorizontal: return "水平透视"
+        case .straighten: return L10n.tr("7df1c3a41535")
+        case .drawStraighten: return L10n.tr("267549f4a4f7")
+        case .guideLines: return L10n.tr("05aa77ec19ba")
+        case .perspectiveVertical: return L10n.tr("cfb8519677bc")
+        case .perspectiveHorizontal: return L10n.tr("1ebf0a707159")
+        case .perspectiveShear: return L10n.tr("04684189cbd7")
+        case .perspectiveAspect: return "宽高比校正"
         }
     }
 
@@ -452,13 +561,13 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         switch self {
         // 086: the first section's small title is the user's new word. The *card* title (「裁切」) is
         // `InspectorView.Section.crop.title` and is not this enum, so it does not move with this.
-        case .crop: return "宽高比"
-        case .angle: return "角度"
+        case .crop: return L10n.tr("22aca111bd1d")
+        case .angle: return L10n.tr("8d855790e87a")
         // 183: 透视 — the two keystone knobs. It is a first-class section (not a bare header inside
         // the panel) so that "nothing else calls itself a section" (082 §4) stays checkable.
-        case .perspective: return "透视"
-        case .rotation: return "旋转"
-        case .mirror: return "镜像"
+        case .perspective: return L10n.tr("17e14283a497")
+        case .rotation: return L10n.tr("68eb90fa809e")
+        case .mirror: return L10n.tr("176c09844e0f")
         }
     }
 
@@ -516,7 +625,7 @@ struct CropSectionTitle: View {
         Text(title)
             .font(.system(size: CropSectionHeader.titleFontSize, weight: .medium))
             .foregroundStyle(.secondary)
-            .modifier(ResetOnDoubleClick(action: reset, help: "双击复位「\(title)」"))
+            .modifier(ResetOnDoubleClick(action: reset, help: L10n.tr("40b2b7a78a37" , String(describing: (title)))))
             .accessibilityIdentifier("inspector.crop.section.\(title)")
     }
 }
@@ -652,7 +761,7 @@ struct CropAspectRow: View {
                                          revision &+= 1
                                      })
                     .frame(width: Self.swapHitSize, height: Self.swapHitSize)
-                    .help("交换长宽")
+                    .help(L10n.tr("48f67733fc2b"))
                     .background(CropRowProbeHost(rowID: Self.swapProbeID))
             }
             .background(CropRowProbeHost(rowID: Self.customProbeID))
@@ -839,7 +948,7 @@ final class RatioPresetButton: NSButton {
         layer?.borderColor = isOn
             ? NSColor.controlAccentColor.cgColor
             : NSColor.tertiaryLabelColor.withAlphaComponent(0.6).cgColor
-        setAccessibilityValue(isOn ? "已选中" : "未选中")
+        setAccessibilityValue(isOn ? L10n.tr("a737fd72b016") : L10n.tr("0e0c21de6988"))
         invalidateIntrinsicContentSize()
     }
 }
@@ -899,7 +1008,7 @@ final class SwapAspectButton: NSButton {
         alignment = .center
         wantsLayer = true
         attributedTitle = NSAttributedString(string: "⇄", attributes: [.font: Self.font])
-        setAccessibilityLabel("交换长宽")
+        setAccessibilityLabel(L10n.tr("48f67733fc2b"))
         refresh(enabled: enabled)
     }
 
@@ -913,7 +1022,7 @@ final class SwapAspectButton: NSButton {
     func refresh(enabled: Bool) {
         isEnabled = enabled
         contentTintColor = enabled ? .labelColor : .tertiaryLabelColor
-        setAccessibilityValue(enabled ? "可交换" : "无裁切工具")
+        setAccessibilityValue(enabled ? L10n.tr("0fc6ecd501ab") : L10n.tr("29f0269b1504"))
     }
 }
 
@@ -978,12 +1087,12 @@ final class CustomRatioField: NSTextField, NSTextFieldDelegate {
         controlSize = .mini
         focusRingType = .default
         alignment = .center
-        toolTip = "键入比例：5:4 或 1.85（回车生效，非法输入不写入）"
+        toolTip = L10n.tr("3f8f6a203851")
         delegate = self
         target = self
         action = #selector(commitAction)
         setAccessibilityIdentifier(CropAspectRow.customID)
-        setAccessibilityLabel("自定义比例")
+        setAccessibilityLabel(L10n.tr("b49d6bdf6e80"))
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -1076,11 +1185,11 @@ struct CropMirrorRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            MirrorButtonHost(symbol: "flip.horizontal", title: "水平翻转", isOn: horizontal,
+            MirrorButtonHost(symbol: "flip.horizontal", title: L10n.tr("44775fbf3342"), isOn: horizontal,
                              identifierID: Self.horizontalID, action: onHorizontal)
                 .fixedSize()
             MirrorButtonHost(symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                             title: "垂直翻转", isOn: vertical,
+                             title: L10n.tr("fcd75ef0a054"), isOn: vertical,
                              identifierID: Self.verticalID, action: onVertical)
                 .fixedSize()
             Spacer(minLength: 4)
@@ -1113,11 +1222,11 @@ struct CropTurnRow: View {
         HStack(spacing: 6) {
             // `.fixedSize()`: the leaves are `NSView`s, and without it SwiftUI proposes the row's
             // width and AppKit stretches them (measured: two 88 pt buttons in a 308 pt card).
-            TurnButtonHost(symbol: "rotate.left", title: "逆时针旋转 90°",
+            TurnButtonHost(symbol: "rotate.left", title: L10n.tr("d4b56c062003"),
                            identifierID: Self.counterClockwiseID,
                            isEnabled: isEnabled, action: onCounterClockwise)
                 .fixedSize()
-            TurnButtonHost(symbol: "rotate.right", title: "顺时针旋转 90°",
+            TurnButtonHost(symbol: "rotate.right", title: L10n.tr("980edb5bf6fd"),
                            identifierID: Self.clockwiseID,
                            isEnabled: isEnabled, action: onClockwise)
                 .fixedSize()
@@ -1166,7 +1275,7 @@ class BareIconButton: NSButton {
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: Self.glyphPointSize,
                                                                  weight: .regular))
-        toolTip = title + "（一次 ⌘Z）"
+        toolTip = title + L10n.tr("d7dfdfdf033e")
         setAccessibilityLabel(title)
         wantsLayer = true
         layer?.cornerRadius = Self.cornerRadius
@@ -1331,7 +1440,7 @@ final class TurnBadgeLabel: NSTextField {
     func refresh(_ text: String, isTurned: Bool) {
         stringValue = text
         textColor = isTurned ? .controlAccentColor : .secondaryLabelColor
-        toolTip = "当前方向：顺时针 \(text)（4 次回到原位，逐字节相同）"
+        toolTip = L10n.tr("7adb78027187" , String(describing: (text)))
         setAccessibilityValue(text)
         invalidateIntrinsicContentSize()
     }
@@ -1365,8 +1474,8 @@ struct CropApplyRow: View {
     static let applyID = "inspector.crop.apply"
     static let cancelID = "inspector.crop.cancel"
     /// The two keys `DetailRowEnabledLog` records them under (the panel's existing readback seam).
-    static let applyProbe = "裁切.应用"
-    static let cancelProbe = "裁切.取消"
+    static let applyProbe = L10n.tr("cda112365c45")
+    static let cancelProbe = L10n.tr("04531351799e")
     /// 336: one probe per **button**, so the acceptance can size each one instead of the pair.
     static let applyButtonProbe = "apply.button"
     static let cancelButtonProbe = "cancel.button"
@@ -1387,7 +1496,7 @@ struct CropApplyRow: View {
         // which is also the order §3.2 measures (`应用`.maxX == content right − 16).
         HStack(spacing: Self.spacing) {
             Button(action: onCancel) {
-                Text("取消")
+                Text(L10n.tr("2cd0f3be8738"))
                     .padding(.horizontal, Self.labelInset)
             }
             .buttonStyle(.bordered)
@@ -1395,10 +1504,10 @@ struct CropApplyRow: View {
             .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
             .background(DetailRowEnabledProbe(title: Self.cancelProbe))
             .background(CropRowProbeHost(rowID: Self.cancelButtonProbe))
-            .help("放弃这次裁切，文档一个字节都不动")
+            .help(L10n.tr("3f205fb11e86"))
             .accessibilityIdentifier(Self.cancelID)
             Button(action: onApply) {
-                Text("应用")
+                Text(L10n.tr("63c73c4730f4"))
                     .padding(.horizontal, Self.labelInset)
             }
             // 341 (user): 应用是主操作 —— 用强调色（蓝），取消保持普通 bordered。
@@ -1407,7 +1516,7 @@ struct CropApplyRow: View {
             .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
             .background(DetailRowEnabledProbe(title: Self.applyProbe))
             .background(CropRowProbeHost(rowID: Self.applyButtonProbe))
-            .help("应用裁切（一条历史，一次 ⌘Z）")
+            .help(L10n.tr("a82b94de987d"))
             .accessibilityIdentifier(Self.applyID)
         }
         .background(CropRowProbeHost(rowID: Self.probeID))
@@ -1516,8 +1625,8 @@ final class DrawStraightenButton: NSButton {
     static let cornerRadius: CGFloat = 5
     /// The symbol the panel draws — the acceptance's one readback (`image name == level`).
     static let symbol = "level"
-    static let label = "画线拉直"
-    static let help = "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消"
+    static let label = L10n.tr("267549f4a4f7")
+    static let help = L10n.tr("7f3e11905725")
     static let identifierID = "inspector.crop.drawStraighten"
 
     private(set) var symbolName: String = DrawStraightenButton.symbol
@@ -1597,6 +1706,79 @@ struct CropDrawStraightenToggle: NSViewRepresentable {
     }
 }
 
+// MARK: - 408 「自动」（宽高比）
+
+/// **408** — the 宽高比校正 row's 自动 button: writes `PerspectiveMap.compensatingAspect`, the aspect that
+/// makes the inscribed canvas square again.
+///
+/// A real `NSButton` rather than a SwiftUI `Button` for the same reason as 334's 画线拉直 and 337's
+/// 引导线: the acceptance reads the button (its title, its `isEnabled`, and the document it wrote)
+/// back from an `NSView`, and a SwiftUI leaf has none.
+final class PerspectiveAspectAutoButton: NSButton {
+
+    static let title = "自动"
+    static let help = "把宽高比设为让画布恢复原比例的值（可撤销；不会静默覆盖你手调的数字）"
+    static let identifierID = "inspector.crop.perspective.aspect.auto"
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: 48, height: 18)))
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.momentaryPushIn)
+        title = Self.title
+        font = .systemFont(ofSize: 10, weight: .medium)
+        contentTintColor = .secondaryLabelColor
+        toolTip = Self.help
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        setAccessibilityIdentifier(Self.identifierID)
+        target = self
+        action = #selector(fire)
+    }
+
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 48, height: 18) }
+
+    /// Assigned by the coordinator on every update, so the click writes the *current* document.
+    var onPress: () -> Void = {}
+
+    @objc private func fire() { onPress() }
+}
+
+struct CropPerspectiveAspectAutoButton: NSViewRepresentable {
+
+    let action: () -> Void
+    var enabled: Bool = true
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> PerspectiveAspectAutoButton {
+        let button = PerspectiveAspectAutoButton()
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.onPress = action
+        button.isEnabled = enabled
+        return button
+    }
+
+    func updateNSView(_ button: PerspectiveAspectAutoButton, context: Context) {
+        context.coordinator.action = action
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.fire)
+        button.onPress = action
+        button.isEnabled = enabled
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func fire() { action() }
+    }
+}
+
 // MARK: - 337 「引导线」
 
 /// 337 — the 校正 card's **引导线** switch: a `perspective` glyph (the same picture-plane idiom the
@@ -1613,9 +1795,9 @@ final class GuideLinesButton: NSButton {
     static let cornerRadius: CGFloat = 5
     /// The symbol the panel draws — the acceptance's one readback (`image name == perspective`).
     static let symbol = "perspective"
-    static let label = "引导线"
-    static let help = "沿本该竖直/水平的边画两条线，松手后解出透视（2 竖 + 2 横，最多 4 条）；"
-        + "Esc 或再点一次取消"
+    static let label = L10n.tr("05aa77ec19ba")
+    static let help = L10n.tr("d193f9de4dfc")
+        + L10n.tr("09c161819adf")
     static let identifierID = "inspector.crop.guideLines"
 
     private(set) var symbolName: String = GuideLinesButton.symbol
@@ -1707,7 +1889,7 @@ struct CropGuideLinesToggle: NSViewRepresentable {
 /// disagree, which is 082's rule for every row of this card.
 struct StaysInsidePixelsCheckbox: NSViewRepresentable {
 
-    static let title = "不出像素"
+    static let title = L10n.tr("813d3cebe72c")
     static let identifier = "inspector.crop.staysInsidePixels"
 
     let isOn: Bool
@@ -1720,7 +1902,7 @@ struct StaysInsidePixelsCheckbox: NSViewRepresentable {
         box.controlSize = .small
         box.font = .systemFont(ofSize: 11)
         box.state = isOn ? .on : .off
-        box.toolTip = "勾选后裁切框只能在照片像素内移动（不出黑角），尺寸不变"
+        box.toolTip = L10n.tr("8baa2686d5d3")
         box.setAccessibilityIdentifier(Self.identifier)
         return box
     }
@@ -1797,6 +1979,10 @@ enum CropCardID {
     /// 183: the two keystone sliders' frames.
     static let perspectiveVertical = "perspective.vertical"
     static let perspectiveHorizontal = "perspective.horizontal"
+    /// 407: 切变's frame, in the same section.
+    static let perspectiveShear = "perspective.shear"
+    /// 408: 宽高比's frame, and its 自动 button, in the same section.
+    static let perspectiveAspect = "perspective.aspect"
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"

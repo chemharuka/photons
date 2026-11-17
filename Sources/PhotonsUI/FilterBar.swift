@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -11,20 +12,20 @@ enum FilterDisplay {
     /// Short enough to sit in a 34 pt popup: 星级 / 旗标 / 相机 / 镜头 / 后缀 / 月 / 日 …
     static func title(_ dimension: FilterDimension) -> String {
         switch dimension {
-        case .month: return "月"
-        case .day: return "日"
-        case .ext: return "后缀"
-        case .rating: return "星级"
-        case .flag: return "旗标"
-        case .color: return "色标"
-        case .camera: return "相机"
-        case .serial: return "序列号"
-        case .lens: return "镜头"
-        case .focal: return "焦距"
-        case .shutter: return "快门"
-        case .aperture: return "光圈"
+        case .month: return L10n.tr("1625179badc0")
+        case .day: return L10n.tr("85217f7aff77")
+        case .ext: return L10n.tr("006d3ffb11d2")
+        case .rating: return L10n.tr("9c55a439d71f")
+        case .flag: return L10n.tr("42756d47efb9")
+        case .color: return L10n.tr("482ec70d0841")
+        case .camera: return L10n.tr("dacf07026026")
+        case .serial: return L10n.tr("94854c89ae71")
+        case .lens: return L10n.tr("bec5dd6e9068")
+        case .focal: return L10n.tr("9084e1064dab")
+        case .shutter: return L10n.tr("8a4f7c319467")
+        case .aperture: return L10n.tr("e3df0be2e19a")
         case .iso: return "ISO"
-        case .flash: return "闪光灯"
+        case .flash: return L10n.tr("e3f9866a9143")
         case .gps: return "GPS"
         }
     }
@@ -32,10 +33,10 @@ enum FilterDisplay {
     /// The checklist entry in the dimension picker — what the 15-row list prints.
     static func longTitle(_ dimension: FilterDimension) -> String {
         switch dimension {
-        case .ext: return "文件后缀"
-        case .shutter: return "快门速度"
-        case .gps: return "GPS 数据"
-        case .focal: return "焦距"
+        case .ext: return L10n.tr("e2f7d66434af")
+        case .shutter: return L10n.tr("82941f103294")
+        case .gps: return L10n.tr("80541253c5fa")
+        case .focal: return L10n.tr("9084e1064dab")
         default: return title(dimension)
         }
     }
@@ -44,22 +45,22 @@ enum FilterDisplay {
                       cameraLabels: [String: String] = [:]) -> String {
         switch dimension {
         case .month:
-            return "\(Int(value) ?? 0) 月"
+            return L10n.tr("752e88e74375" , String(describing: (Int(value) ?? 0)))
         case .day:
-            return "\(Int(value) ?? 0) 日"
+            return L10n.tr("6585bb7be54d" , String(describing: (Int(value) ?? 0)))
         case .ext:
             return value.uppercased()
         case .rating:
-            return value == "0" ? "未评级" : "\(value)★"
+            return value == "0" ? L10n.tr("2df874e69dfd") : "\(value)★"
         case .flag:
             switch value {
-            case "pick": return "留用"
-            case "reject": return "排除"
-            case FilterValue.none: return "未标记"
+            case "pick": return L10n.tr("a9eaa7e913ad")
+            case "reject": return L10n.tr("ac83d3972fe9")
+            case FilterValue.none: return L10n.tr("534fc7e1ac23")
             default: return value
             }
         case .color:
-            if value == FilterValue.none { return "无" }
+            if value == FilterValue.none { return L10n.tr("484d55613910") }
             return ColorLabel.normalized(value)?.displayName ?? value
         case .camera:
             // The key is `make|model`, lowercased; the model is what the user recognises.
@@ -73,7 +74,7 @@ enum FilterDisplay {
             if let d = Double(value), d == d.rounded() { return "f/\(Int(d))" }
             return "f/\(value)"
         case .flash, .gps:
-            return value == FilterValue.yes ? "有" : "无"
+            return value == FilterValue.yes ? L10n.tr("90ce0f66f094") : L10n.tr("484d55613910")
         }
     }
 
@@ -88,14 +89,14 @@ enum FilterDisplay {
     /// the bar is the only place that says which one.
     static func slotTitle(_ slot: FilterSlot, cameraLabels: [String: String] = [:]) -> String {
         let name = title(slot.dimension)
-        guard !slot.values.isEmpty else { return "全部\(name)" }
+        guard !slot.values.isEmpty else { return L10n.tr("f293a27cecfa" , String(describing: (name))) }
         if Self.isBoolean(slot.dimension) || slot.values.count == 1 {
             let shown = slot.values
                 .map { value(slot.dimension, $0, cameraLabels: cameraLabels) }
                 .joined(separator: "、")
             return "\(name) \(shown)"
         }
-        return "部分\(name)"
+        return L10n.tr("c783a90338f5" , String(describing: (name)))
     }
 
     /// 有/无 dimensions — the two whose facet list is a fixed pair rather than a ladder.
@@ -441,7 +442,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
 
     /// 050: 「清除全部」 — the only control right of the slots. Width = measured ink + 8 pt, so a
     /// system font that measures wider than expected can never clip the word.
-    static let clearTitle = "清除全部"
+    static let clearTitle = L10n.tr("55f1033fab69")
     static let clearFont = NSFont.systemFont(ofSize: 10.5)
     /// How far the button's right edge sits from the bar's right edge.
     static let clearTrailingInset: CGFloat = 12
@@ -462,7 +463,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     /// chosen glyph at 16 × 16, inside the 24 × 24 box.
     static func dimensionSymbolImage(pointSize: CGFloat = 13) -> NSImage? {
         for name in dimensionSymbolCandidates {
-            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "选择筛选维度")
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: L10n.tr("f88f4f91aea0"))
             else { continue }
             let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             let image = symbol.withSymbolConfiguration(config) ?? symbol
@@ -513,8 +514,8 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         dimensionButton.contentTintColor = .secondaryLabelColor
         dimensionButton.target = self
         dimensionButton.action = #selector(dimensionButtonTapped)
-        dimensionButton.toolTip = "选择筛选维度"
-        dimensionButton.setAccessibilityLabel("选择筛选维度")
+        dimensionButton.toolTip = L10n.tr("f88f4f91aea0")
+        dimensionButton.setAccessibilityLabel(L10n.tr("f88f4f91aea0"))
         if let symbol = Self.dimensionSymbolImage() {
             dimensionButton.image = symbol
             dimensionButton.imagePosition = .imageOnly
@@ -613,7 +614,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
             let slot = filter.slots[index]
             button.isHidden = false
             button.title = FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels)
-            button.toolTip = "选择\(FilterDisplay.title(slot.dimension))的值（可多选）"
+            button.toolTip = L10n.tr("a692b4e3818c" , String(describing: (FilterDisplay.title(slot.dimension))))
             button.setAccessibilityLabel(button.toolTip ?? "")
         }
     }
@@ -656,7 +657,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
                                       kind: .toggle,
                                       tag: dimension.rawValue)
         }
-        rows.append(FilterChecklistRow(title: "全部不选",
+        rows.append(FilterChecklistRow(title: L10n.tr("0a9481a153a7"),
                                        enabled: !filter.slots.isEmpty,
                                        kind: .action))
         return rows
@@ -671,13 +672,13 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         // It used to repeat the selection (「星级 1★、2★、5★」) in blue, which read as a value and made
         // the list's first line longer than the button that opened it.
         var rows = [FilterChecklistRow(title: slot.values.isEmpty
-                                        ? "全部\(FilterDisplay.title(slot.dimension))"
-                                        : "取消选择",
+                                        ? L10n.tr("f293a27cecfa" , String(describing: (FilterDisplay.title(slot.dimension))))
+                                        : L10n.tr("74966e20df2e"),
                                        enabled: !slot.values.isEmpty,
                                        kind: .action)]
         let values = facetValues(slot.dimension)
         if values.isEmpty {
-            rows.append(FilterChecklistRow(title: "本库无此数据", enabled: false, kind: .note))
+            rows.append(FilterChecklistRow(title: L10n.tr("e249b3f6e038"), enabled: false, kind: .note))
         } else {
             rows += values.map { value in
                 FilterChecklistRow(title: FilterDisplay.value(slot.dimension, value,

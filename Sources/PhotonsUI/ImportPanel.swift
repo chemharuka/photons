@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -22,9 +23,11 @@ public struct ImportPanelConfiguration: Equatable, Sendable {
     public static let includeSubfoldersDefault = true
 
     public var includeSubfolders: Bool
+    public var skipDuplicates: Bool
 
-    public init(includeSubfolders: Bool = ImportPanelConfiguration.includeSubfoldersDefault) {
+    public init(includeSubfolders: Bool = ImportPanelConfiguration.includeSubfoldersDefault, skipDuplicates: Bool = true) {
         self.includeSubfolders = includeSubfolders
+        self.skipDuplicates = skipDuplicates
     }
 
     // MARK: persistence
@@ -33,20 +36,20 @@ public struct ImportPanelConfiguration: Equatable, Sendable {
     /// rather than `bool(forKey:)` on purpose: `bool` cannot tell "saved false" from "never saved",
     /// and the first run has to open ticked.
     public static func load(from defaults: UserDefaults) -> ImportPanelConfiguration {
-        guard defaults.object(forKey: includeSubfoldersKey) != nil else {
-            return ImportPanelConfiguration()
-        }
-        return ImportPanelConfiguration(includeSubfolders: defaults.bool(forKey: includeSubfoldersKey))
+        ImportPanelConfiguration(
+            includeSubfolders: defaults.object(forKey: includeSubfoldersKey) == nil ? true : defaults.bool(forKey: includeSubfoldersKey),
+            skipDuplicates: defaults.object(forKey: "importSkipDuplicates") == nil ? true : defaults.bool(forKey: "importSkipDuplicates"))
     }
 
     public func save(to defaults: UserDefaults) {
         defaults.set(includeSubfolders, forKey: Self.includeSubfoldersKey)
+        defaults.set(skipDuplicates, forKey: "importSkipDuplicates")
     }
 
     // MARK: what it means for the engine
 
     public func options() -> ImportOptions {
-        ImportRequest.options(includeSubfolders: includeSubfolders)
+        ImportRequest.options(includeSubfolders: includeSubfolders, skipDuplicates: skipDuplicates)
     }
 
     /// Fold the panel's answer into (a) the import to run and (b) the choice to remember.
@@ -59,18 +62,19 @@ public struct ImportPanelConfiguration: Equatable, Sendable {
         switch outcome {
         case .cancelled:
             return nil
-        case let .confirmed(sources, includeSubfolders):
+        case let .confirmed(sources, includeSubfolders, skipDuplicates):
             // An empty selection with .OK should not happen, but an import of nothing must never
             // reach the engine (it throws `importSourceMissing`).
             guard !sources.isEmpty else { return nil }
             let shape = ImportSelectionShape.classify(sources)
-            if shape.remembersSubfolderChoice {
-                ImportPanelConfiguration(includeSubfolders: includeSubfolders).save(to: defaults)
-            }
+            var saved = load(from: defaults)
+            if shape.remembersSubfolderChoice { saved.includeSubfolders = includeSubfolders }
+            saved.skipDuplicates = skipDuplicates
+            saved.save(to: defaults)
             // With no folder in the selection the flag is not applicable; `true` is the engine's own
             // default and cannot hide an explicitly named file (single files are always imported).
             return ImportRequest(sources: sources,
-                                 includeSubfolders: shape.hasFolders ? includeSubfolders : true)
+                                 includeSubfolders: shape.hasFolders ? includeSubfolders : true, skipDuplicates: skipDuplicates)
         }
     }
 }
@@ -118,7 +122,7 @@ public struct ImportSelectionShape: Equatable, Sendable {
 /// What the panel was answered with, as a value — so the decision can be tested without a window.
 public enum ImportPanelOutcome: Equatable, Sendable {
     case cancelled
-    case confirmed(sources: [URL], includeSubfolders: Bool)
+    case confirmed(sources: [URL], includeSubfolders: Bool, skipDuplicates: Bool = true)
 }
 
 // MARK: - the request
@@ -131,20 +135,22 @@ public enum ImportPanelOutcome: Equatable, Sendable {
 public struct ImportRequest: Equatable, Sendable {
     public var sources: [URL]
     public var includeSubfolders: Bool
+    public var skipDuplicates: Bool
 
-    public init(sources: [URL], includeSubfolders: Bool) {
+    public init(sources: [URL], includeSubfolders: Bool, skipDuplicates: Bool = true) {
         self.sources = sources
         self.includeSubfolders = includeSubfolders
+        self.skipDuplicates = skipDuplicates
     }
 
     /// The one builder for GUI import options. Both the panel configuration and the request go
     /// through it, so the "GUI = reference" rule cannot drift between the two.
-    public static func options(includeSubfolders: Bool) -> ImportOptions {
-        ImportOptions(mode: .reference, recursive: includeSubfolders)
+    public static func options(includeSubfolders: Bool, skipDuplicates: Bool = true) -> ImportOptions {
+        ImportOptions(mode: .reference, recursive: includeSubfolders, skipDuplicates: skipDuplicates)
     }
 
     public var options: ImportOptions {
-        Self.options(includeSubfolders: includeSubfolders)
+        Self.options(includeSubfolders: includeSubfolders, skipDuplicates: skipDuplicates)
     }
 }
 
@@ -158,13 +164,13 @@ public struct ImportRequest: Equatable, Sendable {
 /// kind of per-operation switch at the bottom.
 @MainActor
 public enum ImportPanel {
-    public static let prompt = "导入"
-    public static let message = "选择要导入的照片或文件夹"
-    public static let includeSubfoldersTitle = "包含子文件夹"
+    public static let prompt = L10n.tr("576d81bb0631")
+    public static let message = L10n.tr("1200718c344a")
+    public static let includeSubfoldersTitle = L10n.tr("e6c0d36d6749")
 
     /// One 20 pt checkbox with 5 pt of air above and below. The frame is required: an accessory
     /// view with a zero frame collapses and the box is invisible.
-    public static let accessorySize = NSSize(width: 400, height: 30)
+    public static let accessorySize = NSSize(width: 400, height: 56)
 
     /// Builds the panel and its checkbox. Construction only — nothing is shown, no run loop is
     /// entered, so a test can assert every knob.
@@ -183,13 +189,20 @@ public enum ImportPanel {
 
         let include = NSButton(checkboxWithTitle: includeSubfoldersTitle, target: nil, action: nil)
         include.state = configuration.includeSubfolders ? .on : .off
-        include.frame = NSRect(x: 12, y: 5, width: accessorySize.width - 24, height: 20)
+        include.frame = NSRect(x: 12, y: 30, width: accessorySize.width - 24, height: 20)
         // Nothing is picked yet when the panel opens; `AccessoryStateWatcher` enables it as soon as
         // the selection contains a folder.
         include.isEnabled = false
 
         let accessory = NSView(frame: NSRect(origin: .zero, size: accessorySize))
         accessory.addSubview(include)
+        let skip = NSButton(checkboxWithTitle: L10n.tr("import.skipDuplicates"), target: nil, action: nil)
+        skip.identifier = NSUserInterfaceItemIdentifier("import.skipDuplicates")
+        skip.setAccessibilityIdentifier("import.skipDuplicates")
+        skip.state = configuration.skipDuplicates ? .on : .off
+        skip.toolTip = L10n.tr("import.duplicateCopies")
+        skip.frame = NSRect(x: 12, y: 5, width: accessorySize.width - 24, height: 20)
+        accessory.addSubview(skip)
         // Must be set before `runModal()`: a panel copies (and dismisses) its accessory view on show.
         panel.accessoryView = accessory
         return (panel, include)
@@ -226,7 +239,7 @@ public enum ImportPanel {
         func refresh() {
             let shape = ImportSelectionShape.classify(panel.urls)
             include.isEnabled = shape.subfolderOptionEnabled
-            include.toolTip = shape.hasFolders ? nil : "只选了照片，子文件夹选项不适用"
+            include.toolTip = shape.hasFolders ? nil : L10n.tr("5b00b953021a")
         }
     }
 
@@ -248,7 +261,8 @@ public enum ImportPanel {
             return ImportPanelConfiguration.resolve(.cancelled, defaults: defaults)
         }
         return ImportPanelConfiguration.resolve(
-            .confirmed(sources: panel.urls, includeSubfolders: include.state == .on),
+            .confirmed(sources: panel.urls, includeSubfolders: include.state == .on,
+                       skipDuplicates: (panel.accessoryView?.subviews.first { $0.identifier?.rawValue == "import.skipDuplicates" } as? NSButton)?.state != .off),
             defaults: defaults)
     }
 }
@@ -268,7 +282,7 @@ public struct ImportProgress: Equatable, Sendable {
     /// 「导入中 12/48」. Before the walk knows its size (the enumeration hashes nothing, so this is
     /// only the first few milliseconds) it reads 「导入中…」 instead of a fake denominator.
     public var text: String {
-        total > 0 ? "导入中 \(processed)/\(total)" : "导入中…"
+        total > 0 ? L10n.tr("189270a8b350" , String(describing: (processed)), String(describing: (total))) : L10n.tr("2f58b6eddc08")
     }
 }
 
@@ -315,7 +329,7 @@ public final class ImportProgressBar: NSView {
     public var onCancel: (() -> Void)?
 
     private let label = NSTextField(labelWithString: "")
-    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    private let cancelButton = NSButton(title: L10n.tr("2cd0f3be8738"), target: nil, action: nil)
     private var hideToken = 0
 
     /// What the line currently reads — the thing a test asserts instead of a screenshot.
@@ -365,7 +379,7 @@ public final class ImportProgressBar: NSView {
 
     /// A finished run with failures: one word, no paragraph (`用户: 摘要文案暂时不需要`).
     public func showFailure(_ count: Int) {
-        show("\(count) 个失败")
+        show(L10n.tr("9384df2ddf8e" , String(describing: (count))))
         cancelButton.isHidden = true
         cancelButton.isEnabled = false      // nothing left to cancel once the run is over
         scheduleHide(after: 4)

@@ -1,5 +1,6 @@
 import XCTest
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 263 — 「撤销」 on a newest row appends one 「撤销 xxx」 snapshot; it never removes a row.
@@ -214,7 +215,14 @@ final class HistoryRevertTests: XCTestCase {
         XCTAssertFalse(source.contains("xmark"), "旧 × 图标必须整体删掉")
         XCTAssertTrue(source.contains("public static let undoWidth: CGFloat = 26"))
         XCTAssertTrue(source.contains("public static let undoHitHeight: CGFloat = 18"))
-        XCTAssertTrue(source.contains("Text(\"撤销\")"))
+        // 本地化之后 `Text("撤销")` 变成 `Text(L10n.tr("926a50b98ece"))`（资源表 zh = 撤销 / en = Undo）。
+        // 等价改写：先钉「这条文案就是撤销」，再钉「面板用的是这条文案」。
+        // 原来那一句想保证的是「按钮上写的是撤销、而且文案只有一个来源」，这两点都还在；
+        // 只是「撤销」两个字从源码搬进了资源表，所以不能再按源码字面量找。
+        XCTAssertEqual(L10n.tr("926a50b98ece"), "撤销",
+                       "撤销文案必须仍是「撤销」（资源表 926a50b98ece）")
+        XCTAssertTrue(source.contains("Text(L10n.tr(\"926a50b98ece\"))"),
+                      "撤销按钮的文案必须走那一条资源，而不是在视图里另写一遍")
         XCTAssertTrue(source.contains("session.revertHistoryEntry(at: row.index)"))
         XCTAssertTrue(source.contains("if row.canUndo {"))
         XCTAssertTrue(source.contains("inspector.history.undo.\\(row.seq)"))

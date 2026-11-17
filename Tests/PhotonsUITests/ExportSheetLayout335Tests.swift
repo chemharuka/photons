@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
+import PhotonsLocalization
 @testable import PhotonsCore
 @testable import PhotonsExport
 @testable import PhotonsUI
@@ -326,10 +327,19 @@ final class ExportSheetLayout335Tests: XCTestCase {
                        "路径紧跟按钮")
         XCTAssertLessThanOrEqual(path.maxX, 540 + 0.5, "路径不许越过面板右 padding")
 
-        // 文案逐字节：源里是 `Button("更改")`，且这一行没有省略号。
+        // 文案：**运行时的实际文案**必须是「更改」，且不带省略号。
+        //
+        // 本地化之后源码是 `Button(L10n.tr("6b01fce4dbea"))`，资源表里
+        // `zh-Hans.json: "6b01fce4dbea": "更改"` —— 文案搬到资源表里，钉的对象跟着搬。
+        // 语义完全等价：以前钉「源码里有 Button("更改") 这串字」，现在钉
+        // 「按钮那条文案是「更改」」—— 这是行为，不是实现细节。
+        let buttonTitle = L10n.tr("6b01fce4dbea")
+        XCTAssertEqual(buttonTitle, "更改", "按钮文案必须是「更改」（资源表 6b01fce4dbea）")
+        XCTAssertFalse(buttonTitle.contains("…"), "335 · 按钮文案不许再带省略号")
+        // 源码守卫仍要证明这行**确实**用的是那条文案，不是把资源里的字反抄进断言。
         let text = try sourceText()
-        XCTAssertTrue(text.contains("Button(\"更改\")"), "按钮文案必须是「更改」")
-        XCTAssertFalse(text.contains("Button(\"更改…\")"), "335 · 按钮文案不许再带省略号")
+        XCTAssertTrue(text.contains("Button(L10n.tr(\"6b01fce4dbea\"))"),
+                      "按钮必须由资源键 6b01fce4dbea 提供文案")
 
         // 宽度 = 文字宽 + 原按钮内边距（= 改前「更改…」51.0 减去多出来的那个省略号）。
         // 小尺寸控件（`.controlSize(.small)`）的文字是 11 pt；改前按钮实测 51.0。

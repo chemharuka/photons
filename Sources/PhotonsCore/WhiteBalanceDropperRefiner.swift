@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// **The iterative fallback (236).**
@@ -80,9 +81,9 @@ public enum WhiteBalanceDropperRefiner {
         /// and every attempt (probes included) whether it converged or not — "how many developments it
         /// needed" is the number the next reader will want.
         public var text: String {
-            let head = String(format: "吸管精修 %.2f%%（目标 %.0f%%）· %d 次解码 · %.0f ms%@%@",
+            let head = String(format: L10n.tr("cc9336ce0ee8"),
                               residual * 100, target * 100, decodes, milliseconds,
-                              converged ? "" : " · 未达标",
+                              converged ? "" : L10n.tr("16eedfe21d48"),
                               failure.map { " · \($0)" } ?? "")
             return ([head] + attempts.map { "  " + $0.text }).joined(separator: "\n")
         }
@@ -152,7 +153,7 @@ public enum WhiteBalanceDropperRefiner {
                 attempts.append(attempt)
                 return attempt
             } catch {
-                failure = "精修解码失败：\(error)"
+                failure = L10n.tr("46cf9e72b7d2" , String(describing: (error)))
                 return nil
             }
         }
@@ -201,7 +202,7 @@ public enum WhiteBalanceDropperRefiner {
             } else {
                 // A singular Jacobian (the axes barely move the cast): the dominant axis alone, so the
                 // click still improves rather than bailing. Reported, not hidden.
-                failure = "精修：雅可比退化，改用单轴步"
+                failure = L10n.tr("266bb5fdd7a7")
                 step = abs(c0.rb) >= abs(c0.gm) ? (-c0.rb, 0) : (0, -c0.gm / 0.001)
             }
             guard abs(step.k) > 1e-6 || abs(step.t) > 1e-6 else { break }
@@ -214,7 +215,7 @@ public enum WhiteBalanceDropperRefiner {
             if landed.sample.chroma <= target { break }
             let moved = cast(landed.sample)
             if abs(moved.rb - c0.rb) < 1e-6 && abs(moved.gm - c0.gm) < 1e-6 {
-                failure = "精修：解码器对这对值没有响应"
+                failure = L10n.tr("5a76d96a4586")
                 break
             }
         }
@@ -224,7 +225,7 @@ public enum WhiteBalanceDropperRefiner {
 
     /// A failure that must stop the loop (a decode error) as opposed to one that merely explains it.
     private static func failure_blocked(_ failure: String?) -> Bool {
-        failure?.contains("解码失败") ?? false
+        failure?.contains(L10n.tr("585962003329")) ?? false
     }
 
     // MARK: - cast

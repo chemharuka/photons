@@ -1,6 +1,8 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsFileAccess
 
 /// One editor window: titlebar contract, the workspace, and the commands the menu dispatches.
 ///
@@ -10,6 +12,64 @@ public final class EditorWindowController: NSWindowController {
 
     public let session = CatalogSession()
     public private(set) var rootView: WorkspaceRootView!
+    private var toolWindows: [NSWindowController] = []
+
+    @objc public func socialMediaSlicesAction(_ sender: Any?) {
+        let items = session.exportItems(for: session.exportableSelection)
+        guard !items.isEmpty else { return }
+        let controller = SocialMediaSliceWindowController(items: items)
+        controller.onClose = { [weak self, weak controller] in self?.toolWindows.removeAll { $0 === controller } }
+        toolWindows.append(controller)
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    public static func panoramaSelectionMessage(count: Int) -> String? {
+        count == 0 ? L10n.tr("977f178f562a") : (count == 1 ? L10n.tr("2e0b7140c7cc") : nil)
+    }
+
+    @objc public func panoramaAction(_ sender: Any?) {
+        let assets = session.selectedAssets
+        if let message = Self.panoramaSelectionMessage(count: assets.count) {
+            showToolMessage(message); return
+        }
+        let urls = assets.compactMap { session.fileURL(for: $0) }
+        guard urls.count == assets.count, urls.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else {
+            showToolMessage(L10n.tr("f809c05c0b95")); return
+        }
+        let controller = PanoramaWindowController(urls: urls)
+        controller.onExported = importExportedPhoto()
+        controller.onClose = { [weak self, weak controller] in self?.toolWindows.removeAll { $0 === controller } }
+        toolWindows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc public func lccAction(_ sender: Any?) {
+        let controller = LCCWindowController(urls: session.selectedAssets.compactMap { session.fileURL(for: $0) })
+        controller.onExported = importExportedPhoto()
+        controller.onClose = { [weak self, weak controller] in self?.toolWindows.removeAll { $0 === controller } }
+        toolWindows.append(controller); controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func importExportedPhoto() -> (URL, @escaping (String?) -> Void) -> Void {
+        let service=session.makeImportService(),library=session.libraryURL
+        return { [weak self] url,done in
+            DispatchQueue.global(qos:.utility).async {
+                do {
+                    guard let service else {throw CocoaError(.fileNoSuchFile)}
+                    let result=try service.run(sources:[url],options:.init(mode:.reference))
+                    DispatchQueue.main.async {
+                        if self?.session.libraryURL==library {self?.session.selectImported(result.addedAssetIDs)}
+                        done(result.failed>0 ? L10n.tr("dba4f5574a62"):nil)
+                    }
+                } catch {DispatchQueue.main.async {done(error.localizedDescription)}}
+            }
+        }
+    }
+
+    private func showToolMessage(_ message: String) {
+        let alert = NSAlert(); alert.messageText = message; alert.addButton(withTitle: L10n.tr("f867f3417859"))
+        if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+    }
 
     public init(size: NSSize = NSSize(width: 1440, height: 900)) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height),
@@ -53,6 +113,42 @@ public final class EditorWindowController: NSWindowController {
 
     public func openLibraryPanel() {
         rootView.openLibraryPanel()
+    }
+
+    public func presentLibraryAccessError(_ error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            self?.showToolMessage(L10n.tr("bc37aded0571" , String(describing: (error.localizedDescription))))
+        }
+    }
+
+    @objc public func createLibraryAction(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = L10n.tr("f7ba2453948e")
+        panel.canCreateDirectories = true
+        panel.message = L10n.tr("ea48d5271772")
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        guard selected.pathExtension == "photonslibrary" else {
+            showToolMessage(L10n.tr("49d1bb1ed097")); return
+        }
+        let access = FileAccess(selected)
+        do {
+            try withExtendedLifetime(access) {
+                _ = try Catalog.create(at: selected)
+                try FileAccessStore.shared.rememberSelection(selected)
+                try openLibrary(at: selected)
+            }
+        } catch { showToolMessage(error.localizedDescription) }
+    }
+
+    @objc public func authorizePhotoFolderAction(_ sender: Any?) {
+        guard session.isOpen else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.message = L10n.tr("54ef6ea927d7")
+        panel.prompt = L10n.tr("22c930950773")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try session.authorizePhotoFolder(url) }
+        catch { showToolMessage(error.localizedDescription) }
     }
 
     // MARK: commands (used by the menu and by `--ui-smoke`)
@@ -127,7 +223,7 @@ public final class EditorWindowController: NSWindowController {
     /// the menu command means, and the sheet's 保存为预设… is where a narrower save belongs (081 §4).
     @objc public func newPresetFromCurrentAction(_ sender: Any?) {
         guard session.anchorAsset != nil else { return }
-        guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+        guard let name = askPresetName(L10n.tr("d30256810c6e" , String(describing: (session.presetRecords.count + 1)))) else { return }
         session.createPresetFromCurrent(named: name)
     }
 
@@ -138,12 +234,12 @@ public final class EditorWindowController: NSWindowController {
     /// `presentCopySheet`); the shipped value is the alert.
     public var askPresetName: (String) -> String? = { defaultName in
         let alert = NSAlert()
-        alert.messageText = "新建预设"
-        alert.informativeText = "当前照片的外观会保存为预设（不含蒙版）。"
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.tr("a61bc16ca0f6")
+        alert.informativeText = L10n.tr("3e163d0aa2c6")
+        alert.addButton(withTitle: L10n.tr("a3030bf8f16d"))
+        alert.addButton(withTitle: L10n.tr("2cd0f3be8738"))
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.placeholderString = "预设名称"
+        field.placeholderString = L10n.tr("5fe110aa6d1d")
         field.stringValue = defaultName
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -329,7 +425,7 @@ public final class EditorWindowController: NSWindowController {
             session.copySettingsFromAnchor(selection: selection)
         case .savePreset(let selection):
             // 081 §4: the sheet's 保存为预设… — the checked cards on the anchor, stored as a preset.
-            guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+            guard let name = askPresetName(L10n.tr("d30256810c6e" , String(describing: (session.presetRecords.count + 1)))) else { return }
             session.createPresetFromCurrent(named: name, sections: selection.sections)
         }
     }
@@ -468,10 +564,12 @@ public final class EditorWindowController: NSWindowController {
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(socialMediaSlicesAction(_:)):
+            return session.isOpen && !session.selection.isEmpty
         case #selector(undoAction(_:)):
             // Title carries the action being taken back ("撤销 Exposure"), and the item is grey
             // when there is nothing behind the cursor — a menu that lies about undo is a bug.
-            item.title = session.undoLabel.map { "撤销 \($0)" } ?? "撤销"
+            item.title = session.undoLabel.map { L10n.tr("e70df6c3828f" , String(describing: ($0))) } ?? L10n.tr("926a50b98ece")
             return session.canUndo
         case #selector(toggleCropAction(_:)):
             // Ticked while the frame is up, and enabled only where there is a photo to crop.
@@ -487,29 +585,29 @@ public final class EditorWindowController: NSWindowController {
             // rule; these two verbs stay on the responder chain for the panel and `--ui-smoke`.)
             return rootView.loupeController.isCropToolActive
         case #selector(redoAction(_:)):
-            item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
+            item.title = session.redoLabel.map { L10n.tr("00d7a2fbf700" , String(describing: ($0))) } ?? L10n.tr("03717b6f1070")
             return session.canRedo
         case #selector(toggleShowOriginalAction(_:)):
             // Ticked while the canvas is showing the decode; the title says which picture the click
             // would bring back, so an item that is on does not read like a command to turn it on.
             item.state = rootView.loupeController.showOriginal ? .on : .off
-            item.title = rootView.loupeController.showOriginal ? "显示原图（已开启）" : "显示原图"
+            item.title = rootView.loupeController.showOriginal ? L10n.tr("c4ae9e6bc483") : L10n.tr("c4507a67622d")
             return session.mode == .loupe && session.anchorID != nil
         case #selector(toggleCompareAction(_:)):
             item.state = rootView.loupeController.compareSplit == nil ? .off : .on
             if let split = rootView.loupeController.compareSplit {
                 // The title carries the state the tick cannot: which way the line runs and where it is.
-                item.title = "前后对比（\(split.axis.displayName) "
+                item.title = L10n.tr("b48eb61a5163" , String(describing: (split.axis.displayName)))
                     + "\(Int((split.fraction * 100).rounded())) %）"
             } else {
-                item.title = "前后对比"
+                item.title = L10n.tr("a5163334460b")
             }
             return session.mode == .loupe && session.anchorID != nil
         case #selector(toggleCompareAxisAction(_:)):
             // Grey until 对比 is on (there is no line to turn), then it names the axis a click would
             // switch *to*, which is what the title promises.
             let axis = rootView.loupeController.compareSplit?.axis ?? .vertical
-            item.title = "对比方向：" + axis.displayName
+            item.title = L10n.tr("d585528e5409") + axis.displayName
             return rootView.loupeController.compareSplit != nil
         case #selector(showGridAction(_:)):
             item.state = session.mode == .grid ? .on : .off
@@ -529,7 +627,7 @@ public final class EditorWindowController: NSWindowController {
             // Grey while a text field owns the keyboard (⌘C is the text field's) and with no photo.
             guard !isTextEditing, session.canCopySettings else { return false }
             if item.action == #selector(copySettingsAction(_:)) {
-                item.title = session.copiedSettings.map { "复制设置（\($0.fieldCount) 项）" } ?? "复制设置"
+                item.title = session.copiedSettings.map { L10n.tr("f8ddd4d1ff0a" , String(describing: ($0.fieldCount))) } ?? L10n.tr("1c7d60676292")
             }
             return true
         case #selector(pasteSettingsAction(_:)), #selector(pasteSettingsWithChoicesAction(_:)):
@@ -538,7 +636,7 @@ public final class EditorWindowController: NSWindowController {
                 // The count is the number of photos the paste will write, not the number selected:
                 // a photo that already holds these values still gets a report but no row.
                 let count = session.metadataTargetIDs.count
-                item.title = count > 1 ? "粘贴设置到 \(count) 张" : "粘贴设置"
+                item.title = count > 1 ? L10n.tr("2e9c71ed45ca" , String(describing: (count))) : L10n.tr("d24cf4a6b02b")
             }
             return true
         case #selector(zoomFitAction(_:)):
@@ -560,8 +658,10 @@ public final class EditorWindowController: NSWindowController {
         case #selector(zoomOutAction(_:)):
             return session.mode == .loupe && session.anchorID != nil
                 && rootView.loupeController.viewState.isActualSize
-        case #selector(openLibraryAction(_:)):
+        case #selector(openLibraryAction(_:)), #selector(createLibraryAction(_:)):
             return true
+        case #selector(authorizePhotoFolderAction(_:)):
+            return session.isOpen
         case #selector(importAction(_:)):
             // Nowhere to write without a library, and a second import while one runs would put two
             // walks on the same root at once. Grey in both cases instead of starting a panel whose
@@ -596,8 +696,8 @@ public final class EditorWindowController: NSWindowController {
             // ≥ 2 selected photos: a "stack" of one would hide its own badge rule (the capsule needs
             // two) and is exactly the state the catalog refuses to create.
             item.title = session.metadataTargetIDs.count > 2
-                ? "堆叠所选 \(session.metadataTargetIDs.count) 张"
-                : "堆叠所选照片"
+                ? L10n.tr("a9f95179545c" , String(describing: (session.metadataTargetIDs.count)))
+                : L10n.tr("93fa7e05b300")
             return session.metadataTargetIDs.count >= 2
         case #selector(ungroupSelectionAction(_:)):
             // Grey unless the selection (or the anchor) touches a stack — a 取消堆叠 with nothing to
@@ -607,8 +707,8 @@ public final class EditorWindowController: NSWindowController {
         case #selector(exportAction(_:)):
             // Nothing selected = nothing to export: grey, not a sheet that says "将导出 0 张".
             item.title = session.selection.count > 1
-                ? "导出 \(session.selection.count) 张…"
-                : "导出…"
+                ? L10n.tr("9002a832cad1" , String(describing: (session.selection.count)))
+                : L10n.tr("643e7408e6a7")
             return !session.selection.isEmpty
         case #selector(applyPresetAction(_:)):
             // Tick the default, so the menu shows which look a new photo would get.

@@ -1,28 +1,16 @@
 import Foundation
 
-/// 派单 242 — the white-balance slider's travel, in **mired** (10⁶ / K), not Kelvin.
-///
-/// The document still stores Kelvin (`WhiteBalance.temperature`), so old documents and presets need
-/// no migration. This type exists only for the two things a control needs and a document does not:
-///
-///   1. **position** — the slider is uniform in mired, with the two ends fixed by the owner:
-///      **left = 2000 K** (`fraction 0`) and **right = 50000 K** (`fraction 1`). A Kelvin-linear
-///      slider would give the visually indistinguishable 12000–50000 K band 80 % of the track; the
-///      mired one gives it the rightmost 13 %.
-///   2. **quantization** — a drag snaps to a mired step, so one step is ~25 K at 5000 K and ~400 K at
-///      20000 K: equally invisible everywhere, which is what the old fixed 25 K step could not say.
-///
-/// The formulas are one definition, and only one: the inspector calls these functions, it does not
-/// copy them.
+/// Shared white-balance control range. Documents continue to store Kelvin; the desktop slider
+/// maps its travel to reciprocal temperature (mired) and snaps changes to one-mired steps.
 public enum TemperatureScale {
 
     /// The document's temperature range — the decoder's usable range, not Apple's header maximum.
-    public static let kelvinRange: ClosedRange<Double> = 2000...50000
+    public static let kelvinRange: ClosedRange<Double> = 800...14000
 
     /// Slider travel: 0 = `kelvinRange.lowerBound`, 1 = `kelvinRange.upperBound`.
     public static let fractionRange: ClosedRange<Double> = 0...1
 
-    /// One quantization step in mired. 1 mired is ~25 K at 5000 K and ~400 K at 20000 K — below the
+    /// One quantization step in mired. 1 mired is ~25 K at 5000 K and ~196 K at 14000 K — below the
     /// visible threshold at both ends, which is the standard the old 25 K linear step only met at
     /// the low end.
     public static let miredStep: Double = 1
@@ -30,9 +18,9 @@ public enum TemperatureScale {
     /// `10⁶ / K`, the one conversion.
     public static func mired(_ kelvin: Double) -> Double { 1_000_000 / kelvin }
 
-    /// The mired value at the left end (2000 K → 500).
+    /// The mired value at the left end (800 K → 1250).
     public static var miredMax: Double { mired(kelvinRange.lowerBound) }
-    /// The mired value at the right end (50000 K → 20).
+    /// The mired value at the right end (14000 K → 71.43).
     public static var miredMin: Double { mired(kelvinRange.upperBound) }
 
     /// Kelvin → slider fraction, clamped to the travel.
@@ -58,8 +46,8 @@ public enum TemperatureScale {
     /// Snap a Kelvin value onto the mired grid, then clamp it. The result is a whole Kelvin value so
     /// the document, its JSON and its `%.0f K` readout all spell the same number.
     ///
-    /// Idempotent: the returned value's mired coordinate is within 0.125 mired of the chosen integer
-    /// (even at 2000 K, the most sensitive end), so quantizing it again cannot cross a step boundary.
+    /// Repeated quantization preserves the whole-Kelvin result, including the low-temperature
+    /// end where one Kelvin spans more than one mired.
     public static func quantizedKelvin(_ kelvin: Double, step: Double = miredStep) -> Double {
         guard kelvin.isFinite else { return kelvinRange.lowerBound }
         let t = min(max(kelvin, kelvinRange.lowerBound), kelvinRange.upperBound)

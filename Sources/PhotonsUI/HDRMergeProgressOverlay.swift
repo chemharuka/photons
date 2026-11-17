@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 
 // MARK: - 392 · 「HDR 合成」 的居中卡片
@@ -20,12 +21,12 @@ import AppKit
 final class HDRMergeProgressOverlay: ProgressCardOverlay {
 
     /// 第 1 行的字面量。① 断言的是这个字符串本身，不是「第一行有点像标题」。
-    static let title = "HDR 合成"
+    static let title = L10n.tr("e118fce7d32d")
 
     /// 参与张数。`0` 只在「还没拿到张数」时出现（合成尚未开始的静止态根本不会画卡片），
     /// 所以这里不编造一个最小 1 张之类的数字。
     static func frameText(_ count: Int) -> String {
-        "\(max(0, count)) 张"
+        L10n.tr("6373a0c6419a" , String(describing: (max(0, count))))
     }
 
     /// 三行，顺序固定：标题 / 张数 / 时间。绘制与验收读同一个函数，顺序不可能漂。

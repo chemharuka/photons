@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import Foundation
 import PhotonsCatalog
@@ -11,12 +12,12 @@ public enum ColorLabel: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .red: return "红"
-        case .orange: return "橙"
-        case .yellow: return "黄"
-        case .green: return "绿"
-        case .blue: return "蓝"
-        case .purple: return "紫"
+        case .red: return L10n.tr("0eb7ee7e38ef")
+        case .orange: return L10n.tr("1ad702b18a4d")
+        case .yellow: return L10n.tr("c732e4d7e380")
+        case .green: return L10n.tr("84b34ffba5aa")
+        case .blue: return L10n.tr("52f354ecfccb")
+        case .purple: return L10n.tr("3d0158cb7cfd")
         }
     }
 
@@ -45,8 +46,8 @@ public enum AssetFlag: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .pick: return "已选"
-        case .reject: return "已拒"
+        case .pick: return L10n.tr("7ecf1cde6486")
+        case .reject: return L10n.tr("a249e81ff26e")
         }
     }
 
@@ -238,14 +239,14 @@ public struct CatalogFilter: Equatable, Sendable {
         switch facet {
         case .rating:
             guard let n = ratingAtLeast else { return nil }
-            return n == 0 ? "未评级" : "≥\(n) 星"
+            return n == 0 ? L10n.tr("2df874e69dfd") : L10n.tr("fbbd88badce7" , String(describing: (n)))
         case .flag:
             guard let flag else { return nil }
             let f = AssetFlag.normalized(flag)
-            return "旗标 \(f?.displayName ?? flag)"
+            return L10n.tr("72485eed4580" , String(describing: (f?.displayName ?? flag)))
         case .color:
             guard let colorLabel else { return nil }
-            return "色标 \(ColorLabel.normalized(colorLabel)?.displayName ?? colorLabel)"
+            return L10n.tr("2c761394263c" , String(describing: (ColorLabel.normalized(colorLabel)?.displayName ?? colorLabel)))
         case .camera:
             guard let cameraKey else { return nil }
             return cameraKey.replacingOccurrences(of: "|", with: " ")
@@ -301,6 +302,6 @@ public struct CatalogFilter: Equatable, Sendable {
 
     public var summary: String {
         let parts = chips().map(\.text)
-        return parts.isEmpty ? "全部照片" : parts.joined(separator: " · ")
+        return parts.isEmpty ? L10n.tr("b49fdf55eefb") : parts.joined(separator: " · ")
     }
 }

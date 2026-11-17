@@ -202,7 +202,7 @@ final class StackModel378Tests: XCTestCase {
 
     func testV6MigrationReplaysWithoutErrorAndLeavesOneOfEachColumn() throws {
         let catalog = try Catalog.create(at: package)
-        XCTAssertEqual(catalog.schemaVersionApplied, 6)
+        XCTAssertEqual(catalog.schemaVersionApplied, Schema.version)
         XCTAssertEqual(try columnNames(catalog).filter { $0 == "stack_id" }.count, 1)
         XCTAssertEqual(try columnNames(catalog).filter { $0 == "stack_rank" }.count, 1)
 
@@ -249,7 +249,7 @@ final class StackModel378Tests: XCTestCase {
         try queue.close()
 
         let opened = try Catalog.open(at: package)
-        XCTAssertEqual(opened.schemaVersionApplied, 6)
+        XCTAssertEqual(opened.schemaVersionApplied, Schema.version)
         let rows = try opened.assets(AssetFilter())
         XCTAssertEqual(rows.count, 1)
         XCTAssertNil(rows[0].stackId, "老库的照片不属于任何堆叠")
