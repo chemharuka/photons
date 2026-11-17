@@ -14,7 +14,7 @@
 | 目录 | 职责 |
 |---|---|
 | `HDR/` | 包围曝光合成：`HDRMergeClient.swift`（驱动外部 `hdrmerge-swift` 子进程）、`HDRMergeService.swift`（多帧 → 一张 CFA DNG，含命名/预检/错误词表） |
-| `Denoise/` | AI 降噪那条路：模型推理（`AnselDenoiseClient` / `AnselDenoiseService`，走 GPL 子进程）＋ 把像素写回合法 DNG（`RawLosslessJPEG` / `DNGRawWriter` / `SourceDNG` / `SourceDNGDecode`）。详见下面「Denoise/」一节。 |
+| `Denoise/` | AI 降噪两条路：①**非局部匹配滤波**（`NLMFDenoiseJob`，MIT 模型，进程内直连，见下面「NLMF」一节）；②Ansel（`AnselDenoiseClient` / `AnselDenoiseService`，走 GPL 子进程）。两条都复用 `RawLosslessJPEG` / `DNGRawWriter` / `SourceDNG` / `SourceDNGDecode` 那套 DNG 读写。 |
 
 ## HDR/ — 多帧包围曝光 → 一张 Bayer DNG
 
@@ -77,6 +77,56 @@ let result = try DNGRawWriter.write(
 ```
 
 要读回 mosaic（例如先取像素再送模型）：`SourceDNG(data:).readMosaic(data:)`。
+
+## NLMF/ — MIT 的非局部匹配滤波（进程内）
+
+`NLMFDenoiseJob.swift`。与 Ansel 那条路的**唯一架构差别是许可证**：
+
+| | Ansel | NLMF |
+|---|---|---|
+| 权重许可 | GPL-3.0 | **MIT** |
+| 接入方式 | 子进程 + JSON 信封 | **进程内调用**，一个 struct 返回 |
+| 需要定位可执行文件 | 是 | 否 |
+| 模型位置 | `Resources/bin/models/` | `Resources/Models/`（target bundle 内） |
+
+MIT 意味着没有需要维持的许可证边界，所以直接链接 `nonlocal-matchfilter-swift`
+这个包（`Package.swift` 里的第二个依赖）。
+
+### 用法
+
+```swift
+let job = NLMFDenoiseJob()
+guard job.isAvailable else { /* 菜单置灰，tooltip 用 job.modelPathHint() */ }
+let report = try job.denoise(input: dngURL, output: outURL) { line in print(line) }
+// report.seconds / .tiles / .outputBytes
+```
+
+### 出厂参数（都是量出来的，不是继承来的默认值）
+
+| 参数 | 值 | 依据 |
+|---|---|---|
+| `strength` | **0.70** | 1.0 会把金属/枝叶的细纹理抹成塑料感；0.5 开始让噪声回流 |
+| `crop` | **4**（平面像素 = 8 马赛克像素） | tile 边缘是接缝：两种网格原点在 0–1px 处分歧达内部的 9× |
+| `measureNoise` | **true** | 出厂默认值在高 ISO 下把中调 σ 低估约 1.8× |
+| `checkerboardNoise` | **true** | 噪声估算省一半块数，约 4 s；对 `a` 只影响 3.6% |
+
+棋盘采样与「隔行跳采」不是一回事：后者先把**暗端**的块抽稀掉，而那正是
+σ²-对-均值回归要用的那一端（块数降到 1/4 时 `a` 偏 4.5%，降到 1/16 直接拟合崩溃）。
+
+### 只打包 256
+
+`Variant` 只有 `.t256`。512 是真做了也量了的，但 60 MP 上 **慢 14%（75 s vs 66 s）**、
+画质差 0.06/255、多占 72 MB —— 它该待在上游仓库的对比表里，不该待在 app 里。
+
+### 打包位置
+
+模型走 SwiftPM 的 `.copy("Denoise/Models")` 资源，落在
+`Photons_PhotonsExtensions.bundle/Contents/Resources/Models/`，**不在 `Bundle.main`**。
+所以解析必须走 `Bundle.module`：查 `Bundle.main` 会找不到文件、功能静默地自报不可用，
+看起来像打包故障，实际是 bundle 查找错。`NLMFDenoiseJobTests` 里有一条测试专门盯这个。
+
+`$PHOTONS_NLMF_MODEL` 可覆盖模型路径（与 `$PHOTONS_ANSEL_MODEL` 同一约定），
+用来在不重装 app 的前提下试别的模型。
 
 ### 降噪：模型推理（GPLv3 子进程）
 

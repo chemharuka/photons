@@ -4,6 +4,8 @@ import ImageIO
 import CoreGraphics
 import CoreVideo
 import PhotonsCore
+import PhotonsPanorama
+import CoreImage
 @testable import PhotonsExport
 
 /// 100 — HDR export: the linear exit in S4, and the gain-map HEIC writer.
@@ -13,6 +15,28 @@ import PhotonsCore
 /// trusting the value we passed in. Synthetic `LinearImage`s keep the numbers reproducible and the
 /// suite independent of a RAW fixture.
 final class HDRGainMapTests: XCTestCase {
+    func testPanoramaAndLCCDecodeReconstructTheHDRGainMap() throws {
+        let (sdr,linear)=try renderPair(value:4,gray:true)
+        let url=tempURL("post-lcc-hdr.heic")
+        defer {try? FileManager.default.removeItem(at:url.deletingLastPathComponent())}
+        let written=try GainMapHEIC.write(sdr:sdr,linear:linear,to:url,options:HDRGainMapOptions(gainMap:.iso,halfSize:false,quality:1))
+        XCTAssertTrue(written.isHDR)
+        let source=try PanoramaSource(url:url),plan=try PanoramaEngine().singlePhoto(source)
+        let decoded=try XCTUnwrap(plan.previewImages.first)
+        let space=CGColorSpace(name:CGColorSpace.extendedLinearSRGB)!
+        let context=CIContext(options:[.workingColorSpace:space])
+        func peak(_ image:CIImage)->Float {
+            var pixel=[Float](repeating:0,count:4)
+            context.render(image.applyingFilter("CIAreaMaximum",parameters:["inputExtent":CIVector(cgRect:image.extent)]),
+                toBitmap:&pixel,rowBytes:16,bounds:CGRect(x:0,y:0,width:1,height:1),format:.RGBAf,colorSpace:space)
+            return pixel[0]
+        }
+        let hdr=try XCTUnwrap(CIImage(contentsOf:url,options:[.expandToHDR:true]))
+        let base=try XCTUnwrap(CIImage(contentsOf:url,options:[.expandToHDR:false]))
+        XCTAssertGreaterThan(peak(decoded),1.5)
+        XCTAssertEqual(peak(decoded),peak(hdr),accuracy:0.02)
+        XCTAssertGreaterThan(peak(decoded),peak(base)*1.5)
+    }
 
     // MARK: - fixtures
 

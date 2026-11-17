@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 229 — 红眼's session/UI surface.
@@ -175,7 +176,11 @@ final class RedEyeUITests: XCTestCase {
         }
         XCTAssertTrue(source.contains("RedEye.radiusPointsRange"), "半径滑杆的 0.5…8 pt 行程")
         XCTAssertTrue(source.contains("HealToolMode.allCases"), "修复 / 红眼 分段")
-        XCTAssertTrue(source.contains("点一下修一只红眼；拖动连续修补"))
+        // 本地化之后这句提示进了资源表（`a601dff90ba4`），源码只剩 `L10n.tr(...)`。
+        // 等价改写：文案仍逐字是那句话，且仍由这张卡提供 —— 只是从资源表取，不依赖语言字面量。
+        XCTAssertEqual(L10n.tr("a601dff90ba4"), "点一下修一只红眼；拖动连续修补")
+        XCTAssertTrue(source.contains("L10n.tr(\"a601dff90ba4\")"),
+                      "红眼提示必须仍由 HealCardPanel 出")
         // The pre-229 heal controls stay where they were.
         XCTAssertTrue(source.contains("inspector.heal.tool"))
         XCTAssertTrue(source.contains("inspector.heal.mode"))

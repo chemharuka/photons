@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import SwiftUI
 import AppKit
 import PhotonsCatalog
@@ -336,8 +337,8 @@ private struct MarqueeLineRepresentable: NSViewRepresentable {
 public enum InspectorPhotoInfo {
 
     /// The slot text for a half the file does not describe.
-    public static let unknownCamera = "未知相机"
-    public static let unknownLens = "未知镜头"
+    public static let unknownCamera = L10n.tr("abed17a7180e")
+    public static let unknownLens = L10n.tr("4fd33b500e82")
 
     /// The four cells of the exposure row, already formatted and **unpadded**: the row is laid out
     /// as four equal-width slots (LR's arrangement) rather than as a space-padded string, so the

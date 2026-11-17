@@ -1,4 +1,5 @@
 import XCTest
+import PhotonsLocalization
 @testable import PhotonsCore
 
 /// 派单 078 P0-7 — 复制/粘贴设置：the payload rules, section by section.
@@ -290,8 +291,17 @@ final class CopySettingsSectionsTests: XCTestCase {
         // P1-5: 蒙版 is a row like any other — 全部 carries it, and the summary says so.
         XCTAssertTrue(selection.contains(.masks))
         // 081: the summary names the **cards**, in the panel's order (164 added 细节/开发).
+        //
+        // 本地化之后组名走 `EditSnapshotSection.title`（`L10n.tr`），模板走 `L10n.tr("e925ae18f664")`。
+        // 等价改写：仍然逐个钉住这 15 个组与它们的顺序，只是名字和前缀从资源表取 ——
+        // 组的集合、顺序、分隔符、模板都在，产品改任何一处照样红；不再把「语言」也钉进去。
+        let expected: [EditSnapshotSection] = [
+            .whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .hsl, .colorGrading,
+            .calibration, .curve, .detail, .correction, .detailFX, .effects, .geometry, .masks,
+        ]
+        XCTAssertEqual(EditSnapshotSection.panelOrder.filter { selection.contains($0) }, expected)
         XCTAssertEqual(selection.summary,
-                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 校准 · 曲线 · 开发 · 校正 · 细节 · 效果 · 裁切 · 蒙版")
+                       L10n.tr("e925ae18f664", expected.map(\.title).joined(separator: " · ")))
 
         selection.selectNone()
         XCTAssertTrue(selection.isEmpty)

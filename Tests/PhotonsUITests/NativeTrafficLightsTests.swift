@@ -86,10 +86,8 @@ final class NativeTrafficLightsTests: XCTestCase {
     }
 
     /// 顶栏里那块材质：最底层、铺满顶层那条带的 `NSVisualEffectView`。
-    private func headerGlass(in root: WorkspaceRootView) -> NSVisualEffectView? {
-        root.subviews.compactMap { $0 as? NSVisualEffectView }.first { view in
-            view.material == .headerView
-        }
+    private func headerGlass(in root: WorkspaceRootView) -> HeaderGlassView? {
+        root.subviews.compactMap { $0 as? HeaderGlassView }.first
     }
 
     private func isOurs(_ view: NSView?, root: NSView) -> Bool {
@@ -158,12 +156,8 @@ final class NativeTrafficLightsTests: XCTestCase {
                 let inventory = root.subviews.map { "\(type(of: $0)) \(NSStringFromRect($0.frame))" }
                 return XCTFail("顶栏没有 .headerView 材质：\(inventory)")
             }
-            print("glass \(type(of: glass)) material \(glass.material.rawValue)"
-                  + " blending \(glass.blendingMode.rawValue) state \(glass.state.rawValue)"
-                  + " frame \(NSStringFromRect(glass.frame))")
-            XCTAssertEqual(glass.material, .headerView)
-            XCTAssertEqual(glass.blendingMode, .behindWindow)
-            XCTAssertEqual(glass.state, .followsWindowActiveState)
+            XCTAssertTrue(glass.isOpaque, "The studio header has an opaque neutral surround")
+            XCTAssertNil(glass.hitTest(.zero), "Header must preserve native traffic-light hit testing")
             // 402 — 玻璃**不再是最底层**：它必须排在 `canvasHost` 之后（画布 overlay 的越界部分
             // 以前连着画布的黑底一起盖住了顶栏与红绿灯），但仍排在 `topBar` 之前（它是按钮的衬托）。
             let glassIndex = root.subviews.firstIndex { $0 === glass } ?? -1
@@ -268,8 +262,16 @@ final class NativeTrafficLightsTests: XCTestCase {
             // 顶栏空白处：命中必须落在 AppKit 的窗体（titlebar / theme frame）上，不是我们的视图，
             // 否则窗口既拖不动、点下去也没人接。拖动契约仍是「只有顶栏那条能拖」。
             XCTAssertFalse(window.isMovableByWindowBackground)
-            for local in [NSPoint(x: 700, y: 8), NSPoint(x: root.bounds.width - 40, y: 8),
-                          NSPoint(x: root.bounds.width / 2, y: 6)] {
+            // The task queue button can occupy the old centre probe in compact windows.
+            // Its click is checked above; only genuinely blank probes must reach the title bar.
+            let blankProbes = [NSPoint(x: 700, y: 8), NSPoint(x: root.bounds.width - 40, y: 8),
+                               NSPoint(x: root.bounds.width / 2, y: 6)].filter { local in
+                !root.topBar.subviews.contains { control in
+                    !control.isHidden && control.convert(control.bounds, to: root).contains(local)
+                }
+            }
+            XCTAssertGreaterThanOrEqual(blankProbes.count, 2, "Keep two independent title-bar drag probes")
+            for local in blankProbes {
                 let point = root.convert(local, to: themeFrame)
                 let hit = themeFrame.hitTest(point)
                 print("blank @\(NSStringFromPoint(local)) → \(hit.map { "\(type(of: $0))" } ?? "nil")"
@@ -282,50 +284,24 @@ final class NativeTrafficLightsTests: XCTestCase {
 
     // MARK: - 4 · 明暗外观：玻璃参数不写死
 
-    func testGlassDoesNotDependOnAppearance() {
-        var seen: [(String, Int, Int, Int, NSRect)] = []
+    func testStudioHeaderFollowsAppearanceWithoutChangingGeometry() {
+        var frames: [NSRect] = []
         for name in [NSAppearance.Name.aqua, .darkAqua] {
-            _ = NSApplication.shared
             let controller = makeLive(NSSize(width: 1600, height: 940))
-            guard let window = controller.window, let root = controller.rootView else {
-                return XCTFail("no window")
-            }
+            guard let window = controller.window, let root = controller.rootView,
+                  let header = headerGlass(in: root) else { return XCTFail("no studio header") }
             defer { window.orderOut(nil) }
             window.appearance = NSAppearance(named: name)
             root.layoutSubtreeIfNeeded()
-            root.topBar.needsDisplay = true
             pump()
-
-            guard let glass = headerGlass(in: root) else {
-                return XCTFail("\(name.rawValue): 顶栏没有 .headerView 材质")
-            }
-            print("\(name.rawValue): glass material \(glass.material.rawValue)"
-                  + " blending \(glass.blendingMode.rawValue) state \(glass.state.rawValue)"
-                  + " effectiveAppearance \(glass.effectiveAppearance.name.rawValue)"
-                  + " frame \(NSStringFromRect(glass.frame))")
-            XCTAssertEqual(glass.material, .headerView, name.rawValue)
-            XCTAssertEqual(glass.blendingMode, .behindWindow, name.rawValue)
-            XCTAssertEqual(glass.state, .followsWindowActiveState, name.rawValue)
-            // 材质视图拿到的是外观的 **vibrant** 变体（NSAppearanceNameVibrantLight/Dark）——这正是
-            // 「材质自己跟外观走」的证据，所以比的是 family（bestMatch），不是字面名字。
-            XCTAssertEqual(glass.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), name,
-                           "玻璃没跟着外观走：\(glass.effectiveAppearance.name.rawValue)")
-
-            if let a = alpha(of: root.topBar, at: NSPoint(x: 700, y: 18)) {
-                print(String(format: "%@: topBar pixel alpha %.3f", name.rawValue, a))
-                XCTAssertLessThan(a, 0.02, "\(name.rawValue): 顶栏还在画不透明底板")
-            }
-            seen.append((name.rawValue, glass.material.rawValue, glass.blendingMode.rawValue,
-                         glass.state.rawValue, glass.frame))
+            XCTAssertTrue(header.isOpaque)
+            XCTAssertEqual(header.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), name)
+            XCTAssertNil(header.hitTest(.zero))
+            frames.append(header.frame)
             window.appearance = nil
         }
-        XCTAssertEqual(seen.count, 2)
-        if seen.count == 2 {
-            XCTAssertEqual(seen[0].1, seen[1].1, "材质数值随外观变了")
-            XCTAssertEqual(seen[0].2, seen[1].2, "blending 随外观变了")
-            XCTAssertEqual(seen[0].3, seen[1].3, "state 随外观变了")
-            XCTAssertEqual(seen[0].4, seen[1].4, "玻璃 frame 随外观变了")
-        }
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertEqual(frames.first, frames.last)
     }
 
     // MARK: - 5 · 顶栏其它内容一个点都不动

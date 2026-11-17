@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 
 /// 相册名的一次性输入框（新建 / 重命名）。
@@ -11,12 +12,12 @@ enum AlbumNamePrompt {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "好")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L10n.tr("f867f3417859"))
+        alert.addButton(withTitle: L10n.tr("2cd0f3be8738"))
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         field.stringValue = value
-        field.placeholderString = "相册名"
+        field.placeholderString = L10n.tr("b664ca5f7a47")
         alert.accessoryView = field
         // 打开即选中旧名字：改名时最常见的是整名替换。
         alert.window.initialFirstResponder = field

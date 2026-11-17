@@ -12,7 +12,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-release}"
 BUILD_DIR="$ROOT/.build/$CONFIG"
-APP="$ROOT/.build/Photons.app"
+APP="${PHOTONS_APP:-$ROOT/.build/Photons.app}"
+export CONFIG
 
 if [ ! -x "$BUILD_DIR/Photons" ]; then
     echo "bundle-app: no executable at $BUILD_DIR/Photons" >&2
@@ -24,6 +25,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BUILD_DIR/Photons" "$APP/Contents/MacOS/Photons"
+mkdir -p "$APP/Contents/Resources/bin"
+cp "$BUILD_DIR/photons-panorama-worker" "$APP/Contents/Resources/bin/photons-panorama-worker"
+codesign --force --sign - --timestamp=none "$APP/Contents/Resources/bin/photons-panorama-worker"
 cp "$ROOT/scripts/App-Info.plist" "$APP/Contents/Info.plist"
 
 # 应用图标：**先用 actool 编译 Resources/AppIcon.icon**，它会把 Icon Composer 的分层文档烘成
@@ -81,6 +85,9 @@ printf 'revision    %s\n' "$REVISION"
 for bundle in "$BUILD_DIR"/*.bundle; do
     [ -e "$bundle" ] || continue
     cp -R "$bundle" "$APP/Contents/Resources/"
+    # SwiftPM command-line helpers resolve Bundle.module beside their executable. Relative links
+    # keep a single signed resource copy inside the app and work under inherited App Sandbox.
+    ln -s "../$(basename "$bundle")" "$APP/Contents/Resources/bin/$(basename "$bundle")"
 done
 
 # 387 — the denoise module rides inside the bundle in **two pieces that belong together**:
@@ -120,6 +127,9 @@ if [ -x "$ROOT/scripts/build-hdrmerge.sh" ] && [ -x "$ROOT/scripts/bundle-hdrmer
         echo "hdrmerge    skipped（没有构建好的 hdrmerge-swift；「HDR 合并…」会显示未找到工具）" >&2
 fi
 
+python3 "$ROOT/scripts/bundle-gpl-sources.py" "$APP"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/Photons-MIT.txt"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
 xattr -cr "$APP" 2>/dev/null || true
 
 # Ad-hoc signature: enough to launch locally and to keep Gatekeeper quiet on this machine.

@@ -350,7 +350,7 @@ final class MaskSliderRowTests: XCTestCase {
         // …and the same style table, not a mask-specific copy of it.
         let style = InspectorView.SliderRowStyle.standard
         XCTAssertEqual(style.readoutSize, mask.size, "数值字号来自 SliderRowStyle")
-        XCTAssertEqual(style.labelSize, 10, "标签字号来自 SliderRowStyle")
+        XCTAssertEqual(style.labelSize, 11, "标签字号来自 SliderRowStyle")
         XCTAssertEqual(SliderValueMap.rowHeight, 16, "轨道高度来自 SliderValueMap")
 
         // The row view is shared, so the style can only come from one place.

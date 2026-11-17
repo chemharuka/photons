@@ -18,6 +18,10 @@ public struct PhotoMetadata: Sendable {
     public var keywords: [String] = []
     public var iso: Int?
     public var focalLength: Double?
+    /// 409 — the 35 mm-equivalent focal length (`exif:FocalLenIn35mmFilm`). With `focalLength` it is
+    /// the **only** input to the crop factor the automatic decoder-version rule uses
+    /// (`DecoderAutoVersion.cropFactor`); the user's rule is 「传感器尺寸通过物理焦距和等效焦距算出」.
+    public var focalLength35mm: Double?
     public var aperture: Double?
     public var shutter: String?
     public var orientation: Int?
@@ -82,6 +86,10 @@ public enum MetadataReader {
             ?? (exif[kCGImagePropertyExifISOSpeedRatings as String] as? NSNumber)?.intValue
         meta.focalLength = doubleXMP(md, "exif:FocalLength")
             ?? (exif[kCGImagePropertyExifFocalLength as String] as? NSNumber)?.doubleValue
+        // 409 — 35 mm-equivalent focal length. Present on this machine's SL3 DNG (measured: 50 with a
+        // 50 mm lens ⇒ crop 1.0); XMP first for the same reason as everything above.
+        meta.focalLength35mm = doubleXMP(md, "exif:FocalLenIn35mmFilm")
+            ?? (exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] as? NSNumber)?.doubleValue
         meta.aperture = doubleXMP(md, "exif:FNumber")
             ?? (exif[kCGImagePropertyExifFNumber as String] as? NSNumber)?.doubleValue
         meta.shutter = shutterString(md: md, exif: exif)

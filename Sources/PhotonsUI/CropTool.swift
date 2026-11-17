@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import PhotonsCore
@@ -113,16 +114,16 @@ public enum CropToolHandle: String, Sendable, Equatable, Hashable, CaseIterable 
 
     public var label: String {
         switch self {
-        case .topLeft: return "左上角"
-        case .topRight: return "右上角"
-        case .bottomRight: return "右下角"
-        case .bottomLeft: return "左下角"
-        case .top: return "上边"
-        case .right: return "右边"
-        case .bottom: return "下边"
-        case .left: return "左边"
-        case .inside: return "框内"
-        case .outside: return "框外"
+        case .topLeft: return L10n.tr("4b7152145f19")
+        case .topRight: return L10n.tr("d8ed5dd75134")
+        case .bottomRight: return L10n.tr("6897632c0ea9")
+        case .bottomLeft: return L10n.tr("cc728271f938")
+        case .top: return L10n.tr("8cae94088bff")
+        case .right: return L10n.tr("0838dcc59823")
+        case .bottom: return L10n.tr("a5089425543b")
+        case .left: return L10n.tr("6a0ef384c814")
+        case .inside: return L10n.tr("2d0399a3247c")
+        case .outside: return L10n.tr("6786c152fcc8")
         }
     }
 }
@@ -467,6 +468,8 @@ public enum CropTool {
                                         quarterTurns: 0,
                                         perspectiveVertical: perspective?.vertical ?? 0,
                                         perspectiveHorizontal: perspective?.horizontal ?? 0,
+                                        perspectiveShear: perspective?.shear ?? 0,
+                                        perspectiveAspect: perspective?.aspect ?? 1,
                                         cropSpace: .canvas),
                 source: source)
             let e = geometry.photoQuadExtent
@@ -480,7 +483,9 @@ public enum CropTool {
                                         aspectLock: .original,
                                         quarterTurns: 0,
                                         perspectiveVertical: perspective.vertical,
-                                        perspectiveHorizontal: perspective.horizontal),
+                                        perspectiveHorizontal: perspective.horizontal,
+                                        perspectiveShear: perspective.shear,
+                                        perspectiveAspect: perspective.aspect),
                 source: source)
             return CropToolProjection(units: CropUnits(source),
                                       space: .keystone(geometry, mapping), scale: scale, carry: carry)
@@ -621,7 +626,9 @@ public enum CropTool {
                                     aspectLock: .original,
                                     quarterTurns: 0,
                                     perspectiveVertical: perspective.vertical,
-                                    perspectiveHorizontal: perspective.horizontal),
+                                    perspectiveHorizontal: perspective.horizontal,
+                                    perspectiveShear: perspective.shear,
+                                    perspectiveAspect: perspective.aspect),
             source: source)
         var candidate = rect.clamped(allowsOutsideSource: true)
         if let placed = geometry.translatedInsidePhotoCanvas(candidate) {

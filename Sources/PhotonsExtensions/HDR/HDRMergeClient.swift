@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import PhotonsFileAccess
 
 // MARK: - Public model
 
@@ -135,6 +136,14 @@ public struct HDRMergeClient: Sendable {
     public init(resolvingExplicit explicit: URL? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 bundle: Bundle = .main) throws {
+        if SandboxEnvironment.isSandboxed {
+            guard let url = bundle.resourceURL?.appendingPathComponent("bin/hdrmerge-swift"),
+                  FileManager.default.isExecutableFile(atPath: url.path) else {
+                throw HDRMergeFailure(code: "tool_missing", message: "应用内缺少 hdrmerge-swift，请重新安装完整应用。", exitCode: nil)
+            }
+            self.executableURL = url
+            return
+        }
         if let explicit {
             self.executableURL = explicit
             return
@@ -245,9 +254,17 @@ public struct HDRMergeClient: Sendable {
     private func runJSON(arguments: [String],
                          progress: (@Sendable (HDRMergeProgress) -> Void)? = nil,
                          isCancelled: (@Sendable () -> Bool)? = nil) throws -> [String: Any] {
+        #if os(macOS)
+        let grants = SandboxEnvironment.isSandboxed ? try HelperFileAccess(arguments: arguments) : nil
+        defer { withExtendedLifetime(grants) {} }
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
+        if let grants {
+            var environment = ProcessInfo.processInfo.environment
+            environment[HelperFileAccess.environmentKey] = grants.manifest.path
+            process.environment = environment
+        }
         // The tool must never inherit a controlling terminal or prompt.
         process.standardInput = FileHandle.nullDevice
 
@@ -322,6 +339,9 @@ public struct HDRMergeClient: Sendable {
                                  exitCode: exit)
         }
         return obj
+        #else
+        throw HDRMergeFailure(code: "platform_unavailable", message: "This external helper is available on macOS only.", exitCode: nil)
+        #endif
     }
 
     private func emitProgress(_ line: Data, to sink: @Sendable (HDRMergeProgress) -> Void) {

@@ -301,8 +301,8 @@ final class DetailTests: XCTestCase {
         let key = DecodeCacheKey(fileSHA256: "abc", decoderVersion: "8")
         XCTAssertEqual(key.keyText, "abc|8|0.0000|1.0000|full|extendedLinearSRGB|\(DecodeRecipe.current)")
         XCTAssertEqual(key.digest,
-                       KeyBuilder.digest(of: "abc|8|0.0000|1.0000|full|extendedLinearSRGB|v3-lens"),
-                       "the digest of the current (103) decode recipe key text")
+                       KeyBuilder.digest(of: "abc|8|0.0000|1.0000|full|extendedLinearSRGB|v4-auto409"),
+                       "the digest of the current (409) decode recipe key text")
     }
 
     /// Requirement 3 (the key half): a document parked on the default positions carries **no** "已改"

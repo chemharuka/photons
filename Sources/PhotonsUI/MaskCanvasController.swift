@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCore
 
@@ -61,7 +62,7 @@ extension CatalogSession {
         var landed: HealSpot?
         applyEdit { landed = $0.addHealSpot(spot) }
         guard let landed else { return nil }
-        commitEdit(label: "修复", coalesce: false)
+        commitEdit(label: L10n.tr("37a693925054"), coalesce: false)
         selectedHealSpotID = landed.id
         setLastHealSource(source)
         return landed
@@ -72,7 +73,7 @@ extension CatalogSession {
         var removed = false
         applyEdit { removed = $0.removeHealSpot(id) }
         guard removed else { return }
-        if commit { commitEdit(label: "删除修复", coalesce: false) }
+        if commit { commitEdit(label: L10n.tr("0032cbfaefd6"), coalesce: false) }
         if selectedHealSpotID == id { selectedHealSpotID = edit.healSpots.last?.id }
     }
 
@@ -83,7 +84,7 @@ extension CatalogSession {
         let clamped = min(max(radius, HealSpot.radiusRange.lowerBound),
                           HealSpot.radiusRange.upperBound)
         applyEdit { $0.healSpots[index].radius = clamped }
-        if commit { commitEdit(label: "修复 半径") }
+        if commit { commitEdit(label: L10n.tr("9890bcbfada3")) }
     }
 
     /// Heal ⇄ clone for one spot — a discrete action, so its own snapshot.
@@ -91,7 +92,7 @@ extension CatalogSession {
         guard let index = edit.healSpots.firstIndex(where: { $0.id == id }),
               edit.healSpots[index].mode != mode else { return }
         applyEdit { $0.healSpots[index].mode = mode }
-        commitEdit(label: "修复 模式", coalesce: false)
+        commitEdit(label: L10n.tr("737840b7f991"), coalesce: false)
     }
 }
 
@@ -108,9 +109,9 @@ public enum MaskTool: String, Sendable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .off: return "浏览"
-        case .brush: return "画笔"
-        case .erase: return "擦除"
+        case .off: return L10n.tr("a8c81f93f2e0")
+        case .brush: return L10n.tr("05731b92ad31")
+        case .erase: return L10n.tr("96960e526529")
         }
     }
 }
@@ -173,10 +174,10 @@ extension CatalogSession {
         let component = MaskComponent(id: "c-\(UUID().uuidString)",
                                       op: .add, invert: false, feather: 0.5,
                                       shape: .brush(BrushShape(size: brushSize, strokes: [])))
-        let mask = Mask(name: name ?? "蒙版 \(edit.masks.count + 1)", components: [component])
+        let mask = Mask(name: name ?? L10n.tr("611ce5b3f9f5" , String(describing: (edit.masks.count + 1))), components: [component])
         applyEdit { $0.masks.append(mask) }
         guard edit.masks.contains(where: { $0.id == mask.id }) else { return nil }
-        commitEdit(label: "新建蒙版")
+        commitEdit(label: L10n.tr("552307889f48"))
         setSelectedMaskID(mask.id)
         return mask
     }
@@ -184,7 +185,7 @@ extension CatalogSession {
     /// Remove a mask, and the overlay with it if that is what was being shown.
     public func deleteMask(_ id: String) {
         applyEdit { $0.masks.removeAll { $0.id == id } }
-        commitEdit(label: "删除蒙版")
+        commitEdit(label: L10n.tr("9c200544f34b"))
         if edit.showMaskID == id { setShowMask(nil) }
         if selectedMaskID == id { setSelectedMaskID(edit.masks.first?.id) }
     }
@@ -195,7 +196,7 @@ extension CatalogSession {
         guard let index = edit.masks.firstIndex(where: { $0.id == id }),
               edit.masks[index].isEnabled != enabled else { return }
         applyEdit { $0.masks[index].isEnabled = enabled }
-        commitEdit(label: enabled ? "启用蒙版" : "停用蒙版")
+        commitEdit(label: enabled ? L10n.tr("f217ac378167") : L10n.tr("f0320186e4d7"))
         if !enabled, edit.showMaskID == id { setShowMask(nil) }
     }
 
@@ -226,7 +227,7 @@ extension CatalogSession {
 
     /// Mutate one mask, commit, persist — the click/toggle door. The slider door is `writeMask`
     /// with `commit: false` during the drag (`MaskParameters.swift`), so both share one writer.
-    public func updateMask(_ id: String, label: String = "蒙版", _ body: (inout Mask) -> Void) {
+    public func updateMask(_ id: String, label: String = L10n.tr("e7c802f4a183"), _ body: (inout Mask) -> Void) {
         writeMask(id, label: label, commit: true, body)
     }
 
@@ -385,7 +386,7 @@ public final class MaskCanvasController {
         guard let session, targetMaskID != nil else { return }
         lastStrokePointCount = points.count / 2
         if lastStrokePointCount > 0 {
-            session.commitEdit(label: session.maskTool == .erase ? "擦除" : "画笔")
+            session.commitEdit(label: session.maskTool == .erase ? L10n.tr("96960e526529") : L10n.tr("05731b92ad31"))
             finishedStrokes += 1
         }
         targetMaskID = nil
@@ -463,7 +464,7 @@ public final class MaskCanvasController {
     public func endHandleDrag() -> Bool {
         guard let session, let drag = handleDrag else { return false }
         defer { clearHandleDrag() }
-        let committed = session.commitEdit(label: "调整\(drag.handle.kind.label)蒙版")
+        let committed = session.commitEdit(label: L10n.tr("122373891fa5" , String(describing: (drag.handle.kind.label))))
         if committed { maskHandleDrags += 1 }
         return committed
     }

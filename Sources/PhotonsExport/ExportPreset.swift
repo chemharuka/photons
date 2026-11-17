@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import CoreGraphics
 import PhotonsCore
@@ -6,6 +7,11 @@ import PhotonsCore
 
 /// What to do when the target file already exists. `rename` is the default: overwriting destroys a
 /// file, skipping silently exports fewer photos, and only a new name can be undone.
+public enum ExportDestination: String, Codable, Sendable, CaseIterable {
+    case chosenFolder, sourceFolder
+    public var displayName: String { self == .sourceFolder ? L10n.tr("1389242a6fd0") : L10n.tr("9bedd6219651") }
+}
+
 public enum ExportConflict: String, Codable, Sendable, CaseIterable {
     case overwrite
     case skip
@@ -13,9 +19,9 @@ public enum ExportConflict: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .overwrite: return "覆盖"
-        case .skip: return "跳过"
-        case .rename: return "重命名"
+        case .overwrite: return L10n.tr("4ce4c98eb27e")
+        case .skip: return L10n.tr("fc50a99caae0")
+        case .rename: return L10n.tr("0d0cbac2eee5")
         }
     }
 }
@@ -42,9 +48,9 @@ public enum ExportSizingMode: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .longEdge: return "长边"
-        case .percent: return "百分比"
-        case .none: return "原尺寸"
+        case .longEdge: return L10n.tr("dc4ffb23c9a3")
+        case .percent: return L10n.tr("03af18e36797")
+        case .none: return L10n.tr("f60066ec4bbf")
         }
     }
 }
@@ -57,9 +63,9 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .copyright: return "仅版权"
-        case .none: return "无"
+        case .all: return L10n.tr("5c55a67935af")
+        case .copyright: return L10n.tr("31bf373b8403")
+        case .none: return L10n.tr("484d55613910")
         }
     }
 }
@@ -75,9 +81,9 @@ public enum ExportMetadataPolicy: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .copyrightOnly: return "仅版权"
-        case .none: return "无"
+        case .all: return L10n.tr("5c55a67935af")
+        case .copyrightOnly: return L10n.tr("31bf373b8403")
+        case .none: return L10n.tr("484d55613910")
         }
     }
 
@@ -108,10 +114,10 @@ public enum WatermarkPosition: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .topLeft: return "左上"
-        case .topRight: return "右上"
-        case .bottomLeft: return "左下"
-        case .bottomRight: return "右下"
+        case .topLeft: return L10n.tr("fef304a69096")
+        case .topRight: return L10n.tr("ddf11974a72b")
+        case .bottomLeft: return L10n.tr("8537c17b8e3e")
+        case .bottomRight: return L10n.tr("eae5305a5c76")
         }
     }
 }
@@ -123,13 +129,15 @@ public enum WatermarkPosition: String, Codable, Sendable, CaseIterable {
 /// highlights into 0…1 before the transfer curve, so a bright sky keeps its shape instead of turning
 /// into a flat white patch. Only consulted while HDR is off — an HDR export has its own two halves.
 public enum SDRToneMapping: String, Codable, Sendable, CaseIterable {
+    case standard
     case global
     case none
 
     public var displayName: String {
         switch self {
-        case .global: return "全局"
-        case .none: return "无（硬截断）"
+        case .standard: return L10n.tr("33aff226fdbf")
+        case .global: return L10n.tr("63d6b47116de")
+        case .none: return L10n.tr("17bbfe9cc152")
         }
     }
 }
@@ -213,7 +221,7 @@ public enum HDRKind: String, Codable, Sendable, CaseIterable {
     public var displayName: String {
         switch self {
         case .none: return "SDR"
-        case .gainMap: return "增益图"
+        case .gainMap: return L10n.tr("a26f95b6e25d")
         case .hlg: return "HLG"
         case .pq: return "PQ"
         }
@@ -409,6 +417,7 @@ public struct ExportPreset: Sendable, Equatable {
     public var ppi: Int?
     /// Relative output folder under the destination. `""` = write straight into it; supports
     /// `{date}` (`yyyy-MM-dd`) and `{camera}`.
+    public var destination: ExportDestination = .chosenFolder
     public var subfolder: String
     /// What to do when the target name already exists on disk or in this batch.
     public var conflict: ExportConflict
@@ -517,7 +526,7 @@ public struct ExportPreset: Sendable, Equatable {
     /// 109 — the SDR renderer takes the linear exit and Core Image's tone map. `false` keeps S4's
     /// hard clamp, which is the byte-identical pre-109 path.
     public var appliesSDRToneMap: Bool {
-        hdrKind == .none && sdrToneMapping == .global
+        hdrKind == .none && sdrToneMapping != .none
     }
 
     /// What the encoder is actually allowed to write.
@@ -584,12 +593,12 @@ public struct ExportPreset: Sendable, Equatable {
     public var summary: String {
         let size: String
         switch sizingMode {
-        case .longEdge: size = longEdge.map { "长边 \($0)" } ?? "原尺寸"
-        case .percent: size = "长边 \(percent ?? 100)%"
-        case .none: size = "原尺寸"
+        case .longEdge: size = longEdge.map { L10n.tr("6e5db4efef0f" , String(describing: ($0))) } ?? L10n.tr("f60066ec4bbf")
+        case .percent: size = L10n.tr("b4d9afee0d1b" , String(describing: (percent ?? 100)))
+        case .none: size = L10n.tr("f60066ec4bbf")
         }
         var parts = [format.rawValue.uppercased(),
-                     "\(effectiveBitDepth) 位",
+                     L10n.tr("60dcc1d0f458" , String(describing: (effectiveBitDepth))),
                      colorSpace.displayName,
                      size,
                      conflict.displayName]
@@ -597,7 +606,7 @@ public struct ExportPreset: Sendable, Equatable {
         switch hdrKind {
         case .gainMap where format.supports(.gainMap):
             let hdr = hdr ?? HDRExport()
-            parts.append("HDR " + hdr.gainMap.displayName + (hdr.halfSize ? " 半尺寸" : ""))
+            parts.append("HDR " + hdr.gainMap.displayName + (hdr.halfSize ? L10n.tr("0f76f56b52df") : ""))
         case .hlg, .pq:
             parts.append("HDR " + hdrKind.displayName)
         case .none, .gainMap:
@@ -606,12 +615,12 @@ public struct ExportPreset: Sendable, Equatable {
         // 111 — an explicit size target plus `noUpscale` is worth saying out loud.
         if noUpscale && ((sizingMode == .longEdge && longEdge != nil)
                          || (sizingMode == .percent && percent != nil)) {
-            parts.append("未放大")
+            parts.append(L10n.tr("0a0e80ee8397"))
         }
         // 180 — only when the watermark really paints: an inactive preset's summary stays byte-for-byte
         // what 099/111 asserted.
         if isWatermarkActive {
-            parts.append("水印 " + watermarkPosition.displayName + " "
+            parts.append(L10n.tr("99014d626105") + watermarkPosition.displayName + " "
                          + String(Int(watermarkOpacity.rounded())) + "%")
         }
         return parts.joined(separator: " · ")
@@ -695,7 +704,7 @@ extension ExportPreset: Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, format, longEdge, quality, bitDepth, colorSpace, hdr, writeXMP, nameTemplate
-        case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel, removeLocation
+        case sizingMode, noUpscale, percent, subfolder, conflict, metadataLevel, removeLocation, destination
         case ppi
         case sdrToneMapping
         case watermarkText, watermarkPosition, watermarkOpacity
@@ -725,6 +734,7 @@ extension ExportPreset: Codable {
         self.noUpscale = try c.decodeIfPresent(Bool.self, forKey: .noUpscale) ?? true
         self.percent = try c.decodeIfPresent(Int.self, forKey: .percent)
         self.ppi = try c.decodeIfPresent(Int.self, forKey: .ppi)
+        self.destination = try c.decodeIfPresent(ExportDestination.self, forKey: .destination) ?? .chosenFolder
         self.subfolder = try c.decodeIfPresent(String.self, forKey: .subfolder) ?? ""
         self.conflict = try c.decodeIfPresent(String.self, forKey: .conflict)
             .flatMap(ExportConflict.init(rawValue:)) ?? .rename
@@ -762,6 +772,7 @@ extension ExportPreset: Codable {
         // 206 — omitted while nil, so a pre-206 preset re-encodes byte-for-byte. An out-of-range
         // value is written as stored; `effectivePPI` clamps it when the file is written.
         try c.encodeIfPresent(ppi, forKey: .ppi)
+        if destination != .chosenFolder { try c.encode(destination, forKey: .destination) }
         if !subfolder.isEmpty { try c.encode(subfolder, forKey: .subfolder) }
         if conflict != .rename { try c.encode(conflict.rawValue, forKey: .conflict) }
         if metadataLevel != .all { try c.encode(metadataLevel.rawValue, forKey: .metadataLevel) }

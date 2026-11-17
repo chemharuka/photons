@@ -117,7 +117,7 @@ public struct LinearSample: Sendable {
 }
 
 /// One channel's distribution plus the three ratios that make it actionable.
-public struct HistogramChannel: Sendable, Equatable {
+public struct HistogramChannel: Sendable, Equatable, Codable {
     /// `bins[k]` = number of sampled pixels whose **code** (`srgbEncode(linear)`) fell in
     /// `[k/binCount, (k+1)/binCount)`. Linear values above white are not here: they are the tail.
     public let bins: [Int]
@@ -178,7 +178,7 @@ public struct HistogramChannel: Sendable, Equatable {
 }
 
 /// Four channels, the picture they were measured over, and the grid they were measured on.
-public struct Histogram: Sendable, Equatable {
+public struct Histogram: Sendable, Equatable, Codable {
     /// What counts as clipped. Display-encoded white is exactly 1.0, so 0.999 admits one 8-bit code
     /// below it; the low side is symmetric (0.001 is the second code above black at 8 bits). Both are
     /// compared in *code* space, which is why `compute` encodes before it tests them — the same

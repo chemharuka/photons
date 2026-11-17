@@ -294,6 +294,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // Same two verbs as the grid, on the same kind of menu.
         contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
         contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
+        contextMenu.onReveal = { [weak self] ids in self?.session?.revealAssetsInFinder(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         contextMenu.albumsProvider = { [weak self] ids in
             AlbumMenuSupport.items(session: self?.session, ids: ids)
@@ -692,7 +693,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
               cell.cardView.asset?.id == id else { return }
         // The in-flight request still carries the pre-edit key; cancel it so it cannot repaint the
         // old frame after the new one arrives.
-        thumbRequests[index]?.cancel()
+        thumbRequests[index]?.cancel(preservingStartedWork: false)
         thumbRequests.removeValue(forKey: index)
         applyThumbnail(to: cell, index: index, asset: session.assets[index])
     }

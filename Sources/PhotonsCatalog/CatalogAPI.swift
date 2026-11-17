@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsFileAccess
 import GRDB
 import PhotonsCore
 
@@ -265,6 +266,11 @@ extension Catalog {
                     hit.status = .online
                     try dbQueue.write { db in try hit.update(db) }
                 }
+                if hit.pathHint == rootPath {
+                    hit.bookmark = try FileAccessStore.bookmark(for: rootURL)
+                    try dbQueue.write { db in try hit.update(db) }
+                }
+                retainSourceAccess(hit)
                 return hit
             }
         } else {
@@ -283,7 +289,7 @@ extension Catalog {
         }
 
         let volumeUUID = (try? rootURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) ?? nil
-        let bookmark = try? rootURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        let bookmark = try FileAccessStore.bookmark(for: rootURL)
         let root = SourceRoot(volumeUuid: volumeUUID,
                               bookmark: bookmark,
                               displayName: rootURL.lastPathComponent,
@@ -291,6 +297,7 @@ extension Catalog {
                               managementMode: mode,
                               status: .online)
         try dbQueue.write { db in try root.insert(db) }
+        retainSourceAccess(root)
         return root
     }
 
@@ -327,7 +334,7 @@ extension Catalog {
 
     public func asset(contentHash: String) throws -> Asset? {
         try dbQueue.read { db in
-            try Asset.fetchOne(db, sql: "SELECT * FROM assets WHERE content_hash = ?", arguments: [contentHash])
+            try Asset.fetchOne(db, sql: "SELECT * FROM assets WHERE content_hash = ? ORDER BY imported_at, id LIMIT 1", arguments: [contentHash])
         }
     }
 
@@ -499,13 +506,19 @@ extension Catalog {
     }
 
     /// Resolve the on-disk location of an asset (copy roots live inside the package).
+    public func folderURL(rootID: String, path: String = "") throws -> URL {
+        guard let root = try root(id: rootID) else { throw CatalogError.noSuchSourceRoot(rootID) }
+        let base = root.managementMode == .copy ? layout.originalsURL : sourceURL(for: root)
+        return path.isEmpty ? base : base.appendingPathComponent(path, isDirectory: true)
+    }
+
     public func fileURL(for asset: Asset) throws -> URL {
         guard let root = try root(id: asset.sourceRootId) else {
             throw CatalogError.noSuchSourceRoot(asset.sourceRootId)
         }
         let base = root.managementMode == .copy
             ? layout.originalsURL
-            : URL(fileURLWithPath: root.pathHint, isDirectory: true)
+            : sourceURL(for: root)
         return base.appendingPathComponent(asset.relPath)
     }
 

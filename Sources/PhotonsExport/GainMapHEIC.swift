@@ -517,55 +517,51 @@ struct GainMapPixels {
 
     init(sdr: DisplayImage, linear: LinearPixels, headroom: Double,
          mode: HDRExport.GainMap, halfSize: Bool) throws {
-        let hdrMax = Float(max(1.0001, headroom))
-        let logMax = log2(hdrMax)
-        guard logMax > 0 else { throw GainMapHEICError.gainMapFailed("headroom must exceed 1") }
-
+        guard headroom.isFinite, headroom > 0, headroom <= Double(Float.greatestFiniteMagnitude) else {
+            throw GainMapHEICError.gainMapFailed("headroom must be finite and positive")
+        }
+        let hdrMax = Float(max(1.0001, headroom)), logMax = log2(hdrMax)
         let w = sdr.width, h = sdr.height
-        // Gain at full resolution first, then (for `halfSize`) a 2×2 box average of the **gain**,
-        // not of the pixels: averaging two linear pictures and then taking their ratio is a different
-        // quantity near an edge.
-        var full = [Float](repeating: 0, count: w * h * (mode == .iso ? 3 : 1))
+        guard w > 0, h > 0, linear.width == w, linear.height == h,
+              sdr.rgba.count == w*h*4, linear.rgba.count == w*h*4 else {
+            throw GainMapHEICError.gainMapFailed("invalid pixel dimensions")
+        }
+        let tw = halfSize ? max(1, w/2) : w, th = halfSize ? max(1, h/2) : h
         let channels = mode == .iso ? 3 : 1
-        for y in 0..<h {
-            for x in 0..<w {
-                let o = (y * w + x) * 4
-                let s = (0..<3).map { GainMapHEIC.srgbToLinear(Float(sdr.rgba[o + $0])) }
-                let l = (0..<3).map { Float(linear.rgba[o + $0]) }
+        self.width = tw; self.height = th; self.channels = channels == 3 ? 4 : 1
+        var bytes = [UInt8](repeating: 0, count: tw*th*self.channels)
+        // Calculate only the output tile's gain. A 166 MP panorama previously needed a
+        // second, full-resolution RGB Float buffer (~2 GB) before downsampling it.
+        let stride = halfSize ? 2 : 1
+        for y in 0..<th { for x in 0..<tw {
+            var sum = SIMD3<Float>.zero
+            for dy in 0..<stride { for dx in 0..<stride {
+                let o = (min(h-1,y*stride+dy)*w+min(w-1,x*stride+dx))*4
+                var base = SIMD3<Float>.zero, hdr = SIMD3<Float>.zero
+                for c in 0..<3 {
+                    let s = Float(sdr.rgba[o+c]), l = Float(linear.rgba[o+c])
+                    base[c] = GainMapHEIC.srgbToLinear(s.isFinite ? max(0,s) : 0)
+                    // Wide-gamut conversion can produce negative channels. They are valid
+                    // working values, but cannot be passed to log2 in a positive gain map.
+                    hdr[c] = l.isFinite ? max(0,l) : 0
+                }
                 switch mode {
                 case .iso:
-                    for c in 0..<3 {
-                        full[(y * w + x) * 3 + c] = GainMapPixels.isoGain(hdr: l[c], sdr: s[c], logMax: logMax)
-                    }
-                case .mono:
-                    let g = GainMapPixels.isoGain(hdr: GainMapPixels.luma(l), sdr: GainMapPixels.luma(s), logMax: logMax)
-                    full[y * w + x] = g
-                case .apple:
-                    let hdrL = GainMapPixels.luma(l), sdrL = GainMapPixels.luma(s)
-                    let ratio = sdrL <= 0 ? 1 : hdrL / sdrL
-                    full[y * w + x] = GainMapPixels.appleGain(ratio: ratio, hdrMax: hdrMax)
+                    for c in 0..<3 { sum[c] += Self.isoGain(hdr:hdr[c],sdr:base[c],logMax:logMax) }
+                case .mono, .apple:
+                    let hl = hdr.x*0.2126+hdr.y*0.7152+hdr.z*0.0722
+                    let sl = base.x*0.2126+base.y*0.7152+base.z*0.0722
+                    sum.x += mode == .mono ? Self.isoGain(hdr:hl,sdr:sl,logMax:logMax)
+                        : Self.appleGain(ratio:sl <= 0 ? 1 : hl/sl,hdrMax:hdrMax)
                 }
-            }
-        }
-
-        // 163 §1.6 — the base has already been made even (`GainMapSizing`), so the map is exactly
-        // `floor(base / 2)` per axis. The 2×2 box average then has no clamped edge row/column.
-        let tw = halfSize ? max(1, w / 2) : w
-        let th = halfSize ? max(1, h / 2) : h
-        let reduced = halfSize ? GainMapPixels.reduce(full, w: w, h: h, channels: channels)
-                                : full
-        self.width = tw
-        self.height = th
-        self.channels = channels == 3 ? 4 : 1
-        var bytes = [UInt8](repeating: 0, count: tw * th * self.channels)
-        for i in 0..<(tw * th) {
+            }}
+            sum /= Float(stride*stride)
+            let o = (y*tw+x)*self.channels
             if channels == 3 {
-                bytes[i * 4] = 255
-                for c in 0..<3 { bytes[i * 4 + 1 + c] = GainMapPixels.encode(reduced[i * 3 + c]) }
-            } else {
-                bytes[i] = GainMapPixels.encode(reduced[i])
-            }
-        }
+                bytes[o] = 255
+                for c in 0..<3 { bytes[o+1+c] = Self.encode(sum[c]) }
+            } else { bytes[o] = Self.encode(sum.x) }
+        }}
         self.data = Data(bytes)
     }
 
@@ -611,7 +607,7 @@ struct GainMapPixels {
     }
 
     private static func encode(_ v: Float) -> UInt8 {
-        UInt8(min(max(v, 0), 1) * 255 + 0.5)
+        UInt8((v.isFinite ? min(max(v, 0), 1) : 0) * 255 + 0.5)
     }
 }
 

@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 158 — **点颜色** on a hosted panel: the swatch strip, multiple samples, selection, double-click
@@ -332,8 +333,14 @@ final class PointColorPanelTests: XCTestCase {
                       "标题双击必须走 group(.pointColor)（一行快照）")
         XCTAssertTrue(card.contains("resets.pointColorField(axis)"),
                       "每行的双击复位必须走 PanelResets")
-        XCTAssertTrue(card.contains("if !editing { session.commitEdit(label: \"点颜色 \\(axis.title)\") }"),
+        XCTAssertTrue(card.contains("if !editing { session.commitEdit(label: L10n.tr(\"85b1f31c4eb3\", axis.title)) }")
+                      || card.contains("if !editing { session.commitEdit(label: L10n.tr(\"85b1f31c4eb3\" , String(describing: (axis.title)))) }"),
                       "拖动结束必须提交一行")
+        // 本地化之后历史行标签是 `L10n.tr("85b1f31c4eb3", axis.title)`（zh「点颜色 {0}」/ en「Point Color {0}」），
+        // 源码里不再有 `"点颜色 \(axis.title)"` 这串插值字面量。上面两条都是等价的同一份代码
+        // （两种拼写只差空格，取决于格式化器），仍然钉「末尾那次提交带着轴名」这件事。
+        XCTAssertEqual(L10n.tr("85b1f31c4eb3", "色相"), "点颜色 色相",
+                       "提交标签的模板必须仍是「点颜色 {0}」")
         XCTAssertTrue(card.contains("PointColorSwatchStrip"), "色框条")
         XCTAssertFalse(card.contains("先吸取一个颜色"), "158: 删掉旧的说明文字")
         XCTAssertFalse(card.contains("PointColorSwatchView(point:"), "大色块移进色框条")

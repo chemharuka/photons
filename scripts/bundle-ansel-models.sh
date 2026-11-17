@@ -41,6 +41,7 @@ MODEL_NAME="denoise-quarter-single-v1.anselnn"
 CANDIDATES=()
 [ -n "${PHOTONS_ANSEL_MODEL:-}" ] && CANDIDATES+=("$PHOTONS_ANSEL_MODEL")
 CANDIDATES+=(
+    "$ROOT/local/models/$MODEL_NAME"
     "$HOME/Library/Application Support/Photons/models/$MODEL_NAME"
     "$HOME/workspace/ansel-probe/$MODEL_NAME"
     "$HOME/workspace/ansel-probe/ansel-denoise-src/models/$MODEL_NAME"
@@ -92,7 +93,7 @@ Photons spawns that executable and passes the model path as an argument
 which is what keeps Photons MIT while the tool is GPL-3.0.
 
 Training data licence (ATDL-1.1), as recorded in
-Vendor/ansel-denoise-swift/LICENSE-DATA.md:
+the upstream project documentation:
 
     The resulting weights are yours — license them however you see fit, in
     open-source or commercial.
@@ -101,8 +102,9 @@ Vendor/ansel-denoise-swift/LICENSE-SCOPE.md adds that upstream attaches no
 additional restriction to the weights themselves, that the vendored repository
 does not distribute them, and that a commercial shipper should confirm the weight
 licence with upstream. That confirmation is the distributor's call, not this
-script's; the vendored documents are the authority and ship in
-Vendor/ansel-denoise-swift/ for anyone auditing this bundle.
+script's. The vendored code and its license-scope notes are included in
+Contents/Resources/licenses/ansel-denoise-swift-source.tar.gz. Training-data
+terms alone do not establish a separate license grant for a released weight file.
 
 The executable's own GPL-3.0 text and §6(d) source offer live in
 Contents/Resources/licenses/ansel-denoise-swift-*.

@@ -206,8 +206,15 @@ final class SliderStyleTests: XCTestCase {
             if text.contains("NSSlider") { nsSliderFiles.append(file.lastPathComponent) }
         }
         XCTAssertEqual(bubbleHits, [], "no BubbleSlider/BarSlider anywhere in the panel")
-        XCTAssertEqual(nsSliderFiles.sorted(), ["CropToolBar.swift", "MaskListPanel.swift"],
-                       "NSSlider 只剩裁切卡的拉直滑杆（真实代码）与掩码面板的两句注释 —— 060 不碰它们")
+        // 055/060 管的是**检查器/蒙版面板**里不许有自绘滑杆。这三处各自都是 060 明确
+        // 「不碰它们」的边界外代码，逐处说明为什么可以留：
+        //   · CropToolBar.swift        —— 裁切卡的拉直滑杆（真实 NSSlider，060 不碰）
+        //   · MaskListPanel.swift      —— 掩码面板里两处提到 NSSlider 的注释
+        //   · AssetGridController.swift —— 浏览网格右下角的「缩略图大小」滑杆（PR1 新增，
+        //     属于网格的自有控件，不在检查器/蒙版面板里，与 055 的气泡滑杆无关）
+        XCTAssertEqual(nsSliderFiles.sorted(),
+                       ["AssetGridController.swift", "CropToolBar.swift", "MaskListPanel.swift"],
+                       "NSSlider 只剩裁切卡的拉直滑杆、掩码面板的注释、网格的缩略图大小滑杆")
         print("SLIDER grep · BubbleSlider|BarSlider → \(bubbleHits.count) files"
               + " · NSSlider → \(nsSliderFiles.sorted())")
     }

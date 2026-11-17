@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import Foundation
 import PhotonsCatalog
@@ -47,7 +48,7 @@ public enum PhotoSortOrder: String, CaseIterable, Sendable {
     /// asserted) so the glyph is tinted by `contentTintColor`/`labelColor` and therefore follows the
     /// light/dark appearance instead of being baked into one colour.
     public static func icon() -> NSImage? {
-        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: "按拍摄时间排序")
+        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: L10n.tr("dcfc67916f26"))
         let configured = base?.withSymbolConfiguration(symbolConfiguration) ?? base
         configured?.isTemplate = true
         return configured
@@ -56,14 +57,14 @@ public enum PhotoSortOrder: String, CaseIterable, Sendable {
     /// What the button says: the order in force, arrow included.
     public var label: String {
         switch self {
-        case .newestFirst: return "新→旧"
-        case .oldestFirst: return "旧→新"
+        case .newestFirst: return L10n.tr("7df98ca53720")
+        case .oldestFirst: return L10n.tr("21551945f873")
         }
     }
 
     /// The hover text: names the key *and* the order, because the label alone does not say what is
     /// being ordered (date? name? rating?).
-    public var tooltip: String { "按拍摄时间排序：\(label)" }
+    public var tooltip: String { L10n.tr("18f0d47772f6" , String(describing: (label))) }
 
     /// What one click does. `newestFirst ⇄ oldestFirst`.
     public var toggled: PhotoSortOrder {

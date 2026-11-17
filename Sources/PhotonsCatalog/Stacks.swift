@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import GRDB
 
@@ -45,10 +46,10 @@ public enum StackError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .noSuchStack(let id): return "没有这个堆叠：\(id)"
-        case .notEnoughPhotos: return "堆叠至少需要两张照片"
+        case .noSuchStack(let id): return L10n.tr("a7cf9a519774" , String(describing: (id)))
+        case .notEnoughPhotos: return L10n.tr("34665e747a7b")
         case .assetNotInStack(let assetID, let stackID):
-            return "照片 \(assetID) 不在堆叠 \(stackID) 里"
+            return L10n.tr("4693497dd1f6" , String(describing: (assetID)), String(describing: (stackID)))
         }
     }
 }

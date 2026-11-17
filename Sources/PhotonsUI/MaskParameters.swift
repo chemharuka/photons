@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import SwiftUI
 import PhotonsCore
@@ -31,8 +32,8 @@ public enum MaskEyedropperKind: String, Sendable, Equatable {
 
     public var label: String {
         switch self {
-        case .luminance: return "亮度吸管"
-        case .colour: return "颜色吸管"
+        case .luminance: return L10n.tr("069cc0ef13b7")
+        case .colour: return L10n.tr("ed967ea53e2e")
         }
     }
 
@@ -46,9 +47,9 @@ public enum MaskEyedropperKind: String, Sendable, Equatable {
     public var help: String {
         switch self {
         case .luminance:
-            return "点击画面：以该点亮度为中心重设窗口；⌥点击：只移动较近的一条边（Esc 取消）"
+            return L10n.tr("2c628844e37f")
         case .colour:
-            return "点击画面：把该点颜色加入样本（最多 8 个，超过时替换最旧的一个）；Esc 取消"
+            return L10n.tr("f1239cc403be")
         }
     }
 }
@@ -86,7 +87,7 @@ public struct MaskEyedropperRow: View {
             // 253 — the mask pickers are the same armed tool as the other droppers.
             .toolActive(isArmed)
 
-            Text(isArmed ? "点击画布取样 · Esc 取消" : kind.label)
+            Text(isArmed ? L10n.tr("0cfb8071577e") : kind.label)
                 .font(.system(size: 10))
                 .foregroundStyle(isArmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .lineLimit(1)
@@ -111,9 +112,9 @@ public enum MaskLevelParameter: String, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .opacity: return "不透明度"
-        case .feather: return "羽化"
-        case .refine: return "精修"
+        case .opacity: return L10n.tr("04405e4a9ffd")
+        case .feather: return L10n.tr("5b228b5ce583")
+        case .refine: return L10n.tr("a5f7ad7e443f")
         }
     }
 
@@ -148,11 +149,11 @@ public enum MaskLevelParameter: String, CaseIterable, Sendable {
     public var help: String {
         switch self {
         case .opacity:
-            return "乘在合成后的选区上（Core: 1.0 = 满强度）；0 等于这个蒙版不参与合成"
+            return L10n.tr("d6d71ee6a13a")
         case .feather:
-            return "选区的空间模糊：1 = 短边 10 %（Core 的 0…0.1 全跨度），走 S1.7 的箱式模糊，与半径无关的 O(1) 代价"
+            return L10n.tr("75528ac0cf87")
         case .refine:
-            return "导向滤波强度（0 = 关）：用 S1 的亮度引导边界，半径 = max(W,H)/30 钳到 3…65"
+            return L10n.tr("3ac20aa5646c")
         }
     }
 }
@@ -190,19 +191,19 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .amount: return "强度"
-        case .exposure: return "曝光"
-        case .contrast: return "对比"
-        case .highlights: return "高光"
-        case .shadows: return "阴影"
-        case .whites: return "白色"
-        case .blacks: return "黑色"
-        case .temperature: return "色温"
-        case .tint: return "色调"
-        case .hue: return "色相"
-        case .saturation: return "饱和"
-        case .texture: return "纹理"
-        case .sharpen: return "锐化"
+        case .amount: return L10n.tr("a2846644a638")
+        case .exposure: return L10n.tr("bc7dacff87db")
+        case .contrast: return L10n.tr("bc4b2dbbb77b")
+        case .highlights: return L10n.tr("f799c2308083")
+        case .shadows: return L10n.tr("a0fb1c62d0e8")
+        case .whites: return L10n.tr("f56e7eff58bf")
+        case .blacks: return L10n.tr("ed7d2c54184b")
+        case .temperature: return L10n.tr("84ac609620e5")
+        case .tint: return L10n.tr("5bddf6a1c0f5")
+        case .hue: return L10n.tr("3ff6d1c07cfc")
+        case .saturation: return L10n.tr("1394938c0161")
+        case .texture: return L10n.tr("262348fa5f3e")
+        case .sharpen: return L10n.tr("fc538f246da7")
         }
     }
 
@@ -258,24 +259,24 @@ public enum MaskAdjustmentParameter: String, CaseIterable, Sendable {
     public var help: String {
         switch self {
         case .amount:
-            return "整段局部调整的 lerp 系数（0…100）：0 与“没有这个蒙版”位精确相等，S1.6 直接跳过"
+            return L10n.tr("3de641d7c6a8")
         case .exposure:
-            return "场景线性的 EV 增益（−4…4），在 S2 之前施加；显示侧增益救不回 S2 已压掉的高光"
+            return L10n.tr("0823050061e4")
         case .temperature:
-            return "相对白平衡 −100…100，按 6500 K + 30 K/单位换算后走全局同一个 WhiteBalanceSolver.gain（不是开尔文，也不再有第二套算法）"
+            return L10n.tr("5895d316531a")
         case .tint:
-            return "−100…100，正值偏品红；与全局色温/色调同一个坐标系（1 单位 = 文档 tint 1），同一份 WhiteBalanceSolver.gain"
+            return L10n.tr("373641613f5b")
         case .contrast, .highlights, .shadows, .whites, .blacks:
             // 056: the tone half stayed in S1.6, where scene-linear is the right domain for them.
-            return "−100…100；S1.6 按 /100 归一后作用在场景线性像素上（对比以 0.18 为枢轴）"
+            return L10n.tr("dce470cef837")
         case .hue, .saturation:
             // 056: colour moved to S3.5, **after** the tone map, so a local slider means what the
             // global one means (same `color_hsl.metal`, same numbers — measured equal to 0 codes).
-            return "−100…100；在 tone map 之后的显示参考域施加，与全局同名滑杆同一份算法"
+            return L10n.tr("4e1e41ae075b")
         case .texture:
-            return "−100…100；在 tone map 之后的显示参考域，用与全局「纹理」同一个导向滤波残差、同一个门控，按蒙版覆盖度 lerp（不是第二套算法）"
+            return L10n.tr("f6b310ae1838")
         case .sharpen:
-            return "0…100；1 px 半径的 USM（与「纹理」的频带无关，那是纹理/清晰度的活），提升被夹在窗口自身的最小/最大 ±1.5 码内（实测 1.49 码，判定线 2 码），所以锐化边缘而不是画光晕"
+            return L10n.tr("61cbc0e05449")
         }
     }
 }
@@ -290,9 +291,9 @@ public enum MaskRowSummary {
 
     /// The shape, in the same vocabulary the 新建 menu uses.
     public static func shapeText(_ mask: Mask) -> String {
-        guard let first = mask.components.first else { return "空" }
+        guard let first = mask.components.first else { return L10n.tr("2f8267a89ad5") }
         if case .brush(let brush) = first.shape {
-            return brush.strokes.isEmpty ? "空" : "\(brush.strokes.count) 笔"
+            return brush.strokes.isEmpty ? L10n.tr("2f8267a89ad5") : L10n.tr("9553e6d82ca1" , String(describing: (brush.strokes.count)))
         }
         if case .semantic(let semantic) = first.shape {
             return semantic.kind.displayName
@@ -312,7 +313,7 @@ public enum MaskRowSummary {
     /// adjustments is the identity branch of S1.6, and the list should say so instead of implying
     /// the mask changes something.
     public static func text(_ mask: Mask) -> String {
-        "\(shapeText(mask)) · 局部 \(adjustmentCount(mask)) 项"
+        L10n.tr("75012fccbc19" , String(describing: (shapeText(mask))), String(describing: (adjustmentCount(mask))))
     }
 }
 
@@ -322,17 +323,17 @@ extension CombineOp {
     /// What the picker says. Core names the algebra ("`acc · (1 − a)`"), the panel names the verb.
     public var displayName: String {
         switch self {
-        case .add: return "相加"
-        case .subtract: return "减去"
-        case .intersect: return "相交"
+        case .add: return L10n.tr("421f9d207d03")
+        case .subtract: return L10n.tr("8ad781d0a54e")
+        case .intersect: return L10n.tr("79e00cc4264b")
         }
     }
 
     public var help: String {
         switch self {
-        case .add: return "并集 max(acc, a)：交界不会重复曝光"
-        case .subtract: return "acc · (1 − a)：把这块从已有选区里擦掉"
-        case .intersect: return "acc · a：与已有选区求交（ART 的叠乘规则）"
+        case .add: return L10n.tr("ac1099af60c6")
+        case .subtract: return L10n.tr("8fa2136bda76")
+        case .intersect: return L10n.tr("0f21c5808c0f")
         }
     }
 }
@@ -452,7 +453,7 @@ public struct MaskSliderRow: Sendable, Identifiable, Equatable {
                       format: parameter.isPercent ? "%.0f%%" : parameter.format,
                       decimals: parameter.isPercent ? 0 : 2,
                       rounding: parameter.isPercent ? .outward : .asIs,
-                      label: "蒙版\(parameter.label)",
+                      label: L10n.tr("4e1b73581a6e" , String(describing: (parameter.label))),
                       help: parameter.help)
     }
 
@@ -467,7 +468,7 @@ public struct MaskSliderRow: Sendable, Identifiable, Equatable {
                              format: parameter.format,
                              decimals: isExposure ? 2 : 1,
                              rounding: isExposure ? .asIs : .outward,
-                             label: "局部\(parameter.label)",
+                             label: L10n.tr("5aa402405ab2" , String(describing: (parameter.label))),
                              help: parameter.help)
     }
 
@@ -509,8 +510,8 @@ public struct MaskShapeSliderRow: Sendable {
         switch shape {
         case .linearGradient:
             return [MaskShapeSliderRow(
-                title: "中点", range: 0.05 ... 0.95, format: "%.2f", decimals: 2, rounding: .asIs,
-                label: "渐变中点",
+                title: L10n.tr("d4f521c2072a"), range: 0.05 ... 0.95, format: "%.2f", decimals: 2, rounding: .asIs,
+                label: L10n.tr("3e16266d0562"),
                 read: { if case .linearGradient(let g) = $0 { return g.midpoint } else { return .nan } },
                 apply: { shape, value in
                     guard case .linearGradient(let g) = shape else { return shape }
@@ -522,8 +523,8 @@ public struct MaskShapeSliderRow: Sendable {
         case .radialGradient:
             return [
                 MaskShapeSliderRow(
-                    title: "半径", range: 0.02 ... 1.2, format: "%.3f", decimals: 3, rounding: .asIs,
-                    label: "椭圆半径",
+                    title: L10n.tr("3e65075eb3e9"), range: 0.02 ... 1.2, format: "%.3f", decimals: 3, rounding: .asIs,
+                    label: L10n.tr("a4c0252e327a"),
                     read: { if case .radialGradient(let g) = $0 {
                         return max(g.radius.x, g.radius.y) } else { return .nan } },
                     apply: { shape, value in
@@ -534,8 +535,8 @@ public struct MaskShapeSliderRow: Sendable {
                     },
                     defaultValue: RadialGradientShape.default.radius.x),
                 MaskShapeSliderRow(
-                    title: "角度", range: -180 ... 180, format: "%.0f°", decimals: 1, rounding: .outward,
-                    label: "椭圆角度",
+                    title: L10n.tr("8d855790e87a"), range: -180 ... 180, format: "%.0f°", decimals: 1, rounding: .outward,
+                    label: L10n.tr("0fd38424b169"),
                     read: { if case .radialGradient(let g) = $0 { return g.angle } else { return .nan } },
                     apply: { shape, value in
                         guard case .radialGradient(let g) = shape else { return shape }
@@ -551,8 +552,8 @@ public struct MaskShapeSliderRow: Sendable {
                     // 139 — the one control that means 「扩大选择范围」. Row units are percent
                     // (0…100 %); the document stays `tolerance` in 0…1, so this is the only
                     // conversion and the panel's readout is the engine's own number ×100.
-                    title: "选择范围", range: 0 ... 100, format: "%.0f%%", decimals: 0,
-                    rounding: .outward, label: "颜色选择范围",
+                    title: L10n.tr("d397ba0e36ed"), range: 0 ... 100, format: "%.0f%%", decimals: 0,
+                    rounding: .outward, label: L10n.tr("ce24ffa833e7"),
                     read: { if case .colorRange(let c) = $0 { return c.tolerance * 100 } else { return .nan } },
                     apply: { shape, value in
                         guard case .colorRange(let c) = shape else { return shape }
@@ -563,8 +564,8 @@ public struct MaskShapeSliderRow: Sendable {
                     },
                     defaultValue: ColorRangeShape.default.tolerance * 100),
                 MaskShapeSliderRow(
-                    title: "过渡", range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
-                    label: "颜色过渡",
+                    title: L10n.tr("b5d8ead3660f"), range: 0 ... 1, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: L10n.tr("3733708a5d94"),
                     read: { if case .colorRange(let c) = $0 { return c.smoothness } else { return .nan } },
                     apply: { shape, value in
                         guard case .colorRange(let c) = shape else { return shape }
@@ -578,8 +579,8 @@ public struct MaskShapeSliderRow: Sendable {
             let top = LuminanceRangeShape.hdrMax
             return [
                 MaskShapeSliderRow(
-                    title: "下限", range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
-                    label: "亮度下限",
+                    title: L10n.tr("2c3f8d6ce49a"), range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: L10n.tr("80463e446557"),
                     read: { if case .luminanceRange(let l) = $0 { return l.low } else { return .nan } },
                     apply: { shape, value in
                         guard case .luminanceRange(let l) = shape else { return shape }
@@ -593,8 +594,8 @@ public struct MaskShapeSliderRow: Sendable {
                     },
                     defaultValue: LuminanceRangeShape.default.low),
                 MaskShapeSliderRow(
-                    title: "上限", range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
-                    label: "亮度上限",
+                    title: L10n.tr("8e7ddbeee310"), range: 0 ... top, format: "%.2f", decimals: 2, rounding: .asIs,
+                    label: L10n.tr("482882a2255e"),
                     read: { if case .luminanceRange(let l) = $0 { return l.high } else { return .nan } },
                     apply: { shape, value in
                         guard case .luminanceRange(let l) = shape else { return shape }
@@ -608,8 +609,8 @@ public struct MaskShapeSliderRow: Sendable {
 
         case .semantic:
             return [MaskShapeSliderRow(
-                title: "软边", range: 0 ... 0.6, format: "%.2f", decimals: 2, rounding: .asIs,
-                label: "语义软边",
+                title: L10n.tr("3ddbd5881ff3"), range: 0 ... 0.6, format: "%.2f", decimals: 2, rounding: .asIs,
+                label: L10n.tr("7527da5c2a9a"),
                 read: { if case .semantic(let s) = $0 { return s.softEdge } else { return .nan } },
                 apply: { shape, value in
                     guard case .semantic(var s) = shape else { return shape }
@@ -663,7 +664,7 @@ extension CatalogSession {
         guard next != shape else { return false }
         setMaskComponentShape(maskID, component: component, shape: .luminanceRange(next),
                               commit: true,
-                              label: moveNearerEdge ? "亮度吸管 · 单边" : "亮度吸管",
+                              label: moveNearerEdge ? L10n.tr("1037c77938ac") : L10n.tr("069cc0ef13b7"),
                               coalesce: false)
         return true
     }
@@ -685,7 +686,7 @@ extension CatalogSession {
         if base.samples == [[0.5, 0.5, 0.5]] { base.samples = [] }
         let next = base.appendingSample(Array(sampleSRGB.prefix(3)))
         setMaskComponentShape(maskID, component: component, shape: .colorRange(next),
-                              commit: true, label: "颜色吸管", coalesce: false)
+                              commit: true, label: L10n.tr("ed967ea53e2e"), coalesce: false)
         return true
     }
 }
@@ -765,7 +766,7 @@ extension CatalogSession {
     ///   `commitEdit` (077): a reset must not fold into the drag that came before it — folding it in
     ///   would either hide the reset inside that row or erase both when it lands on the drag's start.
     @discardableResult
-    public func writeMask(_ id: String, label: String = "蒙版", commit: Bool = false,
+    public func writeMask(_ id: String, label: String = L10n.tr("e7c802f4a183"), commit: Bool = false,
                           coalesce: Bool = true,
                           _ body: (inout Mask) -> Void) -> Bool {
         guard let index = edit.masks.firstIndex(where: { $0.id == id }) else { return false }
@@ -787,7 +788,7 @@ extension CatalogSession {
     public func setMaskLevel(_ id: String, _ parameter: MaskLevelParameter, _ value: Double,
                              commit: Bool = false) -> Bool {
         let clamped = min(max(value, parameter.range.lowerBound), parameter.range.upperBound)
-        return writeMask(id, label: "蒙版\(parameter.label)", commit: commit,
+        return writeMask(id, label: L10n.tr("4e1b73581a6e" , String(describing: (parameter.label))), commit: commit,
                          coalesce: false) { mask in
             parameter.write(&mask, clamped)
         }
@@ -801,7 +802,7 @@ extension CatalogSession {
     public func setMaskAdjustment(_ id: String, _ parameter: MaskAdjustmentParameter,
                                   _ value: Double, commit: Bool = false) -> Bool {
         let clamped = min(max(value, parameter.range.lowerBound), parameter.range.upperBound)
-        return writeMask(id, label: "局部\(parameter.label)", commit: commit,
+        return writeMask(id, label: L10n.tr("5aa402405ab2" , String(describing: (parameter.label))), commit: commit,
                          coalesce: false) { mask in
             mask.adjustments[keyPath: parameter.keyPath] = clamped
         }
@@ -810,7 +811,7 @@ extension CatalogSession {
     /// Mask-level `invert`: applies to the combined selection (`1 − a`), not to one component.
     @discardableResult
     public func setMaskInverted(_ id: String, _ inverted: Bool) -> Bool {
-        writeMask(id, label: inverted ? "反转蒙版" : "取消反转", commit: true) { $0.invert = inverted }
+        writeMask(id, label: inverted ? L10n.tr("aa589f7ed28a") : L10n.tr("75c10814e94c"), commit: true) { $0.invert = inverted }
     }
 
     /// One component's blend mode. Core: the **first** component's `op` is ignored, so the panel
@@ -819,7 +820,7 @@ extension CatalogSession {
     public func setMaskCombineOp(_ id: String, component: Int, _ op: CombineOp) -> Bool {
         guard let mask = edit.masks.first(where: { $0.id == id }),
               mask.components.indices.contains(component) else { return false }
-        return writeMask(id, label: "混合\(op.displayName)", commit: true) { mask in
+        return writeMask(id, label: L10n.tr("645dede0bbca" , String(describing: (op.displayName))), commit: true) { mask in
             mask.components[component].op = op
         }
     }
@@ -835,7 +836,7 @@ extension CatalogSession {
     public func renameMask(_ id: String, to name: String) -> Bool {
         let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(48))
         guard !trimmed.isEmpty else { return false }
-        return writeMask(id, label: "重命名蒙版", commit: true) { $0.name = trimmed }
+        return writeMask(id, label: L10n.tr("3bd13239db62"), commit: true) { $0.name = trimmed }
     }
 
     /// Move a mask one slot up (`-1`) or down (`+1`) in the list.
@@ -854,7 +855,7 @@ extension CatalogSession {
         // `writeMask` hands the *mask* to its body and cannot reach the list. The commit is still the
         // ordinary one-snapshot door.
         applyEdit { $0.masks.swapAt(index, target) }
-        commitEdit(label: delta < 0 ? "上移蒙版" : "下移蒙版")
+        commitEdit(label: delta < 0 ? L10n.tr("06b6ae9eef28") : L10n.tr("6cd8a4813765"))
         return true
     }
 

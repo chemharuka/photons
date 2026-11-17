@@ -1,4 +1,5 @@
 import AppKit
+import PhotonsFileAccess
 import PhotonsCatalog
 import PhotonsUI
 
@@ -35,8 +36,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [EditorWindowController] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ApplicationPreferencesRuntime.shared.start()
         NSApp.mainMenu = MainMenu.build()
         let args = LaunchArguments(CommandLine.arguments)
+        if args.has("--sandbox-check") {
+            let result = SandboxDiagnostics.run()
+            fflush(stdout); exit(result)
+        }
 
         if let smoke = args.value("--ui-smoke") {
             runSmoke(args, library: smoke, bench: false)
@@ -51,15 +57,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 295 B: no `--library` → reopen the library the user last opened, if it is still on disk.
         // A failed open (or a vanished directory) leaves an empty window and forgets the path:
         // a modal alert at launch is something the user cannot act on, only dismiss.
+        let remembered = ApplicationPreferences.shared.reopenLibrary ? RecentLibrary.recall() : nil
+        let rememberedAccess = remembered.map { FileAccessStore.shared.access(to: $0) }
+        defer { withExtendedLifetime(rememberedAccess) {} }
         if let url = RecentLibrary.launchURL(explicit: args.value("--library"),
-                                             remembered: RecentLibrary.recall()) {
+                                             remembered: rememberedAccess?.url) {
             do {
                 try controller.openLibrary(at: url)
             } catch {
-                RecentLibrary.forget()
+                controller.presentLibraryAccessError(error)
             }
-        } else {
-            RecentLibrary.forget()
         }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)

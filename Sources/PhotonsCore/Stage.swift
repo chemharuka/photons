@@ -392,6 +392,7 @@ public struct DisplayOptions: Sendable, Equatable {
     /// exact old spelling, so every recorded golden and cache key is untouched). `true` is only set
     /// by `GainMapHEIC`'s caller, which needs extended-range linear pixels to compute a gain map; the
     /// readback is therefore a linear `DisplayImage` whose values may exceed 1.
+    public var sdrProof: Bool = false
     public var linearOutput: Bool
     /// 320 — the **picture's** own ceiling, in linear scene units: the most light a pixel may keep
     /// after the tone map. `headroom` above is the *panel's* ceiling (what S4 may write); this one is
@@ -411,12 +412,13 @@ public struct DisplayOptions: Sendable, Equatable {
     public var highlightCeiling: Double
 
     public init(primaries: OutputPrimaries = .sRGB, bitDepth: Int = 8, headroom: Double = 1,
-                linearOutput: Bool = false,
+                linearOutput: Bool = false, sdrProof: Bool = false,
                 highlightCeiling: Double = HighlightCeiling.defaultLinear) {
         self.primaries = primaries
         self.bitDepth = bitDepth
         self.headroom = headroom
         self.linearOutput = linearOutput
+        self.sdrProof = sdrProof
         self.highlightCeiling = highlightCeiling
     }
 
@@ -440,7 +442,7 @@ public struct DisplayOptions: Sendable, Equatable {
         let base = String(format: "%@;bits=%d;headroom=%.3f;%@",
                           primaries.rawValue, bitDepth, headroom, ceilingKeyString)
         let linear = linearOutput ? ";linear=true" : ""
-        return base + linear
+        return base + linear + (sdrProof ? ";sdrProof=1":"")
     }
 }
 

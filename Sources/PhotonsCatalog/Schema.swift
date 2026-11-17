@@ -21,7 +21,7 @@ import GRDB
 /// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 6
+    public static let version = 7
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -47,6 +47,7 @@ public enum Schema {
         Step(name: "v4") { db in try db.execute(sql: v4) },
         Step(name: "v5") { db in try addMissingColumnIfAbsent(db) },
         Step(name: "v6") { db in try addStackColumnsIfAbsent(db) },
+        Step(name: "v7") { db in try allowIndependentCopies(db) },
     ]
 
     static var migrator: DatabaseMigrator {
@@ -72,6 +73,24 @@ public enum Schema {
         let target = steps.prefix(max(0, min(version, steps.count)))
         guard let last = target.last else { return }
         try migrator.migrate(queue, upTo: last.name)
+    }
+
+    /// Asset IDs own edits/history; content hashes identify shared original bytes. GRDB runs
+    /// this rebuild with foreign keys disabled, then checks every foreign key before commit.
+    static func allowIndependentCopies(_ db: Database) throws {
+        guard let original = try String.fetchOne(db, sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='assets'"),
+              original.contains("UNIQUE(content_hash)") else { return }
+        let schemaObjects = try String.fetchAll(db, sql: "SELECT sql FROM sqlite_master WHERE tbl_name='assets' AND type IN ('index','trigger') AND sql IS NOT NULL")
+        let create = original.replacingOccurrences(of: "CREATE TABLE assets", with: "CREATE TABLE assets_v7")
+            .replacingOccurrences(of: #",\s*UNIQUE\s*\(\s*content_hash\s*\)"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #",\s*UNIQUE\s*\(\s*source_root_id\s*,\s*rel_path\s*\)"#, with: "", options: .regularExpression)
+        try db.execute(sql: create)
+        let columns = try db.columns(in: "assets").map { "\"" + $0.name.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ",")
+        try db.execute(sql: "INSERT INTO assets_v7 (\(columns)) SELECT \(columns) FROM assets")
+        try db.execute(sql: "DROP TABLE assets")
+        try db.execute(sql: "ALTER TABLE assets_v7 RENAME TO assets")
+        for sql in schemaObjects { try db.execute(sql: sql) }
+        try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash)")
     }
 
     // MARK: - v5

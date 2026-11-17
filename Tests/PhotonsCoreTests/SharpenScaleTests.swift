@@ -376,9 +376,14 @@ final class SharpenScaleTests: XCTestCase {
         // `geometry` (246), `maskAtlas` (215) and `contrast` (159/246) moved in other tasks and are
         // pinned at their current numbers here; `heal` is **not** in the list either — 249 moved the
         // repair to S1 source pixels and bumped it 1 → 2. The claim is "249 touched heal only".
+        //
+        // `curve` is pinned at **3**, not 2: 357 withdrew 137's film-negative inversion and `4e703c2`
+        // bumped the token 2 → 3 so keys minted by the withdrawn generation cannot be hit. The
+        // registration here was left at 2 and the assertion has been red on `main` since — this is
+        // that stale number being brought up to date, not a behaviour change.
         let unchanged: [(RenderStage, Int)] = [
             (.geometry, 5), (.sceneLinear, 10), (.maskAtlas, 6), (.localApply, 6),
-            (.curve, 2), (.contrast, 3), (.toneMap, 7), (.color, 1), (.bw, 1), (.localColor, 1),
+            (.curve, 3), (.contrast, 3), (.toneMap, 7), (.color, 1), (.bw, 1), (.localColor, 1),
             (.hsl, 1), (.pointColour, 3), (.grade, 1), (.detailFX, 4),
             (.vignette, 3), (.grain, 1), (.display, 1),
         ]
@@ -386,7 +391,7 @@ final class SharpenScaleTests: XCTestCase {
             XCTAssertEqual(StageAlgorithmVersion.version(of: stage), version,
                            "249 only moved heal；\(stage.rawValue) 不该变（名单登记的是 \(version)）")
         }
-        XCTAssertEqual(StageAlgorithmVersion.dehaze, 10, "280：高光参与度上界收到估计噪声尺度，dehaze 9→10")
+        XCTAssertEqual(StageAlgorithmVersion.dehaze, 12, "417：w 改为 L ≤ A 全参与（天空压暗），dehaze 11→12")
         XCTAssertEqual(StageAlgorithmVersion.heal, 2, "249：修复搬到 S1 源像素")
         XCTAssertEqual(unchanged.count + 3, RenderStage.order.count,
                        "名单漏了一个阶段，等于没盯住它")

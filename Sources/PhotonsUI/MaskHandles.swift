@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import PhotonsCore
@@ -55,10 +56,10 @@ public enum MaskControlParameter: String, Sendable, CaseIterable, Equatable, Has
 
     public var label: String {
         switch self {
-        case .position: return "位置"
-        case .shape: return "形状"
-        case .angle: return "角度"
-        case .ratio: return "渐变比例"
+        case .position: return L10n.tr("1fb4d574da92")
+        case .shape: return L10n.tr("c2f71c1b10ef")
+        case .angle: return L10n.tr("8d855790e87a")
+        case .ratio: return L10n.tr("828b972e5828")
         }
     }
 }
@@ -106,15 +107,15 @@ public enum MaskHandleKind: Sendable, Equatable, Hashable {
     /// Stable text for the status/QA line (no UI reads it in a test).
     public var label: String {
         switch self {
-        case .linearLine(.start): return "起点线"
-        case .linearLine(.end): return "终点线"
-        case .linearAngle: return "渐变角度"
-        case .radialCenter: return "中心"
-        case .radialEdge(.left): return "左边界"
-        case .radialEdge(.right): return "右边界"
-        case .radialEdge(.top): return "上边界"
-        case .radialEdge(.bottom): return "下边界"
-        case .radialAngle: return "椭圆角度"
+        case .linearLine(.start): return L10n.tr("c105878a3797")
+        case .linearLine(.end): return L10n.tr("cdfc19e079bd")
+        case .linearAngle: return L10n.tr("f11ae947e94f")
+        case .radialCenter: return L10n.tr("260cca3889c2")
+        case .radialEdge(.left): return L10n.tr("8d5e27c8ae21")
+        case .radialEdge(.right): return L10n.tr("03ff9e37c7e1")
+        case .radialEdge(.top): return L10n.tr("8cc9c04f73a7")
+        case .radialEdge(.bottom): return L10n.tr("40c92503c7e0")
+        case .radialAngle: return L10n.tr("0fd38424b169")
         }
     }
 }

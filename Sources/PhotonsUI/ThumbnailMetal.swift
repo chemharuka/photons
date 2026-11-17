@@ -139,6 +139,9 @@ final class ThumbnailMetalSurface {
         let pixels = CGSize(width: max(1, (size.width * s).rounded()),
                             height: max(1, (size.height * s).rounded()))
         if layer.drawableSize != pixels { layer.drawableSize = pixels }
+        // AppKit re-lays out cells during selection, scrolling and sidebar updates. The existing
+        // drawable is still valid when the bitmap and pixel size have not changed.
+        guard pixels != lastDrawableSize || lastFailure != nil else { return }
         drawIfPossible()
     }
 
@@ -239,6 +242,7 @@ final class ThumbnailMetalSurface {
         command.present(drawable)
         command.commit()
         presentCount += 1
+        lastDrawableSize = layer.drawableSize
         lastFailure = nil
     }
 

@@ -1,0 +1,6 @@
+[
+  [
+    "Sources/PhotonsCatalog/Schema.swift",
+    "\"\"\"\n    -- 库级元数据：版本号与数据同库（digiKam 的教训：备份/迁移不脱节）\n    CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);\n\n "
+  ]
+]

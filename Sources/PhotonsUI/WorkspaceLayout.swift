@@ -268,9 +268,10 @@ public enum GridLayout {
     /// Card aspect (width / height of the swatch), matching the placeholder cards.
     public static let swatchAspect: CGFloat = 1.35
 
-    public static func metrics(forWidth width: CGFloat) -> GridMetrics {
-        let usable = max(minItemWidth, width - inset * 2)
-        let columns = max(1, Int((usable + spacing) / (minItemWidth + spacing)))
+    public static func metrics(forWidth width: CGFloat, preferredWidth: CGFloat = minItemWidth) -> GridMetrics {
+        let target = max(100, min(420, preferredWidth.isFinite ? preferredWidth : minItemWidth))
+        let usable = max(1, width - inset * 2)
+        let columns = max(1, Int((usable + spacing) / (target + spacing)))
         let itemWidth = (usable - CGFloat(columns - 1) * spacing) / CGFloat(columns)
         let itemHeight = (itemWidth / swatchAspect).rounded() + labelHeight
         return GridMetrics(columns: columns,

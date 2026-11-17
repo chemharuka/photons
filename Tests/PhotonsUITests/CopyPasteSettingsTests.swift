@@ -3,6 +3,7 @@ import AppKit
 import GRDB
 import PhotonsCore
 import PhotonsCatalog
+import PhotonsLocalization
 @testable import PhotonsCatalog
 @testable import PhotonsUI
 
@@ -404,8 +405,23 @@ final class CopyPasteSettingsTests: XCTestCase {
         let view = CopySettingsAccessoryView(selection: .all, purpose: .copy)
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.selection.sections, Set(EditSnapshotSection.copyable))
-        XCTAssertEqual(view.statusLabel.stringValue,
-                       "将复制：白平衡 · 黑电平 · Light · Color · 黑白 · HSL · 色彩分级 · 校准 · 曲线 · 开发 · 校正 · 细节 · 效果 · 裁切 · 蒙版")
+        // 本地化之后组名走 `EditSnapshotSection.title`（`L10n.tr`），状态行模板走 `L10n.tr("e925ae18f664")`，
+        // 源码里已经没有「将复制：… Light · Color …」这一整串字面量。
+        //
+        // 等价改写：**把 15 个组和它们的顺序逐个钉住**，名字与模板都从资源表取。
+        // 信息量一点没少 —— 组的集合、面板顺序、分隔符（` · `）、前缀模板都在；产品漏一组、
+        // 换顺序、改分隔符或改模板，这条断言照样红。原来钉死中文字面量只是把「语言」也钉进去了，
+        // 那部分不是这条测试要管的事（`LocalizationTests` 管）。
+        let expectedSections: [EditSnapshotSection] = [
+            .whiteBalance, .blackLevel, .light, .color, .blackAndWhite, .hsl, .colorGrading,
+            .calibration, .curve, .detail, .correction, .detailFX, .effects, .geometry, .masks,
+        ]
+        let actualInPanelOrder = EditSnapshotSection.panelOrder.filter { view.selection.sections.contains($0) }
+        XCTAssertEqual(actualInPanelOrder, expectedSections,
+                       "勾满时选中的组必须正好是这 15 个（按面板顺序）")
+        let expected = L10n.tr("e925ae18f664",
+                               expectedSections.map(\.title).joined(separator: " · "))
+        XCTAssertEqual(view.statusLabel.stringValue, expected)
         XCTAssertEqual(view.presetPopUp.indexOfSelectedItem, 1, "全部 is the first preset row")
 
         // 全不选 / 全选 buttons.

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CryptoKit
 import Metal
@@ -19,30 +20,36 @@ public enum MainMenu {
         main.addItem(appItem)
         let appMenu = NSMenu()
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "关于 \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: L10n.tr("8d1c78c9ff28" , String(describing: (appName))), action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let settings = appMenu.addItem(withTitle: L10n.tr("da9fc8ba9497"),
+            action: #selector(SettingsWindowController.openSettings(_:)), keyEquivalent: ",")
+        settings.keyEquivalentModifierMask = [.command]
+        settings.target = SettingsWindowController.shared
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏 \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        let hideOthers = appMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: L10n.tr("5efd5bdc4894" , String(describing: (appName))), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: L10n.tr("d32bd5a0edfe"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "退出 \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: L10n.tr("cbec1c499c29" , String(describing: (appName))), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         // File
         let fileItem = NSMenuItem()
         main.addItem(fileItem)
-        let file = NSMenu(title: "文件")
+        let file = NSMenu(title: L10n.tr("39932f24fe11"))
         fileItem.submenu = file
-        file.addItem(withTitle: "打开库…", action: #selector(EditorWindowController.openLibraryAction(_:)), keyEquivalent: "o")
+        file.addItem(withTitle: L10n.tr("f9af46c99fd4"), action: #selector(EditorWindowController.createLibraryAction(_:)), keyEquivalent: "n")
+        file.addItem(withTitle: L10n.tr("e6fe0fd9bc6e"), action: #selector(EditorWindowController.openLibraryAction(_:)), keyEquivalent: "o")
         // ⇧⌘I — the shortcut every photo app puts on "import". Grey until a library is open
         // (`validateMenuItem`): the panel would otherwise accept folders and have nowhere to write.
-        let importItem = file.addItem(withTitle: "导入照片…",
+        let importItem = file.addItem(withTitle: L10n.tr("006ed48cea9a"),
                                       action: #selector(EditorWindowController.importAction(_:)),
                                       keyEquivalent: "i")
         importItem.keyEquivalentModifierMask = [.command, .shift]
+        file.addItem(withTitle: L10n.tr("dfc8a33f5fb3"), action: #selector(EditorWindowController.authorizePhotoFolderAction(_:)), keyEquivalent: "")
         file.addItem(.separator())
         // ⌘⇧E, the shortcut every photo app puts on "export the selection". Grey with an empty
         // selection (`validateMenuItem`), so the menu cannot promise a batch that has no items.
-        let exportItem = file.addItem(withTitle: "导出…",
+        let exportItem = file.addItem(withTitle: L10n.tr("643e7408e6a7"),
                                       action: #selector(EditorWindowController.exportAction(_:)),
                                       keyEquivalent: "e")
         exportItem.keyEquivalentModifierMask = [.command, .shift]
@@ -50,33 +57,33 @@ public enum MainMenu {
         // Edit
         let editItem = NSMenuItem()
         main.addItem(editItem)
-        let edit = NSMenu(title: "编辑")
+        let edit = NSMenu(title: L10n.tr("051836569928"))
         editItem.submenu = edit
         // Nil targets: AppKit walks the responder chain to the window controller, which validates
         // both items against `CatalogSession.canUndo/canRedo` (grey with no history).
-        edit.addItem(withTitle: "撤销", action: #selector(EditorWindowController.undoAction(_:)),
+        edit.addItem(withTitle: L10n.tr("926a50b98ece"), action: #selector(EditorWindowController.undoAction(_:)),
                      keyEquivalent: "z")
-        let redoItem = edit.addItem(withTitle: "重做", action: #selector(EditorWindowController.redoAction(_:)),
+        let redoItem = edit.addItem(withTitle: L10n.tr("03717b6f1070"), action: #selector(EditorWindowController.redoAction(_:)),
                                     keyEquivalent: "z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         edit.addItem(.separator())
-        edit.addItem(withTitle: "全选照片", action: #selector(EditorWindowController.selectAllAction(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: L10n.tr("7e46f4042041"), action: #selector(EditorWindowController.selectAllAction(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         // 复制/粘贴设置 — 078 P0-7. One row per verb the ticket names, and each keeps the system
         // clipboard when a text field owns the keyboard: `validateMenuItem` greys them, and the action
         // itself hands ⌘C/⌘V back to `NSText` (see `EditorWindowController.copySettingsAction`), so a
         // photo app never eats the shortcut of the text field the user is typing in.
-        edit.addItem(withTitle: "复制设置",
+        edit.addItem(withTitle: L10n.tr("1c7d60676292"),
                      action: #selector(EditorWindowController.copySettingsAction(_:)),
                      keyEquivalent: "c")
-        edit.addItem(withTitle: "粘贴设置",
+        edit.addItem(withTitle: L10n.tr("d24cf4a6b02b"),
                      action: #selector(EditorWindowController.pasteSettingsAction(_:)),
                      keyEquivalent: "v")
-        let pasteChoices = edit.addItem(withTitle: "粘贴设置（选择组…）",
+        let pasteChoices = edit.addItem(withTitle: L10n.tr("5942cecbe73c"),
                                         action: #selector(EditorWindowController.pasteSettingsWithChoicesAction(_:)),
                                         keyEquivalent: "v")
         pasteChoices.keyEquivalentModifierMask = [.command, .shift]
-        let chooseCopy = edit.addItem(withTitle: "选择要复制的设置…",
+        let chooseCopy = edit.addItem(withTitle: L10n.tr("2cd3e10b3a16"),
                                       action: #selector(EditorWindowController.chooseCopySettingsAction(_:)),
                                       keyEquivalent: "c")
         chooseCopy.keyEquivalentModifierMask = [.command, .option]
@@ -86,30 +93,30 @@ public enum MainMenu {
         // photo app uses, and ⌘0–⌘5 would collide with the view menu.
         let photoItem = NSMenuItem()
         main.addItem(photoItem)
-        let photo = NSMenu(title: "照片")
+        let photo = NSMenu(title: L10n.tr("7b50017ae47e"))
         photoItem.submenu = photo
         for stars in 0...5 {
-            let item = photo.addItem(withTitle: stars == 0 ? "清除星级" : "\(stars) 星",
+            let item = photo.addItem(withTitle: stars == 0 ? L10n.tr("3085c81211ed") : L10n.tr("63d4f7b1c358" , String(describing: (stars))),
                                      action: #selector(EditorWindowController.ratingAction(_:)),
                                      keyEquivalent: "\(stars)")
             item.keyEquivalentModifierMask = []
             item.tag = stars
         }
         photo.addItem(.separator())
-        let pick = photo.addItem(withTitle: "标记为选取 (P)",
+        let pick = photo.addItem(withTitle: L10n.tr("96f39964acc7"),
                                  action: #selector(EditorWindowController.pickAction(_:)), keyEquivalent: "p")
         pick.keyEquivalentModifierMask = []
         pick.tag = 1
-        let reject = photo.addItem(withTitle: "标记为拒绝 (X)",
+        let reject = photo.addItem(withTitle: L10n.tr("ce60f6e0a6d1"),
                                    action: #selector(EditorWindowController.rejectAction(_:)), keyEquivalent: "x")
         reject.keyEquivalentModifierMask = []
         reject.tag = 2
-        let unflag = photo.addItem(withTitle: "清除旗标 (U)",
+        let unflag = photo.addItem(withTitle: L10n.tr("200edafcacf5"),
                                    action: #selector(EditorWindowController.clearFlagAction(_:)), keyEquivalent: "u")
         unflag.keyEquivalentModifierMask = []
         photo.addItem(.separator())
         for (index, label) in ColorLabel.allCases.enumerated() {
-            let item = photo.addItem(withTitle: "色标：\(label.displayName)",
+            let item = photo.addItem(withTitle: L10n.tr("90bcec6e0d2b" , String(describing: (label.displayName))),
                                      action: #selector(EditorWindowController.colorLabelAction(_:)),
                                      keyEquivalent: "\(index + 1)")
             item.keyEquivalentModifierMask = [.option]
@@ -119,7 +126,7 @@ public enum MainMenu {
         // multi-selection clears as one metadata write and no history entry appears: a colour label is
         // a library fact, not an edit.
         photo.addItem(.separator())
-        let noLabel = photo.addItem(withTitle: "色标：无",
+        let noLabel = photo.addItem(withTitle: L10n.tr("1faccf658720"),
                                     action: #selector(EditorWindowController.clearColorLabelAction(_:)),
                                     keyEquivalent: "0")
         noLabel.keyEquivalentModifierMask = [.option]
@@ -127,10 +134,10 @@ public enum MainMenu {
         // catalog metadata (`stack_id`/`stack_rank`), so ⌘Z never walks one back. Grey rules live in
         // `validateMenuItem`: 堆叠 needs ≥ 2 selected photos, 取消堆叠 needs a stack in the selection.
         photo.addItem(.separator())
-        photo.addItem(withTitle: "堆叠所选照片",
+        photo.addItem(withTitle: L10n.tr("93fa7e05b300"),
                       action: #selector(EditorWindowController.stackSelectionAction(_:)),
                       keyEquivalent: "g")
-        let ungroup = photo.addItem(withTitle: "取消堆叠",
+        let ungroup = photo.addItem(withTitle: L10n.tr("b5b27507401e"),
                                     action: #selector(EditorWindowController.ungroupSelectionAction(_:)),
                                     keyEquivalent: "g")
         ungroup.keyEquivalentModifierMask = [.command, .shift]
@@ -154,22 +161,22 @@ public enum MainMenu {
         // does nothing). The insertion point is the separator below.
         let transformItem = NSMenuItem()
         main.addItem(transformItem)
-        let transform = NSMenu(title: "变换")
+        let transform = NSMenu(title: L10n.tr("ca4842bc9e80"))
         transformItem.submenu = transform
         // The R every photo app puts on its crop tool, and the key Phos uses
         // (`local/src/swift-raw/Zenodeng_Phos/Sources/Phos/PremiumUI.swift:74`). Ticked while the
         // frame is up (`validateMenuItem`), grey where there is no photo to crop.
-        transform.addItem(withTitle: "裁切",
+        transform.addItem(withTitle: L10n.tr("e9f8face2f69"),
                           action: #selector(EditorWindowController.toggleCropAction(_:)),
                           keyEquivalent: "r")
         // 2026-10-28 (P0-10): the 90° rotation. The card's two buttons are the mouse's door; these
         // two rows are the keyboard's (⌘[ / ⌘], the pair every photo app ships). One verb behind each
         // — `LoupeController.rotateQuarter(clockwise:)` — so the menu cannot turn the picture by a
         // different rule from the buttons.
-        transform.addItem(withTitle: "逆时针旋转 90°",
+        transform.addItem(withTitle: L10n.tr("d4b56c062003"),
                           action: #selector(EditorWindowController.rotateCounterClockwiseAction(_:)),
                           keyEquivalent: "[")
-        transform.addItem(withTitle: "顺时针旋转 90°",
+        transform.addItem(withTitle: L10n.tr("980edb5bf6fd"),
                           action: #selector(EditorWindowController.rotateClockwiseAction(_:)),
                           keyEquivalent: "]")
         // Reserved: 梯形校正 / 四边形校正 go here (see the comment above — no dead rows).
@@ -183,23 +190,33 @@ public enum MainMenu {
         // The list is the library's, so the menu is rebuilt every time it opens
         // (`PresetMenu.menuNeedsUpdate`): a preset created in the copy sheet shows up here without a
         // relaunch, and a deleted one cannot be applied from a stale item.
-        let presetItem = NSMenuItem(title: "预设", action: nil, keyEquivalent: "")
+        let presetItem = NSMenuItem(title: L10n.tr("f1de1e2621de"), action: nil, keyEquivalent: "")
         presetItem.submenu = PresetMenu(kind: .apply)
         main.addItem(presetItem)
+
+        let toolsItem = NSMenuItem()
+        main.addItem(toolsItem)
+        let tools = NSMenu(title: L10n.tr("5ca6730d4415"))
+        toolsItem.submenu = tools
+        let panorama = tools.addItem(withTitle: L10n.tr("8311512f9cab"), action: #selector(EditorWindowController.panoramaAction(_:)), keyEquivalent: "m")
+        panorama.keyEquivalentModifierMask = [.control]
+        let lcc = tools.addItem(withTitle: L10n.tr("486f04a981bd"), action: #selector(EditorWindowController.lccAction(_:)), keyEquivalent: "l")
+        lcc.keyEquivalentModifierMask = [.control]
+        tools.addItem(withTitle: L10n.tr("slices.title"), action: #selector(EditorWindowController.socialMediaSlicesAction(_:)), keyEquivalent: "")
 
         // View
         let viewItem = NSMenuItem()
         main.addItem(viewItem)
-        let view = NSMenu(title: "显示")
+        let view = NSMenu(title: L10n.tr("4e1449e7d5e5"))
         viewItem.submenu = view
-        view.addItem(withTitle: "网格", action: #selector(EditorWindowController.showGridAction(_:)), keyEquivalent: "1")
-        view.addItem(withTitle: "单图", action: #selector(EditorWindowController.showLoupeAction(_:)), keyEquivalent: "2")
+        view.addItem(withTitle: L10n.tr("e41ecc67ca28"), action: #selector(EditorWindowController.showGridAction(_:)), keyEquivalent: "1")
+        view.addItem(withTitle: L10n.tr("e71b76b45a24"), action: #selector(EditorWindowController.showLoupeAction(_:)), keyEquivalent: "2")
         view.addItem(.separator())
-        let strip = view.addItem(withTitle: "胶片条（第二浏览器）",
+        let strip = view.addItem(withTitle: L10n.tr("6efc41d2edbf"),
                                  action: #selector(EditorWindowController.toggleFilmstripAction(_:)),
                                  keyEquivalent: "b")
         strip.keyEquivalentModifierMask = [.control, .command]
-        let list = view.addItem(withTitle: "浏览列表",
+        let list = view.addItem(withTitle: L10n.tr("61db6236bd40"),
                                 action: #selector(EditorWindowController.showBrowserListAction(_:)),
                                 keyEquivalent: "a")
         list.keyEquivalentModifierMask = [.control, .command]
@@ -213,7 +230,7 @@ public enum MainMenu {
         // so it is its own row here (⌘0), and `LoupeController.zoomFitEntryPoint` is the one switch
         // that decides whether that row exists at all. TODO(用户待定): fit 的位置尚未决定。
         if LoupeController.zoomFitEntryPoint == .menuItem {
-            view.addItem(withTitle: "适应窗口",
+            view.addItem(withTitle: L10n.tr("f8d01c881e34"),
                          action: #selector(EditorWindowController.zoomFitAction(_:)),
                          keyEquivalent: "0")
         }
@@ -231,36 +248,36 @@ public enum MainMenu {
         // like the rating rows: they are viewing verbs the hand hits without leaving the picture.
         // The items carry no target, so AppKit resolves them through the responder chain to the window
         // controller, which ticks them against `LoupeController.frameMode` (`validateMenuItem`).
-        let originalItem = view.addItem(withTitle: "显示原图",
+        let originalItem = view.addItem(withTitle: L10n.tr("c4507a67622d"),
                                         action: #selector(EditorWindowController.toggleShowOriginalAction(_:)),
                                         keyEquivalent: "\\")
         originalItem.keyEquivalentModifierMask = []
-        let compareItem = view.addItem(withTitle: "前后对比",
+        let compareItem = view.addItem(withTitle: L10n.tr("a5163334460b"),
                                        action: #selector(EditorWindowController.toggleCompareAction(_:)),
                                        keyEquivalent: "y")
         compareItem.keyEquivalentModifierMask = []
         // ⇧Y swaps the layout of the line the user already placed (左右 ↔ 上下). One row, not a
         // submenu: the submenu spelling taught two places for one verb, which is what the 变换 menu
         // was cut down for (072 §F).
-        let compareAxisItem = view.addItem(withTitle: "对比方向：左右",
+        let compareAxisItem = view.addItem(withTitle: L10n.tr("d3adfe26046b"),
                                            action: #selector(EditorWindowController.toggleCompareAxisAction(_:)),
                                            keyEquivalent: "y")
         compareAxisItem.keyEquivalentModifierMask = [.shift]
         view.addItem(.separator())
-        view.addItem(withTitle: "放大",
+        view.addItem(withTitle: L10n.tr("80f8fbcfa011"),
                      action: #selector(EditorWindowController.zoomInAction(_:)),
                      keyEquivalent: "=")
-        view.addItem(withTitle: "缩小",
+        view.addItem(withTitle: L10n.tr("290f68030501"),
                      action: #selector(EditorWindowController.zoomOutAction(_:)),
                      keyEquivalent: "-")
 
         // Window
         let windowItem = NSMenuItem()
         main.addItem(windowItem)
-        let windowMenu = NSMenu(title: "窗口")
+        let windowMenu = NSMenu(title: L10n.tr("9efe01f647d6"))
         windowItem.submenu = windowMenu
-        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: L10n.tr("ac29e57a46f4"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: L10n.tr("b762aec769a3"), action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu
 
         return main
@@ -292,7 +309,7 @@ final class PresetMenu: NSMenu, NSMenuDelegate {
     init(kind: Kind) {
         self.kind = kind
         super.init(title: "")
-        title = kind == .apply ? "预设" : (kind == .setDefault ? "设为默认" : "删除预设")
+        title = kind == .apply ? L10n.tr("f1de1e2621de") : (kind == .setDefault ? L10n.tr("357211096f78") : L10n.tr("28786d906975"))
         delegate = self
     }
 
@@ -306,7 +323,7 @@ final class PresetMenu: NSMenu, NSMenuDelegate {
         menu.removeAllItems()
 
         guard !records.isEmpty else {
-            let empty = NSMenuItem(title: "（还没有预设）", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: L10n.tr("a73ba3dfdb06"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
             if kind == .apply { addCreateItem(to: menu) }
@@ -325,15 +342,15 @@ final class PresetMenu: NSMenu, NSMenuDelegate {
             menu.addItem(.separator())
             addCreateItem(to: menu)
             menu.addItem(.separator())
-            let defaults = NSMenuItem(title: "设为默认", action: nil, keyEquivalent: "")
+            let defaults = NSMenuItem(title: L10n.tr("357211096f78"), action: nil, keyEquivalent: "")
             defaults.submenu = PresetMenu(kind: .setDefault)
             menu.addItem(defaults)
-            let delete = NSMenuItem(title: "删除预设", action: nil, keyEquivalent: "")
+            let delete = NSMenuItem(title: L10n.tr("28786d906975"), action: nil, keyEquivalent: "")
             delete.submenu = PresetMenu(kind: .delete)
             menu.addItem(delete)
             if let defaultName {
                 menu.addItem(.separator())
-                let note = NSMenuItem(title: "默认：\(defaultName)", action: nil, keyEquivalent: "")
+                let note = NSMenuItem(title: L10n.tr("ad10bbb40992" , String(describing: (defaultName))), action: nil, keyEquivalent: "")
                 note.isEnabled = false
                 menu.addItem(note)
             }
@@ -341,7 +358,7 @@ final class PresetMenu: NSMenu, NSMenuDelegate {
     }
 
     private func addCreateItem(to menu: NSMenu) {
-        menu.addItem(withTitle: "从当前照片新建预设…",
+        menu.addItem(withTitle: L10n.tr("5527eccff3b6"),
                      action: #selector(EditorWindowController.newPresetFromCurrentAction(_:)),
                      keyEquivalent: "")
     }

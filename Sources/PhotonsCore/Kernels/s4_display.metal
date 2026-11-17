@@ -56,6 +56,10 @@ kernel void s4_display(texture2d<float, access::read> src [[texture(0)]],
         // first line that can produce a negative — see the header.
         v = max(v, 0.0);
     }
+    if (p.a.z > 0.5) {
+        float peak=max(v.r,max(v.g,v.b));
+        if (peak>0.8) {v *= (0.8+0.2*(peak-0.8)/(peak-0.6))/peak;}
+    }
     float headroom = max(p.a.y, 0.0);
     v = min(v, headroom);
     float3 enc = float3(srgb_encode(v.x), srgb_encode(v.y), srgb_encode(v.z));
