@@ -320,10 +320,79 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// of the travel, 200 units is `0.42`, i.e. 12.39° of convergence.
     public static let tangentPerUnit = 0.21
 
+    /// **407 — the third degree of freedom, as one number.** `shear` is the coefficient `k` of the
+    /// normalized-frame map
+    ///
+    ///     S(k):  (x, y) ↦ (x + k·y, y)
+    ///
+    /// i.e. a **horizontal** shear: rows slide sideways in proportion to their height, y unchanged.
+    /// It is the fourth unknown the 2 横 2 竖 fit needed (two keystone knobs + 摆正 can only make a
+    /// group parallel, not put four lines on four axes), and it is *one* scalar: 407 §0 established
+    /// that a shear *direction* φ is not a new dimension — `shear(φ, k) = R(−φ)·shear(0, k′)·R(φ)`,
+    /// and `s` already carries the rotation, so φ would be absorbed.
+    ///
+    /// Why horizontal and not vertical: the frame is wider than tall in the pictures this repairs,
+    /// the horizontal slide is the one the user can see (a leaning row of windows), and it is the
+    /// axis darktable's ashift spends its first shear step on. A vertical shear is the transpose of
+    /// this one and would be a second knob, which 407 §2.5 forbids.
+    ///
+    /// `k` is a *millimetre* here, not a slider unit: 0.5 means a row at `y = 1` has slid half the
+    /// frame's width. See `shearLimit`.
+    public var shear: Double
+
+    /// **407 — the shear travel, `k ∈ ±0.5`.** The fit that needed it (407 §2.1's fixture) asked for
+    /// `k = −0.052`, i.e. a tenth of this; 0.5 is the point where the two sides of the frame are
+    /// offset by half a width, which is already extreme on screen (an ART/C1 slider at its end).
+    ///
+    /// Deliberately **not** derived from `limit`/`tangentPerUnit`: those describe the keystone's
+    /// projective scale, and `k` is an affine coefficient — sharing a constant would make widening
+    /// one silently widen the other. It is also not part of `coupledTravelBudget`: a shear does not
+    /// touch the homography's third row, so it cannot create a pole (`w` is unchanged by `S`).
+    public static let shearLimit = 0.5
+
+    /// **408 — 宽高比**, the fifth number: a horizontal scale about the frame's centre,
+    ///
+    ///     A(a):  x ↦ ½ + (x − ½)·a,   y ↦ y
+    ///
+    /// i.e. `[[a, 0, ½(1−a)], [0, 1, 0], [0, 0, 1]]`. `a = 1` is the identity. **This is not
+    /// `AspectLock`**: the lock constrains the *crop rectangle* (3:2 …), this is a degree of freedom
+    /// of the perspective correction itself — symmetric keystones stretch the picture (the far end
+    /// grows, the near end shrinks), and `aspect` is the global horizontal scale that puts the
+    /// frame's proportions back. darktable's `ashift` calls the same knob `aspect` and applies it as
+    /// the last of its ten homography steps (§2.2 of 408); ART/RapidRAW spell it the same way.
+    ///
+    /// It is a **multiplicative** scale, so it leaves the far/near width *ratio* alone (that ratio is
+    /// a property of the keystone); what it does change is the canvas — the inscribed rectangle's
+    /// width, one for one. That is why the automatic value below is `a_auto = a · h/w` of the
+    /// inscribed rect rather than anything derived from the ratio (408 §6.1).
+    public var aspect: Double
+
     public var vertical: Double      // clamped −500…500 (353b; 353 was ±400)
     public var horizontal: Double
 
+    /// **408 — the aspect travel, `a ∈ [0.5, 2.0]`.** The keystone's own stretch at the end of its
+    /// travel is `1/(1 − 1.05/2) = 2.105×` (and `(1 − v/2)/(1 + v/2) = 1.9` in ratio terms), so a
+    /// factor of two in either direction covers every pair the coupled budget admits — and it is
+    /// symmetric, so 「宽 200 %」 and 「宽 50 %」 are the two ends of one knob rather than two
+    /// different features. Like `shearLimit`, deliberately **not** derived from `limit` /
+    /// `tangentPerUnit` (those describe a projective scale; `a` is affine) and **not** part of
+    /// `coupledTravelBudget` (`A` never touches the homography's third row, so it cannot create a
+    /// pole).
+    public static let aspectLimit = 2.0
+
+    /// The 3-parameter initializer — every caller that predates 407 keeps this spelling, and a
+    /// document with no shear is bit-for-bit the pre-407 map (`forwardMatrix`'s early return).
     public init(vertical: Double, horizontal: Double) {
+        self.init(vertical: vertical, horizontal: horizontal, shear: 0, aspect: 1)
+    }
+
+    /// 407's 4-parameter initializer — a document with no aspect keeps this spelling, and
+    /// `aspect == 1` is bit-for-bit the pre-408 map (`forwardMatrix`'s early return).
+    public init(vertical: Double, horizontal: Double, shear: Double) {
+        self.init(vertical: vertical, horizontal: horizontal, shear: shear, aspect: 1)
+    }
+
+    public init(vertical: Double, horizontal: Double, shear: Double, aspect: Double) {
         // 353b — **one axis gives way to the other.** `limit` is a *per-axis* clamp, but the two
         // strengths enter one homography (`M = M_horizontal · M_vertical`) and the corner that
         // matters reads
@@ -341,16 +410,21 @@ public struct PerspectiveMap: Sendable, Equatable {
         // document (±400 max, sum ≤ 800) is untouched bit for bit.
         let v = PerspectiveMap.clamp(vertical)
         let h = PerspectiveMap.clamp(horizontal)
+        let a = PerspectiveMap.clampAspect(aspect)
         let sum = abs(v) + abs(h)
         let budget = PerspectiveMap.coupledTravelBudget
         if sum > budget, sum > 0 {
             let k = budget / sum
             self.vertical = v * k
             self.horizontal = h * k
+            self.shear = PerspectiveMap.clampShear(shear)
+            self.aspect = a
             return
         }
         self.vertical = v
         self.horizontal = h
+        self.shear = PerspectiveMap.clampShear(shear)
+        self.aspect = a
     }
 
     /// The largest `|v| + |h|` the pair may reach. **900** (用户 2026-11-12：「上限设置为900好了」)
@@ -382,8 +456,25 @@ public struct PerspectiveMap: Sendable, Equatable {
         return min(max(value, -limit), limit)
     }
 
+    /// 407 — the same rule for `shear`: finite and inside ±`shearLimit`.
+    static func clampShear(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, -shearLimit), shearLimit)
+    }
+
+    /// 408 — the same rule for `aspect`: finite, inside `[1/aspectLimit, aspectLimit]`, and a
+    /// non-positive value (which would mirror the frame) reads as the identity rather than as a
+    /// flipped picture nobody asked for.
+    static func clampAspect(_ value: Double) -> Double {
+        guard value.isFinite, value > 0 else { return 1 }
+        let lo = 1 / aspectLimit
+        return min(max(value, lo), aspectLimit)
+    }
+
     /// 0/0 — no warp, no canvas change, no uniform, no key token.
-    public var isIdentity: Bool { vertical == 0 && horizontal == 0 }
+    public var isIdentity: Bool {
+        vertical == 0 && horizontal == 0 && shear == 0 && aspect == 1
+    }
 
     /// `true` when this map changes no pixel — the one predicate the renderer, the key and the UI ask.
     public var hasWarp: Bool { !isIdentity }
@@ -419,6 +510,21 @@ public struct PerspectiveMap: Sendable, Equatable {
     /// the `T(½,½)…T(−½,−½)` conjugation's offset, and the whole matrix is odd in `v` (in `h`), so
     /// `±slider` differ by nothing but sign — the reflection is exact in floating point, not merely
     /// accurate.
+    ///
+    /// **The full chain (408).** `M = A(a) · S(k) · M_h · M_v`, i.e. darktable's order with the steps
+    /// this project does not have (its `xy swap`/shift/orthocorr) dropped:
+    ///
+    ///     darktable ashift            here            why
+    ///     ─────────────────────────  ──────────────  ───────────────────────────────────────────────
+    ///     vertical/horizontal comp.  M_v · M_h       the two keystone knobs (183/338)
+    ///     shear                      S(k)            after the quad, so `k` is the frame's horizontal
+    ///     aspect                     A(a)            **last** — a display-layer compensation
+    ///
+    /// `A` must be **outside** `S`, not commuted with it: `A·S` has `a·k` in its `(0,1)` entry while
+    /// `S·A` has `k`, and the former is the reading 「a shear is measured on the plane the user sees,
+    /// then the whole plane is rescaled」 — which is what makes `a` a scale of the *picture* rather
+    /// than of its shear coefficient. `A·S ≠ S·A` for every `a ≠ 1`, `k ≠ 0`; the order is pinned by
+    /// `PerspectiveAspect408Tests.testTheShearAndAspectComposeInTheDocumentedOrder`.
     public var forwardMatrix: [[Double]] {
         let v = verticalStrength
         let h = horizontalStrength
@@ -428,7 +534,34 @@ public struct PerspectiveMap: Sendable, Equatable {
         let m2: [[Double]] = [[1 + 0.5 * h, 0, -0.25 * h],
                               [0.5 * h, 1, -0.25 * h],
                               [h, 0, 1 - 0.5 * h]]
-        return PerspectiveMap.multiply(m2, m1)
+        let keystone = PerspectiveMap.multiply(m2, m1)
+        // **407 — `S(k)` goes on the *outside*, i.e. after the keystone.** `M = S(k) · M_h · M_v`.
+        //
+        // The order is darktable's (`xy swap → rotate → shear → shift`): its shear is applied to the
+        // already-rotated, already-keystoned plane, so the shear's axis is the **frame's** horizontal
+        // rather than an axis the keystone made. That is the only reading under which 「方向固定为水平」
+        // means one thing for every document: a shear *inside* the keystone would be dragged along by
+        // `v`/`h` and two documents with the same `k` would shear along different screen directions.
+        //
+        // The early return is not an optimisation: `S(0)` is the identity, so `multiply` would return
+        // the same nine doubles (`0·a + 1·b + 0·c` is exact in IEEE-754), but the *statement* this
+        // type is built on is 「a document with no shear renders through the pre-407 matrix」, and a
+        // structural early return is what makes that a fact rather than a floating-point coincidence.
+        // `PerspectiveMapShear407Tests.testAZeroShearMapIsBitIdenticalToToday` pins both halves.
+        let sheared = shear == 0
+            ? keystone
+            : PerspectiveMap.multiply([[1, shear, 0], [0, 1, 0], [0, 0, 1]], keystone)
+        // **408 — `A(a)` is the outermost factor.** Same discipline as 407's: `a == 1` returns the
+        // pre-408 matrix structurally, so 「a document that never touched 宽高比 renders through the
+        // 407 matrix」 is a fact and not a rounding coincidence. That early return is what lets 408
+        // ship **without** a `StageAlgorithmVersion.geometry` bump — `.geometry` sits in every
+        // document's chain, so a bump would re-render the whole library's thumbnails.
+        guard aspect != 1 else { return sheared }
+        let a = aspect
+        let scaleA: [[Double]] = [[a, 0, 0.5 * (1 - a)],
+                                  [0, 1, 0],
+                                  [0, 0, 1]]
+        return PerspectiveMap.multiply(scaleA, sheared)
     }
 
     /// The sampling map, `warped frame → frame`: what S0 multiplies the sample coordinate by.
@@ -494,6 +627,32 @@ public struct PerspectiveMap: Sendable, Equatable {
     public func isDegenerate(_ frame: DSize, minimum: Double = 1) -> Bool {
         let r = inscribedRect()
         return !(frame.width * r.width >= minimum) || !(frame.height * r.height >= minimum)
+    }
+
+    /// **408 — the aspect that makes the canvas square again**, i.e. the correction the 自动 button
+    /// writes.
+    ///
+    /// The physical statement is 「the crop afterwards keeps the source frame's proportions」: the
+    /// canvas is the largest rectangle inscribed in the warped quad, and a keystone makes it wider or
+    /// narrower than tall. `A(a)` scales that width **exactly linearly** (`width(a) = a · width(1)`),
+    /// so one step is enough — no iteration:
+    ///
+    ///     a_auto = a_now · canvasHeight / canvasWidth
+    ///
+    /// measured at the map's *own* `a`, which is why the formula carries `a_now` (it must answer the
+    /// same number from any starting point). With `aspect = 1` it reduces to `h / w` of the pre-408
+    /// canvas: `1.105` for `v = 100`, `1.01223` for `(100, −80)`, `0.82419` for `(500, 400)` —
+    /// 408 §6.1's numbers, and the reason this must go through `inscribedRect()` rather than any
+    /// closed form in `v`/`h` (the two-axis case is not `1/(1 − (|v|+|h|)/2)`; that is 8 % off).
+    ///
+    /// `nil` when there is no **keystone** (`v == h == 0`): a shear or a bare aspect does not stretch
+    /// the frame the way this corrects, so 「自动」 has nothing to say and must not offer to rewrite
+    /// the user's number.
+    public var compensatingAspect: Double? {
+        guard vertical != 0 || horizontal != 0 else { return nil }
+        let rect = inscribedRect()
+        guard rect.width > 1e-12, rect.height > 1e-12 else { return nil }
+        return PerspectiveMap.clampAspect(aspect * rect.height / rect.width)
     }
 
     /// The inscribed rectangle in normalized units of the **frame** (not the warped one): `width` and
