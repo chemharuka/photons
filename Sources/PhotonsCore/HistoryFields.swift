@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - 077: field-level history diff
@@ -92,8 +93,8 @@ public enum FieldValue: Equatable, Codable, Sendable {
         switch self {
         case .number(let v): return FieldValue.decimal(v, signed: !structural)
         case .optionalNumber(let v):
-            return v.map { FieldValue.decimal($0, signed: !structural) } ?? "原照"
-        case .flag(let v): return v ? "开" : "关"
+            return v.map { FieldValue.decimal($0, signed: !structural) } ?? Loc.t("原照")
+        case .flag(let v): return v ? Loc.t("开") : Loc.t("关")
         case .text(let v): return v.isEmpty ? "—" : v
         }
     }
@@ -335,7 +336,7 @@ extension EditHistory {
             before.detailSettings.moire, after.detailSettings.moire)
         if before.decoderVersion != after.decoderVersion {
             add("decoderVersion", .detail,
-                .text(before.decoderVersion ?? "默认"), .text(after.decoderVersion ?? "默认"))
+                .text(before.decoderVersion ?? Loc.t("默认")), .text(after.decoderVersion ?? Loc.t("默认")))
         }
 
         // S3 — Effects.
@@ -422,7 +423,7 @@ extension EditHistory {
             let isNew = beforeByID[id] == nil
             if isNew {
                 out.append(FieldChange(field: EditField(key: key("added"), group: .masks),
-                                       from: .text("无"), to: .text("有")))
+                                       from: .text(Loc.t("无")), to: .text(Loc.t("有"))))
             }
             // A brand-new mask is compared against `Mask.fallback` — the row then says what the mask
             // *is* (「羽化 0 → +0.35」) instead of only "a mask appeared", which is what the timeline
@@ -524,7 +525,7 @@ extension EditHistory {
         let afterIDsSet = Set(afterIDs)
         for o in before where !afterIDsSet.contains(o.id) {
             out.append(FieldChange(field: EditField(key: "masks.\(o.id).removed", group: .masks),
-                                   from: .text("有"), to: .text("无")))
+                                   from: .text(Loc.t("有")), to: .text(Loc.t("无"))))
         }
         if beforeIDs != afterIDs {
             // A different set **or** a different order: the stack's own combination order (§3.3) moved.
@@ -566,7 +567,7 @@ extension EditHistory {
             let key = { (field: String) in "heal.\(id).\(field)" }
             if beforeByID[id] == nil {
                 out.append(FieldChange(field: EditField(key: key("added"), group: .heal),
-                                       from: .text("无"), to: .text("有")))
+                                       from: .text(Loc.t("无")), to: .text(Loc.t("有"))))
             }
             let o = beforeByID[id]
             func num(_ field: String, _ a: Double, _ b: Double) {
@@ -605,7 +606,7 @@ extension EditHistory {
         let afterIDsSet = Set(afterIDs)
         for o in before where !afterIDsSet.contains(o.id) {
             out.append(FieldChange(field: EditField(key: "heal.\(o.id).removed", group: .heal),
-                                   from: .text("有"), to: .text("无")))
+                                   from: .text(Loc.t("有")), to: .text(Loc.t("无"))))
         }
         if beforeIDs != afterIDs {
             out.append(FieldChange(field: EditField(key: "heal.order", group: .heal),
@@ -631,103 +632,103 @@ extension EditHistory {
     }
 
     private static let parameterNames: [String: String] = [
-        "document.schemaVersion": "文档版本",
-        "document.processVersion": "处理版本",
-        "geometry.crop.x": "裁切 x",
-        "geometry.crop.y": "裁切 y",
-        "geometry.crop.width": "裁切 宽",
-        "geometry.crop.height": "裁切 高",
-        "geometry.rotationDegrees": "角度",
-        "geometry.flipHorizontal": "水平翻转",
-        "geometry.flipVertical": "垂直翻转",
-        "geometry.perspectiveVertical": "透视垂直",
-        "geometry.perspectiveHorizontal": "透视水平",
-        "geometry.perspectiveShear": "切变",
-        "geometry.perspectiveAspect": "宽高比校正",
-        "geometry.quarterTurns": "旋转 90°",
-        "geometry.aspectLock": "比例",
-        "light.exposure": "曝光",
-        "light.contrast": "对比",
-        "light.highlights": "高光",
-        "light.midtones": "中间调",
-        "light.shadows": "阴影",
-        "light.whites": "白色",
-        "light.blacks": "黑色",
-        "light.temperature": "色温",
-        "light.tint": "色调",
-        "light.highlightRecovery": "高光恢复",
-        "light.blackOffset": "黑电平微调",
-        "color.vibrance": "自然饱和",
-        "color.saturation": "饱和",
-        "color.global.hue": "HSL[全局] 色相",
-        "color.global.saturation": "HSL[全局] 饱和",
-        "color.global.luminance": "HSL[全局] 亮度",
-        "color.blackAndWhite": "黑白",
-        "color.point.sampleHue": "点颜色[采样] 色相",
-        "color.point.sampleChroma": "点颜色[采样] 彩度",
-        "color.point.range": "点颜色 范围",
-        "color.point.feather": "点颜色 过渡",
-        "color.point.hue": "点颜色 色相",
-        "color.point.saturation": "点颜色 饱和",
-        "color.point.luminance": "点颜色 亮度",
-        "colorGrading.shadows.hue": "色彩分级[阴影] 色相",
-        "colorGrading.shadows.saturation": "色彩分级[阴影] 饱和",
-        "colorGrading.shadows.lightness": "色彩分级[阴影] 亮度",
-        "colorGrading.midtones.hue": "色彩分级[中间调] 色相",
-        "colorGrading.midtones.saturation": "色彩分级[中间调] 饱和",
-        "colorGrading.midtones.lightness": "色彩分级[中间调] 亮度",
-        "colorGrading.highlights.hue": "色彩分级[高光] 色相",
-        "colorGrading.highlights.saturation": "色彩分级[高光] 饱和",
-        "colorGrading.highlights.lightness": "色彩分级[高光] 亮度",
-        "detail.sharpening": "锐化",
-        "detail.sharpeningRadius": "锐化半径",
-        "detail.noiseLuminance": "亮度降噪",
-        "detail.noiseColor": "色彩降噪",
-        "detail.lensCorrections": "镜头校正",
-        "detailSettings.luminanceNR": "亮度降噪",
-        "detailSettings.colorNR": "色彩降噪",
-        "detailSettings.sharpness": "锐度",
-        "detailSettings.detail": "细节",
-        "detailSettings.moire": "去摩尔纹",
-        "decoderVersion": "解码版本",
-        "effects.vignetteAmount": "暗角",
-        "effects.vignetteMidpoint": "暗角中点",
-        "effects.vignetteFeather": "暗角羽化",
-        "effects.grain": "颗粒数量",
-        "effects.grainSize": "颗粒大小",
-        "effects.grainRoughness": "颗粒粗糙度",
-        "effects.grainSeed": "颗粒种子",
-        "effects.texture": "纹理",
-        "effects.clarity": "清晰度",
-        "effects.nonBayerLuminanceNR": "去噪",
-        "effects.nonBayerColorNR": "去彩噪",
-        "effects.dehaze": "去雾",
+        "document.schemaVersion": Loc.t("文档版本"),
+        "document.processVersion": Loc.t("处理版本"),
+        "geometry.crop.x": Loc.t("裁切 x"),
+        "geometry.crop.y": Loc.t("裁切 y"),
+        "geometry.crop.width": Loc.t("裁切 宽"),
+        "geometry.crop.height": Loc.t("裁切 高"),
+        "geometry.rotationDegrees": Loc.t("角度"),
+        "geometry.flipHorizontal": Loc.t("水平翻转"),
+        "geometry.flipVertical": Loc.t("垂直翻转"),
+        "geometry.perspectiveVertical": Loc.t("透视垂直"),
+        "geometry.perspectiveHorizontal": Loc.t("透视水平"),
+        "geometry.perspectiveShear": Loc.t("切变"),
+        "geometry.perspectiveAspect": Loc.t("宽高比校正"),
+        "geometry.quarterTurns": Loc.t("旋转 90°"),
+        "geometry.aspectLock": Loc.t("比例"),
+        "light.exposure": Loc.t("曝光"),
+        "light.contrast": Loc.t("对比"),
+        "light.highlights": Loc.t("高光"),
+        "light.midtones": Loc.t("中间调"),
+        "light.shadows": Loc.t("阴影"),
+        "light.whites": Loc.t("白色"),
+        "light.blacks": Loc.t("黑色"),
+        "light.temperature": Loc.t("色温"),
+        "light.tint": Loc.t("色调"),
+        "light.highlightRecovery": Loc.t("高光恢复"),
+        "light.blackOffset": Loc.t("黑电平微调"),
+        "color.vibrance": Loc.t("自然饱和"),
+        "color.saturation": Loc.t("饱和"),
+        "color.global.hue": Loc.t("HSL[全局] 色相"),
+        "color.global.saturation": Loc.t("HSL[全局] 饱和"),
+        "color.global.luminance": Loc.t("HSL[全局] 亮度"),
+        "color.blackAndWhite": Loc.t("黑白"),
+        "color.point.sampleHue": Loc.t("点颜色[采样] 色相"),
+        "color.point.sampleChroma": Loc.t("点颜色[采样] 彩度"),
+        "color.point.range": Loc.t("点颜色 范围"),
+        "color.point.feather": Loc.t("点颜色 过渡"),
+        "color.point.hue": Loc.t("点颜色 色相"),
+        "color.point.saturation": Loc.t("点颜色 饱和"),
+        "color.point.luminance": Loc.t("点颜色 亮度"),
+        "colorGrading.shadows.hue": Loc.t("色彩分级[阴影] 色相"),
+        "colorGrading.shadows.saturation": Loc.t("色彩分级[阴影] 饱和"),
+        "colorGrading.shadows.lightness": Loc.t("色彩分级[阴影] 亮度"),
+        "colorGrading.midtones.hue": Loc.t("色彩分级[中间调] 色相"),
+        "colorGrading.midtones.saturation": Loc.t("色彩分级[中间调] 饱和"),
+        "colorGrading.midtones.lightness": Loc.t("色彩分级[中间调] 亮度"),
+        "colorGrading.highlights.hue": Loc.t("色彩分级[高光] 色相"),
+        "colorGrading.highlights.saturation": Loc.t("色彩分级[高光] 饱和"),
+        "colorGrading.highlights.lightness": Loc.t("色彩分级[高光] 亮度"),
+        "detail.sharpening": Loc.t("锐化"),
+        "detail.sharpeningRadius": Loc.t("锐化半径"),
+        "detail.noiseLuminance": Loc.t("亮度降噪"),
+        "detail.noiseColor": Loc.t("色彩降噪"),
+        "detail.lensCorrections": Loc.t("镜头校正"),
+        "detailSettings.luminanceNR": Loc.t("亮度降噪"),
+        "detailSettings.colorNR": Loc.t("色彩降噪"),
+        "detailSettings.sharpness": Loc.t("锐度"),
+        "detailSettings.detail": Loc.t("细节"),
+        "detailSettings.moire": Loc.t("去摩尔纹"),
+        "decoderVersion": Loc.t("解码版本"),
+        "effects.vignetteAmount": Loc.t("暗角"),
+        "effects.vignetteMidpoint": Loc.t("暗角中点"),
+        "effects.vignetteFeather": Loc.t("暗角羽化"),
+        "effects.grain": Loc.t("颗粒数量"),
+        "effects.grainSize": Loc.t("颗粒大小"),
+        "effects.grainRoughness": Loc.t("颗粒粗糙度"),
+        "effects.grainSeed": Loc.t("颗粒种子"),
+        "effects.texture": Loc.t("纹理"),
+        "effects.clarity": Loc.t("清晰度"),
+        "effects.nonBayerLuminanceNR": Loc.t("去噪"),
+        "effects.nonBayerColorNR": Loc.t("去彩噪"),
+        "effects.dehaze": Loc.t("去雾"),
         // 185 — S3.10. Deliberately distinct from the decoder's 锐化 pair below: this is the
         // 显示域 pass, and a history row that said 「锐化」 for both would hide which of the two moved.
-        "sharpen.amount": "锐化数量",
-        "sharpen.radius": "锐化半径",
-        "sharpen.detail": "锐化细节",
-        "sharpen.masking": "锐化蒙版",
-        "optics.caRed": "横向色差 R",
-        "optics.caBlue": "横向色差 B",
-        "calibration.shadowTint": "校准 阴影色调",
-        "calibration.redHue": "校准 红 色相",
-        "calibration.redSat": "校准 红 饱和",
-        "calibration.greenHue": "校准 绿 色相",
-        "calibration.greenSat": "校准 绿 饱和",
-        "calibration.blueHue": "校准 蓝 色相",
-        "calibration.blueSat": "校准 蓝 饱和",
-        "masks.order": "蒙版顺序",
-        "heal.order": "修复顺序",
+        "sharpen.amount": Loc.t("锐化数量"),
+        "sharpen.radius": Loc.t("锐化半径"),
+        "sharpen.detail": Loc.t("锐化细节"),
+        "sharpen.masking": Loc.t("锐化蒙版"),
+        "optics.caRed": Loc.t("横向色差 R"),
+        "optics.caBlue": Loc.t("横向色差 B"),
+        "calibration.shadowTint": Loc.t("校准 阴影色调"),
+        "calibration.redHue": Loc.t("校准 红 色相"),
+        "calibration.redSat": Loc.t("校准 红 饱和"),
+        "calibration.greenHue": Loc.t("校准 绿 色相"),
+        "calibration.greenSat": Loc.t("校准 绿 饱和"),
+        "calibration.blueHue": Loc.t("校准 蓝 色相"),
+        "calibration.blueSat": Loc.t("校准 蓝 饱和"),
+        "masks.order": Loc.t("蒙版顺序"),
+        "heal.order": Loc.t("修复顺序"),
     ]
 
     private static let maskFieldNames: [String: String] = [
-        "isEnabled": "启用", "opacity": "不透明度", "invert": "反相", "feather": "羽化",
-        "refine": "细化", "name": "名称", "components": "形状", "added": "新增", "removed": "删除",
-        "adj.amount": "强度", "adj.exposure": "曝光", "adj.temperature": "色温", "adj.tint": "色调",
-        "adj.contrast": "对比", "adj.highlights": "高光", "adj.shadows": "阴影",
-        "adj.whites": "白色", "adj.blacks": "黑色", "adj.hue": "色相", "adj.saturation": "饱和",
-        "adj.texture": "纹理", "adj.sharpen": "锐化",
+        "isEnabled": Loc.t("启用"), "opacity": Loc.t("不透明度"), "invert": Loc.t("反相"), "feather": Loc.t("羽化"),
+        "refine": Loc.t("细化"), "name": Loc.t("名称"), "components": Loc.t("形状"), "added": Loc.t("新增"), "removed": Loc.t("删除"),
+        "adj.amount": Loc.t("强度"), "adj.exposure": Loc.t("曝光"), "adj.temperature": Loc.t("色温"), "adj.tint": Loc.t("色调"),
+        "adj.contrast": Loc.t("对比"), "adj.highlights": Loc.t("高光"), "adj.shadows": Loc.t("阴影"),
+        "adj.whites": Loc.t("白色"), "adj.blacks": Loc.t("黑色"), "adj.hue": Loc.t("色相"), "adj.saturation": Loc.t("饱和"),
+        "adj.texture": Loc.t("纹理"), "adj.sharpen": Loc.t("锐化"),
     ]
 
     /// `curve.white[3].y` → 「白[3].y」.
@@ -738,20 +739,20 @@ extension EditHistory {
         let head = String(parts[0])                       // "white[3]" or "white.count"
         guard let bracket = head.firstIndex(of: "[") else {
             return head == "white" || head == "red" || head == "green" || head == "blue"
-                ? "曲线 \(curveListName(head)) 点数" : nil
+                ? Loc.t("曲线 {0} 点数", String(describing: (curveListName(head)))) : nil
         }
         let list = String(head[head.startIndex..<bracket])
         let index = String(head[head.index(after: bracket)...].dropLast())   // "3"
         let axis = parts[1]                              // "x" / "y"
-        return "曲线 \(curveListName(list))[\(index)].\(axis)"
+        return Loc.t("曲线 {0}[{1}].{2}", String(describing: (curveListName(list))), String(describing: (index)), String(describing: (axis)))
     }
 
     private static func curveListName(_ list: String) -> String {
         switch list {
-        case "white": return "白"
-        case "red": return "红"
-        case "green": return "绿"
-        case "blue": return "蓝"
+        case "white": return Loc.t("白")
+        case "red": return Loc.t("红")
+        case "green": return Loc.t("绿")
+        case "blue": return Loc.t("蓝")
         default: return list
         }
     }
@@ -769,12 +770,12 @@ extension EditHistory {
         let axis = key[key.index(after: close)...].dropFirst()   // after "]."
         let name: String
         switch axis {
-        case "hue": name = "色相"
-        case "saturation": name = "饱和"
-        case "luminance": name = "明度"
+        case "hue": name = Loc.t("色相")
+        case "saturation": name = Loc.t("饱和")
+        case "luminance": name = Loc.t("明度")
         case "mix":
             let i = Int(index).map { min(max($0, 0), HSLBands.bandNames.count - 1) } ?? 0
-            return "黑白混合[\(HSLBands.bandNames[i])]"
+            return Loc.t("黑白混合[{0}]", String(describing: (HSLBands.bandNames[i])))
         default: name = String(axis)
         }
         return "HSL[\(index)] \(name)"
@@ -788,18 +789,18 @@ extension EditHistory {
         let axis = key[key.index(after: close)...].dropFirst()   // after "]."
         let name: String
         switch axis {
-        case "sampleY": name = "采样 Y"
-        case "sampleU": name = "采样 U"
-        case "sampleV": name = "采样 V"
-        case "range": name = "范围"
-        case "feather": name = "过渡"
-        case "hue": name = "色相"
-        case "saturation": name = "饱和"
-        case "luminance": name = "亮度"
+        case "sampleY": name = Loc.t("采样 Y")
+        case "sampleU": name = Loc.t("采样 U")
+        case "sampleV": name = Loc.t("采样 V")
+        case "range": name = Loc.t("范围")
+        case "feather": name = Loc.t("过渡")
+        case "hue": name = Loc.t("色相")
+        case "saturation": name = Loc.t("饱和")
+        case "luminance": name = Loc.t("亮度")
         default: name = String(axis)
         }
         let number = (Int(index) ?? 0) + 1
-        return "点颜色[\(number)] \(name)"
+        return Loc.t("点颜色[{0}] {1}", String(describing: (number)), String(describing: (name)))
     }
 
     /// `masks.m-1.feather` → 「蒙版 羽化」; `masks.m-1.components[0].shape` → 「蒙版 形状[0]」.
@@ -818,33 +819,33 @@ extension EditHistory {
             let axis = String(field[field.index(after: close)...].dropFirst())   // after "]."
             let name: String
             switch axis {
-            case "shape": name = "形状"
-            case "op": name = "组合"
-            case "invert": name = "反相"
-            case "feather": name = "羽化"
+            case "shape": name = Loc.t("形状")
+            case "op": name = Loc.t("组合")
+            case "invert": name = Loc.t("反相")
+            case "feather": name = Loc.t("羽化")
             default: name = axis
             }
-            return "蒙版 \(name)[\(index)]"
+            return Loc.t("蒙版 {0}[{1}]", String(describing: (name)), String(describing: (index)))
         }
         let name = maskFieldNames[field] ?? field
-        return "蒙版 \(name)"
+        return Loc.t("蒙版 {0}", String(describing: (name)))
     }
 
     /// `heal.h-1F2A.radius` → 「修复 半径」; `heal.h-1F2A.added` → 「修复 新增」.
     private static func healFieldName(_ key: String) -> String? {
         guard key.hasPrefix("heal.") else { return nil }
-        if key == "heal.order" { return "修复 顺序" }
+        if key == "heal.order" { return Loc.t("修复 顺序") }
         let rest = key.dropFirst("heal.".count)
         guard let dot = rest.firstIndex(of: ".") else { return nil }
         let field = String(rest[rest.index(after: dot)...])
-        return "修复 \(healFieldNames[field] ?? field)"
+        return Loc.t("修复 {0}", String(describing: (healFieldNames[field] ?? field)))
     }
 
     private static let healFieldNames: [String: String] = [
-        "added": "新增", "removed": "删除", "mode": "模式", "kind": "类型",
-        "redThreshold": "红眼阈值", "redSoftness": "红眼过渡",
-        "center.x": "位置 x", "center.y": "位置 y", "radius": "半径",
-        "source.x": "源点 x", "source.y": "源点 y", "feather": "羽化", "opacity": "不透明度",
+        "added": Loc.t("新增"), "removed": Loc.t("删除"), "mode": Loc.t("模式"), "kind": Loc.t("类型"),
+        "redThreshold": Loc.t("红眼阈值"), "redSoftness": Loc.t("红眼过渡"),
+        "center.x": Loc.t("位置 x"), "center.y": Loc.t("位置 y"), "radius": Loc.t("半径"),
+        "source.x": Loc.t("源点 x"), "source.y": Loc.t("源点 y"), "feather": Loc.t("羽化"), "opacity": Loc.t("不透明度"),
     ]
 }
 
@@ -894,7 +895,7 @@ public struct HistoryRow: Identifiable, Hashable, Sendable {
 
     /// The summary line, abbreviated when a row moved many parameters.
     static func summarize(_ changes: [FieldChange]) -> String {
-        guard !changes.isEmpty else { return "原始状态" }
+        guard !changes.isEmpty else { return Loc.t("原始状态") }
         let shown = changes.prefix(2).map(\.summary)
         let rest = changes.count - shown.count
         return rest > 0 ? shown.joined(separator: "、") + " +\(rest)" : shown.joined(separator: "、")

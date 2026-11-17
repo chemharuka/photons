@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - Render groups (D10)
@@ -34,15 +35,15 @@ public enum RenderGroup: String, CaseIterable, Sendable, Codable, Hashable {
     /// Human label, used for menu titles ("Undo Exposure") and history rows.
     public var displayName: String {
         switch self {
-        case .light: return "Light"
-        case .curve: return "Curve"
-        case .color: return "Color"
-        case .colorGrading: return "Color Grading"
-        case .detail: return "Detail"
-        case .effects: return "Effects"
-        case .geometry: return "Geometry"
-        case .masks: return "Masks"
-        case .heal: return "Heal"
+        case .light: return Loc.t("明暗")
+        case .curve: return Loc.t("曲线")
+        case .color: return Loc.t("色彩")
+        case .colorGrading: return Loc.t("色彩分级")
+        case .detail: return Loc.t("细节")
+        case .effects: return Loc.t("效果")
+        case .geometry: return Loc.t("几何")
+        case .masks: return Loc.t("蒙版")
+        case .heal: return Loc.t("修复")
         }
     }
 
@@ -599,7 +600,7 @@ public struct EditHistory: Sendable, Equatable, Codable {
         }
 
         return appendSnapshot(reverted,
-                              label: "撤销 \(row.label)",
+                              label: Loc.t("撤销 {0}", String(describing: (row.label))),
                               before: base,
                               now: Date(),
                               allowsMerge: false)
@@ -814,7 +815,7 @@ private extension EditHistory {
             if let v = optionalNumber(change.from) { doc.detailSettings.moire = v }
 
         case "decoderVersion":
-            if let v = text(change.from) { doc.decoderVersion = v == "默认" ? nil : v }
+            if let v = text(change.from) { doc.decoderVersion = v == Loc.t("默认") ? nil : v }
 
         case "effects.vignetteAmount":
             if let v = number(change.from) { doc.effects.vignetteAmount = v }

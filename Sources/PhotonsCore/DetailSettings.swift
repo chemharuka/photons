@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - 细节 / 降噪（派单 031，数值口径按 040 归一化）
@@ -247,8 +248,8 @@ public struct DetailSettings: Sendable, Hashable, Codable {
 
     /// 一行给检查器/报告：`NR 30 · 色彩 默认 · 细节 默认 · 锐化 60`。
     public var summary: String {
-        func f(_ v: Double?) -> String { v.map { String(format: DetailAxis.positionFormat, $0) } ?? "默认" }
-        return "NR \(f(luminanceNR)) · 色彩 \(f(colorNR)) · 细节 \(f(detail)) · 锐化 \(f(sharpness))"
+        func f(_ v: Double?) -> String { v.map { String(format: DetailAxis.positionFormat, $0) } ?? Loc.t("默认") }
+        return Loc.t("NR {0} · 色彩 {1} · 细节 {2} · 锐化 {3}", String(describing: (f(luminanceNR))), String(describing: (f(colorNR))), String(describing: (f(detail))), String(describing: (f(sharpness))))
     }
 
     // MARK: - slider → CIRAWFilter value
@@ -322,10 +323,10 @@ public enum DetailAxis: String, CaseIterable, Sendable, Hashable {
     /// 面板上的行标题（也就是 commit 时的 undo 标签）。
     public var title: String {
         switch self {
-        case .luminanceNR: return "降噪"
-        case .colorNR: return "色彩降噪"
-        case .detail: return "细节"
-        case .sharpness: return "锐化"
+        case .luminanceNR: return Loc.t("降噪")
+        case .colorNR: return Loc.t("色彩降噪")
+        case .detail: return Loc.t("细节")
+        case .sharpness: return Loc.t("锐化")
         }
     }
 

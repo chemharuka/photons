@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import CoreImage
@@ -1634,15 +1635,15 @@ public enum ThumbProviderError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .noPreview(let url, let tier):
-            return "no embedded preview for \(url.lastPathComponent) at \(tier.rawValue)"
+            return Loc.t("{0} 在 {1} 档没有内嵌预览", String(describing: (url.lastPathComponent)), String(describing: (tier.rawValue)))
         case .unreadable(let url):
-            return "cannot read \(url.lastPathComponent)"
+            return Loc.t("无法读取 {0}", String(describing: (url.lastPathComponent)))
         case .noRAWDecoder:
-            return "CIRAWFilter is unavailable on this machine"
+            return Loc.t("这台机器上没有 CIRAWFilter")
         case .tierAboveCeiling(let tier, let limit, let ext):
-            return "\(ext) preview ceiling is \(limit.rawValue); refusing \(tier.rawValue)"
+            return Loc.t("{0} 预览上限是 {1}，不接受 {2}", String(describing: (ext)), String(describing: (limit.rawValue)), String(describing: (tier.rawValue)))
         case .unsupportedPipeline(let pipeline):
-            return "no producer for pipeline \(pipeline.rawValue)"
+            return Loc.t("没有处理 {0} 管线的生产者", String(describing: (pipeline.rawValue)))
         case .encodeFailed(let url):
             return "could not encode a thumbnail for \(url.lastPathComponent)"
         }

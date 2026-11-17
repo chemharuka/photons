@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import PhotonsCore
 import CoreGraphics
@@ -100,11 +101,10 @@ public enum BatchExportError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .emptyBatch: return "the batch has no items"
+        case .emptyBatch: return Loc.t("批处理里没有条目")
         case .primariesMismatch(let expected, let got):
-            return "renderer returned \(got.displayName) pixels but the preset asks for "
-                + "\(expected.displayName) — retagging would silently shift every colour"
-        case .noPixels(let name): return "\(name): the renderer produced no pixels"
+            return Loc.t("渲染器返回的是 {0} 像素，而预设要求 {1} —— 直接改标记会悄悄移动每一种颜色", String(describing: (got.displayName)), String(describing: (expected.displayName)))
+        case .noPixels(let name): return Loc.t("{0}: 渲染器没有产出像素", String(describing: (name)))
         }
     }
 }
@@ -274,7 +274,7 @@ public enum BatchExporter {
                     // 168 §2 — say out loud that 不扩大 clamped the request, so a 4000 request on a
                     // 3000 px picture is not quietly reported as "4000" by the result row.
                     if preset.noUpscale, longEdge > current {
-                        warnings.append("长边 \(longEdge) 请求 → 源 \(current)，按不扩大输出 \(current)")
+                        warnings.append(Loc.t("长边 {0} 请求 → 源 {1}，按不扩大输出 {2}", String(describing: (longEdge)), String(describing: (current)), String(describing: (current))))
                     }
                     if current > target {
                         warnings.append("renderer returned \(rendered.width)×\(rendered.height); "

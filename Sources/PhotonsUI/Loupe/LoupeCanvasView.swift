@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import QuartzCore
 import PhotonsCore
@@ -712,9 +713,9 @@ public enum LoupeFrameMode: Equatable, Sendable {
 
     public var label: String {
         switch self {
-        case .edited: return "编辑后"
-        case .original: return "原图"
-        case .compare: return "前后对比"
+        case .edited: return Loc.t("编辑后")
+        case .original: return Loc.t("原图")
+        case .compare: return Loc.t("前后对比")
         }
     }
 }

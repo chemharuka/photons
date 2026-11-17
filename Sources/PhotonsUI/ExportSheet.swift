@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import Observation
 import SwiftUI
@@ -33,8 +34,8 @@ public enum UIExportError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .noSourceFile(let name): return "\(name): 没有源文件（资产指向的文件不存在）"
-        case .noPixels(let name): return "\(name): 渲染器没有产出像素"
+        case .noSourceFile(let name): return Loc.t("{0}: 没有源文件（资产指向的文件不存在）", String(describing: (name)))
+        case .noPixels(let name): return Loc.t("{0}: 渲染器没有产出像素", String(describing: (name)))
         }
     }
 }
@@ -185,13 +186,13 @@ public struct ExportRow: Identifiable, Sendable {
     public var id: String
     public var name: String
     public var state: State = .pending
-    public var detail: String = "等待"
+    public var detail: String = Loc.t("等待")
     public var fileURL: URL?
     public var pixelSize: ImageSize?
     public var seconds: Double = 0
     public var warnings: [String] = []
 
-    public init(id: String, name: String, state: State = .pending, detail: String = "等待",
+    public init(id: String, name: String, state: State = .pending, detail: String = Loc.t("等待"),
                 fileURL: URL? = nil, pixelSize: ImageSize? = nil, seconds: Double = 0,
                 warnings: [String] = []) {
         self.id = id
@@ -219,7 +220,7 @@ public enum GainMapColorModel: String, Sendable, CaseIterable {
     public var displayName: String {
         switch self {
         case .rgb: return "RGB"
-        case .mono: return "黑白"
+        case .mono: return Loc.t("黑白")
         }
     }
 }
@@ -252,8 +253,8 @@ public final class ExportSheetModel {
     }
 
     /// 099: the sections, in Lightroom's order, as data — the view and its test read the same list.
-    public static let sectionTitles = ["位置", "文件命名", "文件设置", "图像尺寸",
-                                       "元数据", "导出"]
+    public static let sectionTitles = [Loc.t("位置"), Loc.t("文件命名"), Loc.t("文件设置"), Loc.t("图像尺寸"),
+                                       Loc.t("元数据"), Loc.t("导出")]
 
     /// What the user is editing. Passed to `BatchExporter` verbatim at run time.
     ///
@@ -354,7 +355,7 @@ public final class ExportSheetModel {
             // 161 §5 M2 — never crash and never silently keep a blob we cannot read. Remove it and
             // say so; the next successful export writes a clean one.
             ExportDraftPersistence.clear(in: draftStore)
-            notice = "导出设置记忆已损坏，已恢复默认设置"
+            notice = Loc.t("导出设置记忆已损坏，已恢复默认设置")
         }
 
         let startingPreset = preset ?? remembered?.preset ?? Self.defaultPreset
@@ -384,7 +385,7 @@ public final class ExportSheetModel {
     /// `nonisolated`: a default argument is evaluated at the call site, which is not the main actor,
     /// and both of these are pure values.
     public nonisolated static var defaultPreset: ExportPreset {
-        ExportPreset(name: "默认", format: .heic, quality: 0.85,
+        ExportPreset(name: Loc.t("默认"), format: .heic, quality: 0.85,
                      bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
                      hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}",
                      sizingMode: ExportSizingMode.none, ppi: 240)
@@ -394,7 +395,7 @@ public final class ExportSheetModel {
     /// purpose (a HEIC safe to hand to anyone), so it keeps its 2048 long edge and 0.95 quality; only
     /// the **default** moved.
     public nonisolated static var network2048Preset: ExportPreset {
-        ExportPreset(name: "网络 2048", format: .heic, longEdge: 2048, quality: 0.95,
+        ExportPreset(name: Loc.t("网络 2048"), format: .heic, longEdge: 2048, quality: 0.95,
                      bitDepth: 8, colorSpace: .displayP3, sdrToneMapping: .global,
                      hdr: HDRExport(gainMap: .iso), writeXMP: false, nameTemplate: "{name}")
     }
@@ -420,7 +421,7 @@ public final class ExportSheetModel {
 
     public nonisolated static var defaultOutputDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Pictures/Photons 导出", isDirectory: true)
+            .appendingPathComponent(Loc.t("Pictures/Photons 导出"), isDirectory: true)
     }
 
     // MARK: HDR (106)
@@ -683,7 +684,7 @@ public final class ExportSheetModel {
         guard !sizes.isEmpty else { return nil }
         let outputs = sizes.map { predictedOutputSize(native: $0) }
         let distinct = Set(outputs.map { "\($0.width)x\($0.height)" })
-        if distinct.count > 1 { return "\(distinct.count) 种尺寸" }
+        if distinct.count > 1 { return Loc.t("{0} 种尺寸", String(describing: (distinct.count))) }
         let size = outputs[0]
         let megapixels = Double(size.width) * Double(size.height) / 1_000_000
         return String(format: "%.1f MP", (megapixels * 10).rounded() / 10)
@@ -705,7 +706,7 @@ public final class ExportSheetModel {
         if odd.count == 1 {
             return first.crop.hint(current: first.input)
         }
-        return "半尺寸需要偶数像素：\(odd.count) 张照片将裁到偶数边（右/下各 1 px）"
+        return Loc.t("半尺寸需要偶数像素：{0} 张照片将裁到偶数边（右/下各 1 px）", String(describing: (odd.count)))
     }
 
     // MARK: status line (161 §4)
@@ -746,15 +747,15 @@ public final class ExportSheetModel {
     public var summaryLine: String {
         switch phase {
         case .idle:
-            return "将导出 \(selectionCount) 张 → \(preset.summary)"
+            return Loc.t("将导出 {0} 张 → {1}", String(describing: (selectionCount)), String(describing: (preset.summary)))
         case .running:
-            return String(format: "导出中… 已渲染 %d/%d · %.1f s", rendered, total, elapsed)
+            return String(format: Loc.t("导出中… 已渲染 %d/%d · %.1f s"), rendered, total, elapsed)
         case .finished:
-            var parts = [String(format: "完成：%d 个文件", writtenCount)]
-            if skippedCount > 0 { parts.append("跳过 \(skippedCount)") }
-            if cancelledCount > 0 { parts.append("取消 \(cancelledCount)") }
-            if failedCount > 0 { parts.append("失败 \(failedCount)") }
-            return parts.joined(separator: "，") + String(format: " · 共 %.2f s", elapsed)
+            var parts = [String(format: Loc.t("完成：%d 个文件"), writtenCount)]
+            if skippedCount > 0 { parts.append(Loc.t("跳过 {0}", String(describing: (skippedCount)))) }
+            if cancelledCount > 0 { parts.append(Loc.t("取消 {0}", String(describing: (cancelledCount)))) }
+            if failedCount > 0 { parts.append(Loc.t("失败 {0}", String(describing: (failedCount)))) }
+            return parts.joined(separator: "，") + String(format: Loc.t(" · 共 %.2f s"), elapsed)
         }
     }
 
@@ -778,20 +779,20 @@ public final class ExportSheetModel {
         if phase == .running {
             // 关闭 is not built at all while files are being written: hiding the sheet would not
             // stop the batch ("关了但还在写文件").
-            return [FooterItem(kind: .cancel, title: "取消", isEnabled: true),
-                    FooterItem(kind: .export, title: "导出", isEnabled: false)]
+            return [FooterItem(kind: .cancel, title: Loc.t("取消"), isEnabled: true),
+                    FooterItem(kind: .export, title: Loc.t("导出"), isEnabled: false)]
         }
         var items: [FooterItem] = []
         if phase == .finished {
             if writtenCount > 0 {
-                items.append(FooterItem(kind: .reveal, title: "在 Finder 中显示", isEnabled: true))
+                items.append(FooterItem(kind: .reveal, title: Loc.t("在 Finder 中显示"), isEnabled: true))
             }
             // §7's finished order: 在 Finder 中显示 → 再导出一次 → 关闭.
-            items.append(FooterItem(kind: .export, title: "再导出一次", isEnabled: canRun))
-            items.append(FooterItem(kind: .close, title: "关闭", isEnabled: true))
+            items.append(FooterItem(kind: .export, title: Loc.t("再导出一次"), isEnabled: canRun))
+            items.append(FooterItem(kind: .close, title: Loc.t("关闭"), isEnabled: true))
         } else {
-            items.append(FooterItem(kind: .close, title: "关闭", isEnabled: true))
-            items.append(FooterItem(kind: .export, title: "导出", isEnabled: canRun))
+            items.append(FooterItem(kind: .close, title: Loc.t("关闭"), isEnabled: true))
+            items.append(FooterItem(kind: .export, title: Loc.t("导出"), isEnabled: canRun))
         }
         return items
     }
@@ -800,7 +801,7 @@ public final class ExportSheetModel {
     /// they are why a run stopped, and the footer is where the user is looking after pressing 导出.
     public var footerStatus: String {
         if let errorText { return errorText }
-        if phase == .idle, rows.isEmpty { return "还没有导出。选择照片，点“导出”。" }
+        if phase == .idle, rows.isEmpty { return Loc.t("还没有导出。选择照片，点“导出”。") }
         return summaryLine
     }
 
@@ -813,7 +814,7 @@ public final class ExportSheetModel {
     public func run(items: [ExportItem], natives: [String: ImageSize] = [:]) {
         guard phase != .running else { return }
         guard !items.isEmpty else {
-            errorText = "没有选中的照片"
+            errorText = Loc.t("没有选中的照片")
             return
         }
         do {
@@ -869,7 +870,7 @@ public final class ExportSheetModel {
         rendered = min(total, rendered + 1)
         if let index = rows.firstIndex(where: { $0.id == id }) {
             rows[index].state = .rendering
-            rows[index].detail = "已渲染，写入中…"
+            rows[index].detail = Loc.t("已渲染，写入中…")
         }
     }
 
@@ -894,17 +895,17 @@ public final class ExportSheetModel {
                     String(format: "%.2f s", outcome.seconds),
                 ].joined(separator: " · ")
                 if !outcome.warnings.isEmpty {
-                    row.detail += " · \(outcome.warnings.count) 条警告"
+                    row.detail += Loc.t(" · {0} 条警告", String(describing: (outcome.warnings.count)))
                 }
             } else if outcome.cancelled {
                 row.state = .cancelled
-                row.detail = "已取消"
+                row.detail = Loc.t("已取消")
             } else if outcome.skipped {
                 row.state = .skipped
-                row.detail = "跳过：目标文件已存在"
+                row.detail = Loc.t("跳过：目标文件已存在")
             } else {
                 row.state = .failed
-                row.detail = "失败：\(outcome.error ?? "未知原因")"
+                row.detail = Loc.t("失败：{0}", String(describing: (outcome.error ?? Loc.t("未知原因"))))
             }
             return row
         }
@@ -981,7 +982,7 @@ public final class ExportSheetModel {
     @discardableResult
     public func savePreset(named name: String) -> Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            presetError = "预设名称不能为空"
+            presetError = Loc.t("预设名称不能为空")
             return false
         }
         do {
@@ -1062,9 +1063,9 @@ public struct ExportSheetView: View {
 
     private let sectionStore: ExportSectionCollapseStore
 
-    static let colourSection = "颜色与元数据"
-    static let hdrSection = "HDR 与色调映射"
-    static let afterSection = "输出后"
+    static let colourSection = Loc.t("颜色与元数据")
+    static let hdrSection = Loc.t("HDR 与色调映射")
+    static let afterSection = Loc.t("输出后")
 
     public init(model: ExportSheetModel,
                 sectionStore: ExportSectionCollapseStore = .userDefaults) {
@@ -1093,17 +1094,17 @@ public struct ExportSheetView: View {
         .frame(width: ExportRowGrid.panelWidth)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(.regularMaterial)
-        .alert("存储预设", isPresented: $showingSavePreset) {
-            TextField("预设名称", text: $newPresetName)
+        .alert(Loc.t("存储预设"), isPresented: $showingSavePreset) {
+            TextField(Loc.t("预设名称"), text: $newPresetName)
                 .font(.system(size: ExportRowGrid.Font.control))
-            Button("存储") {
+            Button(Loc.t("存储")) {
                 if model.savePreset(named: newPresetName) {
                     selectedPreset = newPresetName
                 }
             }
-            Button("取消", role: .cancel) {}
+            Button(Loc.t("取消"), role: .cancel) {}
         } message: {
-            Text("存到 \(model.presetStore.directory.path)")
+            Text(Loc.t("存到 {0}", String(describing: (model.presetStore.directory.path))))
         }
     }
 
@@ -1113,7 +1114,7 @@ public struct ExportSheetView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 12) {
-                Text("导出")
+                Text(Loc.t("导出"))
                     .font(.system(size: ExportRowGrid.Font.title, weight: .semibold))
                 Spacer(minLength: 8)
                 presetControls
@@ -1141,7 +1142,7 @@ public struct ExportSheetView: View {
     private var presetControls: some View {
         HStack(spacing: 6) {
             Picker("", selection: presetSelection) {
-                Text("上次使用").tag("")
+                Text(Loc.t("上次使用")).tag("")
                 ForEach(model.presetPickerNames, id: \.self) { name in
                     Text(name).tag(name)
                 }
@@ -1151,13 +1152,13 @@ public struct ExportSheetView: View {
             .exportControlFont("export.preset", kind: .picker)
             .frame(width: ExportRowGrid.presetWidth, alignment: .trailing)
             .disabled(model.phase == .running)
-            Button("存储预设") {
+            Button(Loc.t("存储预设")) {
                 newPresetName = model.preset.name ?? ""
                 showingSavePreset = true
             }
             .controlSize(.small)
             .disabled(model.phase == .running)
-            Button("删除") {
+            Button(Loc.t("删除")) {
                 model.deletePreset(named: selectedPreset)
                 selectedPreset = ""
             }
@@ -1207,7 +1208,7 @@ public struct ExportSheetView: View {
         // 302 —— 质量：容器没有质量档时这一行仍在（滑杆/数值禁用）。**为什么不对 PNG / TIFF 直接
         // 抽掉**：250 的真实点击测试靠行位置稳定（先点 PPI 再换格式），少一行会让探针 frame 过期。
         // 收窄发生在选项层：位深、HDR 类型都按容器给（不出现没有的选项）。
-        exportSliderRow(label: "质量", value: model.preset.quality * 100,
+        exportSliderRow(label: Loc.t("质量"), value: model.preset.quality * 100,
                         range: 10 ... 100, format: "%.0f", decimals: 0,
                         unit: "%", enabled: model.phase != .running
                             && model.preset.format.supportsQuality,
@@ -1217,11 +1218,11 @@ public struct ExportSheetView: View {
         sizeRow
         exportSliderRow(label: "PPI", value: Double(model.preset.effectivePPI ?? 240),
                         range: 72 ... 600, format: "%.0f", decimals: 0,
-                        unit: "像素/英寸", enabled: model.phase != .running,
+                        unit: Loc.t("像素/英寸"), enabled: model.phase != .running,
                         axID: "export.ppi", showsSlider: false,
                         labelToggle: ExportRowToggle(title: "PPI", isOn: ppiEnabledBinding,
                                                      axID: "export.ppi.enabled"),
-                        placeholder: model.preset.ppi == nil ? "不写入" : nil,
+                        placeholder: model.preset.ppi == nil ? Loc.t("不写入") : nil,
                         readoutPlacement: .inline) { typed in
             model.setPPI(Int(typed.rounded()))
         }
@@ -1236,7 +1237,7 @@ public struct ExportSheetView: View {
     private var formatRow: some View {
         ExportRowGridRow(
             rowID: "export.format",
-            label: { rowLabel("格式") },
+            label: { rowLabel(Loc.t("格式")) },
             control: {
                 Picker("", selection: formatBinding) {
                     ForEach(model.availableFormats, id: \.self) { format in
@@ -1261,7 +1262,7 @@ public struct ExportSheetView: View {
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
                 .disabled(model.phase == .running || model.availableHDRKinds.isEmpty)
-                .help("HDR 输出；曲线与增益图在「HDR 与色调映射」里选")
+                .help(Loc.t("HDR 输出；曲线与增益图在「HDR 与色调映射」里选"))
             })
             .background(ExportLayoutProbeHost(kind: .hdrRow))
     }
@@ -1270,7 +1271,7 @@ public struct ExportSheetView: View {
     private var toneMappingRow: some View {
         ExportRowGridRow(
             rowID: "export.hdr.toneMapping",
-            label: { rowLabel("色调映射") },
+            label: { rowLabel(Loc.t("色调映射")) },
             control: {
                 Picker("", selection: sdrToneMappingBinding) {
                     ForEach(SDRToneMapping.allCases, id: \.self) { mapping in
@@ -1282,7 +1283,7 @@ public struct ExportSheetView: View {
                 .exportControlFont("export.hdr.toneMapping", kind: .picker)
                 .frame(maxWidth: .infinity)
                 .disabled(model.phase == .running)
-                .help("全局：Core Image 的 global tone map；无：与旧版相同的硬截断")
+                .help(Loc.t("全局：Core Image 的 global tone map；无：与旧版相同的硬截断"))
             },
             value: { EmptyView() },
             unit: { EmptyView() },
@@ -1296,19 +1297,19 @@ public struct ExportSheetView: View {
     private var sizeRow: some View {
         switch model.preset.sizingMode {
         case .longEdge:
-            exportSliderRow(label: "尺寸", value: Double(model.preset.longEdge ?? 2400),
+            exportSliderRow(label: Loc.t("尺寸"), value: Double(model.preset.longEdge ?? 2400),
                             range: 1 ... 20_000, format: "%.0f", decimals: 0,
                             unit: "px", enabled: model.phase != .running,
                             axID: "export.size.longEdge", showsSlider: false,
                             picker: AnyView(sizeModePicker),
                             trailingToggle: ExportRowToggle(
-                                title: "不扩大", isOn: $model.preset.noUpscale,
+                                title: Loc.t("不扩大"), isOn: $model.preset.noUpscale,
                                 axID: "export.size.noUpscale",
-                                help: "勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大")) { typed in
+                                help: Loc.t("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大"))) { typed in
                 model.preset.longEdge = max(1, Int(typed.rounded()))
             }
         case .percent:
-            exportSliderRow(label: "尺寸", value: Double(model.preset.percent ?? 100),
+            exportSliderRow(label: Loc.t("尺寸"), value: Double(model.preset.percent ?? 100),
                             range: 10 ... 100, format: "%.0f", decimals: 0,
                             unit: "%", enabled: model.phase != .running,
                             axID: "export.size.percent", showsSlider: false,
@@ -1316,9 +1317,9 @@ public struct ExportSheetView: View {
                 model.preset.percent = min(100, max(10, Int(typed.rounded())))
             }
         case .none:
-            exportSliderRow(label: "尺寸", value: 0, range: 0 ... 1, format: "%.0f", decimals: 0,
+            exportSliderRow(label: Loc.t("尺寸"), value: 0, range: 0 ... 1, format: "%.0f", decimals: 0,
                             enabled: false, axID: "export.size.original", showsSlider: false,
-                            picker: AnyView(sizeModePicker), placeholder: "原始像素") { _ in }
+                            picker: AnyView(sizeModePicker), placeholder: Loc.t("原始像素")) { _ in }
         }
     }
 
@@ -1357,12 +1358,12 @@ public struct ExportSheetView: View {
     private var directoryRow: some View {
         ExportRowGridRow(
             rowID: "export.location.directory",
-            label: { rowLabel("存到") },
+            label: { rowLabel(Loc.t("存到")) },
             control: {
                 // 335 —— 按钮回到主列**左端**（138 起），文案去掉省略号（「更改…」→「更改」：
                 // 它开的是同一个目录面板，省略号在这里只占了 15 pt 的宽度）。路径拿剩下的宽度。
                 HStack(spacing: ExportRowGrid.readoutGap) {
-                    Button("更改") { model.onChooseDirectory?() }
+                    Button(Loc.t("更改")) { model.onChooseDirectory?() }
                         .controlSize(.small)
                         .background(ExportRowGridProbeHost(kind: .button,
                                                            rowID: "export.location.directory.change"))
@@ -1385,9 +1386,9 @@ public struct ExportSheetView: View {
     private var namingRow: some View {
         ExportRowGridRow(
             rowID: "export.naming.template",
-            label: { rowLabel("命名") },
+            label: { rowLabel(Loc.t("命名")) },
             control: {
-                TextField("{原名}_{序号}", text: $model.preset.nameTemplate)
+                TextField(Loc.t("{原名}_{序号}"), text: $model.preset.nameTemplate)
                     .textFieldStyle(.roundedBorder)
                     .exportControlFont("export.naming.template", kind: .textField,
                                        design: .monospaced)
@@ -1402,12 +1403,12 @@ public struct ExportSheetView: View {
     // MARK: 颜色与元数据
 
     private var colourSectionView: some View {
-        ExportCollapsibleSection(Self.colourSection, summary: "色彩空间 / 位深 / 元数据 / XMP / 位置",
+        ExportCollapsibleSection(Self.colourSection, summary: Loc.t("色彩空间 / 位深 / 元数据 / XMP / 位置"),
                                  isExpanded: isExpanded(Self.colourSection),
                                  toggle: { toggleSection(Self.colourSection) }) {
             ExportRowGridRow(
                 rowID: "export.colorSpace",
-                label: { rowLabel("色彩空间") },
+                label: { rowLabel(Loc.t("色彩空间")) },
                 control: {
                     Picker("", selection: $model.preset.colorSpace) {
                         Text("sRGB").tag(OutputPrimaries.sRGB)
@@ -1425,11 +1426,11 @@ public struct ExportSheetView: View {
                 accessory: { EmptyView() })
             ExportRowGridRow(
                 rowID: "export.bitDepth",
-                label: { rowLabel("位深") },
+                label: { rowLabel(Loc.t("位深")) },
                 control: {
                     Picker("", selection: bitDepthBinding) {
                         ForEach(model.bitDepths, id: \.self) { depth in
-                            Text("\(depth) 位").tag(depth)
+                            Text(Loc.t("{0} 位", String(describing: (depth)))).tag(depth)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -1443,7 +1444,7 @@ public struct ExportSheetView: View {
                 accessory: { EmptyView() })
             ExportRowGridRow(
                 rowID: "export.metadata.level",
-                label: { rowLabel("元数据") },
+                label: { rowLabel(Loc.t("元数据")) },
                 control: {
                     Picker("", selection: metadataLevelBinding) {
                         ForEach(ExportMetadataLevel.allCases, id: \.self) { level in
@@ -1463,7 +1464,7 @@ public struct ExportSheetView: View {
                 rowID: "export.metadata.xmp",
                 label: {
                     // 335 —— 勾选标签也走墨迹对齐（`checkboxLabel` 内部把文字推到墨迹右沿 130）。
-                    checkboxLabel("写入 XMP", isOn: writeXMPBinding,
+                    checkboxLabel(Loc.t("写入 XMP"), isOn: writeXMPBinding,
                                   enabled: model.phase != .running
                                       && model.preset.metadataLevel == .all,
                                   axID: "export.metadata.xmp")
@@ -1471,8 +1472,8 @@ public struct ExportSheetView: View {
                 control: {
                     // 322 —— 说明允许两行：放不下就换行，不许省成「…」。
                     Text(model.preset.metadataLevel == .all
-                         ? "完整 develop 设置"
-                         : "由上面的档位决定，不能再单独开关")
+                         ? Loc.t("完整 develop 设置")
+                         : Loc.t("由上面的档位决定，不能再单独开关"))
                         .font(.system(size: ExportRowGrid.Font.hint))
                         .foregroundStyle(.tertiary)
                         // 322 —— 宽度先钉在控件列上，`Text` 才知道该换行（不钉它按 ideal 排成
@@ -1486,13 +1487,13 @@ public struct ExportSheetView: View {
             ExportRowGridRow(
                 rowID: "export.metadata.location",
                 label: {
-                    checkboxLabel("移除位置", isOn: $model.preset.removeLocation,
+                    checkboxLabel(Loc.t("移除位置"), isOn: $model.preset.removeLocation,
                                   enabled: model.phase != .running
                                       && model.preset.metadataPolicy != .none,
                                   axID: "export.metadata.location")
                 },
                 control: {
-                    Text("GPS 不写入导出（EXIF 与 XMP 两处）")
+                    Text(Loc.t("GPS 不写入导出（EXIF 与 XMP 两处）"))
                         .font(.system(size: ExportRowGrid.Font.hint))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
@@ -1507,7 +1508,7 @@ public struct ExportSheetView: View {
     // MARK: HDR 与色调映射
 
     private var hdrSectionView: some View {
-        ExportCollapsibleSection(Self.hdrSection, summary: "类型 / 增益图 / 半尺寸",
+        ExportCollapsibleSection(Self.hdrSection, summary: Loc.t("类型 / 增益图 / 半尺寸"),
                                  isExpanded: isExpanded(Self.hdrSection),
                                  toggle: { toggleSection(Self.hdrSection) }) {
             if model.availableHDRKinds.isEmpty {
@@ -1515,7 +1516,7 @@ public struct ExportSheetView: View {
                     rowID: "export.hdr.unavailable",
                     label: { EmptyView() },
                     control: {
-                        Text("此格式不支持 HDR")
+                        Text(Loc.t("此格式不支持 HDR"))
                             .font(.system(size: ExportRowGrid.Font.hint))
                             .foregroundStyle(.tertiary)
                     },
@@ -1525,7 +1526,7 @@ public struct ExportSheetView: View {
             } else {
                 ExportRowGridRow(
                     rowID: "export.hdr.kind",
-                    label: { rowLabel("HDR 类型") },
+                    label: { rowLabel(Loc.t("HDR 类型")) },
                     control: {
                         Picker("", selection: hdrKindBinding) {
                             ForEach(model.availableHDRKinds, id: \.self) { kind in
@@ -1544,7 +1545,7 @@ public struct ExportSheetView: View {
                 if model.showsGainMapRows {
                     ExportRowGridRow(
                         rowID: "export.hdr.gainMap",
-                        label: { rowLabel("增益图") },
+                        label: { rowLabel(Loc.t("增益图")) },
                         control: {
                             HStack(spacing: 6) {
                                 Picker("", selection: gainMapColorBinding) {
@@ -1575,10 +1576,10 @@ public struct ExportSheetView: View {
                     ExportRowGridRow(
                         rowID: "export.hdr.halfSize",
                         label: {
-                            checkboxLabel("半尺寸", isOn: hdrHalfSizeBinding,
+                            checkboxLabel(Loc.t("半尺寸"), isOn: hdrHalfSizeBinding,
                                           enabled: model.phase != .running,
                                           axID: "export.hdr.halfSize",
-                                          help: "增益图按 1/2 边长写入（-H），SDR 基底不缩放")
+                                          help: Loc.t("增益图按 1/2 边长写入（-H），SDR 基底不缩放"))
                         },
                         control: {
                             // 322 —— 裁偶数边的说明有 377.9 pt（「半尺寸需要偶数像素：当前
@@ -1591,7 +1592,7 @@ public struct ExportSheetView: View {
                                     .lineLimit(2)
                                     .help(hint)
                             } else {
-                                Text("增益图小一半；SDR 基底不缩放")
+                                Text(Loc.t("增益图小一半；SDR 基底不缩放"))
                                     .font(.system(size: ExportRowGrid.Font.hint))
                                     .foregroundStyle(.tertiary)
                                     .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
@@ -1609,12 +1610,12 @@ public struct ExportSheetView: View {
     // MARK: 输出后
 
     private var afterSectionView: some View {
-        ExportCollapsibleSection(Self.afterSection, summary: "重名文件 / 水印文字 / 位置",
+        ExportCollapsibleSection(Self.afterSection, summary: Loc.t("重名文件 / 水印文字 / 位置"),
                                  isExpanded: isExpanded(Self.afterSection),
                                  toggle: { toggleSection(Self.afterSection) }) {
             ExportRowGridRow(
                 rowID: "export.location.subfolder",
-                label: { rowLabel("子文件夹") },
+                label: { rowLabel(Loc.t("子文件夹")) },
                 control: {
                     TextField("{date}/{camera}", text: $model.preset.subfolder)
                         .textFieldStyle(.roundedBorder)
@@ -1628,7 +1629,7 @@ public struct ExportSheetView: View {
                 accessory: { EmptyView() })
             ExportRowGridRow(
                 rowID: "export.location.conflict",
-                label: { rowLabel("重名文件") },
+                label: { rowLabel(Loc.t("重名文件")) },
                 control: {
                     Picker("", selection: $model.preset.conflict) {
                         ForEach(ExportConflict.allCases, id: \.self) { policy in
@@ -1646,9 +1647,9 @@ public struct ExportSheetView: View {
                 accessory: { EmptyView() })
             ExportRowGridRow(
                 rowID: "export.watermark.text",
-                label: { rowLabel("水印文字") },
+                label: { rowLabel(Loc.t("水印文字")) },
                 control: {
-                    TextField("关", text: $model.preset.watermarkText)
+                    TextField(Loc.t("关"), text: $model.preset.watermarkText)
                         .textFieldStyle(.roundedBorder)
                         .exportControlFont("export.watermark.text", kind: .textField)
                         .frame(maxWidth: .infinity)
@@ -1660,7 +1661,7 @@ public struct ExportSheetView: View {
                 accessory: { EmptyView() })
             ExportRowGridRow(
                 rowID: "export.watermark.position",
-                label: { rowLabel("水印位置") },
+                label: { rowLabel(Loc.t("水印位置")) },
                 control: {
                     Picker("", selection: $model.preset.watermarkPosition) {
                         ForEach(WatermarkPosition.allCases, id: \.self) { position in
@@ -1678,7 +1679,7 @@ public struct ExportSheetView: View {
                 unit: { EmptyView() },
                 accessory: { EmptyView() })
             // 322 —— 水印的三件事在一段里，顺序：文字 → 位置 → 不透明度。
-            exportSliderRow(label: "水印不透明度", value: model.preset.watermarkOpacity,
+            exportSliderRow(label: Loc.t("水印不透明度"), value: model.preset.watermarkOpacity,
                             range: 0 ... 100, format: "%.0f", decimals: 0,
                             unit: "%", enabled: model.phase != .running,
                             axID: "export.watermark.opacity") { typed in
@@ -2135,7 +2136,7 @@ public final class ExportSheetController: NSObject {
                               styleMask: [.titled],
                               backing: .buffered,
                               defer: false)
-        window.title = "导出 \(model.selectionCount) 张照片"
+        window.title = Loc.t("导出 {0} 张照片", String(describing: (model.selectionCount)))
         // 321 —— 面板尺寸是**应用**的决定，不是 SwiftUI 的 ideal 尺寸。
         //
         // 这里以前只给了 contentRect，紧跟着的 `window.contentViewController = hosting` 让 AppKit
@@ -2215,8 +2216,8 @@ public final class ExportSheetController: NSObject {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "选择"
-        panel.message = "导出到哪里"
+        panel.prompt = Loc.t("选择")
+        panel.message = Loc.t("导出到哪里")
         panel.directoryURL = model.outputDirectory
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.outputDirectory = url

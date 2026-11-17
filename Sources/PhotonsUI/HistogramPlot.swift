@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCore
 
@@ -160,7 +161,7 @@ extension HistogramCardFormat {
         case .code:
             return "\(reading.code)"
         case .tail:
-            return String(format: "%+.2f 档 (%.1f×)", reading.stops, reading.multiple)
+            return String(format: Loc.t("%+.2f 档 (%.1f×)"), reading.stops, reading.multiple)
         }
     }
 

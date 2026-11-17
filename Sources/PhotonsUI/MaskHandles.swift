@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import PhotonsCore
@@ -55,10 +56,10 @@ public enum MaskControlParameter: String, Sendable, CaseIterable, Equatable, Has
 
     public var label: String {
         switch self {
-        case .position: return "位置"
-        case .shape: return "形状"
-        case .angle: return "角度"
-        case .ratio: return "渐变比例"
+        case .position: return Loc.t("位置")
+        case .shape: return Loc.t("形状")
+        case .angle: return Loc.t("角度")
+        case .ratio: return Loc.t("渐变比例")
         }
     }
 }
@@ -106,15 +107,15 @@ public enum MaskHandleKind: Sendable, Equatable, Hashable {
     /// Stable text for the status/QA line (no UI reads it in a test).
     public var label: String {
         switch self {
-        case .linearLine(.start): return "起点线"
-        case .linearLine(.end): return "终点线"
-        case .linearAngle: return "渐变角度"
-        case .radialCenter: return "中心"
-        case .radialEdge(.left): return "左边界"
-        case .radialEdge(.right): return "右边界"
-        case .radialEdge(.top): return "上边界"
-        case .radialEdge(.bottom): return "下边界"
-        case .radialAngle: return "椭圆角度"
+        case .linearLine(.start): return Loc.t("起点线")
+        case .linearLine(.end): return Loc.t("终点线")
+        case .linearAngle: return Loc.t("渐变角度")
+        case .radialCenter: return Loc.t("中心")
+        case .radialEdge(.left): return Loc.t("左边界")
+        case .radialEdge(.right): return Loc.t("右边界")
+        case .radialEdge(.top): return Loc.t("上边界")
+        case .radialEdge(.bottom): return Loc.t("下边界")
+        case .radialAngle: return Loc.t("椭圆角度")
         }
     }
 }

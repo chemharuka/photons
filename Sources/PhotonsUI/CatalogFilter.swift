@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import Foundation
 import PhotonsCatalog
@@ -11,12 +12,12 @@ public enum ColorLabel: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .red: return "红"
-        case .orange: return "橙"
-        case .yellow: return "黄"
-        case .green: return "绿"
-        case .blue: return "蓝"
-        case .purple: return "紫"
+        case .red: return Loc.t("红")
+        case .orange: return Loc.t("橙")
+        case .yellow: return Loc.t("黄")
+        case .green: return Loc.t("绿")
+        case .blue: return Loc.t("蓝")
+        case .purple: return Loc.t("紫")
         }
     }
 
@@ -45,8 +46,8 @@ public enum AssetFlag: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .pick: return "已选"
-        case .reject: return "已拒"
+        case .pick: return Loc.t("已选")
+        case .reject: return Loc.t("已拒")
         }
     }
 
@@ -238,14 +239,14 @@ public struct CatalogFilter: Equatable, Sendable {
         switch facet {
         case .rating:
             guard let n = ratingAtLeast else { return nil }
-            return n == 0 ? "未评级" : "≥\(n) 星"
+            return n == 0 ? Loc.t("未评级") : Loc.t("≥{0} 星", String(describing: (n)))
         case .flag:
             guard let flag else { return nil }
             let f = AssetFlag.normalized(flag)
-            return "旗标 \(f?.displayName ?? flag)"
+            return Loc.t("旗标 {0}", String(describing: (f?.displayName ?? flag)))
         case .color:
             guard let colorLabel else { return nil }
-            return "色标 \(ColorLabel.normalized(colorLabel)?.displayName ?? colorLabel)"
+            return Loc.t("色标 {0}", String(describing: (ColorLabel.normalized(colorLabel)?.displayName ?? colorLabel)))
         case .camera:
             guard let cameraKey else { return nil }
             return cameraKey.replacingOccurrences(of: "|", with: " ")
@@ -301,6 +302,6 @@ public struct CatalogFilter: Equatable, Sendable {
 
     public var summary: String {
         let parts = chips().map(\.text)
-        return parts.isEmpty ? "全部照片" : parts.joined(separator: " · ")
+        return parts.isEmpty ? Loc.t("全部照片") : parts.joined(separator: " · ")
     }
 }

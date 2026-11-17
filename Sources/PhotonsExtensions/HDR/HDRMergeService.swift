@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// HDR merge: several bracketed RAW frames in, **one** radiance-linear Bayer (CFA) DNG out.
@@ -60,23 +61,23 @@ public final class HDRMergeService: @unchecked Sendable {
         public var description: String {
             switch self {
             case .toolMissing:
-                return "未找到 hdrmerge-swift（应随 app 提供于 Contents/Resources/bin/）"
+                return Loc.t("未找到 hdrmerge-swift（应随 app 提供于 Contents/Resources/bin/）")
             case .notEnoughFrames(let n):
-                return "至少需要两张 DNG 才能合并（当前 \(n) 张）"
+                return Loc.t("至少需要两张 DNG 才能合并（当前 {0} 张）", String(describing: (n)))
             case .linearDNG:
-                return "选中的是已去马赛克的线性 DNG（Lightroom / ProRAW 产物），没有 Bayer 数据可合并"
+                return Loc.t("选中的是已去马赛克的线性 DNG（Lightroom / ProRAW 产物），没有 Bayer 数据可合并")
             case .notCFARaw:
-                return "选中的文件不是 CFA RAW"
+                return Loc.t("选中的文件不是 CFA RAW")
             case .unsupportedFormat:
-                return "这个 DNG 的压缩方式尚不支持（Deflate / JPEG XL）"
+                return Loc.t("这个 DNG 的压缩方式尚不支持（Deflate / JPEG XL）")
             case .incompatibleFrames:
-                return "这些照片无法合并：尺寸、CFA 相位或拍摄格式不一致"
+                return Loc.t("这些照片无法合并：尺寸、CFA 相位或拍摄格式不一致")
             case .unreadable(let path):
-                return "无法读取 \(path)（可能已移动或没有权限）"
+                return Loc.t("无法读取 {0}（可能已移动或没有权限）", String(describing: (path)))
             case .cannotWrite(let path):
-                return "无法写入 \(path)（检查目录权限）"
+                return Loc.t("无法写入 {0}（检查目录权限）", String(describing: (path)))
             case .toolFailed(let message):
-                return "合并工具异常退出：\(message)"
+                return Loc.t("合并工具异常退出：{0}", String(describing: (message)))
             }
         }
 
@@ -175,11 +176,11 @@ public final class HDRMergeService: @unchecked Sendable {
             result = try client.merge(frames, to: temp, options: options, progress: { event in
                 switch event {
                 case .decoding(let index, let total, _):
-                    progress?("解码 \(index)/\(total)…")
+                    progress?(Loc.t("解码 {0}/{1}…", String(describing: (index)), String(describing: (total))))
                 case .merging:
-                    progress?("对齐并合并…")
+                    progress?(Loc.t("对齐并合并…"))
                 case .encoding:
-                    progress?("写入 DNG…")
+                    progress?(Loc.t("写入 DNG…"))
                 case .done:
                     break
                 }
@@ -240,13 +241,13 @@ public final class HDRMergeService: @unchecked Sendable {
     /// reason when they are not.
     public func compatibilityIssue(_ frames: [URL]) throws -> String? {
         let infos = try inspect(frames)
-        guard let first = infos.first else { return "没有可合并的帧" }
+        guard let first = infos.first else { return Loc.t("没有可合并的帧") }
         for info in infos.dropFirst() {
             if info.width != first.width || info.height != first.height {
-                return "尺寸不一致：\(first.width)×\(first.height) 与 \(info.width)×\(info.height)"
+                return Loc.t("尺寸不一致：{0}×{1} 与 {2}×{3}", String(describing: (first.width)), String(describing: (first.height)), String(describing: (info.width)), String(describing: (info.height)))
             }
             if info.cfaPattern != first.cfaPattern {
-                return "CFA 相位不一致：\(first.cfaPattern) 与 \(info.cfaPattern)"
+                return Loc.t("CFA 相位不一致：{0} 与 {1}", String(describing: (first.cfaPattern)), String(describing: (info.cfaPattern)))
             }
         }
         return nil

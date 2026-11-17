@@ -1,3 +1,4 @@
+import PhotonsLocalization
 //
 //  AnselDenoiseJob.swift
 //
@@ -29,15 +30,15 @@ import Foundation
 /// 一句提示只写一次。菜单灰掉的 tooltip、`lastDenoiseError` 和测试断言读的都是这里，
 /// 三处不会漂移。
 public enum AnselDenoiseNotices {
-    public static let singlePhotoOnly = "模型降噪只处理单张照片"
-    public static let toolMissing = "未找到 ansel-denoise-swift"
-    public static let notADNG = "只支持 DNG"
-    public static func onlyDNG(_ filename: String) -> String { "只支持 DNG：\(filename)" }
+    public static let singlePhotoOnly = Loc.t("模型降噪只处理单张照片")
+    public static let toolMissing = Loc.t("未找到 ansel-denoise-swift")
+    public static let notADNG = Loc.t("只支持 DNG")
+    public static func onlyDNG(_ filename: String) -> String { Loc.t("只支持 DNG：{0}", String(describing: (filename))) }
     public static func modelMissing(_ expectedPath: String) -> String {
-        "未找到降噪模型：\(expectedPath)"
+        Loc.t("未找到降噪模型：{0}", String(describing: (expectedPath)))
     }
-    public static let noLibrary = "未打开库"
-    public static let alreadyRunning = "已有一次模型降噪在进行"
+    public static let noLibrary = Loc.t("未打开库")
+    public static let alreadyRunning = Loc.t("已有一次模型降噪在进行")
 }
 
 // MARK: - 模型 / 工具的定位（四级可注入）
@@ -198,15 +199,15 @@ public enum AnselDenoiseJobError: Error, CustomStringConvertible, Sendable {
     public var description: String {
         switch self {
         case .notADNG(let name):
-            return "只支持 DNG：\(name)"
+            return Loc.t("只支持 DNG：{0}", String(describing: (name)))
         case .toolMissing:
             return AnselDenoiseNotices.toolMissing
         case .modelMissing(let path):
             return AnselDenoiseNotices.modelMissing(path)
         case .denoise(let message):
-            return "降噪失败：\(message)"
+            return Loc.t("降噪失败：{0}", String(describing: (message)))
         case .move(let message):
-            return "产物落盘失败：\(message)"
+            return Loc.t("产物落盘失败：{0}", String(describing: (message)))
         }
     }
 }
@@ -302,7 +303,7 @@ public struct AnselDenoiseJob: Sendable {
             .appendingPathComponent(".denoise-\(UUID().uuidString).dng")
         defer { try? fm.removeItem(at: temp) }
 
-        progress?("降噪 \(source.lastPathComponent)…")
+        progress?(Loc.t("降噪 {0}…", String(describing: (source.lastPathComponent))))
         let report: AnselDenoiseDNGReport
         do {
             report = try client.denoiseImage(model: model, input: source, output: temp, options: options)
@@ -317,7 +318,7 @@ public struct AnselDenoiseJob: Sendable {
         if report.backend != "gpu" && options.useGPU {
             // 不致命（CPU 上结果仍然正确），但这是唯一能把「跑 7 分钟」和「跑 40 秒」区分开的
             // 地方，所以它必须出现在进度文案里，而不是只躺在报告里等人去读。
-            progress?("降噪完成（CPU：--gpu 未生效）")
+            progress?(Loc.t("降噪完成（CPU：--gpu 未生效）"))
         }
         do {
             try? fm.removeItem(at: finalURL)

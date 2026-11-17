@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import QuartzCore
 import CryptoKit
@@ -1236,7 +1237,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                         self.queue.async { graph?.recycle(output: frame.texture) }
                     }
                 case .failure(let error):
-                    self.lastPresentError = "白平衡预览: \(error)"
+                    self.lastPresentError = Loc.t("白平衡预览: {0}", String(describing: (error)))
                 }
                 if let pending = self.pendingWhiteBalancePreview {
                     self.pendingWhiteBalancePreview = nil
@@ -3023,9 +3024,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         public var hint: String {
             switch self {
-            case .sampled: return "取色完成"
-            case .outsideImage: return "点在照片外（letterbox），未取样"
-            case .notReady: return "画面尚未就绪，未取样"
+            case .sampled: return Loc.t("取色完成")
+            case .outsideImage: return Loc.t("点在照片外（letterbox），未取样")
+            case .notReady: return Loc.t("画面尚未就绪，未取样")
             }
         }
     }
@@ -3047,7 +3048,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let milliseconds: Double
 
         public var text: String {
-            String(format: "读数 1 px · S3.6b 输入 · @%d,%d · RGB %@",
+            String(format: Loc.t("读数 1 px · S3.6b 输入 · @%d,%d · RGB %@"),
                    contentX, contentY, rgb.text)
         }
     }
@@ -3062,9 +3063,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         public var hint: String {
             switch self {
-            case .sampled: return "读数 1 px · S3.6b 输入"
-            case .outsideImage: return "点在照片外（letterbox），未取样"
-            case .notReady: return "画面尚未就绪，未取样"
+            case .sampled: return Loc.t("读数 1 px · S3.6b 输入")
+            case .outsideImage: return Loc.t("点在照片外（letterbox），未取样")
+            case .notReady: return Loc.t("画面尚未就绪，未取样")
             }
         }
     }
@@ -3487,7 +3488,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let current = selectedHealSpot?.clampedRadius ?? session.healRadius
         let selected = selectedHealSpot != nil
         setHealRadius(current * factor)
-        if selected { session.commitEdit(label: "修复 半径") }
+        if selected { session.commitEdit(label: Loc.t("修复 半径")) }
     }
 
     /// Redraw the ring from the current radius and pointer. Pure overlay work: no render request,
@@ -3680,7 +3681,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case .adjust(let maskID, let component, let kind):
             session?.setMaskComponentShape(maskID, component: component, shape: shape,
                                            commit: false, label: "")
-            session?.commitEdit(label: "调整\(kind.label)蒙版")
+            session?.commitEdit(label: Loc.t("调整{0}蒙版", String(describing: (kind.label))))
             shapeDragsAdjusted += 1
         }
     }
@@ -4403,7 +4404,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // from the same flips) — and a mode that is on gets one render.
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
-        return session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        return session.commitEdit(label: horizontal ? Loc.t("水平翻转") : Loc.t("垂直翻转"))
     }
 
     /// The document's flips — what the menu ticks and the bar's two switches show.
@@ -4442,7 +4443,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // and the row is committed before anything else can be, because `commitEdit` answers `nil`
         // inside a session (082 measured that on the shipped path: one press left `quarterTurns` at 0
         // and added no row).
-        session.endToolSession(label: "裁切与旋转")
+        session.endToolSession(label: Loc.t("裁切与旋转"))
         // The frame the camera is measured in, **before** the turn — the picture is about to swap its
         // two dimensions, so a window centre in the old frame means something else in the new one.
         //
@@ -4465,7 +4466,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // memory until 应用 is the 「点了一下没反应」 a crop session showed (082 measured it:
         // `quarterTurns` stayed 0 and no row was added). Writing the row first is also what P0-10
         // promised: one press, one snapshot, with or without the frame up.
-        let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
+        let committed = session.commitEdit(label: clockwise ? Loc.t("顺时针旋转 90°") : Loc.t("逆时针旋转 90°"),
                                            coalesce: false)
         // **The picture turned, so the camera turns with it** (2026-11-02). The window centre is stored
         // in the photograph's own (turned) pixels; a quarter turn renames those axes, so leaving the
@@ -4543,16 +4544,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let candidates = measured.blackCandidates(sampleStride: 5)
         let rawValue = candidates.min
         let offset = Self.autoBlackOffset(for: rawValue)
-        print(String(format: "AUTO BLACK · min %.6f · 候选 %d → %.4f",
+        print(String(format: Loc.t("AUTO BLACK · min %.6f · 候选 %d → %.4f"),
                      candidates.min, candidates.count, offset))
         if offset == LightGroup.blackOffsetRange.lowerBound
             || offset == LightGroup.blackOffsetRange.upperBound {
-            print(String(format: "AUTO BLACK · min %.6f → offset 钳到 ±0.01", candidates.min))
+            print(String(format: Loc.t("AUTO BLACK · min %.6f → offset 钳到 ±0.01"), candidates.min))
         }
         guard abs(offset - session.edit.light.blackOffset) >= 1e-9 else { return nil }
         session.applyEdit { $0.light.blackOffset = offset }
         requestEditRender()
-        session.commitEdit(label: "黑电平 · 自动", coalesce: false)
+        session.commitEdit(label: Loc.t("黑电平 · 自动"), coalesce: false)
         return offset
     }
 

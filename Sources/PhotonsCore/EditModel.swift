@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - Document model
@@ -2112,16 +2113,16 @@ public struct CurveGroup: Sendable, Equatable, Codable {
                 // renders, it is just neutral) and the rest of the document loads normally. Refusing
                 // the whole photo because one group cannot be read would be a worse failure.
                 v.decodeWarnings = ["curve.format version \(format.version) > \(CurveFormat.current.version): "
-                                    + "曲线未加载（保持恒等），其余字段照常"]
+                                    + Loc.t("曲线未加载（保持恒等），其余字段照常")]
                 self = v
                 return
             }
             unit = format.version <= 1 ? .cells(max: Swift.max(format.max, 1.0)) : .coordinate
             if format.version >= 2, format.type != CurveFormat.doubleType {
-                warnings.append("curve.format type \"\(format.type)\" 不是 \"double\": 按 0…2 坐标读")
+                warnings.append(Loc.t("curve.format type \"{0}\" 不是 \"double\": 按 0…2 坐标读", String(describing: (format.type))))
             }
             if format.version >= 2, format.max != CurvePoint.maximum {
-                warnings.append("curve.format max \(format.max) ≠ \(CurvePoint.maximum): 按比例换算")
+                warnings.append(Loc.t("curve.format max {0} ≠ {1}: 按比例换算", String(describing: (format.max)), String(describing: (CurvePoint.maximum))))
             }
         }
         /// One point as it arrived.
@@ -2214,8 +2215,8 @@ public struct CurveCoordinateOutOfRange: Error, Equatable, CustomStringConvertib
     }
 
     public var description: String {
-        "曲线坐标 \(axis) = \(value) 超出 0…\(CurvePoint.maximum)"
-            + "（当前只支持到 +4 EV；将来支持 +5 EV 时把最大值改成 2.25 并升 curve.format version）"
+        Loc.t("曲线坐标 {0} = {1} 超出 0…{2}", String(describing: (axis)), String(describing: (value)), String(describing: (CurvePoint.maximum)))
+            + Loc.t("（当前只支持到 +4 EV；将来支持 +5 EV 时把最大值改成 2.25 并升 curve.format version）")
     }
 }
 
@@ -2466,7 +2467,7 @@ public struct ColorGroup: Sendable, Equatable, Codable {
 /// 101 — the ninth selector's name lives in the core alongside the eight (`HSLBands.bandNames`), so the
 /// card does not hard-write a name a future rename would leave behind.
 extension HSLBands {
-    public static let globalBandName = "全局"
+    public static let globalBandName = Loc.t("全局")
 }
 
 public struct HSLBand: Sendable, Equatable, Codable, Hashable {

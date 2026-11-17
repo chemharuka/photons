@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
@@ -127,7 +128,7 @@ public final class EditorWindowController: NSWindowController {
     /// the menu command means, and the sheet's 保存为预设… is where a narrower save belongs (081 §4).
     @objc public func newPresetFromCurrentAction(_ sender: Any?) {
         guard session.anchorAsset != nil else { return }
-        guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+        guard let name = askPresetName(Loc.t("预设 {0}", String(describing: (session.presetRecords.count + 1)))) else { return }
         session.createPresetFromCurrent(named: name)
     }
 
@@ -138,12 +139,12 @@ public final class EditorWindowController: NSWindowController {
     /// `presentCopySheet`); the shipped value is the alert.
     public var askPresetName: (String) -> String? = { defaultName in
         let alert = NSAlert()
-        alert.messageText = "新建预设"
-        alert.informativeText = "当前照片的外观会保存为预设（不含蒙版）。"
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = Loc.t("新建预设")
+        alert.informativeText = Loc.t("当前照片的外观会保存为预设（不含蒙版）。")
+        alert.addButton(withTitle: Loc.t("保存"))
+        alert.addButton(withTitle: Loc.t("取消"))
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.placeholderString = "预设名称"
+        field.placeholderString = Loc.t("预设名称")
         field.stringValue = defaultName
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -329,7 +330,7 @@ public final class EditorWindowController: NSWindowController {
             session.copySettingsFromAnchor(selection: selection)
         case .savePreset(let selection):
             // 081 §4: the sheet's 保存为预设… — the checked cards on the anchor, stored as a preset.
-            guard let name = askPresetName("预设 \(session.presetRecords.count + 1)") else { return }
+            guard let name = askPresetName(Loc.t("预设 {0}", String(describing: (session.presetRecords.count + 1)))) else { return }
             session.createPresetFromCurrent(named: name, sections: selection.sections)
         }
     }
@@ -471,7 +472,7 @@ public final class EditorWindowController: NSWindowController {
         case #selector(undoAction(_:)):
             // Title carries the action being taken back ("撤销 Exposure"), and the item is grey
             // when there is nothing behind the cursor — a menu that lies about undo is a bug.
-            item.title = session.undoLabel.map { "撤销 \($0)" } ?? "撤销"
+            item.title = session.undoLabel.map { Loc.t("撤销 {0}", String(describing: ($0))) } ?? Loc.t("撤销")
             return session.canUndo
         case #selector(toggleCropAction(_:)):
             // Ticked while the frame is up, and enabled only where there is a photo to crop.
@@ -487,29 +488,29 @@ public final class EditorWindowController: NSWindowController {
             // rule; these two verbs stay on the responder chain for the panel and `--ui-smoke`.)
             return rootView.loupeController.isCropToolActive
         case #selector(redoAction(_:)):
-            item.title = session.redoLabel.map { "重做 \($0)" } ?? "重做"
+            item.title = session.redoLabel.map { Loc.t("重做 {0}", String(describing: ($0))) } ?? Loc.t("重做")
             return session.canRedo
         case #selector(toggleShowOriginalAction(_:)):
             // Ticked while the canvas is showing the decode; the title says which picture the click
             // would bring back, so an item that is on does not read like a command to turn it on.
             item.state = rootView.loupeController.showOriginal ? .on : .off
-            item.title = rootView.loupeController.showOriginal ? "显示原图（已开启）" : "显示原图"
+            item.title = rootView.loupeController.showOriginal ? Loc.t("显示原图（已开启）") : Loc.t("显示原图")
             return session.mode == .loupe && session.anchorID != nil
         case #selector(toggleCompareAction(_:)):
             item.state = rootView.loupeController.compareSplit == nil ? .off : .on
             if let split = rootView.loupeController.compareSplit {
                 // The title carries the state the tick cannot: which way the line runs and where it is.
-                item.title = "前后对比（\(split.axis.displayName) "
+                item.title = Loc.t("前后对比（{0} ", String(describing: (split.axis.displayName)))
                     + "\(Int((split.fraction * 100).rounded())) %）"
             } else {
-                item.title = "前后对比"
+                item.title = Loc.t("前后对比")
             }
             return session.mode == .loupe && session.anchorID != nil
         case #selector(toggleCompareAxisAction(_:)):
             // Grey until 对比 is on (there is no line to turn), then it names the axis a click would
             // switch *to*, which is what the title promises.
             let axis = rootView.loupeController.compareSplit?.axis ?? .vertical
-            item.title = "对比方向：" + axis.displayName
+            item.title = Loc.t("对比方向：") + axis.displayName
             return rootView.loupeController.compareSplit != nil
         case #selector(showGridAction(_:)):
             item.state = session.mode == .grid ? .on : .off
@@ -529,7 +530,7 @@ public final class EditorWindowController: NSWindowController {
             // Grey while a text field owns the keyboard (⌘C is the text field's) and with no photo.
             guard !isTextEditing, session.canCopySettings else { return false }
             if item.action == #selector(copySettingsAction(_:)) {
-                item.title = session.copiedSettings.map { "复制设置（\($0.fieldCount) 项）" } ?? "复制设置"
+                item.title = session.copiedSettings.map { Loc.t("复制设置（{0} 项）", String(describing: ($0.fieldCount))) } ?? Loc.t("复制设置")
             }
             return true
         case #selector(pasteSettingsAction(_:)), #selector(pasteSettingsWithChoicesAction(_:)):
@@ -538,7 +539,7 @@ public final class EditorWindowController: NSWindowController {
                 // The count is the number of photos the paste will write, not the number selected:
                 // a photo that already holds these values still gets a report but no row.
                 let count = session.metadataTargetIDs.count
-                item.title = count > 1 ? "粘贴设置到 \(count) 张" : "粘贴设置"
+                item.title = count > 1 ? Loc.t("粘贴设置到 {0} 张", String(describing: (count))) : Loc.t("粘贴设置")
             }
             return true
         case #selector(zoomFitAction(_:)):
@@ -596,8 +597,8 @@ public final class EditorWindowController: NSWindowController {
             // ≥ 2 selected photos: a "stack" of one would hide its own badge rule (the capsule needs
             // two) and is exactly the state the catalog refuses to create.
             item.title = session.metadataTargetIDs.count > 2
-                ? "堆叠所选 \(session.metadataTargetIDs.count) 张"
-                : "堆叠所选照片"
+                ? Loc.t("堆叠所选 {0} 张", String(describing: (session.metadataTargetIDs.count)))
+                : Loc.t("堆叠所选照片")
             return session.metadataTargetIDs.count >= 2
         case #selector(ungroupSelectionAction(_:)):
             // Grey unless the selection (or the anchor) touches a stack — a 取消堆叠 with nothing to
@@ -607,8 +608,8 @@ public final class EditorWindowController: NSWindowController {
         case #selector(exportAction(_:)):
             // Nothing selected = nothing to export: grey, not a sheet that says "将导出 0 张".
             item.title = session.selection.count > 1
-                ? "导出 \(session.selection.count) 张…"
-                : "导出…"
+                ? Loc.t("导出 {0} 张…", String(describing: (session.selection.count)))
+                : Loc.t("导出…")
             return !session.selection.isEmpty
         case #selector(applyPresetAction(_:)):
             // Tick the default, so the menu shows which look a new photo would get.

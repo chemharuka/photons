@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import CoreGraphics
 import CoreImage
@@ -32,9 +33,9 @@ public enum GainMapHEICError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .writeFailed(let url, let why):
-            return "could not write the HDR HEIC at \(url.path): \(why)"
+            return Loc.t("无法在 {0} 写出 HDR HEIC：{1}", String(describing: (url.path)), String(describing: (why)))
         case .gainMapFailed(let why):
-            return "could not build the gain map: \(why)"
+            return Loc.t("无法建立增益图：{0}", String(describing: (why)))
         }
     }
 }

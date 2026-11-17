@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// Read side of the DNG writer: everything `DNGRawWriter` needs to know about an existing file,
@@ -29,9 +30,9 @@ struct SourceDNG {
 
         var description: String {
             switch self {
-            case .notLittleEndianTIFF: return "只支持小端（II）TIFF/DNG"
-            case .truncated(let what): return "文件在 \(what) 处被截断"
-            case .noRawSubIFD: return "IFD0 没有 SubIFDs，无法定位 RAW 图像"
+            case .notLittleEndianTIFF: return Loc.t("只支持小端（II）TIFF/DNG")
+            case .truncated(let what): return Loc.t("文件在 {0} 处被截断", String(describing: (what)))
+            case .noRawSubIFD: return Loc.t("IFD0 没有 SubIFDs，无法定位 RAW 图像")
             }
         }
     }
@@ -49,7 +50,7 @@ struct SourceDNG {
             throw ReadError.notLittleEndianTIFF
         }
         guard let ifd0Offset = TIFFReader.u32(data, 4) else {
-            throw ReadError.truncated("IFD0 偏移")
+            throw ReadError.truncated(Loc.t("IFD0 偏移"))
         }
         ifd0 = try TIFFReader.readIFD(data, at: Int(ifd0Offset))
 
@@ -99,7 +100,7 @@ struct SourceDNG {
                 guard let offset = TIFFReader.u32(offsetsEntry.value, i),
                       let count = TIFFReader.u32(countsEntry.value, i) else { break }
                 let start = Int(offset), end = start + Int(count)
-                guard end <= data.count else { throw ReadError.truncated("预览条带 \(i)") }
+                guard end <= data.count else { throw ReadError.truncated(Loc.t("预览条带 {0}", String(describing: (i)))) }
                 chunks.append([UInt8](data[start..<end]))
             }
             if !chunks.isEmpty {
@@ -164,7 +165,7 @@ enum TIFFReader {
     }
 
     static func readIFD(_ data: Data, at offset: Int) throws -> [UInt16: TIFFEntry] {
-        guard let count = u16(data, offset) else { throw SourceDNG.ReadError.truncated("IFD 头") }
+        guard let count = u16(data, offset) else { throw SourceDNG.ReadError.truncated(Loc.t("IFD 头")) }
         var entries: [UInt16: TIFFEntry] = [:]
         entries.reserveCapacity(Int(count))
         for i in 0..<Int(count) {
@@ -172,23 +173,23 @@ enum TIFFReader {
             guard let tag = u16(data, base),
                   let type = u16(data, base + 2),
                   let itemCount = u32(data, base + 4) else {
-                throw SourceDNG.ReadError.truncated("IFD 条目 \(i)")
+                throw SourceDNG.ReadError.truncated(Loc.t("IFD 条目 {0}", String(describing: (i))))
             }
             let size = componentSize(type) * Int(itemCount)
             if size <= 4 {
                 let start = base + 8
                 guard start + size <= data.count else {
-                    throw SourceDNG.ReadError.truncated("IFD 内联值 \(tag)")
+                    throw SourceDNG.ReadError.truncated(Loc.t("IFD 内联值 {0}", String(describing: (tag))))
                 }
                 entries[tag] = TIFFEntry(type: type, count: Int(itemCount),
                                          value: [UInt8](data[start..<start + size]))
             } else {
                 guard let payloadOffset = u32(data, base + 8) else {
-                    throw SourceDNG.ReadError.truncated("IFD 指针 \(tag)")
+                    throw SourceDNG.ReadError.truncated(Loc.t("IFD 指针 {0}", String(describing: (tag))))
                 }
                 let start = Int(payloadOffset)
                 guard start >= 0, start + size <= data.count else {
-                    throw SourceDNG.ReadError.truncated("tag \(tag) 的 payload")
+                    throw SourceDNG.ReadError.truncated(Loc.t("tag {0} 的 payload", String(describing: (tag))))
                 }
                 entries[tag] = TIFFEntry(type: type, count: Int(itemCount),
                                          value: [UInt8](data[start..<start + size]))

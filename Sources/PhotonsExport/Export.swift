@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import PhotonsCore
 import CoreGraphics
@@ -220,11 +221,11 @@ public enum ExportError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .badBitDepth(let f, let b): return "\(f) cannot be written at \(b) bits per channel"
-        case .bitmapContextFailed: return "could not build the output bitmap"
-        case .destinationFailed(let u): return "could not create an image destination at \(u.path)"
-        case .finalizeFailed(let u): return "could not finalize \(u.lastPathComponent)"
-        case .encodeFailed(let m): return "encoding failed: \(m)"
+        case .badBitDepth(let f, let b): return Loc.t("{0} 无法按每通道 {1} 位写出", String(describing: (f)), String(describing: (b)))
+        case .bitmapContextFailed: return Loc.t("无法建立输出位图")
+        case .destinationFailed(let u): return Loc.t("无法在 {0} 建立图像目标", String(describing: (u.path)))
+        case .finalizeFailed(let u): return Loc.t("无法完成文件 {0}", String(describing: (u.lastPathComponent)))
+        case .encodeFailed(let m): return Loc.t("编码失败：{0}", String(describing: (m)))
         }
     }
 }

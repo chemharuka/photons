@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - heal / clone / remove — the spot model
@@ -74,8 +75,8 @@ public enum HealSpotKind: String, Sendable, Codable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .heal: return "修复"
-        case .redeye: return "红眼"
+        case .heal: return Loc.t("修复")
+        case .redeye: return Loc.t("红眼")
         }
     }
 }
@@ -89,8 +90,8 @@ public enum HealMode: String, Sendable, Codable, CaseIterable {
 
     public var label: String {
         switch self {
-        case .heal: return "修复"
-        case .clone: return "克隆"
+        case .heal: return Loc.t("修复")
+        case .clone: return Loc.t("克隆")
         }
     }
 }
@@ -110,9 +111,9 @@ public enum HealSourceStatus: String, Sendable, Codable, Equatable, CaseIterable
 
     public var label: String {
         switch self {
-        case .found: return "已取源"
-        case .noCandidateAccepted: return "带内无可用源"
-        case .searchSkipped: return "未搜索"
+        case .found: return Loc.t("已取源")
+        case .noCandidateAccepted: return Loc.t("带内无可用源")
+        case .searchSkipped: return Loc.t("未搜索")
         }
     }
 }

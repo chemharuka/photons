@@ -3,8 +3,16 @@ import PackageDescription
 
 let package = Package(
     name: "Photons",
+    // 本地化：key 就是中文原文，`Sources/PhotonsLocalization/Resources/<lang>.lproj` 是唯一翻译面。
+    // SwiftPM 要求带 `.lproj` 资源的包声明一个源语言 —— 中文是源语言，en 是译文。
+    // 顺序由 SwiftPM 定：`defaultLocalization` 必须在 `platforms` 之前。
+    defaultLocalization: "zh-Hans",
     platforms: [.macOS(.v14)],
     products: [
+        // 界面文案的唯一来源：中文原文即 key（`Loc.t("效果卡")`），en 表是译文。
+        // 单独成 target 的理由是资源：`.lproj` 必须挂在一个 target 上才会被打进 `Bundle.module`，
+        // 而 PhotonsCore/PhotonsUI/PhotonsApp 都要能读到同一张表。
+        .library(name: "PhotonsLocalization", targets: ["PhotonsLocalization"]),
         .library(name: "PhotonsCore", targets: ["PhotonsCore"]),
         .library(name: "PhotonsExport", targets: ["PhotonsExport"]),
         .library(name: "PhotonsCatalog", targets: ["PhotonsCatalog"]),
@@ -28,14 +36,16 @@ let package = Package(
         // Kernels ship as *copied resources* and are compiled at runtime by Metal.framework.
         // SwiftPM has no dependable .metal build step here, and the Metal toolchain component is a
         // network download that has already failed on this machine (see the session-bus pitfalls).
-        .target(name: "PhotonsCore", resources: [.copy("Kernels")]),
-        .target(name: "PhotonsExport", dependencies: ["PhotonsCore"]),
-        .target(name: "PhotonsExtensions"),
+        .target(name: "PhotonsLocalization", resources: [.process("Resources")]),
+        .target(name: "PhotonsCore", dependencies: ["PhotonsLocalization"], resources: [.copy("Kernels")]),
+        .target(name: "PhotonsExport", dependencies: ["PhotonsCore", "PhotonsLocalization"]),
+        .target(name: "PhotonsExtensions", dependencies: ["PhotonsLocalization"]),
         .target(name: "PhotonsCatalog", dependencies: [
-            "PhotonsCore",
+            "PhotonsCore", "PhotonsLocalization",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
-        .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog"]),
+        .executableTarget(name: "photonsctl", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog",
+                                                             "PhotonsLocalization"]),
         // `PhotonsExport` is here because the export sheet (M5) drives `BatchExporter` from the
         // window: the engine is the only implementation of "render + name + encode + report", and a
         // second copy inside the UI would be the beginning of two exports that disagree.
@@ -44,14 +54,16 @@ let package = Package(
         // `HDRMergeService` — the GPLv3 `hdrmerge-swift` binary is spawned as a child process by that
         // module, never linked, so this edge keeps Photons MIT.
         .target(name: "PhotonsUI", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog",
-                                                  "PhotonsExtensions"],
+                                                  "PhotonsExtensions", "PhotonsLocalization"],
                 resources: []),
-        .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog", "PhotonsUI"]),
-        .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport"]),
+        .executableTarget(name: "PhotonsApp", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsCatalog",
+                                                             "PhotonsUI", "PhotonsLocalization"]),
+        .testTarget(name: "PhotonsCoreTests", dependencies: ["PhotonsCore", "PhotonsExport", "PhotonsLocalization"]),
         .testTarget(name: "PhotonsExportTests", dependencies: ["PhotonsExport", "PhotonsCore"]),
         .testTarget(name: "PhotonsExtensionsTests", dependencies: ["PhotonsExtensions"]),
         .testTarget(name: "PhotonsCatalogTests", dependencies: ["PhotonsCatalog", "PhotonsCore"]),
-        .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI", "PhotonsCatalog", "PhotonsExtensions"]),
+        .testTarget(name: "PhotonsUITests", dependencies: ["PhotonsUI", "PhotonsCatalog", "PhotonsExtensions",
+                                                            "PhotonsLocalization"]),
     ],
     // M0 keeps Swift 5 language mode: CIRAWFilter/MTLTexture are not Sendable and
     // strict-concurrency churn would bury the acceptance harness we are building here.

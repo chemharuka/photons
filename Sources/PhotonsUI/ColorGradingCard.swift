@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -16,9 +17,9 @@ public enum GradeAxis: String, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .hue: return "色相"
-        case .saturation: return "饱和"
-        case .lightness: return "亮度"
+        case .hue: return Loc.t("色相")
+        case .saturation: return Loc.t("饱和")
+        case .lightness: return Loc.t("亮度")
         }
     }
 
@@ -46,9 +47,9 @@ public enum GradeRegion: String, CaseIterable, Sendable, Identifiable {
 
     public var title: String {
         switch self {
-        case .shadows: return "阴影"
-        case .midtones: return "中间调"
-        case .highlights: return "高光"
+        case .shadows: return Loc.t("阴影")
+        case .midtones: return Loc.t("中间调")
+        case .highlights: return Loc.t("高光")
         }
     }
 
@@ -127,7 +128,7 @@ extension GradeWheel {
 final class ColorGradingProbe: NSView {
 
     /// The card's own frame, probed from the card's `.background` so the layout test can say 「行在卡里」.
-    static let cardID = "色彩分级卡"
+    static let cardID = Loc.t("色彩分级卡")
 
     private(set) var rowID: String = ""
 

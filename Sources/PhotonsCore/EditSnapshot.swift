@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - Copy/paste settings (M5)
@@ -139,21 +140,21 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// headers cannot drift apart (`CopySheetCardTests` holds them to `InspectorView`'s titles).
     public var title: String {
         switch self {
-        case .geometry: return "裁切"
-        case .whiteBalance: return "白平衡"
-        case .blackLevel: return "黑电平"
-        case .light: return "Light"
-        case .curve: return "曲线"
-        case .color: return "Color"
-        case .blackAndWhite: return "黑白"
+        case .geometry: return Loc.t("裁切")
+        case .whiteBalance: return Loc.t("白平衡")
+        case .blackLevel: return Loc.t("黑电平")
+        case .light: return Loc.t("明暗")
+        case .curve: return Loc.t("曲线")
+        case .color: return Loc.t("色彩")
+        case .blackAndWhite: return Loc.t("黑白")
         case .hsl: return "HSL"
-        case .colorGrading: return "色彩分级"
-        case .calibration: return "校准"
-        case .detail: return "开发"
-        case .correction: return "校正"
-        case .detailFX: return "细节"
-        case .effects: return "效果"
-        case .masks: return "蒙版"
+        case .colorGrading: return Loc.t("色彩分级")
+        case .calibration: return Loc.t("校准")
+        case .detail: return Loc.t("开发")
+        case .correction: return Loc.t("校正")
+        case .detailFX: return Loc.t("细节")
+        case .effects: return Loc.t("效果")
+        case .masks: return Loc.t("蒙版")
         }
     }
 
@@ -170,7 +171,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// short-edge anchoring).
     public var help: String? {
         self == .masks
-            ? "蒙版按目标照片的短边重新锚定，粘贴时生成新的蒙版 id（目标照片自己的蒙版保留）"
+            ? Loc.t("蒙版按目标照片的短边重新锚定，粘贴时生成新的蒙版 id（目标照片自己的蒙版保留）")
             : nil
     }
 }
@@ -248,33 +249,33 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     /// 「高光恢复」 and 「白 / 黑 / 自然饱和度」 drift away from the panel.
     public var standaloneTitle: String? {
         switch self {
-        case .temperature: return "色温"
-        case .tint: return "色调"
-        case .blackOffset: return "黑电平"
-        case .blackAndWhiteSwitch: return "开关"
-        case .blackAndWhiteMix: return "混合"
-        case .hslHue: return "色相"
-        case .hslSaturation: return "饱和度"
-        case .hslLuminance: return "亮度"
-        case .gradeShadows: return "阴影"
-        case .gradeMidtones: return "中间调"
-        case .gradeHighlights: return "高光"
-        case .sharpening: return "锐化"
-        case .sharpeningRadius: return "锐化半径"
-        case .noiseLuminance: return "降噪"
-        case .noiseColor: return "色彩降噪"
-        case .lensCorrections: return "镜头校正"
-        case .decoderVersion: return "解码器版本"
+        case .temperature: return Loc.t("色温")
+        case .tint: return Loc.t("色调")
+        case .blackOffset: return Loc.t("黑电平")
+        case .blackAndWhiteSwitch: return Loc.t("开关")
+        case .blackAndWhiteMix: return Loc.t("混合")
+        case .hslHue: return Loc.t("色相")
+        case .hslSaturation: return Loc.t("饱和度")
+        case .hslLuminance: return Loc.t("亮度")
+        case .gradeShadows: return Loc.t("阴影")
+        case .gradeMidtones: return Loc.t("中间调")
+        case .gradeHighlights: return Loc.t("高光")
+        case .sharpening: return Loc.t("锐化")
+        case .sharpeningRadius: return Loc.t("锐化半径")
+        case .noiseLuminance: return Loc.t("降噪")
+        case .noiseColor: return Loc.t("色彩降噪")
+        case .lensCorrections: return Loc.t("镜头校正")
+        case .decoderVersion: return Loc.t("解码器版本")
 
-        case .curveWhite: return "白色"
-        case .curveRed: return "红"
-        case .curveGreen: return "绿"
-        case .curveBlue: return "蓝"
-        case .crop: return "裁切"
-        case .straighten: return "拉直"
-        case .flips: return "翻转"
-        case .aspectLock: return "比例"
-        case .quarterTurns: return "旋转"
+        case .curveWhite: return Loc.t("白色")
+        case .curveRed: return Loc.t("红")
+        case .curveGreen: return Loc.t("绿")
+        case .curveBlue: return Loc.t("蓝")
+        case .crop: return Loc.t("裁切")
+        case .straighten: return Loc.t("拉直")
+        case .flips: return Loc.t("翻转")
+        case .aspectLock: return Loc.t("比例")
+        case .quarterTurns: return Loc.t("旋转")
 
         // 325: these are `PanelCardSpec` rows — 曝光/对比/高光/中间调/阴影/白色/黑色, 自然饱和/饱和,
         // 色差 R/B, 暗角, 纹理/清晰度/去噪/去彩噪, 锐化四参, 去雾, 颗粒. Their names are the panel's,
@@ -319,12 +320,12 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
 
         public var title: String {
             switch self {
-            case .all: return "全部"
-            case .basic: return "基本：白平衡 + 黑电平 + 曝光 + 曲线"
-            case .color: return "颜色：颜色 + 黑白 + HSL + 色彩分级 + 开发 + 细节 + 效果"
-            case .geometry: return "几何：裁切"
-            case .whiteBalance: return "仅白平衡"
-            case .none: return "全不选"
+            case .all: return Loc.t("全部")
+            case .basic: return Loc.t("基本：白平衡 + 黑电平 + 曝光 + 曲线")
+            case .color: return Loc.t("颜色：颜色 + 黑白 + HSL + 色彩分级 + 开发 + 细节 + 效果")
+            case .geometry: return Loc.t("几何：裁切")
+            case .whiteBalance: return Loc.t("仅白平衡")
+            case .none: return Loc.t("全不选")
             }
         }
 
@@ -439,9 +440,9 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
 
     /// One line for the dialog's status label.
     public var summary: String {
-        if sections.isEmpty { return "未选任何组：粘贴什么也不会发生" }
+        if sections.isEmpty { return Loc.t("未选任何组：粘贴什么也不会发生") }
         let names = EditSnapshotSection.panelOrder.filter { sections.contains($0) }.map(\.title)
-        return "将复制：\(names.joined(separator: " · "))"
+        return Loc.t("将复制：{0}", String(describing: (names.joined(separator: " · "))))
     }
 }
 

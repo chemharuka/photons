@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -41,7 +42,7 @@ public struct HistoryPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             if rows.isEmpty {
-                Text("还没有编辑")
+                Text(Loc.t("还没有编辑"))
                     .font(.system(size: HistoryPanelLayout.metaFontSize))
                     .foregroundStyle(.tertiary)
             } else {
@@ -75,14 +76,14 @@ public struct HistoryPanel: View {
     /// user reads ("我在第 7 步 / 一共 7 步").
     private var header: some View {
         HStack(spacing: 6) {
-            Text("历史记录")
+            Text(Loc.t("历史记录"))
                 .font(.system(size: 11, weight: .bold))
             Text("\(rows.count)")
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
             Spacer(minLength: 0)
             if let undo = session.undoLabel {
-                Text("可撤销 \(undo)")
+                Text(Loc.t("可撤销 {0}", String(describing: (undo))))
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -134,7 +135,7 @@ public struct HistoryPanel: View {
         .contentShape(Rectangle())
         .onTapGesture { session.jumpToHistory(seq: row.seq) }
         .onAppear { builtRowIndexes.insert(row.index) }
-        .help(row.isCurrent ? "现在显示的是这一步" : "回到这一步（不新增历史）")
+        .help(row.isCurrent ? Loc.t("现在显示的是这一步") : Loc.t("回到这一步（不新增历史）"))
         .accessibilityIdentifier("inspector.history.row.\(row.seq)")
     }
 
@@ -150,7 +151,7 @@ public struct HistoryPanel: View {
                 Button {
                     session.revertHistoryEntry(at: row.index)
                 } label: {
-                    Text("撤销")
+                    Text(Loc.t("撤销"))
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Color.accentColor)
                         .frame(width: HistoryPanelLayout.undoWidth,
@@ -158,8 +159,8 @@ public struct HistoryPanel: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("撤销这一步（改回之前的值）")
-                .accessibilityLabel("撤销第 \(row.seq) 条")
+                .help(Loc.t("撤销这一步（改回之前的值）"))
+                .accessibilityLabel(Loc.t("撤销第 {0} 条", String(describing: (row.seq))))
                 .accessibilityIdentifier("inspector.history.undo.\(row.seq)")
             } else {
                 Color.clear

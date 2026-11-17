@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import Observation
@@ -47,12 +48,12 @@ public enum CropAspectPreset: String, Sendable, Equatable, Hashable, CaseIterabl
 
     public var displayName: String {
         switch self {
-        case .original: return "原始"
+        case .original: return Loc.t("原始")
         case .square: return "1:1"
         case .fourThree: return "4:3"
         case .threeTwo: return "3:2"
         case .sixteenNine: return "16:9"
-        case .free: return "自由"
+        case .free: return Loc.t("自由")
         }
     }
 
@@ -771,8 +772,8 @@ public final class CropToolController {
     /// session is open, which is the point: `beginSession` ignores a second open and `endSession`
     /// answers `nil` without one, so nothing here needs to ask the history what it contains.
     private func openGestureSession() {
-        closeToolSession(label: "裁切与旋转")
-        session?.beginToolSession("裁切", label: "裁切与旋转")
+        closeToolSession(label: Loc.t("裁切与旋转"))
+        session?.beginToolSession(Loc.t("裁切"), label: Loc.t("裁切与旋转"))
     }
 
     /// Close the session, writing **one** row for what it changed (`base → edit`), or nothing when it
@@ -893,9 +894,9 @@ public final class CropToolController {
         // write the document and commit its **one** row directly. Asking the session for the row
         // (`endToolSession`) was the same row only when a session happened to be open; with none it
         // recorded nothing at all and 应用 silently stopped being undoable.
-        closeToolSession(label: "裁切与旋转")
+        closeToolSession(label: Loc.t("裁切与旋转"))
         session.applyEdit { $0.geometry = geometry }
-        let committed = session.commitEdit(label: "裁切与旋转", coalesce: false)
+        let committed = session.commitEdit(label: Loc.t("裁切与旋转"), coalesce: false)
         draft = Draft(geometry: geometry)
         draftPhotoID = session.anchorID
         if committed { appliedCount += 1 }
@@ -915,7 +916,7 @@ public final class CropToolController {
         // back to what it was when the tool was entered, as one undoable row.
         if let session, let entry = entryGeometry, session.edit.geometry != entry {
             session.applyEdit { $0.geometry = entry }
-            _ = session.commitEdit(label: "变换 · 取消", coalesce: false)
+            _ = session.commitEdit(label: Loc.t("变换 · 取消"), coalesce: false)
         }
         draft = Draft(geometry: session?.edit.geometry ?? GeometryGroup.identity)
         draftPhotoID = session?.anchorID
@@ -1642,7 +1643,7 @@ public final class CropToolController {
         // inside a session the row was the whole `base → edit` (crop-so-far **and** fit in one row,
         // so ⌘Z put both back), outside it was the fit alone. Same 40 px of keystone, two different
         // documents after the next ⌘Z — the user's 「只要历史里有东西，变换就不对」.
-        closeToolSession(label: "引导线")
+        closeToolSession(label: Loc.t("引导线"))
         let before = session.edit.geometry
         let stored = lines.map(Self.stored)
         session.applyEdit {
@@ -1661,7 +1662,7 @@ public final class CropToolController {
             $0.geometry.guideLines = stored
         }
         guard session.edit.geometry != before else { return }
-        _ = session.commitEdit(label: "引导线", coalesce: false)
+        _ = session.commitEdit(label: Loc.t("引导线"), coalesce: false)
         // The draft carries the document's keystone so the overlay, the red-frame predicate and
         // 应用 all see the picture the fit just produced.
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
@@ -2020,7 +2021,7 @@ public final class CropToolController {
     /// nothing at all (「也不需要提示」).
     public var guideLineStatusText: String? {
         if let index = guideLineOffendingIndex {
-            return String(format: "第 %d 条线与其它线矛盾，已忽略", index + 1)
+            return String(format: Loc.t("第 %d 条线与其它线矛盾，已忽略"), index + 1)
         }
         if let failure = guideLineFailure {
             // 367 — only `.outOfRange` asks about the gap; the other reasons print their own number.
@@ -2032,7 +2033,7 @@ public final class CropToolController {
                                    spacingFraction: spacing)
         }
         if guideLinePairInsufficient {
-            return "一竖一横，再各画一条即可校正"
+            return Loc.t("一竖一横，再各画一条即可校正")
         }
         guard let solution = guideLineSolution else { return nil }
         if abs(solution.vertical) < 0.05, abs(solution.horizontal) < 0.05,
@@ -2043,7 +2044,7 @@ public final class CropToolController {
         if let rotation = solution.rotationFailure {
             text += " · " + rotation.message(measuredWorstPairwise: solution.straightenRequested)
         }
-        if GuideLinesSolve.isMixedDirection(guideLines) { text += " · 另一方向请再画两条" }
+        if GuideLinesSolve.isMixedDirection(guideLines) { text += Loc.t(" · 另一方向请再画两条") }
         return text
     }
 
@@ -2068,7 +2069,7 @@ public final class CropToolController {
         session.applyEdit { $0.geometry.rotationDegrees = angle }
         // 356 — one door, and it never asks the history which case it is: a session that is open
         // (the mouse-down's) records `base → edit`; with none, the same one row is committed.
-        let committed = closeGestureSession(label: "转动")
+        let committed = closeGestureSession(label: Loc.t("转动"))
         // 317 — 「改角度之后」: the released 转动 gets the one-shot question too (the bare slider's
         // `setAngle` asks it per move; this is the gesture's `.inside`-rotate twin).
         inscribeIntoPixelsIfNeeded()
@@ -2172,7 +2173,7 @@ public final class CropToolController {
         // crop-so-far, which 应用 would have written anyway) instead of ending-and-reopening around
         // itself. The old shape's answer — one row or two, and therefore what the next ⌘Z restored —
         // depended on whether the history happened to hold a session.
-        closeToolSession(label: "裁切与旋转")
+        closeToolSession(label: Loc.t("裁切与旋转"))
 
         let before = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
         session.applyEdit { model in
@@ -2181,7 +2182,7 @@ public final class CropToolController {
         }
         let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
         // A flip is discrete (072 §F): never fold it into the drag before it.
-        session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转", coalesce: false)
+        session.commitEdit(label: horizontal ? Loc.t("水平翻转") : Loc.t("垂直翻转"), coalesce: false)
         // The answer the bar needs is "did the document move", not "was a row written".
         return after != before
     }
@@ -2200,11 +2201,11 @@ public final class CropToolController {
         // 356 — a turn is a click, not a gesture: close a gesture's session (one row for the
         // crop-so-far, or nothing) and write the turn's own row. No reopen, so a second press cannot
         // take a different door because of what the first one left behind.
-        closeToolSession(label: "裁切与旋转")
+        closeToolSession(label: Loc.t("裁切与旋转"))
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
         guard turned else { return false }
-        session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°", coalesce: false)
+        session.commitEdit(label: clockwise ? Loc.t("顺时针旋转 90°") : Loc.t("逆时针旋转 90°"), coalesce: false)
         return true
     }
 
@@ -3098,7 +3099,7 @@ public final class CropToolController {
         dragBase = nil
         dragPinned = false
         rotating = false
-        closeToolSession(label: "裁切与旋转")
+        closeToolSession(label: Loc.t("裁切与旋转"))
     }
 
     /// Escape mid-drag: the frame goes back to where it was at mouse-down, and nothing is written.
