@@ -27,7 +27,7 @@ final class BlackLevelCardTests: XCTestCase {
         }
         // 用户 2026-10-27：「黑电平移动到白平衡下方」。
         XCTAssertEqual(titles[wb + 1], "黑电平", "黑电平必须紧跟 白平衡，实际 \(titles)")
-        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "Light") else {
+        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "明暗") else {
             return XCTFail("missing 黑电平/Light in \(titles)")
         }
         XCTAssertEqual(black + 1, light, "黑电平在白平衡与 Light 之间，实际 \(titles)")
@@ -223,7 +223,8 @@ final class BlackLevelCardTests: XCTestCase {
                      value.minX, value.minY, value.width, value.height))
 
         XCTAssertLessThan(icon.midY, value.midY, "图标必须在数值行的上方")
-        XCTAssertEqual(icon.maxX, value.maxX, accuracy: 1, "图标右缘与数值框右缘对齐")
+        XCTAssertLessThanOrEqual(icon.maxX, value.maxX, "自动按钮与复位按钮并排，位于数值列上方")
+        XCTAssertGreaterThanOrEqual(icon.maxX, value.minX, "自动按钮不得挤入标题区域")
         XCTAssertGreaterThanOrEqual(icon.width, 18, "命中区 ≥ 18 pt 宽")
         XCTAssertGreaterThanOrEqual(icon.height, 18, "命中区 ≥ 18 pt 高")
         XCTAssertFalse(probe.hasBorder, "裸图标：没有底、没有边、没有胶囊")

@@ -1,0 +1,8125 @@
+{
+  "35ce8e8e8945": {
+    "zh": "效果卡",
+    "files": [
+      "Sources/PhotonsUI/EffectsRowProbe.swift"
+    ]
+  },
+  "dcfc67916f26": {
+    "zh": "按拍摄时间排序",
+    "files": [
+      "Sources/PhotonsUI/PhotoSortOrder.swift"
+    ]
+  },
+  "7df98ca53720": {
+    "zh": "新→旧",
+    "files": [
+      "Sources/PhotonsUI/PhotoSortOrder.swift"
+    ]
+  },
+  "21551945f873": {
+    "zh": "旧→新",
+    "files": [
+      "Sources/PhotonsUI/PhotoSortOrder.swift"
+    ]
+  },
+  "18f0d47772f6": {
+    "zh": "按拍摄时间排序：{0}",
+    "files": [
+      "Sources/PhotonsUI/PhotoSortOrder.swift"
+    ]
+  },
+  "a6e6a44d6eb3": {
+    "zh": "%+.2f 档 (%.1f×)",
+    "files": [
+      "Sources/PhotonsUI/HistogramPlot.swift"
+    ]
+  },
+  "74091edcb8a2": {
+    "zh": "还没有编辑",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "5467922dce50": {
+    "zh": "历史记录",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift"
+    ]
+  },
+  "7affef8f8cb0": {
+    "zh": "可撤销 {0}",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "01500a28ceab": {
+    "zh": "现在显示的是这一步",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "e8ae096f88f7": {
+    "zh": "回到这一步（不新增历史）",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "926a50b98ece": {
+    "zh": "撤销",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "d9c3499fda95": {
+    "zh": "撤销这一步（改回之前的值）",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "ed491fe110cd": {
+    "zh": "撤销第 {0} 条",
+    "files": [
+      "Sources/PhotonsUI/HistoryPanel.swift"
+    ]
+  },
+  "37a693925054": {
+    "zh": "修复",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsUI/RedEyeTool.swift",
+      "Sources/PhotonsUI/HealCardPanel.swift",
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "0032cbfaefd6": {
+    "zh": "删除修复",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "9890bcbfada3": {
+    "zh": "修复 半径",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsUI/LoupeController.swift",
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "737840b7f991": {
+    "zh": "修复 模式",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "a8c81f93f2e0": {
+    "zh": "浏览",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "05731b92ad31": {
+    "zh": "画笔",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "96960e526529": {
+    "zh": "擦除",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "611ce5b3f9f5": {
+    "zh": "蒙版 {0}",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "552307889f48": {
+    "zh": "新建蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "9c200544f34b": {
+    "zh": "删除蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "f217ac378167": {
+    "zh": "启用蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "f0320186e4d7": {
+    "zh": "停用蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift"
+    ]
+  },
+  "e7c802f4a183": {
+    "zh": "蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "122373891fa5": {
+    "zh": "调整{0}蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskCanvasController.swift",
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "ae72b532f4b8": {
+    "zh": "范围",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b5d8ead3660f": {
+    "zh": "过渡",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "3ff6d1c07cfc": {
+    "zh": "色相",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsUI/HSLPanel.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "1394938c0161": {
+    "zh": "饱和",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsUI/HSLPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "8e2f643ad160": {
+    "zh": "亮度",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift",
+      "Sources/PhotonsUI/CurvePanel.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsUI/HSLPanel.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "901726e21e1b": {
+    "zh": "点颜色 取样",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "baebb0e95d28": {
+    "zh": "点颜色 删除色框",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "1d244f60cfd9": {
+    "zh": "尚未取样",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "9fdc18a10d3e": {
+    "zh": "点颜色吸管：点击画布上要调的颜色（Esc 取消）",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "44586278ee44": {
+    "zh": "采样色 H %.0f° · C %.3f",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "f3834ffce178": {
+    "zh": "点颜色卡",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "449b3214104b": {
+    "zh": "点颜色色块",
+    "files": [
+      "Sources/PhotonsUI/PointColorPanel.swift"
+    ]
+  },
+  "fa8d0c1aaee6": {
+    "zh": "（8-bit 图层）",
+    "files": [
+      "Sources/PhotonsUI/DisplayHeadroom.swift"
+    ]
+  },
+  "71fcd682fb6a": {
+    "zh": "（无窗口）",
+    "files": [
+      "Sources/PhotonsUI/DisplayHeadroom.swift"
+    ]
+  },
+  "8c502b50fbd5": {
+    "zh": "SDR 显示器 · headroom {0}×{1}",
+    "files": [
+      "Sources/PhotonsUI/DisplayHeadroom.swift"
+    ]
+  },
+  "eb3108333cd4": {
+    "zh": "HDR 显示器 · headroom {0}×",
+    "files": [
+      "Sources/PhotonsUI/DisplayHeadroom.swift"
+    ]
+  },
+  "8a7704ad6bc8": {
+    "zh": "屏 %.2f×",
+    "files": [
+      "Sources/PhotonsUI/DisplayHeadroom.swift"
+    ]
+  },
+  "d926341c8b0a": {
+    "zh": "白平衡",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "5454c06bc55f": {
+    "zh": "黑电平",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "751d6ddba1e9": {
+    "zh": "明暗",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "f1de1e2621de": {
+    "zh": "预设",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "e40fffdb9798": {
+    "zh": "色彩",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "937dc7bf30af": {
+    "zh": "曲线",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "5ce4ed5694c3": {
+    "zh": "细节",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift",
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "bf73d1a0a939": {
+    "zh": "校正",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "86a00cf74253": {
+    "zh": "效果",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "749528de0125": {
+    "zh": "日光",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "ff5d8d4c0f3a": {
+    "zh": "吸管白平衡",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "1c487acf1801": {
+    "zh": "反转",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "1b76c104f489": {
+    "zh": "混合",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/MaskListPanel.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "484d55613910": {
+    "zh": "无",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsUI/FilterBar.swift",
+      "Sources/PhotonsCore/HistoryFields.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "53c9aca4b68c": {
+    "zh": "适应",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/ZoomGlassSlider.swift",
+      "Sources/PhotonsUI/LoupeZoom.swift"
+    ]
+  },
+  "4e1449e7d5e5": {
+    "zh": "显示",
+    "files": [
+      "Sources/PhotonsUI/UISmokeRunner.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "468d36ca4456": {
+    "zh": "原文件已移动",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "a47ac7c53334": {
+    "zh": "移出照片库",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "c97a160dd1d9": {
+    "zh": "移出并删除…",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "a1af92e74dba": {
+    "zh": "查找丢失的文件…",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "c189d87c3bcd": {
+    "zh": "移出并删除？",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "612ac51e03d7": {
+    "zh": "移出并删除",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "2cd0f3be8738": {
+    "zh": "取消",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift",
+      "Sources/PhotonsUI/BrowserPaneController.swift",
+      "Sources/PhotonsUI/BackgroundTasks.swift",
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift",
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift",
+      "Sources/PhotonsUI/CopySettingsSheet.swift",
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsUI/ImportPanel.swift",
+      "Sources/PhotonsUI/AlbumNamePrompt.swift",
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "1247b9f2ed1b": {
+    "zh": "将从库中移出 {0} 个条目，并把其中 {1} 个原文件移到废纸篓（可在废纸篓中还原）。",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "8e00c54e8b1a": {
+    "zh": "查找丢失的文件",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "c6ceb44dccd4": {
+    "zh": "选择一个文件夹，按其子文件夹中与条目同名的文件重新链接。",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "44ce7ae909bb": {
+    "zh": "搜索",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "fbe396053ea4": {
+    "zh": "已重新链接 {0} 个",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "1b29ccc137b8": {
+    "zh": "未找到 {0} 个",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "1fbeafc6c6d7": {
+    "zh": "内容不一致 {0} 个（已跳过）",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "9876a61f221e": {
+    "zh": "写入失败 {0} 个",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "b646ca8104d5": {
+    "zh": "没有找到与条目内容一致的丢失文件；条目仍标记为「原文件已移动」。",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "3910992c9ab5": {
+    "zh": "加入相册",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "39ef5d30d1ff": {
+    "zh": "移出相册",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "c949e18a954d": {
+    "zh": "有条目未能移出（文件没有删除，条目仍在库中）：\n",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift"
+    ]
+  },
+  "f867f3417859": {
+    "zh": "好",
+    "files": [
+      "Sources/PhotonsUI/MissingFilesUI.swift",
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift",
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift",
+      "Sources/PhotonsUI/LibraryHistory.swift",
+      "Sources/PhotonsUI/LCCWindowController.swift",
+      "Sources/PhotonsUI/AlbumNamePrompt.swift",
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a356c8190a5c": {
+    "zh": "素材浏览",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "1182c5454f11": {
+    "zh": "未选择",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift",
+      "Sources/PhotonsUI/PanoramaBodyOrientationPicker.swift"
+    ]
+  },
+  "bee92e28f9f7": {
+    "zh": "已选 {0}",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift",
+      "Sources/PhotonsUI/TopBarStatusCluster.swift"
+    ]
+  },
+  "79510f06e3d6": {
+    "zh": "{0} 张照片",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "b49fdf55eefb": {
+    "zh": "全部照片",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift",
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "38793c1c1c23": {
+    "zh": "相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "c2dbc285075b": {
+    "zh": "新建相册…",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "93a26fe601f5": {
+    "zh": "重命名相册…",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "82afe38919be": {
+    "zh": "删除相册…",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "b349139dc732": {
+    "zh": "把选中的照片加入此相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "90e085319bbd": {
+    "zh": "把选中的照片移出此相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "6135d4159e89": {
+    "zh": "移除",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "339a0c38813e": {
+    "zh": "从照片库移除「{0}」？",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "8256f99d7b73": {
+    "zh": "「{0}」下没有照片，只会把它从左栏移除。磁盘上的文件夹不会被删除。",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "ba37b4c452fe": {
+    "zh": "{0} 张照片将从照片库移除。磁盘上的原文件不会被删除，\n该操作不能撤销（需要重新导入才能找回）。",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "5abd22b40f26": {
+    "zh": "从照片库移除「{0}」（空文件夹）…",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "69f8fa882c9f": {
+    "zh": "从照片库移除「{0}」（{1} 张）…",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "997d983f6787": {
+    "zh": "新建相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "b664ca5f7a47": {
+    "zh": "相册名",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift",
+      "Sources/PhotonsUI/AlbumNamePrompt.swift"
+    ]
+  },
+  "bfa3ef7590c2": {
+    "zh": "重命名相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "ee8b06866698": {
+    "zh": "删除相册「{0}」？",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "aa040a8c924f": {
+    "zh": "相册里的 {0} 张照片不会被删除，只是不再属于这个相册。",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "44cec5c2a07e": {
+    "zh": "删除相册",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "7c7802d8adae": {
+    "zh": "文件夹",
+    "files": [
+      "Sources/PhotonsUI/BrowserPaneController.swift"
+    ]
+  },
+  "8fb3a3261b43": {
+    "zh": "等待处理",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "e8e08b0f61dd": {
+    "zh": "正在取消…",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "6b820899c037": {
+    "zh": "应用缺少拼接工作进程，请重新构建完整应用。",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "c3bae02b0ab3": {
+    "zh": "准备拼接任务…",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "da27780eaea7": {
+    "zh": "拼接工作进程意外结束；主程序仍可继续使用。",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "9d399493510f": {
+    "zh": "正在导入照片库…",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "88f90bbd656e": {
+    "zh": "已导出，自动导入失败：{0}",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "36202891817c": {
+    "zh": "已导出并导入照片库",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "a37778f17c5f": {
+    "zh": "已取消",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift",
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "fe76e31d24dd": {
+    "zh": "显示文件",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "4c46c904395c": {
+    "zh": "后台任务",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "349c4b7eb1f3": {
+    "zh": "清除已完成",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "4277db85512d": {
+    "zh": "没有后台任务",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "5253040db864": {
+    "zh": "任务",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "5cf043ec96db": {
+    "zh": "任务 {0}",
+    "files": [
+      "Sources/PhotonsUI/BackgroundTasks.swift"
+    ]
+  },
+  "cfb8519677bc": {
+    "zh": "垂直透视",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift",
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "1ebf0a707159": {
+    "zh": "水平透视",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift",
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "4c08b8c1fb12": {
+    "zh": "再画一条（需 2 条）",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "a748f82e019a": {
+    "zh": "每个方向最多 2 条",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "a20d42cdd4a4": {
+    "zh": "两条线几乎平行，没有信息",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "59c93b5f7d3a": {
+    "zh": "这两条线偏轴太多，校正不了（先记下）",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "1e1867997154": {
+    "zh": "这两条线偏轴 %.1f°，校正不了（先记下）",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "489cb50a45b7": {
+    "zh": "这些线互相矛盾，未应用",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "d874b7115943": {
+    "zh": "这些线互相矛盾（差 %.1f°），未应用",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "67ce5d681581": {
+    "zh": "新线与已有线重复，未应用",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "2a5f43991b82": {
+    "zh": "两条线挨太近，判断不出透视",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "2ecddabad4a2": {
+    "zh": "需要的透视超出 ±{0}",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "ade6d6355834": {
+    "zh": "线间还差 %.1f°",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "2f1c193cbe67": {
+    "zh": "，透视超出 ±{0}",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "93154a18f874": {
+    "zh": "摆正超 ±45°（透视已应用）",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "24b81d9e2979": {
+    "zh": "垂直透视 %+.1f / 水平透视 %+.1f",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "0d0d8f8c6f0f": {
+    "zh": "垂直透视 %+.1f",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "77bfe3cb11bf": {
+    "zh": "水平透视 %+.1f",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "285dc62bb64f": {
+    "zh": "%@ · 残差 %.2f°",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "dea4134c882e": {
+    "zh": " · 摆正 %+.1f°",
+    "files": [
+      "Sources/PhotonsUI/GuideLinesSolve.swift"
+    ]
+  },
+  "a306ecabb07b": {
+    "zh": "未打开库",
+    "files": [
+      "Sources/PhotonsUI/TopBarStatusCluster.swift",
+      "Sources/PhotonsUI/BuildStamp.swift",
+      "Sources/PhotonsUI/AssetGridController.swift",
+      "Sources/PhotonsUI/CatalogSession.swift",
+      "Sources/PhotonsUI/ImportCoordinator.swift"
+    ]
+  },
+  "6373a0c6419a": {
+    "zh": "{0} 张",
+    "files": [
+      "Sources/PhotonsUI/TopBarStatusCluster.swift",
+      "Sources/PhotonsUI/HDRMergeProgressOverlay.swift"
+    ]
+  },
+  "8cb7c0a54b21": {
+    "zh": "原始",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "d1047eed5dd5": {
+    "zh": "自由",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "53f37fa28f71": {
+    "zh": "裁切与旋转",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "e9f8face2f69": {
+    "zh": "裁切",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/AppMenu.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "740d9404403a": {
+    "zh": "变换 · 取消",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "05aa77ec19ba": {
+    "zh": "引导线",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "3fcbcabb4e93": {
+    "zh": "第 %d 条线与其它线矛盾，已忽略",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "f77a3322c808": {
+    "zh": "一竖一横，再各画一条即可校正",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "dfaa6c755550": {
+    "zh": " · 另一方向请再画两条",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift"
+    ]
+  },
+  "0cf81e4c2481": {
+    "zh": "转动",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "44775fbf3342": {
+    "zh": "水平翻转",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/LoupeController.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "fcd75ef0a054": {
+    "zh": "垂直翻转",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/LoupeController.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "980edb5bf6fd": {
+    "zh": "顺时针旋转 90°",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/LoupeController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "d4b56c062003": {
+    "zh": "逆时针旋转 90°",
+    "files": [
+      "Sources/PhotonsUI/CropToolController.swift",
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/LoupeController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "e118fce7d32d": {
+    "zh": "HDR 合成",
+    "files": [
+      "Sources/PhotonsUI/HDRMergeProgressOverlay.swift"
+    ]
+  },
+  "328011393a8a": {
+    "zh": "校正卡",
+    "files": [
+      "Sources/PhotonsUI/ChromaticAberrationProbe.swift"
+    ]
+  },
+  "91439ce969a6": {
+    "zh": "细节卡",
+    "files": [
+      "Sources/PhotonsUI/ChromaticAberrationProbe.swift"
+    ]
+  },
+  "fcac10f00bfe": {
+    "zh": "黑白卡",
+    "files": [
+      "Sources/PhotonsUI/BlackAndWhiteCardProbe.swift"
+    ]
+  },
+  "92d9be0a0e94": {
+    "zh": "开关",
+    "files": [
+      "Sources/PhotonsUI/BlackAndWhiteCardProbe.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "be8f84d4ac37": {
+    "zh": "堆叠",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "93fa7e05b300": {
+    "zh": "堆叠所选照片",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "b5b27507401e": {
+    "zh": "取消堆叠",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "4f8fea909caf": {
+    "zh": "设为置顶",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "ef5561181489": {
+    "zh": "HDR 合成…",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "def1e7dad5ec": {
+    "zh": "至少需要选中两张 DNG",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "b63d1d1a7229": {
+    "zh": "只支持 DNG：{0}",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "948a32dc1e4d": {
+    "zh": "未找到 hdrmerge-swift",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "c056d3a05da4": {
+    "zh": "把选中的 {0} 张 DNG 合成一张，结果与参与的照片组成新堆叠",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "6dba134c867c": {
+    "zh": "模型降噪…",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "abf5439e2277": {
+    "zh": "在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "b1a4ef613179": {
+    "zh": "<原名>-denoised.dng",
+    "files": [
+      "Sources/PhotonsUI/AssetGridController.swift"
+    ]
+  },
+  "49b2f0995f89": {
+    "zh": "堆叠至少需要选中两张照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "a3d97653c061": {
+    "zh": "选中的照片已经不在库里",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "07652a0ef5f9": {
+    "zh": "这张照片不在任何堆叠里",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "f10e47df4740": {
+    "zh": "已有一次 HDR 合成在进行",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "7fa3da0f7171": {
+    "zh": "准备合成…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "3d89918342b7": {
+    "zh": "预检 {0} 帧…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "acb5e38e6e67": {
+    "zh": "合成结果已经在库里（内容相同），没有新建照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "69094ff50483": {
+    "zh": "合成结果未能加入照片库",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "2f94b35412f1": {
+    "zh": "加入堆叠…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "ded76e19c722": {
+    "zh": "合成完成：{0}×{1}，{2} 帧",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "67c1e05bb305": {
+    "zh": "准备降噪…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "284118e67705": {
+    "zh": "模型降噪：继承编辑",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "7e5e6742f6d5": {
+    "zh": "加入照片库…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "dc3fcda0c135": {
+    "zh": "降噪结果已经在库里（内容相同），没有新建照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "da4bb4c0be39": {
+    "zh": "继承编辑…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "3d187f00165f": {
+    "zh": "组成堆叠…",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "43a02908556a": {
+    "zh": "降噪完成：{0}×{1}，{2} 个 tile",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "01f13cf91d31": {
+    "zh": "先打开库并选中一张照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "d30256810c6e": {
+    "zh": "预设 {0}",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "dcd8f7fb1891": {
+    "zh": "预设没有落地",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "3d9bad4499f0": {
+    "zh": "未选择照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift",
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "34c9dd6890e4": {
+    "zh": "预设需要一个名字",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "36582f53f40a": {
+    "zh": "没有名为“{0}”的预设",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "40614bd1732b": {
+    "zh": "先选中一张照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "bab4a56245d2": {
+    "zh": "这张照片在所选组里没有非默认设置：粘贴不会改动任何字段",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "450f52d15bfd": {
+    "zh": "剪贴板里没有设置：先按 ⌘C 复制",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "09a7365110f1": {
+    "zh": "所选组里没有可粘贴的设置",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "dd90071981ee": {
+    "zh": "没有目标照片",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "ba060fa6bd72": {
+    "zh": "当前照片在工具会话里：先应用或取消裁切/蒙版工具再粘贴",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "d24cf4a6b02b": {
+    "zh": "粘贴设置",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift",
+      "Sources/PhotonsCatalog/Presets.swift"
+    ]
+  },
+  "0e6a8fa0869c": {
+    "zh": "目标照片已经是这些值：没有改动",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "13a46616e16f": {
+    "zh": "未知错误",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "132cba10c735": {
+    "zh": "移出条目失败：{0}",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift"
+    ]
+  },
+  "29b1acd9fb6e": {
+    "zh": "无法保存文件夹访问权限：{0}",
+    "files": [
+      "Sources/PhotonsUI/CatalogSession.swift",
+      "Sources/PhotonsUI/ImportCoordinator.swift"
+    ]
+  },
+  "8b92765d86d0": {
+    "zh": "全景拼接",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "b3ef060e30d6": {
+    "zh": "正在读取镜头 profiles…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "2dce53ce7a65": {
+    "zh": "请输入有效的移轴位置。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "fca735eecc8a": {
+    "zh": "请先选择镜头 profile 并确定传感器尺寸。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "6631ec06dcd5": {
+    "zh": "正在准备 LCC 并自动解算位置…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "299e5b1859ed": {
+    "zh": "正在更新 LCC 校正…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "2f7403431f62": {
+    "zh": "自动解算未完成：{0} 可点击“手动对齐lcc”调整位置。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "a20a67918b78": {
+    "zh": "LCC 自动解算并已应用 · 预览与输出共用同一位置",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "8dc393a05b0d": {
+    "zh": "预览就绪 · 拼接位置已锁定",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "b733a8d2ca5b": {
+    "zh": "LCC 对齐已应用 · 预览与输出共用同一校正位置",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "1eaba71129bf": {
+    "zh": "位置由手动 LCC 对齐确定；可点击照片输入已知读数覆盖。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "3e9efb0180ff": {
+    "zh": "正在自动解算位置…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "a005705ea84c": {
+    "zh": "自动解算完成，请在预览中核对并应用",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "5af8232321e0": {
+    "zh": "按后背型号、尺寸及后背相对机身的方向匹配。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "fe1ba1e1b306": {
+    "zh": "手动：44 × 33",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "288f3856c6ea": {
+    "zh": "手动：54 × 40（按实际后背尺寸）",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "749c9afbfd71": {
+    "zh": "手动：135 全画幅",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "4eafa9e925b3": {
+    "zh": "自定义",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "50ab666cb70c": {
+    "zh": "配准未完成 · 请补充移轴信息后重新匹配",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "e7e00c84ee53": {
+    "zh": "选择拼接模式",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "18a20c5ab680": {
+    "zh": "已选择 {0} 张照片",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "e0a7acc067fd": {
+    "zh": "移轴接片",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "f6ec5765c5b6": {
+    "zh": "镜头保持固定，后背平移。只移动图片位置，保留原始透视。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "0f638e919d73": {
+    "zh": "开始移轴接片",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "713e40499206": {
+    "zh": "透视接片",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "45da88d7b38d": {
+    "zh": "适用于转动相机的拍摄方式，后续版本提供。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "62fd2de26931": {
+    "zh": "使用原始图像统一解码，不应用图库内的裁剪和调色。预览完成后，点击“拼接”才生成全分辨率文件。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "248c5f929e45": {
+    "zh": "正在解算拼接位置",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "e885a990b960": {
+    "zh": "请在示意图中选择照片，补充移轴信息后重新匹配",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "03b1a13cf2c0": {
+    "zh": "按移轴信息重新匹配",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "f423e12e53c9": {
+    "zh": "{0} × {1} · {2} MP · {3} 张",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "630ca11bfbde": {
+    "zh": "拼接",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "dcd3ee9cec9b": {
+    "zh": "拍摄机身",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "ee38b80c37d9": {
+    "zh": "机身",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "a1d86877af02": {
+    "zh": "已显示相对机身的位置。点击照片可指定唯一基准；橙框表示超出行程。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "92edb20a3dbc": {
+    "zh": "Δ 以拼接图中心为 (0, 0)，右／上为正。点击任意照片，输入已知移轴位置。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "de949bd06103": {
+    "zh": "待配准示意，未确认的照片位置仅供选取。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "5e76d67d4617": {
+    "zh": "已录入 {0} 张移轴信息；搜索范围为读数附近 ±1.5 mm。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "a41d4452a74e": {
+    "zh": "移轴约束已变更，请重新匹配。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "a4f7cbe44e92": {
+    "zh": "传感器",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "97f973377efe": {
+    "zh": "从 RAW 自动识别",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "8a2e28474a49": {
+    "zh": "自定义尺寸",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "345ff469e07d": {
+    "zh": "宽 mm",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "b8da5e89518e": {
+    "zh": "高 mm",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "0edf8c27def3": {
+    "zh": "无法确定传感器尺寸，请选择规格或手动输入。相对像素位置仍然有效。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "7702014ae81a": {
+    "zh": "光学位置估计",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "9f661eaa4c1a": {
+    "zh": "读取亮度衰减、边缘遮挡与红移后估计。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "93fa020baa18": {
+    "zh": "已知位置优先，LCC 原点由该基准确定，自动估计与手动对齐不再改变位置。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "73281fd9d6f5": {
+    "zh": "候选光轴：距第一张中心 X {0} / Y {1} mm",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "a6805c058eaa": {
+    "zh": "位置基准：{0}\nX {1} / Y {2} mm",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "47966d105fad": {
+    "zh": "解除位置基准",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "185ffacaf4ad": {
+    "zh": "镜头 Profile",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "d03dcdd057a2": {
+    "zh": "不选择",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "f7485cc751f2": {
+    "zh": "{0} · {1} 张标定",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "10f0730bd9d6": {
+    "zh": "无匹配标定",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "23615da9ada4": {
+    "zh": "镜头 Profile 管理…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "945ac5c3da15": {
+    "zh": "LCC校正",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "61635e357c96": {
+    "zh": "将图片裁切到lcc覆盖范围",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "693a0e217822": {
+    "zh": "手动对齐lcc",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "45d14f0c4f3d": {
+    "zh": "自动解算位置",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "3b0da2de91ba": {
+    "zh": "暗角与颜色偏移：完整校正",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "4626a2810ff9": {
+    "zh": "整体曝光",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "fa9bce35de33": {
+    "zh": "校正后自动白平衡",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "de9d8ad34ef8": {
+    "zh": "{0}：{1} K · 色调 {2}",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "84ac609620e5": {
+    "zh": "色温",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5bddf6a1c0f5": {
+    "zh": "色调",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "7d5e9c09c086": {
+    "zh": "应用白平衡",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "2444feb8c1fc": {
+    "zh": "保护高光",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "b1df88bb7bb6": {
+    "zh": "高光保护自动曝光 {0} EV；HDR 预览与输出保留高光余量。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "571a6cd6f748": {
+    "zh": "开启 LCC 时自动解算并应用位置，也可手动对齐或重新解算。先校正 RAW 通道，再应用白平衡；预览与输出共用位置和增益。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "531e654e1a1e": {
+    "zh": "LCC 已跟随位置基准锁定。清除基准后可手动对齐。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "71e8dddcf62b": {
+    "zh": "重叠处理",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "dcc5dc5e40cb": {
+    "zh": "自动避开运动冲突",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "f332d17f7e09": {
+    "zh": "匹配重叠曝光",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "802a18c71f09": {
+    "zh": "接缝柔化",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "f55043412c64": {
+    "zh": "冲突优先",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "db9773faa309": {
+    "zh": "自动选择",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "95875297cbcd": {
+    "zh": "接缝可绕开冲突区域。仅有两张且背景被遮住时，自动判断可能有误，可改选优先照片。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "9e4be2d889be": {
+    "zh": "管理逐张 LCC…",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "26747f634b19": {
+    "zh": "已记录 {0}/{1} 组逐张配对，白板用于自动定位与校正后的白平衡测量。“LCC校正”只应用所选镜头 Profile，不叠加白板校正。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "26de880334ca": {
+    "zh": "照片移轴信息",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "5851c578611d": {
+    "zh": "按画面方向填写：右 R／上 U 为正，左 L／下 D 为负。机身旋转后，请先将刻度换算到画面方向。输入镜头相对后背的移轴读数；若记录的是后背移动方向，请取反。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "98ab61de3e93": {
+    "zh": "水平 X",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "5e9009b476b1": {
+    "zh": "垂直 Y",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift",
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "13097721eadb": {
+    "zh": "设为整组位置基准",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "096e62731d90": {
+    "zh": "可录入多张照片用于辅助匹配；整组只有一个绝对位置基准。清除仅移除这张照片的读数。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "44acfaf249fe": {
+    "zh": "清除移轴信息",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "d977ab79b013": {
+    "zh": "应用位置",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "fe8af84b5fd4": {
+    "zh": "{0} · {1}° · 总覆盖范围",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "00964853f102": {
+    "zh": "范围居中示意 · 绝对位置未知",
+    "files": [
+      "Sources/PhotonsUI/PanoramaWindowController.swift"
+    ]
+  },
+  "54bb8712bd77": {
+    "zh": "堆叠 ",
+    "files": [
+      "Sources/PhotonsUI/AssetBadges.swift"
+    ]
+  },
+  "72d109955aed": {
+    "zh": "堆叠{0}张",
+    "files": [
+      "Sources/PhotonsUI/AssetBadges.swift"
+    ]
+  },
+  "50c884e953ed": {
+    "zh": "直方图",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "47d88357c5ea": {
+    "zh": "黑白",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "08b8947b9bf7": {
+    "zh": "点颜色",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "00c482421fa9": {
+    "zh": "色彩分级",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "45230cc916f6": {
+    "zh": "校准",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "9ec428625fee": {
+    "zh": "开发",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "ca4842bc9e80": {
+    "zh": "变换",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "e7028601e7da": {
+    "zh": "信息",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "d51735bf350e": {
+    "zh": "最高亮度",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "742d64d724f3": {
+    "zh": "自动黑电平：把解码后的线性数据拉到非负",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "0580f53ef368": {
+    "zh": "自动黑电平",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "f905e85ff3b2": {
+    "zh": "偏移",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "03b62f375010": {
+    "zh": "黑白：S3.4 把彩色转成单色。关掉只是停用下面的混合——八个值都留着，重新打开就回来",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "85b1f31c4eb3": {
+    "zh": "点颜色 {0}",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "78447e42d716": {
+    "zh": "点击画布上要调的颜色…",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "6a02faebdbc3": {
+    "zh": "已吸取 色框 %d · H %.0f° · C %.3f · %@",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "d14f16f7ed63": {
+    "zh": "已吸取 色框 {0} · ",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "6372be7e139a": {
+    "zh": "这里几乎没有颜色，换个位置点",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "a4b3d55745f2": {
+    "zh": "最多 8 个色框，先双击删除一个",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "c6b72ac37f82": {
+    "zh": "去摩尔纹",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "cc742900f44d": {
+    "zh": "已自动应用配置文件",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "aed6b38a0164": {
+    "zh": "阴影色调",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "2304051c2cb0": {
+    "zh": "红 色相",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "21fae3c845b8": {
+    "zh": "红 饱和",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "d9cea627e2e9": {
+    "zh": "绿 色相",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "4940bdebf9cb": {
+    "zh": "绿 饱和",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "290ad7aed661": {
+    "zh": "蓝 色相",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "2bcc4344dfe7": {
+    "zh": "蓝 饱和",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "2be284b8a376": {
+    "zh": "色差 R",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "b2d4e9d059c9": {
+    "zh": "色差 B",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "1f2ad22d94bc": {
+    "zh": "解码模型",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "6505e90b2e58": {
+    "zh": "正在切换解码器…",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "7d029b81dc5f": {
+    "zh": "已退回 v{0}",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "51c23226d57b": {
+    "zh": "实际 v{0}",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "bc7dacff87db": {
+    "zh": "曝光",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "bc4b2dbbb77b": {
+    "zh": "对比",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "f799c2308083": {
+    "zh": "高光",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "280d2d14de93": {
+    "zh": "中间调",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a0fb1c62d0e8": {
+    "zh": "阴影",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/ColorGradingCard.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/WhiteBalancePresets.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "f56e7eff58bf": {
+    "zh": "白色",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ed7d2c54184b": {
+    "zh": "黑色",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ea9f8caa4ed3": {
+    "zh": "自然饱和",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "da89443e202b": {
+    "zh": "暗角",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "6d0d9fcc7f37": {
+    "zh": "暗角中点",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a3382c24d9e9": {
+    "zh": "暗角羽化",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a08cd6ad31a2": {
+    "zh": "颗粒数量",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b5d27bfa565b": {
+    "zh": "颗粒大小",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "4208ff3a2c8b": {
+    "zh": "颗粒粗糙度",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5e20fc223736": {
+    "zh": "种子",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "262348fa5f3e": {
+    "zh": "纹理",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "0e22652107f5": {
+    "zh": "清晰度",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "da6c0db97b87": {
+    "zh": "去噪",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ad51d63abfc2": {
+    "zh": "去彩噪",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b0dbdc47bcc2": {
+    "zh": "锐化数量",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "e9c8b36e09c7": {
+    "zh": "锐化半径",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ca1caeef1733": {
+    "zh": "锐化细节",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "4b16c5d8dbf4": {
+    "zh": "锐化蒙版",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "0665cca26772": {
+    "zh": "去雾",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b82bd426d236": {
+    "zh": "颗粒",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "49c1a56f69f6": {
+    "zh": "吸管：点击画布上的中性灰取样（Esc 取消）",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "0cfb8071577e": {
+    "zh": "点击画布取样 · Esc 取消",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "6f11ed20eb70": {
+    "zh": "吸管",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "01edd90ed0f4": {
+    "zh": "点击画布上的中性灰取样…",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "73cc98a1086e": {
+    "zh": "吸管：正在读取 RAW 中性点…",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "03fbd17c1412": {
+    "zh": "吸管：取样点几乎无颜色信息，未写入",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "c4cc41ec1c3e": {
+    "zh": "吸管精修：正在对解码器迭代（最多 {0} 次解码）…",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "92bf04035ccb": {
+    "zh": " · 未达 2%",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "efebb2711444": {
+    "zh": "原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "76da8e56954d": {
+    "zh": "自动白平衡：画面尚未就绪，未写入",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "d219bf2a061d": {
+    "zh": "自动白平衡：画面没有可用的颜色信息，未写入",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "cb95f005b0b2": {
+    "zh": "自动（灰世界）· %@ · 画面均值 RGB %@%@",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "d02a9db9609c": {
+    "zh": " · 已到量程边界（近似）",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "534852c87fdd": {
+    "zh": "双击复位此参数",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "059343880dec": {
+    "zh": "双击整组复位",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "e55b6bdd2bc1": {
+    "zh": "模拟预览",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "00bd3960fea8": {
+    "zh": "展开",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "84a07f292f1f": {
+    "zh": "折叠",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "87a894ed1aec": {
+    "zh": "复位{0}",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "3fa8bd7acc8d": {
+    "zh": "点击数值可键盘输入：↵ 提交 · Esc 取消 · 点别处取消并退回原值",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "f61860846778": {
+    "zh": "原照设置",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift",
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "9495b7c64315": {
+    "zh": "自动白平衡",
+    "files": [
+      "Sources/PhotonsUI/InspectorView.swift"
+    ]
+  },
+  "f9edbf5994a5": {
+    "zh": "九宫格",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "561266708d88": {
+    "zh": "裁切框上的三分线（视图态，不进文档）",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "29ff7128a14f": {
+    "zh": "清除引导线",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "17e14283a497": {
+    "zh": "透视",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "7df1c3a41535": {
+    "zh": "拉直",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "267549f4a4f7": {
+    "zh": "画线拉直",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "22aca111bd1d": {
+    "zh": "宽高比",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "8d855790e87a": {
+    "zh": "角度",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/MaskHandles.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "68eb90fa809e": {
+    "zh": "旋转",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "176c09844e0f": {
+    "zh": "镜像",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "40b2b7a78a37": {
+    "zh": "双击复位「{0}」",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "48f67733fc2b": {
+    "zh": "交换长宽",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "a737fd72b016": {
+    "zh": "已选中",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "0e0c21de6988": {
+    "zh": "未选中",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "0fc6ecd501ab": {
+    "zh": "可交换",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "29f0269b1504": {
+    "zh": "无裁切工具",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "3f8f6a203851": {
+    "zh": "键入比例：5:4 或 1.85（回车生效，非法输入不写入）",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "b49d6bdf6e80": {
+    "zh": "自定义比例",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "d7dfdfdf033e": {
+    "zh": "（一次 ⌘Z）",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "7adb78027187": {
+    "zh": "当前方向：顺时针 {0}（4 次回到原位，逐字节相同）",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "cda112365c45": {
+    "zh": "裁切.应用",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "04531351799e": {
+    "zh": "裁切.取消",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "3f205fb11e86": {
+    "zh": "放弃这次裁切，文档一个字节都不动",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "63c73c4730f4": {
+    "zh": "应用",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "a82b94de987d": {
+    "zh": "应用裁切（一条历史，一次 ⌘Z）",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "7f3e11905725": {
+    "zh": "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "d193f9de4dfc": {
+    "zh": "沿本该竖直/水平的边画两条线，松手后解出透视（2 竖 + 2 横，最多 4 条）；",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "09c161819adf": {
+    "zh": "Esc 或再点一次取消",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "813d3cebe72c": {
+    "zh": "不出像素",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "8baa2686d5d3": {
+    "zh": "勾选后裁切框只能在照片像素内移动（不出黑角），尺寸不变",
+    "files": [
+      "Sources/PhotonsUI/TransformPanel.swift"
+    ]
+  },
+  "f8c6e3e86baa": {
+    "zh": "横",
+    "files": [
+      "Sources/PhotonsUI/CropStraightenDraw.swift"
+    ]
+  },
+  "b86568089d7c": {
+    "zh": "竖",
+    "files": [
+      "Sources/PhotonsUI/CropStraightenDraw.swift"
+    ]
+  },
+  "7ef05e0d7696": {
+    "zh": "建立 {0} LCC 校正场…",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "3a579ac6686e": {
+    "zh": "手动对齐 LCC",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "d235647a10ab": {
+    "zh": "请输入有效的对齐位置。",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "88cedbfbe0da": {
+    "zh": "自动解算位置 · 结果预览",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "5bb313b69db4": {
+    "zh": "拖动预览中的标定覆盖范围，或调整下方位置。预览实时显示校正结果。",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "e33473ee7de8": {
+    "zh": "显示标定边框",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "468d97cef9ed": {
+    "zh": "应用对齐…",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "0cd2df38d720": {
+    "zh": "更新预览…",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "7aeb211ca8bb": {
+    "zh": "LCC 标定覆盖当前拼接范围。",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "8c1e47e38eb8": {
+    "zh": "位置以拼接中心为基准，右／上为正。青色为标定范围；橙色虚线为可完整校正的裁切范围。预览使用固定白平衡。",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "4cc3885c182e": {
+    "zh": "居中",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "c5160c4ce0c4": {
+    "zh": "应用对齐",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "5836a4495ac1": {
+    "zh": "LCC 对齐",
+    "files": [
+      "Sources/PhotonsUI/LCCAlignmentWindowController.swift"
+    ]
+  },
+  "0eb7ee7e38ef": {
+    "zh": "红",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift",
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HSLBands.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "84b34ffba5aa": {
+    "zh": "绿",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift",
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HSLBands.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "52f354ecfccb": {
+    "zh": "蓝",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift",
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HSLBands.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b03c07babd79": {
+    "zh": "W 是亮度增益：整像素按 luma 平移，保色相，不是第四张逐通道表",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "b488b83cba63": {
+    "zh": "R 通道曲线（逐通道映射）",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "30a3ca1f64f7": {
+    "zh": "G 通道曲线（逐通道映射）",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "99dfac1c5458": {
+    "zh": "B 通道曲线（逐通道映射）",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "f53026e7259d": {
+    "zh": "SDR 视图",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "8065eeb2e93b": {
+    "zh": "HDR 视图",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "be3b42c6a802": {
+    "zh": "输入 {0} 输出 {1}",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "a6a06b49fc95": {
+    "zh": "复位本通道",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "c6b25d17dd8c": {
+    "zh": "curve.button.复位本通道",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "ab1a38d7e28f": {
+    "zh": "全部复位",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "30999803de9b": {
+    "zh": "curve.button.全部复位",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "3382870bc4ad": {
+    "zh": "区域",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "a17c3ea55307": {
+    "zh": "视图：{0}。SDR 只显示 x 0…1（显示码 0–255），HDR 显示整条 x 0…2",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "642edc7196b3": {
+    "zh": "（SDR 半区 0…1 加 HDR 半区 1…2 / +0…+4 EV），两个视图都把各自的轴铺满绘图区；",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "03d062575371": {
+    "zh": "再按一次切到另一个",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "c125d3a93bf4": {
+    "zh": "区域 {0}",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "2e9d2be605f9": {
+    "zh": "拖动控制点：末段（最后两点之间）的斜率上限 2.0 —— +4 EV 以上的高光尾巴",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "6d41d3cdaff7": {
+    "zh": "可以画得比 1× 更陡，渲染与拖动用同一个上限；其它段不受这个上限约束",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "7e26a08082bd": {
+    "zh": "（它们只在表内插值，不会外延）",
+    "files": [
+      "Sources/PhotonsUI/CurvePanel.swift"
+    ]
+  },
+  "229063af0cdc": {
+    "zh": "导出拼接图",
+    "files": [
+      "Sources/PhotonsUI/PanoramaExport.swift"
+    ]
+  },
+  "e8183b25e9ba": {
+    "zh": "导出文件夹不可写。请点击“更改”选择并授权文件夹。",
+    "files": [
+      "Sources/PhotonsUI/PanoramaExport.swift"
+    ]
+  },
+  "43a57d0f50bc": {
+    "zh": "HDR（HEIC + 增益图）",
+    "files": [
+      "Sources/PhotonsUI/ExportHDRControls.swift"
+    ]
+  },
+  "a26f95b6e25d": {
+    "zh": "增益图",
+    "files": [
+      "Sources/PhotonsUI/ExportHDRControls.swift",
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "fbbf2846665b": {
+    "zh": "半尺寸增益图",
+    "files": [
+      "Sources/PhotonsUI/ExportHDRControls.swift"
+    ]
+  },
+  "5a346a2d5ba7": {
+    "zh": "增益图类型与尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportHDRControls.swift"
+    ]
+  },
+  "df3d58c7d84b": {
+    "zh": "设置",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "835b700e028c": {
+    "zh": "通用",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "df3be042e1cf": {
+    "zh": "照片库",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift",
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "37979829426b": {
+    "zh": "工作区",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "f02381de45eb": {
+    "zh": "HDR 与预览",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "58d26314335d": {
+    "zh": "性能与降噪",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "acb3664262f1": {
+    "zh": "语言与应用偏好。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "74ff79c4bef3": {
+    "zh": "管理所有曾经打开的照片库。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "886ed0494986": {
+    "zh": "让界面适合你的看图与编辑习惯。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "3c98d56527cc": {
+    "zh": "管理屏幕上的高光显示。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "727c570a573c": {
+    "zh": "平衡后台处理速度、内存与能耗。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "6746e89bd14e": {
+    "zh": "设置自动保存",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "9f6fee1aba17": {
+    "zh": "语言",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "da9054ac44be": {
+    "zh": "应用语言",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "4eaa632ed776": {
+    "zh": "中文（简体）",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "ee45ba7af403": {
+    "zh": "重新启动后，所有菜单与窗口使用所选语言。更改此设置不会中断正在进行的任务。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "86a63f23a076": {
+    "zh": "外观",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "785d65c70fde": {
+    "zh": "界面",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "8e8cb3a30cd2": {
+    "zh": "中性的界面背景，便于判断照片的色彩与明暗。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "3906276fd1bd": {
+    "zh": "画布",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "971d8601d9ef": {
+    "zh": "照片周围的背景",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "79551187b83c": {
+    "zh": "深灰",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "4f0126e18c78": {
+    "zh": "中灰",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "fe07a094f39e": {
+    "zh": "浅灰",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "6d2382ffa01b": {
+    "zh": "立即应用于主画布和素材浏览区。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "56410fc65314": {
+    "zh": "启动",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "ab39ddf5d95d": {
+    "zh": "重新打开上次使用的照片库",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "ef14a0c17fbe": {
+    "zh": "显示预览",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "03e08145d393": {
+    "zh": "启用 HDR 预览",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "5ccdb424dd76": {
+    "zh": "在支持的显示器上显示超出 SDR 白色的高光，立即应用于单图、缩略图与全景预览。关闭后使用 SDR 显示。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "c71d0bca46eb": {
+    "zh": "工作流",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "10c90668a3ab": {
+    "zh": "原始图像与导出保持独立",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "4cc9cdf1a1d8": {
+    "zh": "这个开关只改变屏幕预览，不修改照片参数。HDR 导出仍在导出面板中选择格式、色彩空间与 HDR 编码。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "12395fe07d46": {
+    "zh": "可显示的高光范围取决于屏幕、亮度和系统当前提供的余量。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "018be97547b4": {
+    "zh": "后台处理",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "0fb008493588": {
+    "zh": "性能策略",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "bb7c48e8d7fc": {
+    "zh": "自动平衡：适度并发，低电量模式下收敛至单任务。性能优先：允许更多并行任务。节能：逐张生成缩略图。高温时所有策略都会降低并发。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "0a418653465e": {
+    "zh": "当前缩略图并发上限",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "70a474eff9ef": {
+    "zh": "硬件加速",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "ec2dfc19ec2f": {
+    "zh": "显影与显示",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "a3073210cfd1": {
+    "zh": "Metal 不可用",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "6b522b15a417": {
+    "zh": "Metal GPU · 已启用",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "50456a97e64e": {
+    "zh": "显影引擎使用 Metal；此版本没有完整的 CPU 显影后端。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "b43d3c8a5e31": {
+    "zh": "AI 模型降噪使用 GPU",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "e4be6cfc2997": {
+    "zh": "推荐开启。关闭后下一次模型降噪使用 CPU，主要用于兼容性排查，通常耗时更长。不会中断正在运行的任务。",
+    "files": [
+      "Sources/PhotonsUI/SettingsWindowController.swift"
+    ]
+  },
+  "a6b75d068032": {
+    "zh": "深色",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "aa0819dfc4d8": {
+    "zh": "浅色",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "217cfe7db1e3": {
+    "zh": "跟随系统",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "f261d33274d7": {
+    "zh": "自动平衡",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "2822bd0c1053": {
+    "zh": "性能优先",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "758d05bff127": {
+    "zh": "节能",
+    "files": [
+      "Sources/PhotonsUI/ApplicationPreferences.swift"
+    ]
+  },
+  "386d3917a3af": {
+    "zh": "创建镜头 Profile",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "1f9e7c586f1b": {
+    "zh": "选择 LCC 白板照片，然后逐张填写并确认移轴量。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "5d68152f8c27": {
+    "zh": "多选用相同曝光、同一光圈和同一后背拍摄的 LCC 白板照片。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "7814088b5104": {
+    "zh": "一个 profile 最多包含 256 张白板。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "8f9015335c4d": {
+    "zh": "读取 LCC 缩略图和曝光信息…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "e07b75100360": {
+    "zh": "已读取 {0} 张。文件名中的移轴量仅为建议，请核对后确认。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "95069b4fdd7d": {
+    "zh": "请填写有效光圈值，例如 11。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "b764a9e30559": {
+    "zh": "建立镜头标定…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "ab05f387f60b": {
+    "zh": "创建成功 · {0} · 已保存到本机应用数据",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "ccb58a406838": {
+    "zh": "已取消，可继续编辑。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "3440d153274a": {
+    "zh": "未创建 profile，请检查输入。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "c5a4291b3c19": {
+    "zh": "请用 LCC 板，以相同曝光（ISO、快门）、同一光圈和对焦设置，拍摄不同移轴量的白板照片。后背相对机身的横竖方向分别标定；整机一起旋转可复用原标定。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "c90832fa2126": {
+    "zh": "镜头名称，例如 APO-Digitar 43XL + iiic",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "e3df0be2e19a": {
+    "zh": "光圈",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift",
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "76d2d245b1cd": {
+    "zh": "添加白板照片…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "3e0560dc572d": {
+    "zh": "{0} 张 · 已确认 {1} 张",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "f84ea94b0208": {
+    "zh": "移除选中",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "52e99ef48748": {
+    "zh": "机身 {0}° · 后背相对{1}",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "9c084cf315a5": {
+    "zh": "待确认移轴量",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "f8d53c4e0187": {
+    "zh": "添加 LCC 白板",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "991602e4e93f": {
+    "zh": "支持多选文件。选中缩略图后，在右侧输入该张移轴量。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "191656941071": {
+    "zh": "部分照片没有曝光元数据，请根据拍摄记录确认整组曝光相同。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "1280364b7f84": {
+    "zh": "在 Finder 中显示",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift",
+      "Sources/PhotonsUI/LibraryHistory.swift",
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "c0b3fbff51cc": {
+    "zh": "完成",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "4a548bc641dd": {
+    "zh": "创建 Profile",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "7c3c44699597": {
+    "zh": "拍摄时的机身方向",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "32438bd5e3da": {
+    "zh": "将此机身方向用于全部照片",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "ed6ca829152b": {
+    "zh": "照片方向（RAW）",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "7abedf61e774": {
+    "zh": "后背相对机身：{0}",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "a1cde73e9c42": {
+    "zh": "移轴量（mm）",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "e7f3667f84e8": {
+    "zh": "水平 H",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "ef216dc818fc": {
+    "zh": "垂直 V",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "97203d12e496": {
+    "zh": "按画面方向填写：右 R / 上 U 为正；左 L / 下 D 为负。机身旋转后，请先将刻度换算到画面方向。保存时会与白板测量一起转换到机身坐标。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "d59031c83f0e": {
+    "zh": "已核对这张的方向和移轴量",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "4d8c1c5b4283": {
+    "zh": "未知",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "8e55403e96e1": {
+    "zh": "%.4g 秒",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "b43a1481512d": {
+    "zh": "快门未知",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "e83f547dcd27": {
+    "zh": "选择左侧照片，填写对应的移轴量。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "10a0d92065bd": {
+    "zh": "传感器尺寸（mm）",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "dc4ffb23c9a3": {
+    "zh": "长边",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "d36b0efe1ed8": {
+    "zh": "短边",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "d4fe7326c0a1": {
+    "zh": "优先读取 RAW；识别不到时按后背的实际感光面积填写。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "77152b07ba75": {
+    "zh": "备注，例如无穷远对焦",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "80748924f490": {
+    "zh": "Profile 保存白板的色偏、亮度测量与拍摄位置。创建后无需依赖原始 RAW；弱光角落也会保留。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileCreatorWindowController.swift"
+    ]
+  },
+  "66ccd087d70e": {
+    "zh": "统一管理曾经创建或打开的照片库。移除记录不会删除照片库或原片。",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "5b6408caf9a6": {
+    "zh": "打开其他照片库…",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "f9af46c99fd4": {
+    "zh": "新建照片库…",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "096585910b99": {
+    "zh": "尚未打开照片库",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "32364c3f65af": {
+    "zh": "当前照片库",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "4d99c976beb8": {
+    "zh": "可用",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "55c1247ebaa9": {
+    "zh": "离线或未授权",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "c771248e511f": {
+    "zh": "打开",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift",
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "081ed577f0c2": {
+    "zh": "移除记录",
+    "files": [
+      "Sources/PhotonsUI/LibraryHistory.swift"
+    ]
+  },
+  "68129d5a147a": {
+    "zh": "白平衡预览: {0}",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "02619c8e1a74": {
+    "zh": "取色完成",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "e536f08483f8": {
+    "zh": "点在照片外（letterbox），未取样",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "a0efee97ad90": {
+    "zh": "画面尚未就绪，未取样",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "5cb5608d6fbf": {
+    "zh": "读数 1 px · S3.6b 输入 · @%d,%d · RGB %@",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "9117b61f0477": {
+    "zh": "读数 1 px · S3.6b 输入",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "e388d0ebca8d": {
+    "zh": "AUTO BLACK · min %.6f · 候选 %d → %.4f",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "d0a516ec35a8": {
+    "zh": "AUTO BLACK · min %.6f → offset 钳到 ±0.01",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "d9878964a8f3": {
+    "zh": "黑电平 · 自动",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "24bb46651e93": {
+    "zh": "切换 HDR / SDR 编辑预览；SDR 使用与标准导出一致的映射",
+    "files": [
+      "Sources/PhotonsUI/LoupeController.swift"
+    ]
+  },
+  "c1a4158ec2b5": {
+    "zh": "选择要复制的设置",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "9cb5bfcecb9e": {
+    "zh": "选择要粘贴的设置",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "fe4a71e4bf42": {
+    "zh": "复制（记住本次选择）",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "335179267471": {
+    "zh": "粘贴",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "e27f2e88b080": {
+    "zh": "不包含默认值",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "0a1e52b0c3f0": {
+    "zh": "勾选要粘贴的卡片或单个参数。目标照片里没被点名的卡片一个字段都不会动。",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "2dfe2465b7f6": {
+    "zh": "展开「{0}」的参数",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "df35f91c7ce9": {
+    "zh": "收起「{0}」的参数",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "efb4d7b551f3": {
+    "zh": "只复制这一组：{0}（{1} 卡）",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "540016b41bc2": {
+    "zh": "只复制这一个参数（{0} 卡）",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "4a9bedceb01f": {
+    "zh": "组合：自定义",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "127e42e99e1d": {
+    "zh": "组合：{0}",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "3a5040b68abf": {
+    "zh": "全选",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "ab9084a640fb": {
+    "zh": "全不选",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "695704a261cb": {
+    "zh": "展开全部",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "0321ddbc1fe9": {
+    "zh": "收起全部",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "86e9ed365cd4": {
+    "zh": "保存为预设…",
+    "files": [
+      "Sources/PhotonsUI/CopySettingsSheet.swift"
+    ]
+  },
+  "8eed626f0186": {
+    "zh": "该文件来自更新的版本 v{0}，未知设置已原样保留",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "576d81bb0631": {
+    "zh": "导入",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift",
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "76420433f22d": {
+    "zh": "导出",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift",
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "e41ecc67ca28": {
+    "zh": "网格",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "e71b76b45a24": {
+    "zh": "单图",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "38559373577e": {
+    "zh": "胶片条",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "4422e24b23e8": {
+    "zh": "打开照片库 · ⌘O",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "fad39b265c7a": {
+    "zh": "导入照片 · ⇧⌘I",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "1c8f057e276d": {
+    "zh": "导出所选照片 · ⇧⌘E",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "01aaebc96af1": {
+    "zh": "导入失败",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "fd913946f0df": {
+    "zh": "打开 .photonslibrary",
+    "files": [
+      "Sources/PhotonsUI/WorkspaceRootView.swift"
+    ]
+  },
+  "87b1166498f9": {
+    "zh": "红眼",
+    "files": [
+      "Sources/PhotonsUI/RedEyeTool.swift",
+      "Sources/PhotonsUI/HealCardPanel.swift",
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "717f9803e3f6": {
+    "zh": "{0}: 没有源文件（资产指向的文件不存在）",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "a8ae871ce8f5": {
+    "zh": "{0}: 渲染器没有产出像素",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "251bc40e7027": {
+    "zh": "等待",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "1fb4d574da92": {
+    "zh": "位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "3df3f90a5922": {
+    "zh": "文件命名",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "d4ac0d4b1a6c": {
+    "zh": "文件设置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "71a90485d565": {
+    "zh": "图像尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "aeae1c799c94": {
+    "zh": "元数据",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3576a63b4da7": {
+    "zh": "无法保存导出目录权限：{0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "25ae3a0ab83e": {
+    "zh": "导出设置记忆已损坏，已恢复默认设置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "844b8cc8dff7": {
+    "zh": "默认",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsCore/History.swift",
+      "Sources/PhotonsCore/HistoryFields.swift",
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "645306984b87": {
+    "zh": "网络 2048",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "d5ab4fc6e60d": {
+    "zh": "Pictures/Photons 导出",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "6e5204815fae": {
+    "zh": "{0} 种尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "bdf4beaeab81": {
+    "zh": "半尺寸需要偶数像素：{0} 张照片将裁到偶数边（右/下各 1 px）",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "8befa2a07247": {
+    "zh": "将导出 {0} 张 → {1}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "e6cef430ff9d": {
+    "zh": "导出中… 已渲染 %d/%d · %.1f s",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "96085eea637f": {
+    "zh": "完成：%d 个文件",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "4d18c2642395": {
+    "zh": "跳过 {0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "b02ce763959f": {
+    "zh": "取消 {0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3a34291a5331": {
+    "zh": "失败 {0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "8b1e627269ec": {
+    "zh": " · 共 %.2f s",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "2636b822b377": {
+    "zh": "再导出一次",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3fd47edce45b": {
+    "zh": "关闭",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "78f5de17aa24": {
+    "zh": "还没有导出。选择照片，点“导出”。",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "e555a1dcbb2b": {
+    "zh": "没有选中的照片",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "c18d1bb2234b": {
+    "zh": "请点击位置旁的选择按钮，选择并授权导出文件夹。",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "52c96167103d": {
+    "zh": "已渲染，写入中…",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "ed497cfb86f2": {
+    "zh": " · {0} 条警告",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "4b283e22c613": {
+    "zh": "跳过：目标文件已存在",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "a1a9da9ee6ed": {
+    "zh": "未知原因",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "7880bd8e5238": {
+    "zh": "失败：{0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "1e396cf6fce0": {
+    "zh": "预设名称不能为空",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "c70580d20561": {
+    "zh": "颜色与元数据",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "47b3920963c5": {
+    "zh": "HDR 与色调映射",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "72abcd917c88": {
+    "zh": "输出后",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "1e5b3b2d1762": {
+    "zh": "输出动态范围",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "99ae75bfd658": {
+    "zh": "存储预设",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "5fe110aa6d1d": {
+    "zh": "预设名称",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a3434acddb75": {
+    "zh": "存储",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "77da66648c1b": {
+    "zh": "存到 {0}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "5d4140e4c5e3": {
+    "zh": "上次使用",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "2f9daa828907": {
+    "zh": "删除",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "27d6867d773e": {
+    "zh": "16 位线性 RGB · 无损压缩 · 保留 HDR 高光。白平衡已应用；不添加水印。",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "55847d2e5bed": {
+    "zh": "质量",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "0d2fed4d4197": {
+    "zh": "像素/英寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "640ecddb555a": {
+    "zh": "不写入",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "0e8b1c78c5f3": {
+    "zh": "格式",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "edc6e86229fa": {
+    "zh": "DNG · 16 位无损压缩",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "8c38852df3df": {
+    "zh": "色调映射",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "e2b199033db9": {
+    "zh": "全局：Core Image 的 global tone map；无：与旧版相同的硬截断",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "246df7d8db84": {
+    "zh": "尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "8f3e3c390021": {
+    "zh": "不扩大",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "2f6aaa2691c2": {
+    "zh": "勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "fc7b0426c7b1": {
+    "zh": "原始像素",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "531bccd8f330": {
+    "zh": "存到",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "f6727cfa6281": {
+    "zh": "导出位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "6b01fce4dbea": {
+    "zh": "更改",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "eed4ef2c6677": {
+    "zh": "每张原片的文件夹（拼接使用文件名排首张）",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "41aa3ae4ba1c": {
+    "zh": "命名",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3c86dcbd3eee": {
+    "zh": "{原名}_{序号}",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "dded3a8a45bd": {
+    "zh": "色彩空间 / 位深 / 元数据 / XMP / 位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3c663ac9fe3f": {
+    "zh": "色彩空间",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "09220325fb3e": {
+    "zh": "位深",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "60dcc1d0f458": {
+    "zh": "{0} 位",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "c5f7efdab1bc": {
+    "zh": "写入 XMP",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "31b79bd08181": {
+    "zh": "完整 develop 设置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "80444de1efc5": {
+    "zh": "由上面的档位决定，不能再单独开关",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "8d367c10c398": {
+    "zh": "移除位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "9549136d6cdc": {
+    "zh": "GPS 不写入导出（EXIF 与 XMP 两处）",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3b779e4f8396": {
+    "zh": "类型 / 增益图 / 半尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "0d80f9331307": {
+    "zh": "此格式不支持 HDR",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "c39de769f2a9": {
+    "zh": "HDR 类型",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "d92531be7845": {
+    "zh": "半尺寸",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "5a0598078455": {
+    "zh": "增益图按 1/2 边长写入（-H），SDR 基底不缩放",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "1b01ecd28138": {
+    "zh": "增益图小一半；SDR 基底不缩放",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "78fa88728927": {
+    "zh": "重名文件 / 水印文字 / 位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "e23ca17e6026": {
+    "zh": "子文件夹",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "c2d4b5ca3438": {
+    "zh": "重名文件",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "454aca5e7137": {
+    "zh": "水印文字",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "aa9f217c8186": {
+    "zh": "水印",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "14b69bd6eeb0": {
+    "zh": "文字",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "3ed692b960f2": {
+    "zh": "水印位置",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "a53d909714ae": {
+    "zh": "水印不透明度",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "ab95f2111084": {
+    "zh": "导出 {0} 张照片",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "c11330b85234": {
+    "zh": "选择",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "006f61c8e4cc": {
+    "zh": "导出到哪里",
+    "files": [
+      "Sources/PhotonsUI/ExportSheet.swift"
+    ]
+  },
+  "069cc0ef13b7": {
+    "zh": "亮度吸管",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "ed967ea53e2e": {
+    "zh": "颜色吸管",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "2c628844e37f": {
+    "zh": "点击画面：以该点亮度为中心重设窗口；⌥点击：只移动较近的一条边（Esc 取消）",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "f1239cc403be": {
+    "zh": "点击画面：把该点颜色加入样本（最多 8 个，超过时替换最旧的一个）；Esc 取消",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "04405e4a9ffd": {
+    "zh": "不透明度",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5b228b5ce583": {
+    "zh": "羽化",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a5f7ad7e443f": {
+    "zh": "精修",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "d6d71ee6a13a": {
+    "zh": "乘在合成后的选区上（Core: 1.0 = 满强度）；0 等于这个蒙版不参与合成",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "75528ac0cf87": {
+    "zh": "选区的空间模糊：1 = 短边 10 %（Core 的 0…0.1 全跨度），走 S1.7 的箱式模糊，与半径无关的 O(1) 代价",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3ac20aa5646c": {
+    "zh": "导向滤波强度（0 = 关）：用 S1 的亮度引导边界，半径 = max(W,H)/30 钳到 3…65",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "a2846644a638": {
+    "zh": "强度",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/HealCardPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "fc538f246da7": {
+    "zh": "锐化",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift",
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "3de641d7c6a8": {
+    "zh": "整段局部调整的 lerp 系数（0…100）：0 与“没有这个蒙版”位精确相等，S1.6 直接跳过",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "0823050061e4": {
+    "zh": "场景线性的 EV 增益（−4…4），在 S2 之前施加；显示侧增益救不回 S2 已压掉的高光",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "5895d316531a": {
+    "zh": "相对白平衡 −100…100，按 6500 K + 30 K/单位换算后走全局同一个 WhiteBalanceSolver.gain（不是开尔文，也不再有第二套算法）",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "373641613f5b": {
+    "zh": "−100…100，正值偏品红；与全局色温/色调同一个坐标系（1 单位 = 文档 tint 1），同一份 WhiteBalanceSolver.gain",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "dce470cef837": {
+    "zh": "−100…100；S1.6 按 /100 归一后作用在场景线性像素上（对比以 0.18 为枢轴）",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "4e1e41ae075b": {
+    "zh": "−100…100；在 tone map 之后的显示参考域施加，与全局同名滑杆同一份算法",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "f6b310ae1838": {
+    "zh": "−100…100；在 tone map 之后的显示参考域，用与全局「纹理」同一个导向滤波残差、同一个门控，按蒙版覆盖度 lerp（不是第二套算法）",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "61cbc0e05449": {
+    "zh": "0…100；1 px 半径的 USM（与「纹理」的频带无关，那是纹理/清晰度的活），提升被夹在窗口自身的最小/最大 ±1.5 码内（实测 1.49 码，判定线 2 码），所以锐化边缘而不是画光晕",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "2f8267a89ad5": {
+    "zh": "空",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "9553e6d82ca1": {
+    "zh": "{0} 笔",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "75012fccbc19": {
+    "zh": "{0} · 局部 {1} 项",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "421f9d207d03": {
+    "zh": "相加",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "8ad781d0a54e": {
+    "zh": "减去",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "79e00cc4264b": {
+    "zh": "相交",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "ac1099af60c6": {
+    "zh": "并集 max(acc, a)：交界不会重复曝光",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "8fa2136bda76": {
+    "zh": "acc · (1 − a)：把这块从已有选区里擦掉",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "0f21c5808c0f": {
+    "zh": "acc · a：与已有选区求交（ART 的叠乘规则）",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "4e1b73581a6e": {
+    "zh": "蒙版{0}",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "5aa402405ab2": {
+    "zh": "局部{0}",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "d4f521c2072a": {
+    "zh": "中点",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3e16266d0562": {
+    "zh": "渐变中点",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3e65075eb3e9": {
+    "zh": "半径",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/HealCardPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a4c0252e327a": {
+    "zh": "椭圆半径",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "0fd38424b169": {
+    "zh": "椭圆角度",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift",
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "d397ba0e36ed": {
+    "zh": "选择范围",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "ce24ffa833e7": {
+    "zh": "颜色选择范围",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3733708a5d94": {
+    "zh": "颜色过渡",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "2c3f8d6ce49a": {
+    "zh": "下限",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "80463e446557": {
+    "zh": "亮度下限",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "8e7ddbeee310": {
+    "zh": "上限",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "482882a2255e": {
+    "zh": "亮度上限",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3ddbd5881ff3": {
+    "zh": "软边",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "7527da5c2a9a": {
+    "zh": "语义软边",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "1037c77938ac": {
+    "zh": "亮度吸管 · 单边",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "aa589f7ed28a": {
+    "zh": "反转蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "75c10814e94c": {
+    "zh": "取消反转",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "645dede0bbca": {
+    "zh": "混合{0}",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "3bd13239db62": {
+    "zh": "重命名蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "06b6ae9eef28": {
+    "zh": "上移蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "6cd8a4813765": {
+    "zh": "下移蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskParameters.swift"
+    ]
+  },
+  "eeb59ac90b45": {
+    "zh": "点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径。⌥+滚轮 或 [ / ] 调大小",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "6e9d39eb4517": {
+    "zh": "红眼是 修复 的一个预设：点一次找红瞳并修正，拖动连续修补",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "acadb988a9f9": {
+    "zh": "自动取源",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "a53d379a7e19": {
+    "zh": "搜索缺陷周围 2–4 个半径的环形带，取边界最像的一块做源；关掉 = 老行为（右移一个半径）",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "863106085475": {
+    "zh": "还没有修复点",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "a601dff90ba4": {
+    "zh": "点一下修一只红眼；拖动连续修补",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "4fe5dd9e400a": {
+    "zh": "删除这个修复点",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "c01cffec4890": {
+    "zh": "源：自动（%.1f 个半径）",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "33984a3dbf80": {
+    "zh": "源：带内无可用源，用默认",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "4dd142b77076": {
+    "zh": "源：默认",
+    "files": [
+      "Sources/PhotonsUI/HealCardPanel.swift"
+    ]
+  },
+  "ac3ff788759d": {
+    "zh": "色彩分级卡",
+    "files": [
+      "Sources/PhotonsUI/ColorGradingCard.swift"
+    ]
+  },
+  "aa2ee555507d": {
+    "zh": "{0}：没有 section",
+    "files": [
+      "Sources/PhotonsUI/TransformCardSpec.swift"
+    ]
+  },
+  "2921f8453d71": {
+    "zh": "{0}：没有字段",
+    "files": [
+      "Sources/PhotonsUI/TransformCardSpec.swift"
+    ]
+  },
+  "9199aa593667": {
+    "zh": "{0}：字段与 section 不一致",
+    "files": [
+      "Sources/PhotonsUI/TransformCardSpec.swift"
+    ]
+  },
+  "b2b995d74a03": {
+    "zh": "（多 {0} · 少 {1}）",
+    "files": [
+      "Sources/PhotonsUI/TransformCardSpec.swift"
+    ]
+  },
+  "c6006e0463a6": {
+    "zh": "同一个 geometry 字段被两张卡同时声明：{0}",
+    "files": [
+      "Sources/PhotonsUI/TransformCardSpec.swift"
+    ]
+  },
+  "1ad702b18a4d": {
+    "zh": "橙",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/HSLBands.swift"
+    ]
+  },
+  "c732e4d7e380": {
+    "zh": "黄",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/HSLBands.swift"
+    ]
+  },
+  "3d0158cb7cfd": {
+    "zh": "紫",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsCore/HSLBands.swift"
+    ]
+  },
+  "7ecf1cde6486": {
+    "zh": "已选",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "a249e81ff26e": {
+    "zh": "已拒",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "2df874e69dfd": {
+    "zh": "未评级",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift",
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "fbbd88badce7": {
+    "zh": "≥{0} 星",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "72485eed4580": {
+    "zh": "旗标 {0}",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "2c761394263c": {
+    "zh": "色标 {0}",
+    "files": [
+      "Sources/PhotonsUI/CatalogFilter.swift"
+    ]
+  },
+  "1200718c344a": {
+    "zh": "选择要导入的照片或文件夹",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "e6c0d36d6749": {
+    "zh": "包含子文件夹",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "5b00b953021a": {
+    "zh": "只选了照片，子文件夹选项不适用",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "189270a8b350": {
+    "zh": "导入中 {0}/{1}",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "2f58b6eddc08": {
+    "zh": "导入中…",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "9384df2ddf8e": {
+    "zh": "{0} 个失败",
+    "files": [
+      "Sources/PhotonsUI/ImportPanel.swift"
+    ]
+  },
+  "5487e5246a67": {
+    "zh": "{0}：色相 / 饱和 / 亮度",
+    "files": [
+      "Sources/PhotonsUI/HSLPanel.swift"
+    ]
+  },
+  "c5674be81e61": {
+    "zh": "{0}色带",
+    "files": [
+      "Sources/PhotonsUI/HSLPanel.swift"
+    ]
+  },
+  "4070f55d9a88": {
+    "zh": "LCC 矫正",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "5ce551a5f536": {
+    "zh": "读取照片和已确认的 LCC 对应关系…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "cd392f12e4da": {
+    "zh": "已载入确认过的对应关系",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "f3a2a43f5215": {
+    "zh": "添加 LCC 后，请逐张核对并确认对应关系",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "a73473ed6b17": {
+    "zh": "选择需要对应 LCC 的场景照片",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "0f70ac46e5a3": {
+    "zh": "选择单独拍摄的 LCC 平场照片",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "1a0105d45d33": {
+    "zh": "检查 LCC 纹理、亮度、遮挡与元数据…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "dd01a5cc3a83": {
+    "zh": "LCC 已读取；文件序号不能证明拍摄位置，请核对逐张对应",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "bffb62fbd550": {
+    "zh": "已填入建议配对，请核对后点击“确认并保存对应关系”",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "e7eb72afa632": {
+    "zh": "尚未选择 LCC",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "caafba41957c": {
+    "zh": "这张 LCC 被重复分配",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "fca64867d785": {
+    "zh": "单张场景的暗角与颜色不能可靠确定移轴位置。请先确认大致位置，再在附近解算。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "c7bbd14f9634": {
+    "zh": "准备 LCC 校正…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "18758dce1d62": {
+    "zh": "请选择镜头配置文件。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "f31f21c22b68": {
+    "zh": "校正预览已生成；原照片保持不变。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "a68e350ac627": {
+    "zh": "LCC 校正预览",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "412e76858234": {
+    "zh": "对应关系已保存；尚未对原图或全景应用 LCC 矫正",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "6abae60810ba": {
+    "zh": "逐张 LCC 对应",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "6d38f48f99b2": {
+    "zh": "传统校正：每张场景照片对应一张相同拍摄位置、方向和光圈的 LCC 白板。校正直接使用该白板，不叠加镜头配置文件。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "71a78a42af7e": {
+    "zh": "选择场景照片…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "46dd6450d88b": {
+    "zh": "添加 LCC…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "1240efcb239a": {
+    "zh": "{0} 张场景 · {1} 张 LCC",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "55a7bf2a5c93": {
+    "zh": "按文件正序配对",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "62f4f9bd810b": {
+    "zh": "按文件逆序配对",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "980c8f04383a": {
+    "zh": "从图库选择场景照片后打开此窗口，或点击“选择场景照片”。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "727e74b0c370": {
+    "zh": "对应 LCC",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "da590a8fe3ce": {
+    "zh": "请选择",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "da7aa9bc8f48": {
+    "zh": "尺寸、方向和后背型号匹配",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "0d3a4952e5a8": {
+    "zh": "选择对应关系以预览 LCC",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "03bcfaea2fab": {
+    "zh": "LCC 识别依据平滑亮度、色偏和边缘遮挡。光圈、移轴位置等信息未必写入 RAW，元数据匹配不能代替拍摄记录。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "3077d89627b1": {
+    "zh": "校正所选照片…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "8234d1bf247e": {
+    "zh": "确认并保存对应关系",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "29d1945ab067": {
+    "zh": "LCC 对应",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "2028834f2b6b": {
+    "zh": "LCC 功能",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "17b409bc4ecb": {
+    "zh": "传统 LCC 校正",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "36be15abd92b": {
+    "zh": "镜头配置文件校正",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "bba6488b8640": {
+    "zh": "管理配置文件",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "7b9fc5d84c0d": {
+    "zh": "后期 RGB 校正：使用嵌入的拼接几何；合并与调色造成的信息损失无法恢复。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "d098a748d520": {
+    "zh": "原始通道 LCC 校正 · 原片保留",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "1405051c6675": {
+    "zh": "导出校正副本…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "ac8ccd7914cd": {
+    "zh": "选择照片…",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "7b50017ae47e": {
+    "zh": "照片",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "5c30b533510f": {
+    "zh": "镜头配置文件",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "854f821696ae": {
+    "zh": "未指定配置文件",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "6255d52c9bfe": {
+    "zh": "已读取拼接信息：{0} 张原片 · {1}",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "14f6c2f69469": {
+    "zh": "该图片已做 LCC，不能重复应用。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "40c001b76410": {
+    "zh": "位置采用与像素数无关的坐标，重新导入或缩放后仍可校正。已压缩、合并或调色的图片只能进行近似后期校正。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "15b15c887158": {
+    "zh": "单张场景无法可靠区分物体颜色、照明与镜头红移。请输入拍摄时的大致移轴量，再在 ±3 mm 内细化；左右为横轴，上下为纵轴。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "6ddef7f6075c": {
+    "zh": "手动确认大致位置（右、上为正，mm）",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "4995b90d72fc": {
+    "zh": "水平",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "1777a1e5f3a5": {
+    "zh": "垂直",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "3d0cb62afa54": {
+    "zh": "在大致位置附近解算（单张原片）",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "7a9cfbc9eceb": {
+    "zh": "全景缺少镜头中心记录时，上述位置指整个拼接画面中心相对镜头中心的位置。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "19e40f9ff2dc": {
+    "zh": "生成校正预览",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "91a5d44e3599": {
+    "zh": "LCC 校正",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  },
+  "1625179badc0": {
+    "zh": "月",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "85217f7aff77": {
+    "zh": "日",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "006d3ffb11d2": {
+    "zh": "后缀",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "9c55a439d71f": {
+    "zh": "星级",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "42756d47efb9": {
+    "zh": "旗标",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "482ec70d0841": {
+    "zh": "色标",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "dacf07026026": {
+    "zh": "相机",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "94854c89ae71": {
+    "zh": "序列号",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "bec5dd6e9068": {
+    "zh": "镜头",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "9084e1064dab": {
+    "zh": "焦距",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "8a4f7c319467": {
+    "zh": "快门",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "e3f9866a9143": {
+    "zh": "闪光灯",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift",
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "e2f7d66434af": {
+    "zh": "文件后缀",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "82941f103294": {
+    "zh": "快门速度",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "80541253c5fa": {
+    "zh": "GPS 数据",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "752e88e74375": {
+    "zh": "{0} 月",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "6585bb7be54d": {
+    "zh": "{0} 日",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "a9eaa7e913ad": {
+    "zh": "留用",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "ac83d3972fe9": {
+    "zh": "排除",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "534fc7e1ac23": {
+    "zh": "未标记",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "90ce0f66f094": {
+    "zh": "有",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "f293a27cecfa": {
+    "zh": "全部{0}",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "c783a90338f5": {
+    "zh": "部分{0}",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "55f1033fab69": {
+    "zh": "清除全部",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "f88f4f91aea0": {
+    "zh": "选择筛选维度",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "a692b4e3818c": {
+    "zh": "选择{0}的值（可多选）",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "0a9481a153a7": {
+    "zh": "全部不选",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "74966e20df2e": {
+    "zh": "取消选择",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "e249b3f6e038": {
+    "zh": "本库无此数据",
+    "files": [
+      "Sources/PhotonsUI/FilterBar.swift"
+    ]
+  },
+  "c2f71c1b10ef": {
+    "zh": "形状",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "828b972e5828": {
+    "zh": "渐变比例",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "c105878a3797": {
+    "zh": "起点线",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "cdfc19e079bd": {
+    "zh": "终点线",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "f11ae947e94f": {
+    "zh": "渐变角度",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "260cca3889c2": {
+    "zh": "中心",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "8d5e27c8ae21": {
+    "zh": "左边界",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "03ff9e37c7e1": {
+    "zh": "右边界",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "8cc9c04f73a7": {
+    "zh": "上边界",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "40c92503c7e0": {
+    "zh": "下边界",
+    "files": [
+      "Sources/PhotonsUI/MaskHandles.swift"
+    ]
+  },
+  "abed17a7180e": {
+    "zh": "未知相机",
+    "files": [
+      "Sources/PhotonsUI/MarqueeText.swift"
+    ]
+  },
+  "4fd33b500e82": {
+    "zh": "未知镜头",
+    "files": [
+      "Sources/PhotonsUI/MarqueeText.swift"
+    ]
+  },
+  "fcc31c39d5a1": {
+    "zh": "拖动把手改边界；拖中间整体平移；拖斜纹改羽化；双击把手复位该端",
+    "files": [
+      "Sources/PhotonsUI/MaskRangeBar.swift"
+    ]
+  },
+  "d4f6eb859980": {
+    "zh": "亮度 0…%.2f（与吸管同一量纲）",
+    "files": [
+      "Sources/PhotonsUI/MaskRangeBar.swift"
+    ]
+  },
+  "81c90e70e25a": {
+    "zh": "线性渐变",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "7f951909bac4": {
+    "zh": "径向渐变",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "34b5939d8815": {
+    "zh": "颜色范围",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "ccf5d257491b": {
+    "zh": "亮度范围",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "becb5df9dbcb": {
+    "zh": "语义",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "6c8c7a77cdfd": {
+    "zh": "天空",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "d6a7576b7962": {
+    "zh": "主体",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "8d7aff5a595f": {
+    "zh": "人物",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "476627a8c1b8": {
+    "zh": "头发",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "fc0d7cf23b54": {
+    "zh": "皮肤",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "7ee56603f63d": {
+    "zh": "牙齿",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "e4919ea342ea": {
+    "zh": "眼镜",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "70ca451994b7": {
+    "zh": "主体（旧）",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "b11b7f126b6d": {
+    "zh": "新建{0}蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskShapeControls.swift"
+    ]
+  },
+  "f65c42a2540b": {
+    "zh": "调整",
+    "files": [
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift"
+    ]
+  },
+  "52dc4b577116": {
+    "zh": "{0}{1}（尚未实现，暂无卡片）",
+    "files": [
+      "Sources/PhotonsUI/InspectorWorkspaceTabs.swift"
+    ]
+  },
+  "45664d5e4aba": {
+    "zh": "删除选中的蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "5a2fe7372486": {
+    "zh": "新建蒙版：画笔 / 线性 / 径向 / 颜色范围 / 亮度范围 / 语义",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "7e3362f3584b": {
+    "zh": "还没有蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "4e6fd0e28c55": {
+    "zh": "停用",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "f4f0ead1116b": {
+    "zh": "启用",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "cb3d3d457531": {
+    "zh": "蒙版级",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "24bf5f9844a9": {
+    "zh": "上移（列表与 develop_json 的数组顺序）",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "bffa4a78e1ea": {
+    "zh": "下移（列表与 develop_json 的数组顺序）",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "d44e9b3d3b31": {
+    "zh": "名称",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b3c59c2149c6": {
+    "zh": "重命名（⏎ 亦可）：改名不进任何键，不重渲，但会进一次历史——Core 的语义比较按值比 masks，名字在内",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "b45416fd1c8d": {
+    "zh": "作用在合成后的选区上：1 − a。覆盖面积会翻过来（蒙版内变外）",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "46eaa2def491": {
+    "zh": "只有一个组件时 Core 忽略 op（第一个组件的运算没有左值）——再加一个组件才生效",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "fb7d1789e217": {
+    "zh": "局部调整",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "8af892e81407": {
+    "zh": "{0} 项",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "11229de6c967": {
+    "zh": "拖动画面调整形状",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "74b8d7dcc694": {
+    "zh": "选中线/径向蒙版时，画布上的拖拽改形状（起点↔终点、中心→半径），不再平移画面",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "d76384870e04": {
+    "zh": "亮度范围条",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "c2df9bb34d16": {
+    "zh": "样本与选择范围是并集：加样本扩大覆盖，减小选择范围收缩",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "8c67206c7d45": {
+    "zh": "选择范围：样本色 → 中性；容差越大，带越宽",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "e3ad34dc8afa": {
+    "zh": "{0} 个样本",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "278e5034a88e": {
+    "zh": "未生成",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "11448fff91a4": {
+    "zh": "已生成",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "00a0072b2541": {
+    "zh": "未知 {0}",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "bd5f5b4afc9d": {
+    "zh": "显示蒙版",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "3f90d28034e8": {
+    "zh": "红色叠加来自蒙版自己的选区图（S1.5 atlas），不是第二次求值；不产生历史",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "50db7447b966": {
+    "zh": "大小",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "3f8950eeb398": {
+    "zh": "硬度",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "81a9d0b5a2a2": {
+    "zh": "流量",
+    "files": [
+      "Sources/PhotonsUI/MaskListPanel.swift"
+    ]
+  },
+  "e88329a2fa97": {
+    "zh": "{0} 个镜头 profile · 保存在本机应用数据中",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "6430d7f1cd18": {
+    "zh": "读取镜头 Profile…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "8c7ee4e7adb6": {
+    "zh": "镜头 profile 大小无效。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift",
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "558c9f10c4c6": {
+    "zh": "替换现有镜头 Profile？",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "86833a8f747b": {
+    "zh": "已存在相同标识的标定文件。替换会更新该文件的测量数据。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "131b13aa2659": {
+    "zh": "替换",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "08d7a98d788a": {
+    "zh": "已取消导入",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "03523dad439e": {
+    "zh": "导出镜头 Profile…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "474788f92319": {
+    "zh": "已导出：{0}",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "2eeb1676861b": {
+    "zh": "镜头 Profiles",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "61f6b1a29661": {
+    "zh": "用户创建的 LCC 标定，可查看、导入和分享；随附样例由开发者作为用户制作。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "0d624bdac72a": {
+    "zh": "创建镜头 Profile…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "6db6e93d9c3d": {
+    "zh": "{0} {1} 张",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "00f3f3fdc6a8": {
+    "zh": "标定机身：{0}",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "9ff1649978c3": {
+    "zh": "标定光圈 f/{0}",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "bc22134b1d3f": {
+    "zh": "后背相对机身{0} · {1} 张白板",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "6c3b0465bdf0": {
+    "zh": "H %+.1f 至 %+.1f mm · V %+.1f 至 %+.1f mm",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "462dcac8baeb": {
+    "zh": "保留每张白板的完整低频测量，包括弱光角落。原始 RAW 不会复制到 profile，也不需要一直保留在原路径。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "89e848ef8755": {
+    "zh": "拼接按后背相对机身的方向匹配标定；整机旋转会同步旋转校正场。对称机身的等价放置方向共用标定。",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "621708f1b63d": {
+    "zh": "读取镜头标定…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "1b9818e1adfe": {
+    "zh": "导入…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "643e7408e6a7": {
+    "zh": "导出…",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift",
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "859a15dbf359": {
+    "zh": "标定照片在像场中的完整矩形覆盖范围",
+    "files": [
+      "Sources/PhotonsUI/LCCProfileLibraryView.swift"
+    ]
+  },
+  "c0a3dfc3ae3e": {
+    "zh": "机身方向：{0}° {1}",
+    "files": [
+      "Sources/PhotonsUI/PanoramaBodyOrientationPicker.swift"
+    ]
+  },
+  "3f4ebc4aad97": {
+    "zh": "已选择",
+    "files": [
+      "Sources/PhotonsUI/PanoramaBodyOrientationPicker.swift"
+    ]
+  },
+  "444399a3f9ce": {
+    "zh": "逆时针旋转 · 十字为移轴零点",
+    "files": [
+      "Sources/PhotonsUI/PanoramaBodyOrientationPicker.swift"
+    ]
+  },
+  "65c83dfb4727": {
+    "zh": "示意",
+    "files": [
+      "Sources/PhotonsUI/PanoramaBodyOrientationPicker.swift"
+    ]
+  },
+  "1241282e23af": {
+    "zh": "切换 HDR / SDR 预览，SDR 使用与标准导出一致的映射",
+    "files": [
+      "Sources/PhotonsUI/PanoramaHDRPreview.swift"
+    ]
+  },
+  "eb1c4475f146": {
+    "zh": "HDR 预览 · {0}",
+    "files": [
+      "Sources/PhotonsUI/PanoramaHDRPreview.swift"
+    ]
+  },
+  "2e895f4004e4": {
+    "zh": "SDR 预览 · 标准映射",
+    "files": [
+      "Sources/PhotonsUI/PanoramaHDRPreview.swift"
+    ]
+  },
+  "4a992de52aca": {
+    "zh": "过白",
+    "files": [
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "c08de948f396": {
+    "zh": "削顶",
+    "files": [
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "63b98ddec268": {
+    "zh": "削底",
+    "files": [
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "6270304d33b8": {
+    "zh": "直方图：R/G/B 三组曲线，重叠处按光叠加（R+G 为黄，三路齐为白）；亮度用于过白、削顶和削底读数，不单独画线。横轴 {0} 档 SDR 码值 + {1} 档高光尾。下方读数跟随鼠标：在照片上显示当前 HDR/SDR 预览映射后的像素 R/G/B 值（SDR 为 0–255，超白为 +x.x 档）；在直方图上显示该箱的 R/G/B 样本数。",
+    "files": [
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "e419b0ff536a": {
+    "zh": "还没有可测的帧",
+    "files": [
+      "Sources/PhotonsUI/HistogramCard.swift"
+    ]
+  },
+  "977f178f562a": {
+    "zh": "请先选中需要拼接的图片",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "2e0b7140c7cc": {
+    "zh": "请至少选中两张需要拼接的图片",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "f809c05c0b95": {
+    "zh": "部分原始图片离线或无法读取，请先重新连接原片。",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "dba4f5574a62": {
+    "zh": "照片库导入失败，导出文件已保留。",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "bc37aded0571": {
+    "zh": "无法打开上次的照片库。请通过“文件 → 打开库…”重新选择照片库。\n{0}",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "f7ba2453948e": {
+    "zh": "照片库.photonslibrary",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "ea48d5271772": {
+    "zh": "选择照片库的保存位置",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "49d1bb1ed097": {
+    "zh": "照片库名称需要以 .photonslibrary 结尾。",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "54ef6ea927d7": {
+    "zh": "选择照片库引用的原片文件夹，以恢复读取和保存权限。照片不会被移动。",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "22c930950773": {
+    "zh": "授权文件夹",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a61bc16ca0f6": {
+    "zh": "新建预设",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "3e163d0aa2c6": {
+    "zh": "当前照片的外观会保存为预设（不含蒙版）。",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a3030bf8f16d": {
+    "zh": "保存",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "e70df6c3828f": {
+    "zh": "撤销 {0}",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsCore/History.swift"
+    ]
+  },
+  "00d7a2fbf700": {
+    "zh": "重做 {0}",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "03717b6f1070": {
+    "zh": "重做",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "c4ae9e6bc483": {
+    "zh": "显示原图（已开启）",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "c4507a67622d": {
+    "zh": "显示原图",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "b48eb61a5163": {
+    "zh": "前后对比（{0} ",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a5163334460b": {
+    "zh": "前后对比",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "d585528e5409": {
+    "zh": "对比方向：",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "f8ddd4d1ff0a": {
+    "zh": "复制设置（{0} 项）",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "1c7d60676292": {
+    "zh": "复制设置",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift",
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "2e9c71ed45ca": {
+    "zh": "粘贴设置到 {0} 张",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "a9f95179545c": {
+    "zh": "堆叠所选 {0} 张",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "9002a832cad1": {
+    "zh": "导出 {0} 张…",
+    "files": [
+      "Sources/PhotonsUI/EditorWindowController.swift"
+    ]
+  },
+  "8d1c78c9ff28": {
+    "zh": "关于 {0}",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "da9fc8ba9497": {
+    "zh": "设置…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "5efd5bdc4894": {
+    "zh": "隐藏 {0}",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "d32bd5a0edfe": {
+    "zh": "隐藏其他",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "cbec1c499c29": {
+    "zh": "退出 {0}",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "39932f24fe11": {
+    "zh": "文件",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "e6fe0fd9bc6e": {
+    "zh": "打开库…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "006ed48cea9a": {
+    "zh": "导入照片…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "dfc8a33f5fb3": {
+    "zh": "授权原片文件夹…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "051836569928": {
+    "zh": "编辑",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "7e46f4042041": {
+    "zh": "全选照片",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "5942cecbe73c": {
+    "zh": "粘贴设置（选择组…）",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "2cd3e10b3a16": {
+    "zh": "选择要复制的设置…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "3085c81211ed": {
+    "zh": "清除星级",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "63d4f7b1c358": {
+    "zh": "{0} 星",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "96f39964acc7": {
+    "zh": "标记为选取 (P)",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "ce60f6e0a6d1": {
+    "zh": "标记为拒绝 (X)",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "200edafcacf5": {
+    "zh": "清除旗标 (U)",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "90bcec6e0d2b": {
+    "zh": "色标：{0}",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "1faccf658720": {
+    "zh": "色标：无",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "5ca6730d4415": {
+    "zh": "工具",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "8311512f9cab": {
+    "zh": "全景拼接…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "486f04a981bd": {
+    "zh": "LCC矫正…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "6efc41d2edbf": {
+    "zh": "胶片条（第二浏览器）",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "61db6236bd40": {
+    "zh": "浏览列表",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "f8d01c881e34": {
+    "zh": "适应窗口",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "d3adfe26046b": {
+    "zh": "对比方向：左右",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "80f8fbcfa011": {
+    "zh": "放大",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "290f68030501": {
+    "zh": "缩小",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "9efe01f647d6": {
+    "zh": "窗口",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "ac29e57a46f4": {
+    "zh": "最小化",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "b762aec769a3": {
+    "zh": "缩放",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "357211096f78": {
+    "zh": "设为默认",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "28786d906975": {
+    "zh": "删除预设",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "a73ba3dfdb06": {
+    "zh": "（还没有预设）",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "ad10bbb40992": {
+    "zh": "默认：{0}",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "5527eccff3b6": {
+    "zh": "从当前照片新建预设…",
+    "files": [
+      "Sources/PhotonsUI/AppMenu.swift"
+    ]
+  },
+  "4b7152145f19": {
+    "zh": "左上角",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "d8ed5dd75134": {
+    "zh": "右上角",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "6897632c0ea9": {
+    "zh": "右下角",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "cc728271f938": {
+    "zh": "左下角",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "8cae94088bff": {
+    "zh": "上边",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "0838dcc59823": {
+    "zh": "右边",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "a5089425543b": {
+    "zh": "下边",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "6a0ef384c814": {
+    "zh": "左边",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "2d0399a3247c": {
+    "zh": "框内",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "6786c152fcc8": {
+    "zh": "框外",
+    "files": [
+      "Sources/PhotonsUI/CropTool.swift"
+    ]
+  },
+  "82160ecd619f": {
+    "zh": "降噪中",
+    "files": [
+      "Sources/PhotonsUI/DenoiseProgressOverlay.swift"
+    ]
+  },
+  "37405b94dbeb": {
+    "zh": "曲线未加载（保持恒等），其余字段照常",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift"
+    ]
+  },
+  "56fd2e8372af": {
+    "zh": "curve.format type \"{0}\" 不是 \"double\": 按 0…2 坐标读",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift"
+    ]
+  },
+  "055702c95f40": {
+    "zh": "curve.format max {0} ≠ {1}: 按比例换算",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift"
+    ]
+  },
+  "458b09c88c03": {
+    "zh": "曲线坐标 {0} = {1} 超出 0…{2}",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift"
+    ]
+  },
+  "4b84a374a70a": {
+    "zh": "（当前只支持到 +4 EV；将来支持 +5 EV 时把最大值改成 2.25 并升 curve.format version）",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift"
+    ]
+  },
+  "63d6b47116de": {
+    "zh": "全局",
+    "files": [
+      "Sources/PhotonsCore/EditModel.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "24591142d6fe": {
+    "zh": "克隆",
+    "files": [
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "f75eb48f83be": {
+    "zh": "已取源",
+    "files": [
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "2dffeb9d83c1": {
+    "zh": "带内无可用源",
+    "files": [
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "13c6b3c5ee55": {
+    "zh": "未搜索",
+    "files": [
+      "Sources/PhotonsCore/HealSpot.swift"
+    ]
+  },
+  "fae0f730b9e0": {
+    "zh": "蒙版按目标照片的短边重新锚定，粘贴时生成新的蒙版 id（目标照片自己的蒙版保留）",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "762f17e26780": {
+    "zh": "饱和度",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "e6e3a4abdbcc": {
+    "zh": "降噪",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "462d8c4e2cd2": {
+    "zh": "色彩降噪",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift",
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "96038cde015a": {
+    "zh": "镜头校正",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "8aa38971de29": {
+    "zh": "解码器版本",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "3733e06a5224": {
+    "zh": "翻转",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "82a59f3d1c16": {
+    "zh": "比例",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5c55a67935af": {
+    "zh": "全部",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift",
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "1b9da17d230e": {
+    "zh": "基本：白平衡 + 黑电平 + 曝光 + 曲线",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "466de970a7d3": {
+    "zh": "颜色：颜色 + 黑白 + HSL + 色彩分级 + 开发 + 细节 + 效果",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "5bdad4030075": {
+    "zh": "几何：裁切",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "3a95d8539ab1": {
+    "zh": "仅白平衡",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "5fe84946add6": {
+    "zh": "未选任何组：粘贴什么也不会发生",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "e925ae18f664": {
+    "zh": "将复制：{0}",
+    "files": [
+      "Sources/PhotonsCore/EditSnapshot.swift"
+    ]
+  },
+  "191e26b5d741": {
+    "zh": "左右",
+    "files": [
+      "Sources/PhotonsCore/BeforeAfter.swift"
+    ]
+  },
+  "8284260058dd": {
+    "zh": "上下",
+    "files": [
+      "Sources/PhotonsCore/BeforeAfter.swift"
+    ]
+  },
+  "dc06463a46eb": {
+    "zh": "青",
+    "files": [
+      "Sources/PhotonsCore/HSLBands.swift"
+    ]
+  },
+  "e2d7f32e6c98": {
+    "zh": "品红",
+    "files": [
+      "Sources/PhotonsCore/HSLBands.swift"
+    ]
+  },
+  "7eb336e42cb5": {
+    "zh": "自动",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "d1aac086f427": {
+    "zh": "阴天",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "0fe8c7659afb": {
+    "zh": "钨丝灯",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "c18b7ff32832": {
+    "zh": "荧光灯",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalancePresets.swift"
+    ]
+  },
+  "67a8a7f79b96": {
+    "zh": "原照",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "39eae64cfc41": {
+    "zh": "开",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5d0ae622f61f": {
+    "zh": "关",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "78d8ccff9b0b": {
+    "zh": "文档版本",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "e2230dd88ee5": {
+    "zh": "处理版本",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "d2125c960fba": {
+    "zh": "裁切 x",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b2cd02701f51": {
+    "zh": "裁切 y",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "fbc66321f652": {
+    "zh": "裁切 宽",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "1c84ad224faf": {
+    "zh": "裁切 高",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "d12fead12279": {
+    "zh": "透视垂直",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c858cb3c11d4": {
+    "zh": "透视水平",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "1a9d08f722bd": {
+    "zh": "旋转 90°",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "387dea4835ba": {
+    "zh": "高光恢复",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "e5ad5eed0e3a": {
+    "zh": "黑电平微调",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "139d78846dee": {
+    "zh": "HSL[全局] 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c4f29c8650bf": {
+    "zh": "HSL[全局] 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "870e888d1942": {
+    "zh": "HSL[全局] 亮度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "123fe76bbed2": {
+    "zh": "点颜色[采样] 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "bcf347b10acd": {
+    "zh": "点颜色[采样] 彩度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "73f87f5e817c": {
+    "zh": "点颜色 范围",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "62efcb26219c": {
+    "zh": "点颜色 过渡",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5188a3b1131f": {
+    "zh": "点颜色 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c46305604cd2": {
+    "zh": "点颜色 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "886652da4db6": {
+    "zh": "点颜色 亮度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "f1c8d721b420": {
+    "zh": "色彩分级[阴影] 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "6f477b789d02": {
+    "zh": "色彩分级[阴影] 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "9de82d023d4a": {
+    "zh": "色彩分级[阴影] 亮度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "bf0b9e5f07d4": {
+    "zh": "色彩分级[中间调] 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b95a426c3f9c": {
+    "zh": "色彩分级[中间调] 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5ff21d39cefd": {
+    "zh": "色彩分级[中间调] 亮度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c5a971e98e94": {
+    "zh": "色彩分级[高光] 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b1d00d29a9e0": {
+    "zh": "色彩分级[高光] 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "95c8ad8fcba3": {
+    "zh": "色彩分级[高光] 亮度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "08fbf5c173e0": {
+    "zh": "亮度降噪",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ec32b1ee8a74": {
+    "zh": "锐度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5b047f4716b6": {
+    "zh": "解码版本",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "12417d8c19c6": {
+    "zh": "颗粒种子",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5044ff6b70f4": {
+    "zh": "横向色差 R",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ffd74c6ce0b1": {
+    "zh": "横向色差 B",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b4c79bf43a0b": {
+    "zh": "校准 阴影色调",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ace0349b7b3b": {
+    "zh": "校准 红 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a0ee4d365447": {
+    "zh": "校准 红 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "0868b2b59dba": {
+    "zh": "校准 绿 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "caa1572b770f": {
+    "zh": "校准 绿 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "46b02b1e3927": {
+    "zh": "校准 蓝 色相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "76a9c528ce55": {
+    "zh": "校准 蓝 饱和",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "805b17470cbb": {
+    "zh": "蒙版顺序",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c91e0dcf2cb4": {
+    "zh": "修复顺序",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "930ff0a6a7be": {
+    "zh": "反相",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "6edfe8091d05": {
+    "zh": "细化",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "0006d696d8e1": {
+    "zh": "新增",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "d7fff10717ea": {
+    "zh": "曲线 {0} 点数",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "5a38276e6681": {
+    "zh": "曲线 {0}[{1}].{2}",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "3366645622a7": {
+    "zh": "白",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "c5fce2a15bee": {
+    "zh": "明度",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "52d088529559": {
+    "zh": "黑白混合[{0}]",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b11d73ea8a01": {
+    "zh": "采样 Y",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b6269fa04fd7": {
+    "zh": "采样 U",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ed68bb53fccb": {
+    "zh": "采样 V",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "cc0dc846e124": {
+    "zh": "点颜色[{0}] {1}",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ce3df931927b": {
+    "zh": "组合",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "3e1b2762eb39": {
+    "zh": "蒙版 {0}[{1}]",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "a3f4a94e14a6": {
+    "zh": "修复 顺序",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "575f102e7d24": {
+    "zh": "修复 {0}",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "47a270081ab2": {
+    "zh": "模式",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "ba40014ff496": {
+    "zh": "类型",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "dd335f95a38b": {
+    "zh": "红眼阈值",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "34481e3b1aaf": {
+    "zh": "红眼过渡",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "b0c179e5bdba": {
+    "zh": "位置 x",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "45edfc8d9f15": {
+    "zh": "位置 y",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "4d9d52fe60ce": {
+    "zh": "源点 x",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "6c50bacd9a1f": {
+    "zh": "源点 y",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "972b218e54bb": {
+    "zh": "原始状态",
+    "files": [
+      "Sources/PhotonsCore/HistoryFields.swift"
+    ]
+  },
+  "cc9336ce0ee8": {
+    "zh": "吸管精修 %.2f%%（目标 %.0f%%）· %d 次解码 · %.0f ms%@%@",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "16eedfe21d48": {
+    "zh": " · 未达标",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "46cf9e72b7d2": {
+    "zh": "精修解码失败：{0}",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "266bb5fdd7a7": {
+    "zh": "精修：雅可比退化，改用单轴步",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "5a76d96a4586": {
+    "zh": "精修：解码器对这对值没有响应",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "585962003329": {
+    "zh": "解码失败",
+    "files": [
+      "Sources/PhotonsCore/WhiteBalanceDropperRefiner.swift"
+    ]
+  },
+  "91dafae950ae": {
+    "zh": "NR {0} · 色彩 {1} · 细节 {2} · 锐化 {3}",
+    "files": [
+      "Sources/PhotonsCore/DetailSettings.swift"
+    ]
+  },
+  "3f94a3a6d3ac": {
+    "zh": "Matrix3 是 3×3，行主序展开应为 9 个数",
+    "files": [
+      "Sources/PhotonsCore/ColorPrimaries.swift"
+    ]
+  },
+  "8f59b56a5d24": {
+    "zh": "Matrix3 是 3×3",
+    "files": [
+      "Sources/PhotonsCore/ColorPrimaries.swift"
+    ]
+  },
+  "c61cd8ca3012": {
+    "zh": "奇异矩阵没有逆：两套基色不可能重合到这种程度",
+    "files": [
+      "Sources/PhotonsCore/ColorPrimaries.swift"
+    ]
+  },
+  "1389242a6fd0": {
+    "zh": "原照片所在文件夹",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "9bedd6219651": {
+    "zh": "指定文件夹",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "4ce4c98eb27e": {
+    "zh": "覆盖",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "fc50a99caae0": {
+    "zh": "跳过",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "0d0cbac2eee5": {
+    "zh": "重命名",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "03af18e36797": {
+    "zh": "百分比",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "f60066ec4bbf": {
+    "zh": "原尺寸",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "31bf373b8403": {
+    "zh": "仅版权",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "fef304a69096": {
+    "zh": "左上",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "ddf11974a72b": {
+    "zh": "右上",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "8537c17b8e3e": {
+    "zh": "左下",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "eae5305a5c76": {
+    "zh": "右下",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "33aff226fdbf": {
+    "zh": "标准（与 SDR 预览一致）",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "17bbfe9cc152": {
+    "zh": "无（硬截断）",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "6e5db4efef0f": {
+    "zh": "长边 {0}",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "b4d9afee0d1b": {
+    "zh": "长边 {0}%",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "0f76f56b52df": {
+    "zh": " 半尺寸",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "0a0e80ee8397": {
+    "zh": "未放大",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "99014d626105": {
+    "zh": "水印 ",
+    "files": [
+      "Sources/PhotonsExport/ExportPreset.swift"
+    ]
+  },
+  "ce43afe62d83": {
+    "zh": "右/下各 {0} px",
+    "files": [
+      "Sources/PhotonsExport/GainMapSizing.swift"
+    ]
+  },
+  "4e05e22f0f7d": {
+    "zh": "右 {0} px",
+    "files": [
+      "Sources/PhotonsExport/GainMapSizing.swift"
+    ]
+  },
+  "14e8cc678708": {
+    "zh": "下 {0} px",
+    "files": [
+      "Sources/PhotonsExport/GainMapSizing.swift"
+    ]
+  },
+  "dd9a86ddd236": {
+    "zh": "半尺寸需要偶数像素：当前 {0}×{1}，将裁到 ",
+    "files": [
+      "Sources/PhotonsExport/GainMapSizing.swift"
+    ]
+  },
+  "b788f1d8b85b": {
+    "zh": "半尺寸增益图：源 {0}×{1}，已裁 ({2},{3}) → ",
+    "files": [
+      "Sources/PhotonsExport/GainMapSizing.swift"
+    ]
+  },
+  "b413c7356a75": {
+    "zh": "没有原照片文件夹，请指定导出位置。",
+    "files": [
+      "Sources/PhotonsExport/BatchExport.swift"
+    ]
+  },
+  "933e7782d4d7": {
+    "zh": "长边 {0} 请求 → 源 {1}，按不扩大输出 {2}",
+    "files": [
+      "Sources/PhotonsExport/BatchExport.swift"
+    ]
+  },
+  "d95352f4e044": {
+    "zh": "横向",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "b37dadee1b92": {
+    "zh": "横向 · 倒置",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "8336178d7b2b": {
+    "zh": "竖向 · 向左 90°",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "705571773f83": {
+    "zh": "竖向 · 向右 90°",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "b9d6d42dc0bf": {
+    "zh": "镜头 profile 的测量网格无效或版本不受支持。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "d02204483a8c": {
+    "zh": "镜头 profile 的测量误差数据无效。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "922f6b22f998": {
+    "zh": "镜头 profile 内容无效或版本不受支持。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "a2dbc7bae4dd": {
+    "zh": "镜头 profile 中的传感器、曝光或移轴数据无效。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "6a7590d81df0": {
+    "zh": "渲染标定的色彩空间不受支持。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "5a13415f2912": {
+    "zh": "测量网格超出了传感器范围。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCLensProfile.swift"
+    ]
+  },
+  "cd505be730c2": {
+    "zh": "拼接范围超过 {0}（{1}°）行程，请检查机身方向或手动输入位置。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "3735a180c3c7": {
+    "zh": "大致位置超出机身行程。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "409ec3974901": {
+    "zh": "读取已配对白板 {0}…",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "4f3510d3b9ac": {
+    "zh": "请先准备 LCC 预览。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "fb4baac95a8f": {
+    "zh": "可用于位置解算的有效标定与图像不足。请检查方向匹配或手动指定位置。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "3e9dec9a63e9": {
+    "zh": "用配对白板的红移、暗角匹配镜头 Profile…",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "2fdf398a243c": {
+    "zh": "从场景红移、暗角估计中心（低置信度）…",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "d44d22cbc3ea": {
+    "zh": "依据 %d 张已配对白板解算；匹配残差 %.1f%%。仍请预览核对。白板用于定位与校正后的白平衡测量，空间增益来自镜头 Profile。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "32579e8b19fb": {
+    "zh": "仅依据场景红移与暗角估计，可信度较低：天空、建筑颜色与照明可能干扰，请预览核对，已知机身读数优先。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "6cb863df7b95": {
+    "zh": " 候选接近机身行程边界，请以实际读数核对。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "bab9d5b8d021": {
+    "zh": "Profile 的实测覆盖不足以自动解算当前拼接图，请手动对齐。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPositionSolver.swift"
+    ]
+  },
+  "fc6d0bd57867": {
+    "zh": "第一版一次最多支持 16 张图片，请分组拼接。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "2208e0978c6a": {
+    "zh": "没有输入图片",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "ff9aa3d63f3f": {
+    "zh": "移轴接片要求各张照片尺寸和方向一致；请使用同一后背、同一朝向的原始图片。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "f0f5a708b21d": {
+    "zh": "读取 RAW {0}/{1}：{2}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "ffa317474694": {
+    "zh": "匹配重叠区域 {0} ↔ {1}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "421e14fe1c2b": {
+    "zh": "依据移轴读数搜索 {0} ↔ {1}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "a89e2a702257": {
+    "zh": "未找到可靠的平移重叠：{0}。可点击示意图，输入这些照片和一张基准照片的移轴量，再点击“按移轴信息重新匹配”。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "8a5142e9f53e": {
+    "zh": "照片间的平移关系不一致，可能存在视差或机位旋转。请减少选图并检查拍摄方式。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "04fcf0f7a641": {
+    "zh": "拼接结果超过 6 亿像素，请减少输入图片。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "bef4c76fe825": {
+    "zh": "尚未估计",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "c31363b407bf": {
+    "zh": "请先完成照片配准。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "0c65de60079d": {
+    "zh": "分析暗角、红移和重叠冲突",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "b087e27f78f6": {
+    "zh": "生成拼接预览",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "57119ed82d7a": {
+    "zh": "尚未完成配准，不能导出。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "c732647ded62": {
+    "zh": "这组图片超出当前内存预算，请减少拼接张数。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "dcc5db9b7e00": {
+    "zh": "全分辨率解码 {0}/{1}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "dfcc7af61de8": {
+    "zh": "不能覆盖输入图片。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift",
+      "Sources/PhotonsJobs/PanoramaJob.swift"
+    ]
+  },
+  "2c1ef19b2f8f": {
+    "zh": "写入 16 位 TIFF（LZW）",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "b4cd18cf7cdc": {
+    "zh": "无法创建 16 位 TIFF",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "8f86e5986392": {
+    "zh": "TIFF 写入失败，请检查剩余磁盘空间。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaEngine.swift"
+    ]
+  },
+  "bd0936d0eb8b": {
+    "zh": "无效的工作进程增益图。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaSnapshot.swift"
+    ]
+  },
+  "64a9879edbe2": {
+    "zh": "请先完成配准。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaSnapshot.swift"
+    ]
+  },
+  "6319cde4e732": {
+    "zh": "无效的拼接任务。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaSnapshot.swift"
+    ]
+  },
+  "a56bfaee063f": {
+    "zh": "无法识别传感器尺寸，不能建立传统 LCC 校正。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "2b2e356aa95e": {
+    "zh": "无法识别传感器尺寸。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "9d273dbe67b9": {
+    "zh": "移轴位置必须是有限数值。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "edbde7a1e03c": {
+    "zh": "这张图已记录 LCC 校正。为避免重复校正，请使用未校正的导出或原片。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "630c0e121a40": {
+    "zh": "这个 profile 缺少渲染 RGB 标定，请从 LCC 原片重新创建，或校正原片后重新拼接。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "759292c5a6ab": {
+    "zh": "图片宽高比超出校正范围。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "0fb1925587ba": {
+    "zh": "拼接信息未记录镜头中心，请输入大致水平、垂直位置。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "f397a44809b0": {
+    "zh": "镜头 profile 与拼接源后背或方向不匹配。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "f8cd32a1d0e0": {
+    "zh": "后期 LCC {0}/{1}",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "e184fba3ced0": {
+    "zh": "拼接信息缺少传感器尺寸。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "511abfcff05c": {
+    "zh": "当前 profile 的实测范围没有完整覆盖图片，请核对位置或校正原片后重新拼接。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "2964a5376783": {
+    "zh": "左 %.0f / 右 %.0f · 上 %.0f / 下 %.0f mm",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "fe4ff4c2b79b": {
+    "zh": "四向相同",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "0795fb1a4b4b": {
+    "zh": "水平放置",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "bf6b4f034de6": {
+    "zh": "竖直放置",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "39b4d37525c7": {
+    "zh": "正常放置",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "9eb2d65178e1": {
+    "zh": "向左横放",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "920f1de3792d": {
+    "zh": "倒置放置",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "3206dbbbf8e1": {
+    "zh": "向右横放",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaCameraBody.swift"
+    ]
+  },
+  "da5dd0a43564": {
+    "zh": "{0} 尚无可用于校正的原始通道标定。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "8c2a5480489f": {
+    "zh": "白板没有可用于校正的正信号。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "39cf8921084d": {
+    "zh": "⚠️ LCC矫正不完全：当前标定约覆盖 %.1f%%。未覆盖区域保留原图。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "6267568b6d4b": {
+    "zh": "读取原始 LCC 通道 {0}/{1}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "ee285a263f1c": {
+    "zh": "配对白板与照片不匹配",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "ff85097641dd": {
+    "zh": "LCC 对齐参数无效。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "0d2075dd3f5d": {
+    "zh": "整体曝光无效。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "cdd222f5e634": {
+    "zh": "请输入 2000–50000 K、色调 −150 至 150 的白平衡。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "b3cde958b3bb": {
+    "zh": "当前 LCC 没有可裁切的完整覆盖区域，请先调整位置或选择匹配的 profile。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "8c0a27d8b9db": {
+    "zh": "{0}：此格式尚不支持原始通道 LCC；不能用 RGB 校正替代。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "d23649ab6a49": {
+    "zh": "手动白平衡",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "81f4b75a4c48": {
+    "zh": "校正后场景估计",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "4b3606bb6ea6": {
+    "zh": "校正后配对白板平均",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "344c1f88edf9": {
+    "zh": "缺少 RAW 校正缓存",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "4bb84000db0d": {
+    "zh": "旧版 RGB profile 不能提供原始通道 LCC，请从白板 RAW 重新创建。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaLCC.swift"
+    ]
+  },
+  "4a14b51acd0b": {
+    "zh": "暗角与红移拟合一致，低置信度候选；场景明暗仍可能干扰，请手动校准。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaSeams.swift"
+    ]
+  },
+  "0df4a9d36d96": {
+    "zh": "暗角／红移不足以可靠确定绝对移轴位置；当前显示相对位置。可用已知机身读数手动校准。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaSeams.swift"
+    ]
+  },
+  "ac13861872e3": {
+    "zh": "校正后的 RAW 无足够信号估计白平衡。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCameraPipeline.swift"
+    ]
+  },
+  "05cb7d84c9df": {
+    "zh": "无法读取 RAW 白平衡标定。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCameraPipeline.swift"
+    ]
+  },
+  "a0c9e40082d3": {
+    "zh": "无法显影校正后的 RAW。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCameraPipeline.swift"
+    ]
+  },
+  "804fd97215e0": {
+    "zh": "校正后的 RAW 显影失败。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCameraPipeline.swift"
+    ]
+  },
+  "76eaacfe87d2": {
+    "zh": "{0}：镜像方向暂不支持，请使用未镜像的 LCC 原片。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "5fbddcf57213": {
+    "zh": "这组白板的 ISO 或快门时间不一致。请使用相同曝光拍摄的 LCC 创建 profile。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "a5a786d39ada": {
+    "zh": "请填写镜头名称、传感器尺寸，并确认每张白板的移轴量。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "cc1009f86e6a": {
+    "zh": "同一个 profile 请使用同一型号后背拍摄的白板。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "8431ceaff69a": {
+    "zh": "传感器尺寸与 {0} 的 RAW 信息不一致。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "2822ec9e0922": {
+    "zh": "分析 LCC {0}/{1}：{2}",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "12edd19f4454": {
+    "zh": "无法解码 {0}",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileBuilder.swift"
+    ]
+  },
+  "fa397c8d29a6": {
+    "zh": "拼接信息无效或过大。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaManifest.swift"
+    ]
+  },
+  "43898da0de51": {
+    "zh": "不支持或损坏的拼接信息。",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaManifest.swift"
+    ]
+  },
+  "12dd189a96f3": {
+    "zh": "DNG 尺寸无效",
+    "files": [
+      "Sources/PhotonsPanorama/LinearDNGWriter.swift"
+    ]
+  },
+  "378062584513": {
+    "zh": "拼接图像含无效像素",
+    "files": [
+      "Sources/PhotonsPanorama/LinearDNGWriter.swift"
+    ]
+  },
+  "726b933bf36a": {
+    "zh": "无损压缩 DNG {0}/{1}",
+    "files": [
+      "Sources/PhotonsPanorama/LinearDNGWriter.swift"
+    ]
+  },
+  "45b5f91bb4eb": {
+    "zh": "DNG 超过 4 GB 文件上限，请减少拼接张数。",
+    "files": [
+      "Sources/PhotonsPanorama/LinearDNGWriter.swift"
+    ]
+  },
+  "6470bc680f74": {
+    "zh": "RAW 焦平面像素密度",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "803071841b91": {
+    "zh": "{0} 型号规格",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "dbf58361c2d4": {
+    "zh": "无法读取图片：{0}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "1e3818fd0c54": {
+    "zh": "未知机身",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift",
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "ae0e8fc37498": {
+    "zh": "RAW 解码失败：{0}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "30fe5a21c7fe": {
+    "zh": "不支持这张图片：{0}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "7e0e69f9c09a": {
+    "zh": "原片已变更，请重新生成预览：{0}",
+    "files": [
+      "Sources/PhotonsPanorama/PanoramaModel.swift"
+    ]
+  },
+  "5fecc8c5b050": {
+    "zh": "平场特征符合 LCC（仅为识别提示）",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "bafa53262a70": {
+    "zh": "包含较多纹理或过暗，请核对是否为 LCC",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "f29324f3114f": {
+    "zh": "约 {0}% 像素接近饱和",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "2e52cbc0f6b8": {
+    "zh": "检测到暗区／物理遮挡",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "22ae2734f10b": {
+    "zh": "场景照片不能同时作为自己的 LCC",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "8883220d2555": {
+    "zh": "像素尺寸不同",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "d9bd50d31ae9": {
+    "zh": "拍摄方向不同",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "5d172d568146": {
+    "zh": "相机／后背型号不同",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "39305921c957": {
+    "zh": "每张场景照片和每张 LCC 只能在这组配对中出现一次。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCPairing.swift"
+    ]
+  },
+  "1a2fca964681": {
+    "zh": "镜头 profile 过大。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "2bf1caca5511": {
+    "zh": "不是受支持的镜头 profile 文件。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "d11ed0770c8f": {
+    "zh": "镜头 profile 文件头无效。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "38a335e41104": {
+    "zh": "镜头 profile 文件不完整。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "968cb9104ff5": {
+    "zh": "镜头 profile 校验失败，文件可能已损坏。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "8615cf543f0a": {
+    "zh": "镜头 profile 索引与测量数据不一致。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "4fb3133ed0ee": {
+    "zh": "无法读取镜头 profile。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "05bc388feca5": {
+    "zh": "镜头 profile 索引不完整。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "93604323ed6f": {
+    "zh": "镜头 profile 索引无效。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "a76334bd19b7": {
+    "zh": "应用内缺少 43XL 镜头标定数据，请重新安装完整应用。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "5b744aed063f": {
+    "zh": "43XL 镜头 profile 标识不正确。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "0c807b983a78": {
+    "zh": "文件名与标识不一致",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "848d4385ac80": {
+    "zh": "镜头 profile 标识不一致。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCProfileStore.swift"
+    ]
+  },
+  "d7df93601eab": {
+    "zh": "无改动",
+    "files": [
+      "Sources/PhotonsCatalog/Presets.swift"
+    ]
+  },
+  "e17c2ae071b3": {
+    "zh": "文件内容与库中记录不一致（{0}）：期望 {1}…，实际 {2}…",
+    "files": [
+      "Sources/PhotonsCatalog/Availability.swift"
+    ]
+  },
+  "de03f6d02cc4": {
+    "zh": "不是一个文件：{0}",
+    "files": [
+      "Sources/PhotonsCatalog/Availability.swift"
+    ]
+  },
+  "27e785b57bd2": {
+    "zh": "库中没有这个条目：{0}",
+    "files": [
+      "Sources/PhotonsCatalog/Availability.swift"
+    ]
+  },
+  "291122de4189": {
+    "zh": "已有另一个条目指向 {0}",
+    "files": [
+      "Sources/PhotonsCatalog/Availability.swift"
+    ]
+  },
+  "6444f5bbc642": {
+    "zh": "相册名不能为空",
+    "files": [
+      "Sources/PhotonsCatalog/Albums.swift"
+    ]
+  },
+  "b8b1ccee45e0": {
+    "zh": "已经有一个叫「{0}」的相册",
+    "files": [
+      "Sources/PhotonsCatalog/Albums.swift"
+    ]
+  },
+  "eb5b0feed7b8": {
+    "zh": "没有这个相册: {0}",
+    "files": [
+      "Sources/PhotonsCatalog/Albums.swift"
+    ]
+  },
+  "430f02218d7c": {
+    "zh": "没有打开的库",
+    "files": [
+      "Sources/PhotonsCatalog/Albums.swift"
+    ]
+  },
+  "a7cf9a519774": {
+    "zh": "没有这个堆叠：{0}",
+    "files": [
+      "Sources/PhotonsCatalog/Stacks.swift"
+    ]
+  },
+  "34665e747a7b": {
+    "zh": "堆叠至少需要两张照片",
+    "files": [
+      "Sources/PhotonsCatalog/Stacks.swift"
+    ]
+  },
+  "4693497dd1f6": {
+    "zh": "照片 {0} 不在堆叠 {1} 里",
+    "files": [
+      "Sources/PhotonsCatalog/Stacks.swift"
+    ]
+  },
+  "21ce6456ecdb": {
+    "zh": "全分辨率解码",
+    "files": [
+      "Sources/PhotonsJobs/PanoramaJob.swift"
+    ]
+  },
+  "4206964a902f": {
+    "zh": "编码并写入文件…",
+    "files": [
+      "Sources/PhotonsJobs/PanoramaJob.swift"
+    ]
+  },
+  "6e4445df6957": {
+    "zh": "导出失败",
+    "files": [
+      "Sources/PhotonsJobs/PanoramaJob.swift",
+      "Sources/PhotonsPanoramaWorker/main.swift"
+    ]
+  },
+  "bcb9008477f1": {
+    "zh": "渲染输出 {0}/{1}",
+    "files": [
+      "Sources/PhotonsJobs/PanoramaJob.swift"
+    ]
+  },
+  "81d95bbdad66": {
+    "zh": "生成 SDR 映射与 HDR 数据…",
+    "files": [
+      "Sources/PhotonsJobs/PanoramaJob.swift"
+    ]
+  },
+  "fc7ac1c0b0ab": {
+    "zh": "此图片经过无法还原位置的变换，请在变换前应用 LCC 校正。",
+    "files": [
+      "Sources/PhotonsPanorama/LCCCorrectionEngine.swift"
+    ]
+  },
+  "538a8818a398": {
+    "zh": "已跳过现有文件",
+    "files": [
+      "Sources/PhotonsPanoramaWorker/main.swift"
+    ]
+  },
+  "3e6886d17a1c": {
+    "zh": "导出完成",
+    "files": [
+      "Sources/PhotonsPanoramaWorker/main.swift"
+    ]
+  },
+  "64f1d2691e0c": {
+    "zh": "手动位置表示全景画面中心相对镜头光轴的偏移，右／上为正，单位 mm。",
+    "files": [
+      "Sources/PhotonsUI/LCCWindowController.swift"
+    ]
+  }
+}

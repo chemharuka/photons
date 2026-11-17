@@ -17,6 +17,12 @@ public final class AnselDenoiseMetal {
     let model: AnselDenoiseModel
     let cfg: AnselModelConfig
     let metal: MetalConv
+    private var preparedLayers: [String: MetalConv.PreparedConvolution] = [:]
+    private let preparedLock = NSLock()
+    var preparedLayerCount: Int {
+        preparedLock.lock(); defer { preparedLock.unlock() }
+        return preparedLayers.count
+    }
 
     public init(model: AnselDenoiseModel, metal: MetalConv) {
         self.model = model
@@ -77,9 +83,8 @@ public final class AnselDenoiseMetal {
             h = try block(h, "enc.\(i).0.weight", "enc.\(i).0.bias",
                           "enc.\(i).2.weight", "enc.\(i).2.bias", cmd: cmd)
             skips.append(h)
-            h = try metal.conv(h, w: try model.weights("down.\(i).weight"),
-                               b: model.tensors["down.\(i).bias"]?.values,
-                               kind: .down2x2, cmd: cmd)
+            h = try convolution(h, weight: "down.\(i).weight", bias: "down.\(i).bias",
+                                kind: .down2x2, cmd: cmd)
         }
 
         h = try block(h, "bottleneck.0.weight", "bottleneck.0.bias",
@@ -87,9 +92,8 @@ public final class AnselDenoiseMetal {
 
         for i in 0..<depth {
             h = try metal.upsampleNearest(h, cmd: cmd)
-            h = try metal.conv(h, w: try model.weights("up.\(i).weight"),
-                               b: model.tensors["up.\(i).bias"]?.values,
-                               kind: .point1x1, cmd: cmd)
+            h = try convolution(h, weight: "up.\(i).weight", bias: "up.\(i).bias",
+                                kind: .point1x1, cmd: cmd)
             let skip = skips[depth - 1 - i]
             precondition(skip.width == h.width && skip.height == h.height,
                          "skip \(i) \(skip.width)x\(skip.height) vs decoder \(h.width)x\(h.height)")
@@ -98,13 +102,10 @@ public final class AnselDenoiseMetal {
                           "dec.\(i).2.weight", "dec.\(i).2.bias", cmd: cmd)
         }
 
-        let noise = try metal.conv(h, w: try model.weights("head.weight"),
-                                   b: model.tensors["head.bias"]?.values,
-                                   kind: .same3x3, cmd: cmd)
+        let noise = try convolution(h, weight: "head.weight", bias: "head.bias",
+                                    kind: .same3x3, cmd: cmd)
 
         // Residual: output = signal − predicted noise.
-        let dbg = "DBG signal=\(signal.width)x\(signal.height)x\(signal.channels) noise=\(noise.width)x\(noise.height)x\(noise.channels)\n"
-        FileHandle.standardError.write(Data(dbg.utf8))
         let out = try metal.subtract(signal, noise, cmd: cmd)
 
         cmd.commit()
@@ -128,15 +129,31 @@ public final class AnselDenoiseMetal {
         return slice
     }
 
+    private func convolution(_ input: MetalConv.Tensor, weight: String, bias: String,
+                             kind: MetalConv.ConvKind, cmd: MTLCommandBuffer) throws -> MetalConv.Tensor {
+        let layer = try preparedLayer(weight: weight, bias: bias)
+        return try metal.conv(input, prepared: layer, kind: kind, cmd: cmd)
+    }
+
+    private func preparedLayer(weight: String, bias: String) throws -> MetalConv.PreparedConvolution {
+        preparedLock.lock(); defer { preparedLock.unlock() }
+        let layer: MetalConv.PreparedConvolution
+        if let cached = preparedLayers[weight] {
+            layer = cached
+        } else {
+            layer = try metal.prepare(w: model.weights(weight), b: model.tensors[bias]?.values)
+            preparedLayers[weight] = layer
+        }
+        return layer
+    }
+
     private func block(_ x: MetalConv.Tensor,
                        _ w0: String, _ b0: String,
                        _ w2: String, _ b2: String,
                        cmd: MTLCommandBuffer) throws -> MetalConv.Tensor {
-        var h = try metal.conv(x, w: try model.weights(w0),
-                               b: model.tensors[b0]?.values, kind: .same3x3, cmd: cmd)
+        var h = try convolution(x, weight: w0, bias: b0, kind: .same3x3, cmd: cmd)
         try metal.geluInPlace(h, cmd: cmd)
-        h = try metal.conv(h, w: try model.weights(w2),
-                           b: model.tensors[b2]?.values, kind: .same3x3, cmd: cmd)
+        h = try convolution(h, weight: w2, bias: b2, kind: .same3x3, cmd: cmd)
         try metal.geluInPlace(h, cmd: cmd)
         return h
     }

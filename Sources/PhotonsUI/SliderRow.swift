@@ -23,8 +23,8 @@ import SwiftUI
 ///   · **the slider** — `InspectorView.shapeSlider`, the panel's only `Slider`: 16 pt high, `.mini`,
 ///     and a tint that comes from `SliderShape.accent` (blue = render, yellow = raw/decode,
 ///     red = linear domain). No `step:` — SwiftUI draws tick marks the moment it is handed one (046).
-///   · **the style** — `InspectorView.SliderRowStyle`: label 10 pt medium, readout 10 pt monospaced,
-///     1 pt between the head and the track. A card cannot grow a second set of numbers.
+///   · **the style** — `InspectorView.SliderRowStyle`: label 11 pt medium, readout 11 pt monospaced,
+///     on one aligned row with the track between them. A card cannot grow a second set of numbers.
 struct SliderRow: View {
 
     /// The row's label — also the accessibility name of its controls.
@@ -57,49 +57,35 @@ struct SliderRow: View {
     let onEditingChanged: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.rowSpacing) {
-            HStack(spacing: style.headSpacing) {
-                Text(title)
-                    .font(.system(size: style.labelSize, weight: style.labelWeight))
-                    .foregroundStyle(.secondary)
-                    .modifier(ResetOnDoubleClick(action: onReset,
-                                                 help: InspectorView.resetParameterHelp))
-                Spacer(minLength: 4)
-                if editable {
-                    SliderNumberField(value: value.wrappedValue,
-                                      range: range,
-                                      format: format,
-                                      decimals: decimals,
-                                      rounding: rounding,
-                                      fontSize: style.readoutSize,
-                                      accessibilityID: accessibilityID,
-                                      onCommit: { typed in
-                                          // The drag's own path, in the drag's own order: write
-                                          // through the binding, then the gesture-end commit. One
-                                          // typed value = one `applyEdit` + one `commitEdit`.
-                                          value.wrappedValue = typed
-                                          onEditingChanged(false)
-                                      })
-                } else {
-                    Text(InspectorView.sliderText(format, value.wrappedValue, rounding: rounding))
-                        .font(.system(size: style.readoutSize, design: .monospaced))
-                        .foregroundStyle(.primary)
-                }
-            }
-            // The readback probe sits **inside** the disabled scope, so what it reports is SwiftUI's
-            // own resolved `isEnabled` — not the local `enabled` flag echoed back (see
-            // `DetailRowEnabledProbe`: macOS 27's `Slider` is drawn by SwiftUI, so there is no
-            // `NSControl.isEnabled` to ask).
-            .background(DetailRowEnabledProbe(title: title))
-            // 060: **one** `Slider` for every shape, built by `shapeSlider` — the accent colour is the
-            // only difference, and it lives in exactly one place.
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: style.labelSize, weight: style.labelWeight))
+                .foregroundStyle(.secondary)
+                .modifier(ResetOnDoubleClick(action: onReset,
+                                             help: InspectorView.resetParameterHelp))
+                .frame(width: StudioTheme.labelWidth, alignment: .leading)
+                .lineLimit(1).minimumScaleFactor(0.85)
             InspectorView.shapeSlider(value, in: range, shape: shape,
                                       controlSize: style.controlSize,
                                       onEditingChanged: onEditingChanged)
+            if editable {
+                SliderNumberField(value: value.wrappedValue, range: range, format: format,
+                                  decimals: decimals, rounding: rounding,
+                                  fontSize: style.readoutSize, width: StudioTheme.valueWidth - 10,
+                                  accessibilityID: accessibilityID,
+                                  onCommit: { typed in
+                                      value.wrappedValue = typed
+                                      onEditingChanged(false)
+                                  })
+            } else {
+                Text(InspectorView.sliderText(format, value.wrappedValue, rounding: rounding))
+                    .font(.system(size: style.readoutSize, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(width: StudioTheme.valueWidth, alignment: .trailing)
+            }
         }
-        // `enabled: false` is the 解码模型 rule: the rows are **inert and visibly grey** rather than
-        // live controls that quietly do nothing. The value is untouched — `.disabled` stops input, it
-        // does not write.
+        .frame(minHeight: StudioTheme.rowHeight)
+        .background(DetailRowEnabledProbe(title: title))
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.42)
         .accessibilityIdentifier("\(rowIdentifierPrefix).\(title)")

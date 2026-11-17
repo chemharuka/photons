@@ -305,7 +305,23 @@ public enum StageAlgorithmVersion {
     /// every `L ≥ A`; `L < A` is bit-identical, so the fog and the sky keep their pixels. Every
     /// document with `effects.dehaze > 0` renders different pixels for the same stored number;
     /// `dehaze < 0` and `dehaze == 0` are bit-identical to 9.
-    public static let dehaze = 10
+    ///
+    /// **11** — 401: the recovery's **darkening depth** is capped (`g = clamp(J/L, 0.4, 1)`), so the
+    /// fog band is no longer multiplied by up to `1/t`. 374 had made `w` C¹ but left the two sides'
+    /// slopes asymmetric: below `A` the blend moved `L` by the full `1/t` (measured `gain(0.5·A) =
+    /// 0.2406` at `dehaze = 100` on an `A = 0.95` ramp) and above it by 1, so a frame whose airlight
+    /// sits near SDR white darkened `L = 0.9` (`w ≈ 0.12`, gain 0.9605) and left `L = 1.4` untouched
+    /// (gain 1.0000) — the "0.9 掉了、1.4 不动，对比度被拉爆" the user reported. `L > A` cannot be
+    /// darkened by the model (`J − L = (L − A)(1 − t)/t > 0`), so the fix bounds the asymmetry from
+    /// the dark side instead: `gain(0.5·A)` 0.2406 → 0.4000, `gain(0.9)` 0.9605 → 0.9603 (unchanged),
+    /// `gain(1.4)` 1.0000 → 1.0000 (280's contract), `gain(0.9)/gain(0.5)` 3.99 → 2.40 (−40 %).
+    /// The deep fog is still darkened (60 % instead of 76 %), and the measured `p99–p99.9` gain on
+    /// `L1030437`/`L1030428` falls from 1.007/1.008/1.012 to 1.000 (the tail is no longer lifted at
+    /// all). **Every** document with `effects.dehaze > 0` renders different pixels for the same stored
+    /// number; `dehaze < 0` (the haze-adding branch, which never reads the recovery) and `dehaze == 0`
+    /// (no stage) are **bit-identical** to 10 — the four negative `E = 0` hashes in
+    /// `DehazeExposureTests` are unchanged, and only the three positive ones moved.
+    public static let dehaze = 11
     /// **2** — 249: 修复搬到 S1 源像素（透视/旋转/裁切之前），spot 坐标从帧空间改为源空间。
     /// 同样的 spot 数字覆盖不同的像素（旋转/裁切不再带动它），旧文档按 `canvasV1` 迁移，所以这一代
     /// 的像素与 1 不同。

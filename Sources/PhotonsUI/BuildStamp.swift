@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// The revision this binary was **built** from, read back from the bundle.
@@ -20,7 +21,7 @@ public enum BuildStamp {
 
     /// `photons-demo 4a7c34b` — what the top-right corner shows.
     public static func label(libraryName: String?) -> String {
-        let name = libraryName ?? "未打开库"
+        let name = libraryName ?? L10n.tr("a306ecabb07b")
         return "\(name) \(revision)"
     }
 }

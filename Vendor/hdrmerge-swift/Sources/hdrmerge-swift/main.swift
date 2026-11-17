@@ -280,6 +280,13 @@ func runCapabilities() -> Response {
 
 // MARK: - main
 
+let sandboxFileGrants: SandboxFileGrants
+do { sandboxFileGrants = try SandboxFileGrants() }
+catch {
+    FileHandle.standardError.write(Data(("Unable to restore file access: \(error.localizedDescription)\n").utf8))
+    exit(2)
+}
+
 let argv = Array(CommandLine.arguments.dropFirst())
 let wantsJSON = argv.contains("--json")
 

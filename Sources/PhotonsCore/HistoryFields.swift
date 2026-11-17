@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - 077: field-level history diff
@@ -92,8 +93,8 @@ public enum FieldValue: Equatable, Codable, Sendable {
         switch self {
         case .number(let v): return FieldValue.decimal(v, signed: !structural)
         case .optionalNumber(let v):
-            return v.map { FieldValue.decimal($0, signed: !structural) } ?? "原照"
-        case .flag(let v): return v ? "开" : "关"
+            return v.map { FieldValue.decimal($0, signed: !structural) } ?? L10n.tr("67a8a7f79b96")
+        case .flag(let v): return v ? L10n.tr("39eae64cfc41") : L10n.tr("5d0ae622f61f")
         case .text(let v): return v.isEmpty ? "—" : v
         }
     }
@@ -328,7 +329,7 @@ extension EditHistory {
             before.detailSettings.moire, after.detailSettings.moire)
         if before.decoderVersion != after.decoderVersion {
             add("decoderVersion", .detail,
-                .text(before.decoderVersion ?? "默认"), .text(after.decoderVersion ?? "默认"))
+                .text(before.decoderVersion ?? L10n.tr("844b8cc8dff7")), .text(after.decoderVersion ?? L10n.tr("844b8cc8dff7")))
         }
 
         // S3 — Effects.
@@ -415,7 +416,7 @@ extension EditHistory {
             let isNew = beforeByID[id] == nil
             if isNew {
                 out.append(FieldChange(field: EditField(key: key("added"), group: .masks),
-                                       from: .text("无"), to: .text("有")))
+                                       from: .text(L10n.tr("484d55613910")), to: .text(L10n.tr("90ce0f66f094"))))
             }
             // A brand-new mask is compared against `Mask.fallback` — the row then says what the mask
             // *is* (「羽化 0 → +0.35」) instead of only "a mask appeared", which is what the timeline
@@ -517,7 +518,7 @@ extension EditHistory {
         let afterIDsSet = Set(afterIDs)
         for o in before where !afterIDsSet.contains(o.id) {
             out.append(FieldChange(field: EditField(key: "masks.\(o.id).removed", group: .masks),
-                                   from: .text("有"), to: .text("无")))
+                                   from: .text(L10n.tr("90ce0f66f094")), to: .text(L10n.tr("484d55613910"))))
         }
         if beforeIDs != afterIDs {
             // A different set **or** a different order: the stack's own combination order (§3.3) moved.
@@ -559,7 +560,7 @@ extension EditHistory {
             let key = { (field: String) in "heal.\(id).\(field)" }
             if beforeByID[id] == nil {
                 out.append(FieldChange(field: EditField(key: key("added"), group: .heal),
-                                       from: .text("无"), to: .text("有")))
+                                       from: .text(L10n.tr("484d55613910")), to: .text(L10n.tr("90ce0f66f094"))))
             }
             let o = beforeByID[id]
             func num(_ field: String, _ a: Double, _ b: Double) {
@@ -598,7 +599,7 @@ extension EditHistory {
         let afterIDsSet = Set(afterIDs)
         for o in before where !afterIDsSet.contains(o.id) {
             out.append(FieldChange(field: EditField(key: "heal.\(o.id).removed", group: .heal),
-                                   from: .text("有"), to: .text("无")))
+                                   from: .text(L10n.tr("90ce0f66f094")), to: .text(L10n.tr("484d55613910"))))
         }
         if beforeIDs != afterIDs {
             out.append(FieldChange(field: EditField(key: "heal.order", group: .heal),
@@ -624,101 +625,101 @@ extension EditHistory {
     }
 
     private static let parameterNames: [String: String] = [
-        "document.schemaVersion": "文档版本",
-        "document.processVersion": "处理版本",
-        "geometry.crop.x": "裁切 x",
-        "geometry.crop.y": "裁切 y",
-        "geometry.crop.width": "裁切 宽",
-        "geometry.crop.height": "裁切 高",
-        "geometry.rotationDegrees": "角度",
-        "geometry.flipHorizontal": "水平翻转",
-        "geometry.flipVertical": "垂直翻转",
-        "geometry.perspectiveVertical": "透视垂直",
-        "geometry.perspectiveHorizontal": "透视水平",
-        "geometry.quarterTurns": "旋转 90°",
-        "geometry.aspectLock": "比例",
-        "light.exposure": "曝光",
-        "light.contrast": "对比",
-        "light.highlights": "高光",
-        "light.midtones": "中间调",
-        "light.shadows": "阴影",
-        "light.whites": "白色",
-        "light.blacks": "黑色",
-        "light.temperature": "色温",
-        "light.tint": "色调",
-        "light.highlightRecovery": "高光恢复",
-        "light.blackOffset": "黑电平微调",
-        "color.vibrance": "自然饱和",
-        "color.saturation": "饱和",
-        "color.global.hue": "HSL[全局] 色相",
-        "color.global.saturation": "HSL[全局] 饱和",
-        "color.global.luminance": "HSL[全局] 亮度",
-        "color.blackAndWhite": "黑白",
-        "color.point.sampleHue": "点颜色[采样] 色相",
-        "color.point.sampleChroma": "点颜色[采样] 彩度",
-        "color.point.range": "点颜色 范围",
-        "color.point.feather": "点颜色 过渡",
-        "color.point.hue": "点颜色 色相",
-        "color.point.saturation": "点颜色 饱和",
-        "color.point.luminance": "点颜色 亮度",
-        "colorGrading.shadows.hue": "色彩分级[阴影] 色相",
-        "colorGrading.shadows.saturation": "色彩分级[阴影] 饱和",
-        "colorGrading.shadows.lightness": "色彩分级[阴影] 亮度",
-        "colorGrading.midtones.hue": "色彩分级[中间调] 色相",
-        "colorGrading.midtones.saturation": "色彩分级[中间调] 饱和",
-        "colorGrading.midtones.lightness": "色彩分级[中间调] 亮度",
-        "colorGrading.highlights.hue": "色彩分级[高光] 色相",
-        "colorGrading.highlights.saturation": "色彩分级[高光] 饱和",
-        "colorGrading.highlights.lightness": "色彩分级[高光] 亮度",
-        "detail.sharpening": "锐化",
-        "detail.sharpeningRadius": "锐化半径",
-        "detail.noiseLuminance": "亮度降噪",
-        "detail.noiseColor": "色彩降噪",
-        "detail.lensCorrections": "镜头校正",
-        "detailSettings.luminanceNR": "亮度降噪",
-        "detailSettings.colorNR": "色彩降噪",
-        "detailSettings.sharpness": "锐度",
-        "detailSettings.detail": "细节",
-        "detailSettings.moire": "去摩尔纹",
-        "decoderVersion": "解码版本",
-        "effects.vignetteAmount": "暗角",
-        "effects.vignetteMidpoint": "暗角中点",
-        "effects.vignetteFeather": "暗角羽化",
-        "effects.grain": "颗粒数量",
-        "effects.grainSize": "颗粒大小",
-        "effects.grainRoughness": "颗粒粗糙度",
-        "effects.grainSeed": "颗粒种子",
-        "effects.texture": "纹理",
-        "effects.clarity": "清晰度",
-        "effects.nonBayerLuminanceNR": "去噪",
-        "effects.nonBayerColorNR": "去彩噪",
-        "effects.dehaze": "去雾",
+        "document.schemaVersion": L10n.tr("78d8ccff9b0b"),
+        "document.processVersion": L10n.tr("e2230dd88ee5"),
+        "geometry.crop.x": L10n.tr("d2125c960fba"),
+        "geometry.crop.y": L10n.tr("b2cd02701f51"),
+        "geometry.crop.width": L10n.tr("fbc66321f652"),
+        "geometry.crop.height": L10n.tr("1c84ad224faf"),
+        "geometry.rotationDegrees": L10n.tr("8d855790e87a"),
+        "geometry.flipHorizontal": L10n.tr("44775fbf3342"),
+        "geometry.flipVertical": L10n.tr("fcd75ef0a054"),
+        "geometry.perspectiveVertical": L10n.tr("d12fead12279"),
+        "geometry.perspectiveHorizontal": L10n.tr("c858cb3c11d4"),
+        "geometry.quarterTurns": L10n.tr("1a9d08f722bd"),
+        "geometry.aspectLock": L10n.tr("82a59f3d1c16"),
+        "light.exposure": L10n.tr("bc7dacff87db"),
+        "light.contrast": L10n.tr("bc4b2dbbb77b"),
+        "light.highlights": L10n.tr("f799c2308083"),
+        "light.midtones": L10n.tr("280d2d14de93"),
+        "light.shadows": L10n.tr("a0fb1c62d0e8"),
+        "light.whites": L10n.tr("f56e7eff58bf"),
+        "light.blacks": L10n.tr("ed7d2c54184b"),
+        "light.temperature": L10n.tr("84ac609620e5"),
+        "light.tint": L10n.tr("5bddf6a1c0f5"),
+        "light.highlightRecovery": L10n.tr("387dea4835ba"),
+        "light.blackOffset": L10n.tr("e5ad5eed0e3a"),
+        "color.vibrance": L10n.tr("ea9f8caa4ed3"),
+        "color.saturation": L10n.tr("1394938c0161"),
+        "color.global.hue": L10n.tr("139d78846dee"),
+        "color.global.saturation": L10n.tr("c4f29c8650bf"),
+        "color.global.luminance": L10n.tr("870e888d1942"),
+        "color.blackAndWhite": L10n.tr("47d88357c5ea"),
+        "color.point.sampleHue": L10n.tr("123fe76bbed2"),
+        "color.point.sampleChroma": L10n.tr("bcf347b10acd"),
+        "color.point.range": L10n.tr("73f87f5e817c"),
+        "color.point.feather": L10n.tr("62efcb26219c"),
+        "color.point.hue": L10n.tr("5188a3b1131f"),
+        "color.point.saturation": L10n.tr("c46305604cd2"),
+        "color.point.luminance": L10n.tr("886652da4db6"),
+        "colorGrading.shadows.hue": L10n.tr("f1c8d721b420"),
+        "colorGrading.shadows.saturation": L10n.tr("6f477b789d02"),
+        "colorGrading.shadows.lightness": L10n.tr("9de82d023d4a"),
+        "colorGrading.midtones.hue": L10n.tr("bf0b9e5f07d4"),
+        "colorGrading.midtones.saturation": L10n.tr("b95a426c3f9c"),
+        "colorGrading.midtones.lightness": L10n.tr("5ff21d39cefd"),
+        "colorGrading.highlights.hue": L10n.tr("c5a971e98e94"),
+        "colorGrading.highlights.saturation": L10n.tr("b1d00d29a9e0"),
+        "colorGrading.highlights.lightness": L10n.tr("95c8ad8fcba3"),
+        "detail.sharpening": L10n.tr("fc538f246da7"),
+        "detail.sharpeningRadius": L10n.tr("e9c8b36e09c7"),
+        "detail.noiseLuminance": L10n.tr("08fbf5c173e0"),
+        "detail.noiseColor": L10n.tr("462d8c4e2cd2"),
+        "detail.lensCorrections": L10n.tr("96038cde015a"),
+        "detailSettings.luminanceNR": L10n.tr("08fbf5c173e0"),
+        "detailSettings.colorNR": L10n.tr("462d8c4e2cd2"),
+        "detailSettings.sharpness": L10n.tr("ec32b1ee8a74"),
+        "detailSettings.detail": L10n.tr("5ce4ed5694c3"),
+        "detailSettings.moire": L10n.tr("c6b72ac37f82"),
+        "decoderVersion": L10n.tr("5b047f4716b6"),
+        "effects.vignetteAmount": L10n.tr("da89443e202b"),
+        "effects.vignetteMidpoint": L10n.tr("6d0d9fcc7f37"),
+        "effects.vignetteFeather": L10n.tr("a3382c24d9e9"),
+        "effects.grain": L10n.tr("a08cd6ad31a2"),
+        "effects.grainSize": L10n.tr("b5d27bfa565b"),
+        "effects.grainRoughness": L10n.tr("4208ff3a2c8b"),
+        "effects.grainSeed": L10n.tr("12417d8c19c6"),
+        "effects.texture": L10n.tr("262348fa5f3e"),
+        "effects.clarity": L10n.tr("0e22652107f5"),
+        "effects.nonBayerLuminanceNR": L10n.tr("da6c0db97b87"),
+        "effects.nonBayerColorNR": L10n.tr("ad51d63abfc2"),
+        "effects.dehaze": L10n.tr("0665cca26772"),
         // 185 — S3.10. Deliberately distinct from the decoder's 锐化 pair below: this is the
         // 显示域 pass, and a history row that said 「锐化」 for both would hide which of the two moved.
-        "sharpen.amount": "锐化数量",
-        "sharpen.radius": "锐化半径",
-        "sharpen.detail": "锐化细节",
-        "sharpen.masking": "锐化蒙版",
-        "optics.caRed": "横向色差 R",
-        "optics.caBlue": "横向色差 B",
-        "calibration.shadowTint": "校准 阴影色调",
-        "calibration.redHue": "校准 红 色相",
-        "calibration.redSat": "校准 红 饱和",
-        "calibration.greenHue": "校准 绿 色相",
-        "calibration.greenSat": "校准 绿 饱和",
-        "calibration.blueHue": "校准 蓝 色相",
-        "calibration.blueSat": "校准 蓝 饱和",
-        "masks.order": "蒙版顺序",
-        "heal.order": "修复顺序",
+        "sharpen.amount": L10n.tr("b0dbdc47bcc2"),
+        "sharpen.radius": L10n.tr("e9c8b36e09c7"),
+        "sharpen.detail": L10n.tr("ca1caeef1733"),
+        "sharpen.masking": L10n.tr("4b16c5d8dbf4"),
+        "optics.caRed": L10n.tr("5044ff6b70f4"),
+        "optics.caBlue": L10n.tr("ffd74c6ce0b1"),
+        "calibration.shadowTint": L10n.tr("b4c79bf43a0b"),
+        "calibration.redHue": L10n.tr("ace0349b7b3b"),
+        "calibration.redSat": L10n.tr("a0ee4d365447"),
+        "calibration.greenHue": L10n.tr("0868b2b59dba"),
+        "calibration.greenSat": L10n.tr("caa1572b770f"),
+        "calibration.blueHue": L10n.tr("46b02b1e3927"),
+        "calibration.blueSat": L10n.tr("76a9c528ce55"),
+        "masks.order": L10n.tr("805b17470cbb"),
+        "heal.order": L10n.tr("c91e0dcf2cb4"),
     ]
 
     private static let maskFieldNames: [String: String] = [
-        "isEnabled": "启用", "opacity": "不透明度", "invert": "反相", "feather": "羽化",
-        "refine": "细化", "name": "名称", "components": "形状", "added": "新增", "removed": "删除",
-        "adj.amount": "强度", "adj.exposure": "曝光", "adj.temperature": "色温", "adj.tint": "色调",
-        "adj.contrast": "对比", "adj.highlights": "高光", "adj.shadows": "阴影",
-        "adj.whites": "白色", "adj.blacks": "黑色", "adj.hue": "色相", "adj.saturation": "饱和",
-        "adj.texture": "纹理", "adj.sharpen": "锐化",
+        "isEnabled": L10n.tr("f4f0ead1116b"), "opacity": L10n.tr("04405e4a9ffd"), "invert": L10n.tr("930ff0a6a7be"), "feather": L10n.tr("5b228b5ce583"),
+        "refine": L10n.tr("6edfe8091d05"), "name": L10n.tr("d44e9b3d3b31"), "components": L10n.tr("c2f71c1b10ef"), "added": L10n.tr("0006d696d8e1"), "removed": L10n.tr("2f9daa828907"),
+        "adj.amount": L10n.tr("a2846644a638"), "adj.exposure": L10n.tr("bc7dacff87db"), "adj.temperature": L10n.tr("84ac609620e5"), "adj.tint": L10n.tr("5bddf6a1c0f5"),
+        "adj.contrast": L10n.tr("bc4b2dbbb77b"), "adj.highlights": L10n.tr("f799c2308083"), "adj.shadows": L10n.tr("a0fb1c62d0e8"),
+        "adj.whites": L10n.tr("f56e7eff58bf"), "adj.blacks": L10n.tr("ed7d2c54184b"), "adj.hue": L10n.tr("3ff6d1c07cfc"), "adj.saturation": L10n.tr("1394938c0161"),
+        "adj.texture": L10n.tr("262348fa5f3e"), "adj.sharpen": L10n.tr("fc538f246da7"),
     ]
 
     /// `curve.white[3].y` → 「白[3].y」.
@@ -729,20 +730,20 @@ extension EditHistory {
         let head = String(parts[0])                       // "white[3]" or "white.count"
         guard let bracket = head.firstIndex(of: "[") else {
             return head == "white" || head == "red" || head == "green" || head == "blue"
-                ? "曲线 \(curveListName(head)) 点数" : nil
+                ? L10n.tr("d7fff10717ea" , String(describing: (curveListName(head)))) : nil
         }
         let list = String(head[head.startIndex..<bracket])
         let index = String(head[head.index(after: bracket)...].dropLast())   // "3"
         let axis = parts[1]                              // "x" / "y"
-        return "曲线 \(curveListName(list))[\(index)].\(axis)"
+        return L10n.tr("5a38276e6681" , String(describing: (curveListName(list))), String(describing: (index)), String(describing: (axis)))
     }
 
     private static func curveListName(_ list: String) -> String {
         switch list {
-        case "white": return "白"
-        case "red": return "红"
-        case "green": return "绿"
-        case "blue": return "蓝"
+        case "white": return L10n.tr("3366645622a7")
+        case "red": return L10n.tr("0eb7ee7e38ef")
+        case "green": return L10n.tr("84b34ffba5aa")
+        case "blue": return L10n.tr("52f354ecfccb")
         default: return list
         }
     }
@@ -760,12 +761,12 @@ extension EditHistory {
         let axis = key[key.index(after: close)...].dropFirst()   // after "]."
         let name: String
         switch axis {
-        case "hue": name = "色相"
-        case "saturation": name = "饱和"
-        case "luminance": name = "明度"
+        case "hue": name = L10n.tr("3ff6d1c07cfc")
+        case "saturation": name = L10n.tr("1394938c0161")
+        case "luminance": name = L10n.tr("c5fce2a15bee")
         case "mix":
             let i = Int(index).map { min(max($0, 0), HSLBands.bandNames.count - 1) } ?? 0
-            return "黑白混合[\(HSLBands.bandNames[i])]"
+            return L10n.tr("52d088529559" , String(describing: (HSLBands.bandNames[i])))
         default: name = String(axis)
         }
         return "HSL[\(index)] \(name)"
@@ -779,18 +780,18 @@ extension EditHistory {
         let axis = key[key.index(after: close)...].dropFirst()   // after "]."
         let name: String
         switch axis {
-        case "sampleY": name = "采样 Y"
-        case "sampleU": name = "采样 U"
-        case "sampleV": name = "采样 V"
-        case "range": name = "范围"
-        case "feather": name = "过渡"
-        case "hue": name = "色相"
-        case "saturation": name = "饱和"
-        case "luminance": name = "亮度"
+        case "sampleY": name = L10n.tr("b11d73ea8a01")
+        case "sampleU": name = L10n.tr("b6269fa04fd7")
+        case "sampleV": name = L10n.tr("ed68bb53fccb")
+        case "range": name = L10n.tr("ae72b532f4b8")
+        case "feather": name = L10n.tr("b5d8ead3660f")
+        case "hue": name = L10n.tr("3ff6d1c07cfc")
+        case "saturation": name = L10n.tr("1394938c0161")
+        case "luminance": name = L10n.tr("8e2f643ad160")
         default: name = String(axis)
         }
         let number = (Int(index) ?? 0) + 1
-        return "点颜色[\(number)] \(name)"
+        return L10n.tr("cc0dc846e124" , String(describing: (number)), String(describing: (name)))
     }
 
     /// `masks.m-1.feather` → 「蒙版 羽化」; `masks.m-1.components[0].shape` → 「蒙版 形状[0]」.
@@ -809,33 +810,33 @@ extension EditHistory {
             let axis = String(field[field.index(after: close)...].dropFirst())   // after "]."
             let name: String
             switch axis {
-            case "shape": name = "形状"
-            case "op": name = "组合"
-            case "invert": name = "反相"
-            case "feather": name = "羽化"
+            case "shape": name = L10n.tr("c2f71c1b10ef")
+            case "op": name = L10n.tr("ce3df931927b")
+            case "invert": name = L10n.tr("930ff0a6a7be")
+            case "feather": name = L10n.tr("5b228b5ce583")
             default: name = axis
             }
-            return "蒙版 \(name)[\(index)]"
+            return L10n.tr("3e1b2762eb39" , String(describing: (name)), String(describing: (index)))
         }
         let name = maskFieldNames[field] ?? field
-        return "蒙版 \(name)"
+        return L10n.tr("611ce5b3f9f5" , String(describing: (name)))
     }
 
     /// `heal.h-1F2A.radius` → 「修复 半径」; `heal.h-1F2A.added` → 「修复 新增」.
     private static func healFieldName(_ key: String) -> String? {
         guard key.hasPrefix("heal.") else { return nil }
-        if key == "heal.order" { return "修复 顺序" }
+        if key == "heal.order" { return L10n.tr("a3f4a94e14a6") }
         let rest = key.dropFirst("heal.".count)
         guard let dot = rest.firstIndex(of: ".") else { return nil }
         let field = String(rest[rest.index(after: dot)...])
-        return "修复 \(healFieldNames[field] ?? field)"
+        return L10n.tr("575f102e7d24" , String(describing: (healFieldNames[field] ?? field)))
     }
 
     private static let healFieldNames: [String: String] = [
-        "added": "新增", "removed": "删除", "mode": "模式", "kind": "类型",
-        "redThreshold": "红眼阈值", "redSoftness": "红眼过渡",
-        "center.x": "位置 x", "center.y": "位置 y", "radius": "半径",
-        "source.x": "源点 x", "source.y": "源点 y", "feather": "羽化", "opacity": "不透明度",
+        "added": L10n.tr("0006d696d8e1"), "removed": L10n.tr("2f9daa828907"), "mode": L10n.tr("47a270081ab2"), "kind": L10n.tr("ba40014ff496"),
+        "redThreshold": L10n.tr("dd335f95a38b"), "redSoftness": L10n.tr("34481e3b1aaf"),
+        "center.x": L10n.tr("b0c179e5bdba"), "center.y": L10n.tr("45edfc8d9f15"), "radius": L10n.tr("3e65075eb3e9"),
+        "source.x": L10n.tr("4d9d52fe60ce"), "source.y": L10n.tr("6c50bacd9a1f"), "feather": L10n.tr("5b228b5ce583"), "opacity": L10n.tr("04405e4a9ffd"),
     ]
 }
 
@@ -885,7 +886,7 @@ public struct HistoryRow: Identifiable, Hashable, Sendable {
 
     /// The summary line, abbreviated when a row moved many parameters.
     static func summarize(_ changes: [FieldChange]) -> String {
-        guard !changes.isEmpty else { return "原始状态" }
+        guard !changes.isEmpty else { return L10n.tr("972b218e54bb") }
         let shown = changes.prefix(2).map(\.summary)
         let rest = changes.count - shown.count
         return rest > 0 ? shown.joined(separator: "、") + " +\(rest)" : shown.joined(separator: "、")

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
@@ -24,7 +25,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// 46 pt row: one row of slack is cheaper than a scroll hitch).
     private static let prefetchSlackRows = 5
 
-    private let headerTitle = NSTextField(labelWithString: "素材浏览")
+    private let headerTitle = NSTextField(labelWithString: L10n.tr("a356c8190a5c"))
     private let headerCount = NSTextField(labelWithString: "")
     private let footer = NSTextField(labelWithString: "")
     private let sourcesOutline = NSOutlineView()
@@ -41,7 +42,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private lazy var denoiseMenuTarget = DenoiseMenuTarget(session: session)
     private let sourcesScroll = NSScrollView()
     private let photosScroll = NSScrollView()
-    private let matte = NSVisualEffectView()
+    private let matte = StudioPanelView()
     private let bridge = ObservationBridge()
 
     /// Same one-snapshot rule as the grid/filmstrip: the photo ids/order plus the tree/album
@@ -192,9 +193,6 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     public override func loadView() {
         let root = FlippedView()
 
-        matte.material = .sidebar
-        matte.blendingMode = .behindWindow
-        matte.state = .followsWindowActiveState
         root.addSubview(matte)
 
         headerTitle.font = .systemFont(ofSize: 12, weight: .bold)
@@ -226,6 +224,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         contextMenu.willOpen = { [weak self] in self?.prepareContextMenu() }
         contextMenu.onRemove = { [weak self] ids in self?.removeAssets(ids) }
         contextMenu.onRemoveAndDelete = { [weak self] ids in self?.removeAndDeleteAssets(ids) }
+        contextMenu.onReveal = { [weak self] ids in self?.session?.revealAssetsInFinder(ids) }
         contextMenu.onFindLost = { [weak self] ids in self?.findAndRelinkMissingAssets(ids) }
         // 照片列表也是「菜单入口」的一部分：选中几张 → 右键 → 加入相册（078 B10）。
         contextMenu.albumsProvider = { [weak self] ids in
@@ -421,8 +420,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard isViewLoaded, let session else { return }
         applySelectionFromModel()
         footer.stringValue = session.selection.isEmpty
-            ? "未选择"
-            : "已选 \(session.selection.count)"
+            ? L10n.tr("1182c5454f11")
+            : L10n.tr("bee92e28f9f7" , String(describing: (session.selection.count)))
         for row in 0..<photosTable.numberOfRows {
             guard let cell = photosTable.view(atColumn: 0, row: row,
                                               makeIfNecessary: false) as? PhotoRowCell,
@@ -440,10 +439,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             resetThumbnails()
         }
         rebuildTree(for: session)
-        headerCount.stringValue = "\(session.assets.count) 张照片"
+        headerCount.stringValue = L10n.tr("79510f06e3d6" , String(describing: (session.assets.count)))
         footer.stringValue = session.selection.isEmpty
-            ? "未选择"
-            : "已选 \(session.selection.count)"
+            ? L10n.tr("1182c5454f11")
+            : L10n.tr("bee92e28f9f7" , String(describing: (session.selection.count)))
         // `reloadData` clamps the table's selection to what still exists and posts
         // `tableViewSelectionDidChange` for it. That transient row count is not the user's
         // selection: writing it back would collapse a 5-photo selection to one row on every
@@ -477,7 +476,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                 if item.isAlbumGroup { albumsExpanded = true } else { expandedKeys.insert(item.key) }
             }
         }
-        let all = FolderTreeItem(kind: .allPhotos, title: "全部照片",
+        let all = FolderTreeItem(kind: .allPhotos, title: L10n.tr("b49fdf55eefb"),
                                  // The library's size, not the filtered count: this row is the way
                                  // *back* to everything, so it must not shrink as a filter is applied.
                                  detail: "\(session.stats?.total ?? session.assets.count)",
@@ -503,7 +502,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // 「相册」区段（078 B10）：标题行 + 一个相册一行，数字直接来自 `session.albums`
         // —— 也就是 `album_assets` 里数出来的那一份。左栏的数字和点开后的行数不可能不一致，
         // 因为两者都不在这一层算。
-        let group = FolderTreeItem(kind: .albumGroup, title: "相册",
+        let group = FolderTreeItem(kind: .albumGroup, title: L10n.tr("38793c1c1c23"),
                                    detail: session.albums.isEmpty ? "" : "\(session.albums.count)",
                                    rootID: nil, path: "", status: nil)
         group.children = session.albums.map { album in
@@ -995,7 +994,7 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
               cell.assetID == id else { return }
         // An in-flight request still carries the pre-edit key; cancel it so it cannot repaint the
         // old frame after the new one arrives.
-        thumbRequests[row]?.cancel()
+        thumbRequests[row]?.cancel(preservingStartedWork: false)
         thumbRequests.removeValue(forKey: row)
         applyThumbnail(to: cell, row: row, asset: session.assets[row])
     }
@@ -1399,31 +1398,31 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                                        displayName: node.title)
         }
 
-        let new = NSMenuItem(title: "新建相册…", action: #selector(albumMenuNew), keyEquivalent: "")
+        let new = NSMenuItem(title: L10n.tr("c2dbc285075b"), action: #selector(albumMenuNew), keyEquivalent: "")
         new.target = self
         menu.addItem(new)
 
         if let albumID = menuAlbumID {
             menu.addItem(.separator())
-            let rename = NSMenuItem(title: "重命名相册…", action: #selector(albumMenuRename), keyEquivalent: "")
+            let rename = NSMenuItem(title: L10n.tr("93a26fe601f5"), action: #selector(albumMenuRename), keyEquivalent: "")
             rename.target = self
             rename.representedObject = albumID
             menu.addItem(rename)
 
-            let delete = NSMenuItem(title: "删除相册…", action: #selector(albumMenuDelete), keyEquivalent: "")
+            let delete = NSMenuItem(title: L10n.tr("82afe38919be"), action: #selector(albumMenuDelete), keyEquivalent: "")
             delete.target = self
             delete.representedObject = albumID
             menu.addItem(delete)
 
             // 选中照片时，「加入 / 移出这个相册」就在同一个菜单里：不用先去找网格的右键菜单。
             let hasSelection = !(session?.selection.isEmpty ?? true)
-            let add = NSMenuItem(title: "把选中的照片加入此相册", action: #selector(albumMenuAdd), keyEquivalent: "")
+            let add = NSMenuItem(title: L10n.tr("b349139dc732"), action: #selector(albumMenuAdd), keyEquivalent: "")
             add.target = self
             add.representedObject = albumID
             add.isEnabled = hasSelection
             menu.addItem(add)
 
-            let remove = NSMenuItem(title: "把选中的照片移出此相册", action: #selector(albumMenuRemove), keyEquivalent: "")
+            let remove = NSMenuItem(title: L10n.tr("90e085319bbd"), action: #selector(albumMenuRemove), keyEquivalent: "")
             remove.target = self
             remove.representedObject = albumID
             remove.isEnabled = hasSelection
@@ -1432,6 +1431,12 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
         if let target = menuFolderTarget {
             menu.addItem(.separator())
+            if let url = session?.folderURL(rootID: target.rootID, path: target.path) {
+                let reveal = NSMenuItem(title: L10n.tr("1280364b7f84"), action: #selector(folderMenuReveal(_:)), keyEquivalent: "")
+                reveal.target = self
+                reveal.representedObject = url
+                menu.addItem(reveal)
+            }
             // 张数用 COUNT(*)：一个上万张的子树也必须立刻弹出菜单，不能为了标题先捞一遍 id。
             let count = session?.folderAssetCount(rootID: target.rootID, path: target.path) ?? 0
             let remove = NSMenuItem(title: FolderRemovalText.menuTitle(name: target.displayName, count: count),
@@ -1449,21 +1454,26 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     // MARK: 文件夹的右键菜单（379 「从照片库移除此文件夹…」）
 
     /// The words this verb shows — one copy, so the menu title and the alert cannot disagree.
+    @objc private func folderMenuReveal(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
     public enum FolderRemovalText {
-        public static let confirmButton = "移除"
-        public static let cancelButton = "取消"
+        public static let confirmButton = L10n.tr("6135d4159e89")
+        public static let cancelButton = L10n.tr("2cd0f3be8738")
 
         public static func confirmTitle(name: String) -> String {
-            "从照片库移除「\(name)」？"
+            L10n.tr("339a0c38813e" , String(describing: (name)))
         }
 
         public static func confirmMessage(name: String, count: Int) -> String {
             // 381: 0 张不是「删 0 张照片」，而是「移除一个空行」——措辞必须说清盘上的文件夹还在，
             // 否则用户会以为点什么都没发生。`count > 0` 的那句一字未改（379 的断言原文）。
             guard count > 0 else {
-                return "「\(name)」下没有照片，只会把它从左栏移除。磁盘上的文件夹不会被删除。"
+                return L10n.tr("8256f99d7b73" , String(describing: (name)))
             }
-            return "\(grouped(count)) 张照片将从照片库移除。磁盘上的原文件不会被删除，\n该操作不能撤销（需要重新导入才能找回）。"
+            return L10n.tr("ba37b4c452fe" , String(describing: (grouped(count))))
         }
 
         /// `从照片库移除「day2」（1,234 张）…` — the count is what the row shows, so the menu can be
@@ -1471,9 +1481,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         /// 「（空文件夹）」 instead of 「（0 张）」: there are no photos to promise.
         public static func menuTitle(name: String, count: Int) -> String {
             guard count > 0 else {
-                return "从照片库移除「\(name)」（空文件夹）…"
+                return L10n.tr("5abd22b40f26" , String(describing: (name)))
             }
-            return "从照片库移除「\(name)」（\(grouped(count)) 张）…"
+            return L10n.tr("69f8fa882c9f" , String(describing: (name)), String(describing: (grouped(count))))
         }
 
         /// `1234` → `1,234`. Grouping by hand, not through `NumberFormatter`: the menu title is
@@ -1551,14 +1561,14 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     @objc private func albumMenuNew() {
-        guard let name = AlbumNamePrompt.run(title: "新建相册", message: "相册名", value: "") else { return }
+        guard let name = AlbumNamePrompt.run(title: L10n.tr("997d983f6787"), message: L10n.tr("b664ca5f7a47"), value: "") else { return }
         _ = createAlbum(named: name)
     }
 
     @objc private func albumMenuRename(_ sender: NSMenuItem) {
         guard let albumID = sender.representedObject as? String,
               let album = session?.albums.first(where: { $0.id == albumID }) else { return }
-        guard let name = AlbumNamePrompt.run(title: "重命名相册", message: "相册名", value: album.name) else { return }
+        guard let name = AlbumNamePrompt.run(title: L10n.tr("bfa3ef7590c2"), message: L10n.tr("b664ca5f7a47"), value: album.name) else { return }
         _ = renameAlbum(albumID, to: name)
     }
 
@@ -1567,10 +1577,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
               let album = session?.albums.first(where: { $0.id == albumID }) else { return }
         // 确认框只说真话：删的是相册，照片留在库里。
         let alert = NSAlert()
-        alert.messageText = "删除相册「\(album.name)」？"
-        alert.informativeText = "相册里的 \(album.count) 张照片不会被删除，只是不再属于这个相册。"
-        alert.addButton(withTitle: "删除相册")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.tr("ee8b06866698" , String(describing: (album.name)))
+        alert.informativeText = L10n.tr("aa040a8c924f" , String(describing: (album.count)))
+        alert.addButton(withTitle: L10n.tr("44cec5c2a07e"))
+        alert.addButton(withTitle: L10n.tr("2cd0f3be8738"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         _ = deleteAlbum(albumID)
     }
@@ -1644,7 +1654,7 @@ private final class SourceRowCell: NSTableCellView {
         // A folder for a root and for every subfolder; the library glyph for 全部照片, so the
         // "everything" row never reads as a plain folder next to the folder it contains. 相册 段
         // 与相册行各有自己的 glyph（078 B10）：左栏里「一叠照片」和「一个文件夹」是两种东西。
-        let description: String = isAllPhotos ? "全部照片" : (symbolName == "folder" ? "文件夹" : "相册")
+        let description: String = isAllPhotos ? L10n.tr("b49fdf55eefb") : (symbolName == "folder" ? L10n.tr("7c7802d8adae") : L10n.tr("38793c1c1c23"))
         icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: description)
         icon.contentTintColor = isOffline ? .tertiaryLabelColor
             : (isAllPhotos ? .labelColor : .secondaryLabelColor)

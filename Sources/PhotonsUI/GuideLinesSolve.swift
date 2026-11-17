@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import PhotonsCore
@@ -84,8 +85,8 @@ public enum GuideLineAxis: String, Sendable, Equatable, Hashable, CaseIterable {
     /// The document field this axis' solve writes.
     public var title: String {
         switch self {
-        case .vertical: return "垂直透视"
-        case .horizontal: return "水平透视"
+        case .vertical: return L10n.tr("cfb8519677bc")
+        case .horizontal: return L10n.tr("1ebf0a707159")
         }
     }
 
@@ -204,25 +205,25 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
     public func message(measuredWorstPairwise measured: Double?,
                         spacingFraction: Double? = nil) -> String {
         switch self {
-        case .notEnoughLines: return "再画一条（需 2 条）"
-        case .tooManyLines: return "每个方向最多 2 条"
-        case .nearParallel: return "两条线几乎平行，没有信息"
+        case .notEnoughLines: return L10n.tr("4c08b8c1fb12")
+        case .tooManyLines: return L10n.tr("a748f82e019a")
+        case .nearParallel: return L10n.tr("a20d42cdd4a4")
         case .linesTooFarFromAxis:
-            guard let measured, measured.isFinite else { return "这两条线偏轴太多，校正不了（先记下）" }
-            return String(format: "这两条线偏轴 %.1f°，校正不了（先记下）", measured)
+            guard let measured, measured.isFinite else { return L10n.tr("59c93b5f7d3a") }
+            return String(format: L10n.tr("1e1867997154"), measured)
         case .inconsistent:
-            guard let measured, measured.isFinite else { return "这些线互相矛盾，未应用" }
-            return String(format: "这些线互相矛盾（差 %.1f°），未应用", measured)
-        case .degenerate: return "新线与已有线重复，未应用"
+            guard let measured, measured.isFinite else { return L10n.tr("489cb50a45b7") }
+            return String(format: L10n.tr("d874b7115943"), measured)
+        case .degenerate: return L10n.tr("67ce5d681581")
         case .outOfRange:
             if let spacingFraction, spacingFraction.isFinite,
                spacingFraction < GuideLinesSolve.nearGapFraction {
-                return "两条线挨太近，判断不出透视"
+                return L10n.tr("2a5f43991b82")
             }
             let limit = Int(PerspectiveMap.limit)
-            guard let measured, measured.isFinite else { return "需要的透视超出 ±\(limit)" }
-            return String(format: "线间还差 %.1f°", measured) + "，透视超出 ±\(limit)"
-        case .rotationOutOfRange: return "摆正超 ±45°（透视已应用）"
+            guard let measured, measured.isFinite else { return L10n.tr("2ecddabad4a2" , String(describing: (limit))) }
+            return String(format: L10n.tr("ade6d6355834"), measured) + L10n.tr("2f1c193cbe67" , String(describing: (limit)))
+        case .rotationOutOfRange: return L10n.tr("93154a18f874")
         }
     }
 }
@@ -296,13 +297,13 @@ public struct GuideLineSolution: Equatable, Sendable {
     public var summary: String {
         let values: String
         switch (axes.contains(.vertical), axes.contains(.horizontal)) {
-        case (true, true): values = String(format: "垂直透视 %+.1f / 水平透视 %+.1f", vertical, horizontal)
-        case (true, false): values = String(format: "垂直透视 %+.1f", vertical)
-        default: values = String(format: "水平透视 %+.1f", horizontal)
+        case (true, true): values = String(format: L10n.tr("24b81d9e2979"), vertical, horizontal)
+        case (true, false): values = String(format: L10n.tr("0d0d8f8c6f0f"), vertical)
+        default: values = String(format: L10n.tr("77bfe3cb11bf"), horizontal)
         }
-        var text = String(format: "%@ · 残差 %.2f°", values, worstResidual)
+        var text = String(format: L10n.tr("285dc62bb64f"), values, worstResidual)
         if rotationFailure == nil, abs(straightenDelta) >= 0.05 {
-            text += String(format: " · 摆正 %+.1f°", straightenDelta)
+            text += String(format: L10n.tr("dea4134c882e"), straightenDelta)
         }
         return text
     }

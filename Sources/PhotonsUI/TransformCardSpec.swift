@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import PhotonsCore
 
 // MARK: - 214: a transform card declares the geometry fields it owns
@@ -141,18 +142,18 @@ public struct TransformCardSpec: Sendable, Hashable {
     public static func issues(in specs: [TransformCardSpec]) -> [String] {
         var issues: [String] = []
         for card in specs {
-            if card.sections.isEmpty { issues.append("\(card.title)：没有 section") }
-            if card.fields.isEmpty { issues.append("\(card.title)：没有字段") }
+            if card.sections.isEmpty { issues.append(L10n.tr("aa2ee555507d" , String(describing: (card.title)))) }
+            if card.fields.isEmpty { issues.append(L10n.tr("2921f8453d71" , String(describing: (card.title)))) }
             if card.fields != card.sectionFieldUnion {
                 let extra = card.fields.ordered.filter { !card.sectionFieldUnion.contains($0) }
                 let missing = card.sectionFieldUnion.ordered.filter { !card.fields.contains($0) }
-                issues.append("\(card.title)：字段与 section 不一致"
-                              + "（多 \(extra.map(\.rawValue)) · 少 \(missing.map(\.rawValue))）")
+                issues.append(L10n.tr("9199aa593667" , String(describing: (card.title)))
+                              + L10n.tr("b2b995d74a03" , String(describing: (extra.map(\.rawValue))), String(describing: (missing.map(\.rawValue)))))
             }
         }
         let owned = specs.flatMap { $0.fields.ordered }
         if Set(owned).count != owned.count {
-            issues.append("同一个 geometry 字段被两张卡同时声明：\(owned.map(\.rawValue))")
+            issues.append(L10n.tr("c6006e0463a6" , String(describing: (owned.map(\.rawValue)))))
         }
         return issues
     }

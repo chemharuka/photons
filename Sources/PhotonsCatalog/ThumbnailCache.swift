@@ -161,7 +161,7 @@ public enum ThumbRecipe {
     public static func editFingerprint(_ document: EditModel, spec: ThumbSpec = .hd) -> String {
         let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
         var material = "\(stageKeys)|\(StageAlgorithmVersion.material)|\(spec.rawValue)"
-            + "|sv\(spec.schemaVersion)"
+            + "|sv\(spec.schemaVersion)|decode=\(LinearDNGCompatibility.recipeVersion)|ceiling=\(HighlightCeiling.currentEV)"
         let inputs = document.decodeInputs
         if let version = inputs.versionComponent { material += "|\(version)" }
         if let detail = inputs.detailComponent { material += "|\(detail)" }
@@ -865,7 +865,17 @@ public final class ThumbnailCache {
     ///
     /// No `fsync`: derived data, regenerating is cheaper than an I/O barrier. A crash can lose the
     /// file, never a half file: the final name only ever appears after the bytes are all there.
-    public func store(_ data: Data, for key: ThumbKey) throws {
+    public var generation: UInt64 { PreviewCacheStorage.generation(in: root.deletingLastPathComponent()) }
+
+    @discardableResult
+    public func store(_ data: Data, for key: ThumbKey, generation: UInt64? = nil) throws -> Bool {
+        try PreviewCacheStorage.publish(in: root.deletingLastPathComponent(), generation: generation) {
+            try storePayload(data, for: key)
+            return true
+        } ?? false
+    }
+
+    private func storePayload(_ data: Data, for key: ThumbKey) throws {
         guard ThumbnailCache.payloadLooksComplete(data, for: key) else {
             throw ThumbCacheError.notPayload(url(for: key),
                                              key.spec == .hd ? "an incomplete HEIC" : "a non-JPEG payload")

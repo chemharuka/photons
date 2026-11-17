@@ -175,7 +175,7 @@ final class CopySheetCardTests: XCTestCase {
         print("156 rows: \(cardRows.count) cards · titles \(cardRows.map(\.title))")
         XCTAssertEqual(cardRows.count, 15, "十五张卡：白平衡…蒙版（156 校正，164 细节，179 校准）")
         XCTAssertEqual(cardRows.map(\.title),
-                       ["白平衡", "黑电平", "Light", "Color", "黑白", "HSL", "色彩分级",
+                       ["白平衡", "黑电平", "明暗", "色彩", "黑白", "HSL", "色彩分级",
                         "校准", "曲线", "开发", "校正", "细节", "效果", "裁切", "蒙版"])
         // The row order *is* the inspector's render order — not a second list (曲线 above 开发 since
         // 2026-10-28; 校正 between 开发 and 细节 since 096/164). 调整's cards are compared in full: 156

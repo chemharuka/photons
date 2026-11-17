@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import GRDB
+import PhotonsFileAccess
 
 public enum CatalogError: LocalizedError {
     case packageExists(URL)
@@ -57,11 +58,15 @@ public struct LibraryLayout: Sendable {
     }
 
     /// `~/Library/Caches/Photons/<sha1(package path)>/` — decoded buffers, thumbnails (M3).
-    public var cacheDirectory: URL {
+    public static var cacheBaseDirectory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return base.appendingPathComponent("Photons", isDirectory: true)
+    }
+
+    public var cacheDirectory: URL {
         let key = Self.digest(packageURL.path).prefix(16)
-        return base.appendingPathComponent("Photons/\(key)", isDirectory: true)
+        return Self.cacheBaseDirectory.appendingPathComponent(String(key), isDirectory: true)
     }
 
     static func digest(_ s: String) -> String {
@@ -73,6 +78,9 @@ public struct LibraryLayout: Sendable {
 public final class Catalog {
     public let layout: LibraryLayout
     public let dbQueue: DatabaseQueue
+    private let libraryAccess: FileAccess
+    let sourceAccessLock = NSLock()
+    var sourceAccess: [String: FileAccess] = [:]
 
     /// Develop blobs that failed to decode — and were quarantined — since this handle opened.
     ///
@@ -90,7 +98,8 @@ public final class Catalog {
 
     public var presetDecodeFailures: Int { presetFailureCounter.value }
 
-    private init(layout: LibraryLayout, dbQueue: DatabaseQueue) {
+    private init(layout: LibraryLayout, dbQueue: DatabaseQueue, access: FileAccess) {
+        self.libraryAccess = access
         self.layout = layout
         self.dbQueue = dbQueue
     }
@@ -112,7 +121,8 @@ public final class Catalog {
 
     /// Create a new library package. Refuses to touch an existing one.
     public static func create(at packageURL: URL) throws -> Catalog {
-        let layout = LibraryLayout(packageURL: packageURL)
+        let access = FileAccessStore.shared.access(to: packageURL)
+        let layout = LibraryLayout(packageURL: access.url)
         let fm = FileManager.default
         if fm.fileExists(atPath: layout.databaseURL.path) {
             throw CatalogError.packageExists(packageURL)
@@ -121,7 +131,7 @@ public final class Catalog {
         let queue = try DatabaseQueue(path: layout.databaseURL.path, configuration: configuration())
         try Schema.migrate(queue)
         try stampSchemaVersion(queue)
-        let catalog = Catalog(layout: layout, dbQueue: queue)
+        let catalog = Catalog(layout: layout, dbQueue: queue, access: access)
         try catalog.writeSettings([
             "schema_version": "\(Schema.version)",
             "unique_hash_version": "\(Schema.uniqueHashVersion)",
@@ -132,7 +142,8 @@ public final class Catalog {
 
     /// Open an existing library, snapshotting it first when a migration is pending.
     public static func open(at packageURL: URL) throws -> Catalog {
-        let layout = LibraryLayout(packageURL: packageURL)
+        let access = FileAccessStore.shared.access(to: packageURL)
+        let layout = LibraryLayout(packageURL: access.url)
         guard FileManager.default.fileExists(atPath: layout.databaseURL.path) else {
             throw CatalogError.packageNotFound(packageURL)
         }
@@ -148,7 +159,9 @@ public final class Catalog {
         }
         try Schema.migrate(queue)
         try stampSchemaVersion(queue)
-        return Catalog(layout: layout, dbQueue: queue)
+        let catalog = Catalog(layout: layout, dbQueue: queue, access: access)
+        try catalog.restoreSourceAccess()
+        return catalog
     }
 
     /// GRDB tracks applied migrations in its own table; we also keep `PRAGMA user_version` honest so

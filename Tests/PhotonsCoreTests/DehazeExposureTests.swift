@@ -282,12 +282,19 @@ final class DehazeExposureTests: XCTestCase {
     /// off; without that the 1-ULP commute test below cannot hold in any version — an unsharp mask is
     /// spatial, not scale-equivariant. Re-disabling it is what restores the four negative hashes to
     /// their recorded values.)
+    ///
+    /// **401** — `foggy·20/60/100` moved again: the recovery's gain is now capped at 0.4, which bites
+    /// on this frame's deep fog (measured `gain(0.5·A)` 0.2406 → 0.4000 at `dehaze = 100` on the
+    /// `A = 0.95` ramp). The four **negative** entries are again unchanged to the digit (the
+    /// haze-adding branch never reads the recovery), and so are the three **positive `chroma`**
+    /// entries: that fixture's fog is shallow enough that no pixel asks for a gain below the floor,
+    /// which is the evidence that 401 moved the depth and not the arithmetic around it.
     private static let e0SHA: [String: String] = [
         "foggy·-100": "9fe53cdc43f873c012e920e18a1fcdba7c481c70aee0acafa9db5a4d09ca6abd",
         "foggy·-60": "90fe67a2b12a33a39440134ff42f8ed40320a744e6241d4934585fdabaa5965b",
-        "foggy·20": "57aae5c2829309ab3f3ccfd00d49bc064d5eac22107d96e0d81704f3c9ae361e",
-        "foggy·60": "beca67142e9c93cadde32e9a138fdb1c76031dfd93514ee7d405ecbf711e7b3d",
-        "foggy·100": "829b79e9f033523334a67f73d0fd70d34f09b1373220a6648b7fb28e88b9cb63",
+        "foggy·20": "7ea6d6d03b7ce0ad6c0b3264d095bbe153dd9a6568eb3db6ca11951fdbb402c3",
+        "foggy·60": "32c7d6e6625503b6d84d826e05f9b3505d3a8fee1f4afa465ebd2035ef09d76c",
+        "foggy·100": "c7042d34f2ebf5186be28d21f0024b3cb6ab1de0154b78af6645e585892d6725",
         "chroma·-100": "d214aa71558eeffbffaacbdcf11f3a0da44bb08fdd96b234796458c23d559272",
         "chroma·-60": "6015c989af2f6f905e0dd3db3068e770b0ef0de5a3fc78e8b2a302632da071c4",
         "chroma·20": "04d7253f8b7eb8d51582b896020153208c178562222cf1267ad5cf39b65e1303",

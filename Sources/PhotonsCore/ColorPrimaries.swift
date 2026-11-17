@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - RGB 基色（075 的前置地基）
@@ -105,12 +106,12 @@ public struct Matrix3: Sendable, Hashable {
     public let values: [Double]
 
     public init(rowMajor values: [Double]) {
-        precondition(values.count == 9, "Matrix3 是 3×3，行主序展开应为 9 个数")
+        precondition(values.count == 9, L10n.tr("3f94a3a6d3ac"))
         self.values = values
     }
 
     public init(rows: [[Double]]) {
-        precondition(rows.count == 3 && rows.allSatisfy { $0.count == 3 }, "Matrix3 是 3×3")
+        precondition(rows.count == 3 && rows.allSatisfy { $0.count == 3 }, L10n.tr("8f59b56a5d24"))
         self.values = rows.flatMap { $0 }
     }
 
@@ -157,7 +158,7 @@ public struct Matrix3: Sendable, Hashable {
         let d = self[1, 0], e = self[1, 1], f = self[1, 2]
         let g = self[2, 0], h = self[2, 1], i = self[2, 2]
         let det = determinant
-        precondition(det != 0, "奇异矩阵没有逆：两套基色不可能重合到这种程度")
+        precondition(det != 0, L10n.tr("c61cd8ca3012"))
         return Matrix3(rows: [
             [e * i - f * h, c * h - b * i, b * f - c * e],
             [f * g - d * i, a * i - c * g, c * d - a * f],

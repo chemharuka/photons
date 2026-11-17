@@ -7,7 +7,7 @@ import QuartzCore
 
 /// The decoder-side white balance of one development: absolute Kelvin + tint, in exactly the two
 /// coordinates `CIRAWFilter` exposes for the job (`neutralTemperature` / `neutralTint`, header range
-/// 2000…50000 K and −150…150).
+/// 800…14000 K and −150…150).
 ///
 /// **`nil` is the as-shot state, and it means "do not touch the filter".** That is not a
 /// convenience: assigning the *reported* as-shot value back to the filter is **not** a no-op —
@@ -24,11 +24,8 @@ public struct WhiteBalance: Sendable, Hashable, Codable {
 
     public static let asShot = WhiteBalance()
 
-    /// 242 — the UI, the validator and the decoder write share one range: **2000…50000 K**. This is
-    /// our product choice, not a `CIRAWFilter` limit (the filter accepted 2000…1 000 000 K in the
-    /// measured tests); the top end was raised from 12000 K because the decoder really does change
-    /// the picture out there (ΔE76 vs 12000 K: 7.21 at 20000 K, 12.41 at 50000 K). Tint stays the
-    /// same −150…150.
+    /// Product adjustment range, shared by the UI, validator and explicit decoder requests.
+    /// As-shot metadata remains unchanged when no manual white balance is selected.
     public static let temperatureRange: ClosedRange<Double> = TemperatureScale.kelvinRange
     public static let tintRange: ClosedRange<Double> = -150...150
     /// Slider quanta. A full-size development is ~762 ms, so the value the document stores only
@@ -813,7 +810,8 @@ public final class RAWDecoder {
     private func decodeDetailed(_ url: URL, options: DecodeOptions,
                                 measurement: Bool) throws -> DecodeOutcome {
         let tStart = CACurrentMediaTime()
-        guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
+        guard let initialFilter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
+        let filter = try LinearDNGCompatibility.filter(for: url, initial: initialFilter)
         var ph = DecodePhases()
         ph.scale = options.scale
         ph.queueID = queueIdentity

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import QuartzCore
 import CryptoKit
@@ -257,6 +258,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public let canvasView = LoupeCanvasView()
     private let container = NSView()
     private let statusChip = LoupeStatusChip()
+    private let previewModeButton = NSButton(title:"HDR",target:nil,action:nil)
     /// 画布右下角的**固定档位**缩放拖动条（液态玻璃药丸）。
     ///
     /// It names a rung and nothing else: its only way out is `onZoom`, wired to `zoom(to:)` — the
@@ -1236,7 +1238,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                         self.queue.async { graph?.recycle(output: frame.texture) }
                     }
                 case .failure(let error):
-                    self.lastPresentError = "白平衡预览: \(error)"
+                    self.lastPresentError = L10n.tr("68129d5a147a" , String(describing: (error)))
                 }
                 if let pending = self.pendingWhiteBalancePreview {
                     self.pendingWhiteBalancePreview = nil
@@ -1399,6 +1401,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
         self.cropTool = CropToolController(session: session)
         super.init(nibName: nil, bundle: nil)
 
+        screenTokens.append(NotificationCenter.default.addObserver(
+            forName: .photonsPreferencesDidChange, object: nil, queue: .main) { [weak self] note in
+                guard note.userInfo?["key"] as? String == "photons.hdrPreviewEnabled" else { return }
+                guard let self else {return}
+                self.refreshDisplay()
+                self.histogramLock.lock();self.histogramCache.removeAll();self.histogramCacheOrder.removeAll();self.histogramFrameKey=nil;self.histogramLock.unlock()
+                self.histogramMeasuredKey=nil
+                self.invalidateBackdrop()
+                self.scheduleRender()
+                self.updateStatusChip()
+            })
+
         // P5a: the 原图 / 对比 state machine has no frame path of its own. Every change comes back
         // here, where the generation moves and one (coalesced) frame is asked for.
         compare.onChange = { [weak self] in self?.frameModeDidChange() }
@@ -1506,6 +1520,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             self?.syncGuideLines()
         }
         container.addSubview(statusChip)
+        previewModeButton.bezelStyle = .rounded
+        previewModeButton.controlSize = .small
+        previewModeButton.target=self;previewModeButton.action=#selector(togglePreviewMode)
+        previewModeButton.setAccessibilityIdentifier("canvas.dynamicRange")
+        container.addSubview(previewModeButton)
         // Topmost chrome on the canvas, and the only piece of it that takes clicks (inside its own
         // pill — outside, `hitTest` is nil so a pan starting next to it still belongs to the canvas).
         container.addSubview(zoomSlider)
@@ -1789,7 +1808,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func refreshDisplay() {
         let screen = view.window?.screen ?? NSScreen.main
         let layerAcceptsEDR = (presenter?.storage ?? .linear16) == .linear16
-        let next = DisplayHeadroom.current(for: screen, layerAcceptsEDR: layerAcceptsEDR)
+        let next = DisplayHeadroom.current(for: screen,
+            layerAcceptsEDR: layerAcceptsEDR && ProcessingPreferences.hdrPreview)
         if next == displayHeadroom { return }
         setDisplayHeadroom(next)
     }
@@ -2822,7 +2842,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         pointerSampleFrame = frameSerial
         pointerSampleTexel = texel
         pointerReadbackCount += 1
-        let pixel = Self.sample(frame, x: texel.x, y: texel.y, histogram: lastHistogram)
+        let pixel = Self.sample(frame, x: texel.x, y: texel.y, histogram: lastHistogram,
+                                sdrProof: !ProcessingPreferences.hdrPreview)
         guard let pixel else {
             pointerReadout = nil
             pointerReadoutSource = nil
@@ -2870,11 +2891,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Static and public so the tests can call it on a frame they built themselves, and assert which
     /// source answered (`PointerPixel.source`).
     public static func sample(_ frame: FrameResult, x: Int, y: Int,
-                              histogram: Histogram?) -> PointerPixel? {
+                              histogram: Histogram?, sdrProof: Bool = false) -> PointerPixel? {
         if let grid = frame.sceneLinearSample {
             let lattice = PointerSampleLattice(picture: frame.photoRect, grid: grid.size)
             let cell = lattice.gridTexel(forTextureX: x, y: y)
             if let texel = grid.texel(x: cell.x, y: cell.y) {
+                if sdrProof {
+                    let rgb=SDRProjection.fromWorking(SIMD3(texel.red,texel.green,texel.blue))
+                    return PointerPixel(encodedRed:Histogram.srgbEncode(rgb.x),green:Histogram.srgbEncode(rgb.y),blue:Histogram.srgbEncode(rgb.z),histogram:histogram)
+                }
                 return PointerPixel(linearRed: texel.red, green: texel.green, blue: texel.blue,
                                     histogram: histogram)
             }
@@ -3023,9 +3048,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         public var hint: String {
             switch self {
-            case .sampled: return "取色完成"
-            case .outsideImage: return "点在照片外（letterbox），未取样"
-            case .notReady: return "画面尚未就绪，未取样"
+            case .sampled: return L10n.tr("02619c8e1a74")
+            case .outsideImage: return L10n.tr("e536f08483f8")
+            case .notReady: return L10n.tr("a0efee97ad90")
             }
         }
     }
@@ -3047,7 +3072,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let milliseconds: Double
 
         public var text: String {
-            String(format: "读数 1 px · S3.6b 输入 · @%d,%d · RGB %@",
+            String(format: L10n.tr("5cb5608d6fbf"),
                    contentX, contentY, rgb.text)
         }
     }
@@ -3062,9 +3087,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
         public var hint: String {
             switch self {
-            case .sampled: return "读数 1 px · S3.6b 输入"
-            case .outsideImage: return "点在照片外（letterbox），未取样"
-            case .notReady: return "画面尚未就绪，未取样"
+            case .sampled: return L10n.tr("9117b61f0477")
+            case .outsideImage: return L10n.tr("e536f08483f8")
+            case .notReady: return L10n.tr("a0efee97ad90")
             }
         }
     }
@@ -3487,7 +3512,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let current = selectedHealSpot?.clampedRadius ?? session.healRadius
         let selected = selectedHealSpot != nil
         setHealRadius(current * factor)
-        if selected { session.commitEdit(label: "修复 半径") }
+        if selected { session.commitEdit(label: L10n.tr("9890bcbfada3")) }
     }
 
     /// Redraw the ring from the current radius and pointer. Pure overlay work: no render request,
@@ -3680,7 +3705,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case .adjust(let maskID, let component, let kind):
             session?.setMaskComponentShape(maskID, component: component, shape: shape,
                                            commit: false, label: "")
-            session?.commitEdit(label: "调整\(kind.label)蒙版")
+            session?.commitEdit(label: L10n.tr("122373891fa5" , String(describing: (kind.label))))
             shapeDragsAdjusted += 1
         }
     }
@@ -4388,7 +4413,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // from the same flips) — and a mode that is on gets one render.
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
-        return session.commitEdit(label: horizontal ? "水平翻转" : "垂直翻转")
+        return session.commitEdit(label: horizontal ? L10n.tr("44775fbf3342") : L10n.tr("fcd75ef0a054"))
     }
 
     /// The document's flips — what the menu ticks and the bar's two switches show.
@@ -4427,7 +4452,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // and the row is committed before anything else can be, because `commitEdit` answers `nil`
         // inside a session (082 measured that on the shipped path: one press left `quarterTurns` at 0
         // and added no row).
-        session.endToolSession(label: "裁切与旋转")
+        session.endToolSession(label: L10n.tr("53f37fa28f71"))
         // The frame the camera is measured in, **before** the turn — the picture is about to swap its
         // two dimensions, so a window centre in the old frame means something else in the new one.
         //
@@ -4450,7 +4475,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // memory until 应用 is the 「点了一下没反应」 a crop session showed (082 measured it:
         // `quarterTurns` stayed 0 and no row was added). Writing the row first is also what P0-10
         // promised: one press, one snapshot, with or without the frame up.
-        let committed = session.commitEdit(label: clockwise ? "顺时针旋转 90°" : "逆时针旋转 90°",
+        let committed = session.commitEdit(label: clockwise ? L10n.tr("980edb5bf6fd") : L10n.tr("d4b56c062003"),
                                            coalesce: false)
         // **The picture turned, so the camera turns with it** (2026-11-02). The window centre is stored
         // in the photograph's own (turned) pixels; a quarter turn renames those axes, so leaving the
@@ -4528,16 +4553,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let candidates = measured.blackCandidates(sampleStride: 5)
         let rawValue = candidates.min
         let offset = Self.autoBlackOffset(for: rawValue)
-        print(String(format: "AUTO BLACK · min %.6f · 候选 %d → %.4f",
+        print(String(format: L10n.tr("e388d0ebca8d"),
                      candidates.min, candidates.count, offset))
         if offset == LightGroup.blackOffsetRange.lowerBound
             || offset == LightGroup.blackOffsetRange.upperBound {
-            print(String(format: "AUTO BLACK · min %.6f → offset 钳到 ±0.01", candidates.min))
+            print(String(format: L10n.tr("d0a516ec35a8"), candidates.min))
         }
         guard abs(offset - session.edit.light.blackOffset) >= 1e-9 else { return nil }
         session.applyEdit { $0.light.blackOffset = offset }
         requestEditRender()
-        session.commitEdit(label: "黑电平 · 自动", coalesce: false)
+        session.commitEdit(label: L10n.tr("d9878964a8f3"), coalesce: false)
         return offset
     }
 
@@ -7091,7 +7116,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 canvasRole: job.canvasRole,
                 scale: scale,
                 display: DisplayOptions(primaries: primaries, bitDepth: 16, headroom: headroom,
-                                        highlightCeiling: HighlightCeiling.current),
+                                        sdrProof: !ProcessingPreferences.hdrPreview, highlightCeiling: HighlightCeiling.current),
                 useCache: false, wantsPixels: false,
                 // 070: the backdrop render is the whole picture, so it also produces the histogram
                 // the loupe needs when a **windowed** frame cannot measure one itself. The measurement
@@ -7512,7 +7537,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 // the render (S2 clamps at it) and of the key, so moving the row re-renders instead of
                 // serving a cached frame with the old top.
                 display: DisplayOptions(primaries: primaries, bitDepth: 8, headroom: ceiling,
-                                        highlightCeiling: HighlightCeiling.current),
+                                        sdrProof: !ProcessingPreferences.hdrPreview, highlightCeiling: HighlightCeiling.current),
                 neverUpscalesContent: neverUpscales,
                 // 307 — one value for the pixels, the projection and the overlay.
                 canvasRole: canvasRole)
@@ -8569,7 +8594,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// lands, and the key changes (and re-measures once) when the real one does.
     private func histogramKey(identity: String, digest: String, fallbackScale: Float) -> String {
         let rung = histogramRungScale(identity: identity, fallbackScale: fallbackScale)
-        return Histogram.cacheKey(rungIdentity: "\(identity)-s\(rung)",
+        return Histogram.cacheKey(rungIdentity: "\(identity)-s\(rung)-proof\(!ProcessingPreferences.hdrPreview)",
                                   editDigest: digest, bins: 256,
                                   ceiling: HighlightCeiling.current)
     }
@@ -8863,7 +8888,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // The injected base first: the whole picture for ≈1 ms — and its digest is what says
             // whether it is the picture *of this edit* at all. A base rendered for another document is
             // never measured against this one.
-            if let source = fullPictureSource?(request.edit),
+            if ProcessingPreferences.hdrPreview,let source = fullPictureSource?(request.edit),
                source.digest == Histogram.editDigest(request.edit),
                // 323 — the base is only this measurement's picture when it was **made for the
                // ceiling in force**: the histogram is counted after S2's clamp, so a base rendered at
@@ -8887,7 +8912,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             }
             let histogram = try graph.measureHistogram(request.edit, bins: 256,
                                                        headroom: request.ceiling,
-                                                       ceiling: HighlightCeiling.current)
+                                                       ceiling: HighlightCeiling.current,sdrProof: !ProcessingPreferences.hdrPreview)
             histogramLock.lock()
             pictureRenderUses += 1
             histogramLock.unlock()
@@ -9061,11 +9086,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let projection = projection ?? framing()
         statusChip.text = statusText(projection: projection)
         statusChip.tooltip = displayHeadroom.detailText
+        previewModeButton.title=ProcessingPreferences.hdrPreview ? "HDR":"SDR"
+        previewModeButton.toolTip=L10n.tr("24bb46651e93")
         layoutStatusChip()
         syncZoomSlider(projection: projection)
     }
 
+    @objc private func togglePreviewMode() {ApplicationPreferences.shared.hdrPreview.toggle()}
     private func layoutStatusChip() {
+        previewModeButton.frame=CGRect(x:16,y:container.isFlipped ? 16:container.bounds.height-44,width:62,height:28)
         statusChip.layout(in: container.bounds)
     }
 

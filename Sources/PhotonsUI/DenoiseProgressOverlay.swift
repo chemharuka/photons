@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 
 // MARK: - 387 · 「降噪中」 的居中卡片 ／ 392 · 「HDR 合成」 的居中卡片
@@ -193,5 +194,5 @@ final class DenoiseProgressOverlay: ProgressCardOverlay {
     }
 
     /// The title line. Exposed because ① asserts 「不带省略号」 on the literal.
-    static let title = "降噪中"
+    static let title = L10n.tr("82160ecd619f")
 }

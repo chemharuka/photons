@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCatalog
@@ -165,34 +166,34 @@ public struct InspectorView: View {
 
         public var title: String {
             switch self {
-            case .histogram: return "直方图"
-            case .whiteBalance: return "白平衡"
-            case .light: return "Light"
-            case .blackLevel: return "黑电平"
-            case .color: return "Color"
-            case .blackAndWhite: return "黑白"
+            case .histogram: return L10n.tr("50c884e953ed")
+            case .whiteBalance: return L10n.tr("d926341c8b0a")
+            case .light: return L10n.tr("751d6ddba1e9")
+            case .blackLevel: return L10n.tr("5454c06bc55f")
+            case .color: return L10n.tr("e40fffdb9798")
+            case .blackAndWhite: return L10n.tr("47d88357c5ea")
             case .hsl: return "HSL"
-            case .pointColor: return "点颜色"
-            case .colorGrading: return "色彩分级"
-            case .calibration: return "校准"
-            case .detail: return "开发"
-            case .correction: return "校正"
-            case .detailFX: return "细节"
-            case .curve: return "曲线"
-            case .effects: return "效果"
-            case .crop: return "裁切"
+            case .pointColor: return L10n.tr("08b8947b9bf7")
+            case .colorGrading: return L10n.tr("00c482421fa9")
+            case .calibration: return L10n.tr("45230cc916f6")
+            case .detail: return L10n.tr("9ec428625fee")
+            case .correction: return L10n.tr("bf73d1a0a939")
+            case .detailFX: return L10n.tr("5ce4ed5694c3")
+            case .curve: return L10n.tr("937dc7bf30af")
+            case .effects: return L10n.tr("86a00cf74253")
+            case .crop: return L10n.tr("e9f8face2f69")
             /// 334: the 变换 workspace's 校正 card (geometry), not the 调整 workspace's lens 校正.
-            case .transformCorrection: return "校正"
-            case .angle: return "变换"
-            case .masks: return "蒙版"
+            case .transformCorrection: return L10n.tr("bf73d1a0a939")
+            case .angle: return L10n.tr("ca4842bc9e80")
+            case .masks: return L10n.tr("e7c802f4a183")
             // 077: the timeline. Own card, last in the panel order (it reads the *result* of the cards
             // above it, so it belongs under them).
-            case .history: return "历史记录"
+            case .history: return L10n.tr("5467922dce50")
             }
         }
     }
 
-    /// `["直方图", "白平衡", "Light", …]` — the order the cards appear in, from the one list above.
+    /// `["直方图", "白平衡", "明暗", …]` — the order the cards appear in, from the one list above.
     public static var sectionTitles: [String] { Section.allCases.map(\.title) }
 
     /// The cards that live **inside** the scroll view: everything except the pinned histogram.
@@ -227,7 +228,7 @@ public struct InspectorView: View {
     /// The pinned block's title. 「信息」, not 「调整」 — the block reports the photo (file name,
     /// shooting parameters, equipment); it is not a control, and calling it 调整 made the panel promise
     /// edits where it only ever printed facts.
-    public static let infoTitle = "信息"
+    public static let infoTitle = L10n.tr("e7028601e7da")
 
     @Bindable public var session: CatalogSession
     /// The canvas, for the eyedropper and for the Auto preset's grey-world input (派单 009 C).
@@ -301,7 +302,7 @@ public struct InspectorView: View {
             pinnedColumn
             workspaceSwitcher
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 4) {
                     ForEach(visibleSections) { section in
                         sectionView(section)
                             .accessibilityIdentifier("inspector.card.\(section.rawValue)")
@@ -491,7 +492,7 @@ public struct InspectorView: View {
                 // while it is open, else the document's geometry. Computed once per refresh (a crop
                 // tick, ⌘Z, a photo switch), not per frame; `metrics` is pure arithmetic.
                 let spec = specMetrics
-                InspectorPhotoInfo.PhotoSpecRow(filename: session.anchorAsset?.filename ?? "未选择照片",
+                InspectorPhotoInfo.PhotoSpecRow(filename: session.anchorAsset?.filename ?? L10n.tr("3d9bad4499f0"),
                                                 pixelCount: spec.pixelCount,
                                                 pixelDimensions: spec.pixelDimensions)
                 // Two rows, not one: 相机 and 镜头 are different facts, and the joined line was the
@@ -596,7 +597,7 @@ public struct InspectorView: View {
     /// histogram's own tail (`Histogram.maxStops`) — a ceiling past it would move a control no reading
     /// on the card could show.
     private var highlightCeilingRow: some View {
-        SliderRow(title: "最高亮度",
+        SliderRow(title: L10n.tr("d51735bf350e"),
                   value: Binding(get: { highlightCeilingEV },
                                  set: { next in
                                      highlightCeilingEV = HighlightCeiling.clampEV(next)
@@ -672,8 +673,8 @@ public struct InspectorView: View {
         .buttonStyle(.plain)
         .padding(.trailing, -2)
         .onHover { autoBlackHovered = $0 }
-        .help("自动黑电平：把解码后的线性数据拉到非负")
-        .accessibilityLabel("自动黑电平")
+        .help(L10n.tr("742d64d724f3"))
+        .accessibilityLabel(L10n.tr("0580f53ef368"))
         .accessibilityIdentifier("inspector.blackLevel.auto")
     }
 
@@ -688,7 +689,7 @@ public struct InspectorView: View {
     /// (「加一个黑电平滑块」), the row is what the number is. Printing 黑电平 twice in a one-row card
     /// is the only alternative, and it reads like a bug.
     public static let blackLevelRows: [ToneRow] = [
-        ToneRow(title: "偏移", range: LightGroup.blackOffsetSliderRange, format: "%.1f",
+        ToneRow(title: L10n.tr("f905e85ff3b2"), range: LightGroup.blackOffsetSliderRange, format: "%.1f",
                 shape: .linear, keyPath: \.light.blackOffset, decimals: 1, rounding: .asIs),
     ]
 
@@ -805,7 +806,7 @@ public struct InspectorView: View {
         .toggleStyle(.checkbox)
         .controlSize(.mini)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help("黑白：S3.4 把彩色转成单色。关掉只是停用下面的混合——八个值都留着，重新打开就回来")
+        .help(L10n.tr("03b62f375010"))
         .accessibilityIdentifier("inspector.blackAndWhite.switch")
         .background(BlackAndWhiteProbeHost(rowID: BlackAndWhiteProbe.switchID, isOn: isOn))
     }
@@ -990,7 +991,7 @@ public struct InspectorView: View {
                               editable: true,
                               accessibilityID: "inspector.pointColor.\(axis.rawValue)",
                               onReset: { resets.pointColorField(axis) }) { editing in
-                        if !editing { session.commitEdit(label: "点颜色 \(axis.title)") }
+                        if !editing { session.commitEdit(label: L10n.tr("85b1f31c4eb3" , String(describing: (axis.title)))) }
                     }
                     .background(PointColorProbeHost(rowID: axis.rawValue,
                                                     point: set?.activeSwatch))
@@ -1041,7 +1042,7 @@ public struct InspectorView: View {
             hint = nil
         }
         pointDropperArmed = true
-        pointHint = "点击画布上要调的颜色…"
+        pointHint = L10n.tr("78447e42d716")
         loupe.armPointColorEyedropper { outcome in applyPointColorDropper(outcome) }
     }
 
@@ -1060,16 +1061,16 @@ public struct InspectorView: View {
                 let stored = session.edit.color.point?.swatches.indices.contains(index) == true
                     ? session.edit.color.point?.swatches[index] : nil
                 if let stored {
-                    pointHint = String(format: "已吸取 色框 %d · H %.0f° · C %.3f · %@",
+                    pointHint = String(format: L10n.tr("6a02faebdbc3"),
                                        index + 1, stored.sampleHue, stored.sampleChroma,
                                        outcome.hint)
                 } else {
-                    pointHint = "已吸取 色框 \(index + 1) · " + outcome.hint
+                    pointHint = L10n.tr("d14f16f7ed63" , String(describing: (index + 1))) + outcome.hint
                 }
             case .rejectedLowChroma:
-                pointHint = "这里几乎没有颜色，换个位置点"
+                pointHint = L10n.tr("6372be7e139a")
             case .full:
-                pointHint = "最多 8 个色框，先双击删除一个"
+                pointHint = L10n.tr("a4b3d55745f2")
             }
         case .outsideImage, .notReady:
             pointDropperArmed = loupe?.isEyedropperArmed ?? false
@@ -1236,7 +1237,7 @@ public struct InspectorView: View {
             // `DetailAxis` case: the four-axis table is 031/040/042's contract and stays untouched.
             // v9 reports `isMoireReductionSupported == false`, so the row is greyed there exactly
             // like 色彩降噪 / 细节.
-            sliderRow("去摩尔纹",
+            sliderRow(L10n.tr("c6b72ac37f82"),
                       moireBinding(baseline),
                       DetailSettings.moireRange,
                       "%.0f",
@@ -1245,7 +1246,7 @@ public struct InspectorView: View {
                       enabled: axes.moire,
                       accessibilityID: "inspector.detail.moire",
                       onReset: { resets.moire() }) { editing in
-                if editing { beginDetailDrag() } else { commitDetail(title: "去摩尔纹") }
+                if editing { beginDetailDrag() } else { commitDetail(title: L10n.tr("c6b72ac37f82")) }
             }
         }
         // 096: the 色差 rows moved to `correctionCard`; this frame probe is the negative control for
@@ -1297,7 +1298,7 @@ public struct InspectorView: View {
         }
         // A file whose planes agree is corrected by Apple's own decode; one whose planes disagree is
         // corrected by our S0 warp. Both are "applied from the file", which is what the note claims.
-        return "已自动应用配置文件"
+        return L10n.tr("cc742900f44d")
     }
 
     /// 2026-10-28 (078 B8 / 096) — **色差**: the two lateral-CA rows, now in the 校正 card.
@@ -1330,26 +1331,26 @@ public struct InspectorView: View {
     /// read on scene-linear luminance. The panel's unit **is** the document's (a hue is a hue), so
     /// `+30` here is `+30` in the file and `+30°` on the wheel; nothing on this card is a ratio.
     public static let calibrationRows: [ToneRow] = [
-        ToneRow(title: "阴影色调", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("aed6b38a0164"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.shadowTint),
-        ToneRow(title: "红 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("2304051c2cb0"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.redHue),
-        ToneRow(title: "红 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("21fae3c845b8"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.redSat),
-        ToneRow(title: "绿 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("d9cea627e2e9"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.greenHue),
-        ToneRow(title: "绿 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("4940bdebf9cb"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.greenSat),
-        ToneRow(title: "蓝 色相", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("290ad7aed661"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.blueHue),
-        ToneRow(title: "蓝 饱和", range: CalibrationGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("2bcc4344dfe7"), range: CalibrationGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.calibration.blueSat),
     ]
 
     public static let caRows: [ToneRow] = [
-        ToneRow(title: "色差 R", range: OpticsGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("2be284b8a376"), range: OpticsGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.optics.caRed),
-        ToneRow(title: "色差 B", range: OpticsGroup.sliderRange, format: "%.0f",
+        ToneRow(title: L10n.tr("b2d4e9d059c9"), range: OpticsGroup.sliderRange, format: "%.0f",
                 shape: .linear, keyPath: \.optics.caBlue),
     ]
 
@@ -1399,12 +1400,12 @@ public struct InspectorView: View {
     private func decoderModelRow(chosen: String, offered: [String], effective: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: SliderRowStyle.standard.headSpacing) {
-                Text("解码模型")
+                Text(L10n.tr("1f2ad22d94bc"))
                     .font(.system(size: SliderRowStyle.standard.labelSize,
                                   weight: SliderRowStyle.standard.labelWeight))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                Picker("解码模型", selection: Binding(get: { chosen },
+                Picker(L10n.tr("1f2ad22d94bc"), selection: Binding(get: { chosen },
                                                      set: { spelling in
                                                          resets.decoderVersion(spelling, offered: offered)
                                                      })) {
@@ -1668,12 +1669,12 @@ public struct InspectorView: View {
     /// The line under 「解码模型」: the version that **actually** shaped the frame, never the request.
     public static func decoderModelNote(requested: String?, effective: String?) -> String? {
         guard let effective else {
-            return requested == nil ? nil : "正在切换解码器…"
+            return requested == nil ? nil : L10n.tr("6505e90b2e58")
         }
         if let requested, requested != effective {
-            return "已退回 v\(effective)"
+            return L10n.tr("7d029b81dc5f" , String(describing: (effective)))
         }
-        return "实际 v\(effective)"
+        return L10n.tr("51c23226d57b" , String(describing: (effective)))
     }
 
     /// True when the request did not survive the read-back — the note is then drawn in orange.
@@ -1812,34 +1813,21 @@ public struct InspectorView: View {
     /// 052: 曝光 is the one row that prints decimals (`%.2f EV`) and stores on a 0.01 grid; the other
     /// six read as whole numbers rounded away from zero and store what was typed (their 1 step is 1,
     /// so a drag is already whole).
-    public static let lightRows: [ToneRow] = [
-        ToneRow(title: "曝光", range: -4 ... 8, format: "%.2f EV", shape: .knob, keyPath: \.light.exposure,
-                decimals: 2, rounding: .asIs, quantum: 0.01),
-        ToneRow(title: "对比", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.contrast,
-                decimals: 1),
-        ToneRow(title: "高光", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.highlights,
-                decimals: 1),
-        ToneRow(title: "中间调", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.midtones,
-                decimals: 1),
-        ToneRow(title: "阴影", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.shadows,
-                decimals: 1),
-        ToneRow(title: "白色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.whites,
-                decimals: 1),
-        ToneRow(title: "黑色", range: -100 ... 100, format: "%.0f", shape: .knob, keyPath: \.light.blacks,
-                decimals: 1),
-    ]
+    private static func sharedRows(_ rows: [DevelopControl]) -> [ToneRow] {
+        rows.map { ToneRow(title: $0.title, range: $0.range, format: $0.format,
+                          shape: $0.linear ? .linear : .knob, keyPath: $0.keyPath,
+                          decimals: $0.decimals, rounding: $0.precise ? .asIs : .outward,
+                          quantum: $0.quantum) }
+    }
+
+    public static let lightRows: [ToneRow] = sharedRows(DevelopControls.lightRows)
 
     /// 自然饱和 / 饱和 — the Color card's two rows, the same table shape as Light.
     ///
     /// 047 put them in a table for the same reason 046 did with Light's: the card's behaviour (shape,
     /// typeable number, per-parameter reset) is then a value a test can hold, and the two cards cannot
     /// drift apart. Both are render parameters, so both are `.knob`.
-    public static let colorRows: [ToneRow] = [
-        ToneRow(title: "自然饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.color.vibrance, decimals: 1),
-        ToneRow(title: "饱和", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.color.saturation, decimals: 1),
-    ]
+    public static let colorRows: [ToneRow] = sharedRows(DevelopControls.colorRows)
 
     /// 2026-10-28 — the 校正 card's 暗角 block: **S3c's three uniforms, in the kernel's own order**
     /// (`s3_vignette.metal`: amount, midpoint, feather), with the kernel's own travels.
@@ -1853,14 +1841,7 @@ public struct InspectorView: View {
     ///
     /// All three are `.linear`: S3c runs in the scene-linear chain (116), so 060's yellow would claim
     /// a decode parameter and 071's red a scene-linear one; the card paints them red.
-    public static let vignetteRows: [ToneRow] = [
-        ToneRow(title: "暗角", range: -100 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.vignetteAmount),
-        ToneRow(title: "暗角中点", range: 0 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.vignetteMidpoint),
-        ToneRow(title: "暗角羽化", range: 0 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.vignetteFeather),
-    ]
+    public static let vignetteRows: [ToneRow] = sharedRows(DevelopControls.vignetteRows)
 
     /// 2026-10-28 — the 效果 card's 颗粒 block: S3.7's four numbers (`s3_7_grain.metal`).
     ///
@@ -1869,16 +1850,7 @@ public struct InspectorView: View {
     /// **whole-number grid** (`quantum: 1`) because the kernel hashes `grainSeedValue`, the rounded
     /// integer — a document holding 3.7 hashes 4, and letting the field store 3.7 would be a number the
     /// key and the pixels both silently disagree with.
-    public static let grainRows: [ToneRow] = [
-        ToneRow(title: "颗粒数量", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.grain),
-        ToneRow(title: "颗粒大小", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.grainSize),
-        ToneRow(title: "颗粒粗糙度", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.grainRoughness),
-        ToneRow(title: "种子", range: 0 ... 999, format: "%.0f", shape: .knob,
-                keyPath: \.effects.grainSeed, quantum: 1),
-    ]
+    public static let grainRows: [ToneRow] = sharedRows(DevelopControls.grainRows)
 
     /// 2026-10-28 (P0-6), 164 — the **开发** card's four decoder rows are drawn from
     /// `DetailAxis.panelOrder` (031 / 040 / 042); 去摩尔纹 is the fifth decoder amount and has its
@@ -1887,38 +1859,19 @@ public struct InspectorView: View {
     ///
     /// 164 moved the old 纹理 / 清晰度 / 去雾 block out of this table: 纹理 / 清晰度 are the new
     /// **细节** card's first block, 去雾 is the **效果** card's first block.
-    public static let textureClarityRows: [ToneRow] = [
-        ToneRow(title: "纹理", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.texture),
-        ToneRow(title: "清晰度", range: -100 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.clarity),
-    ]
+    public static let textureClarityRows: [ToneRow] = sharedRows(DevelopControls.textureClarityRows)
 
     /// 164 — the new 细节 card's two **denoise** rows: S3.9's display-referred luminance and
     /// chroma noise reduction. 0 is the pre-164 frame byte for byte (the stage is not encoded when
     /// everything is 0), and the rows are `.knob` because they act on the decoded/render frame,
     /// not in the scene-linear or decoder domains.
-    public static let nonBayerRows: [ToneRow] = [
-        ToneRow(title: "去噪", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.nonBayerLuminanceNR),
-        ToneRow(title: "去彩噪", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.effects.nonBayerColorNR),
-    ]
+    public static let nonBayerRows: [ToneRow] = sharedRows(DevelopControls.nonBayerRows)
 
     /// 185 — the 细节 card's third block: S3.10's four numbers.
     ///
     /// The card's title resets all of them with the block above it (`PanelResets.group(.detailFX)`
     /// walks `rows.map(\.keyPath)`), so the four new rows need no reset of their own.
-    public static let sharpenRows: [ToneRow] = [
-        ToneRow(title: "锐化数量", range: 0 ... 150, format: "%.0f", shape: .knob,
-                keyPath: \.sharpen.amount),
-        ToneRow(title: "锐化半径", range: 0.5 ... 3.0, format: "%.1f", shape: .knob,
-                keyPath: \.sharpen.radius),
-        ToneRow(title: "锐化细节", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.sharpen.detail),
-        ToneRow(title: "锐化蒙版", range: 0 ... 100, format: "%.0f", shape: .knob,
-                keyPath: \.sharpen.masking),
-    ]
+    public static let sharpenRows: [ToneRow] = sharedRows(DevelopControls.sharpenRows)
 
     /// The new 细节 card's rows in draw order: 纹理 / 清晰度, then the two denoises.
     public static var detailFXRows: [ToneRow] { textureClarityRows + nonBayerRows }
@@ -1928,12 +1881,7 @@ public struct InspectorView: View {
     ///
     /// The travel is the kernel's: −100…100. 0 means the veil is not touched — and then S1.9 is not
     /// encoded at all, so the frame is the pre-117 frame byte for byte.
-    public static let dehazeRows: [ToneRow] = [
-        // 117: 去雾 runs in the scene-linear chain (S1.9), so its row carries the linear-domain red
-        // (071's class) like the vignette rows in 校正.
-        ToneRow(title: "去雾", range: -100 ... 100, format: "%.0f", shape: .linear,
-                keyPath: \.effects.dehaze),
-    ]
+    public static let dehazeRows: [ToneRow] = sharedRows(DevelopControls.dehazeRows)
 
     /// The 效果 card's rows in draw order — 164 leaves it two blocks and **no detail rows**:
     /// 去雾 (S1.9) then 颗粒 (S3.7).
@@ -1987,8 +1935,8 @@ public struct InspectorView: View {
             /// block renames the copy item — that is the point.
             public var title: String? {
                 switch self {
-                case .vignette: return "暗角"
-                case .grain: return "颗粒"
+                case .vignette: return L10n.tr("da89443e202b")
+                case .grain: return L10n.tr("b82bd426d236")
                 case .tone, .ca, .presence, .noise, .dehaze, .sharpen: return nil
                 }
             }
@@ -2159,9 +2107,9 @@ public struct InspectorView: View {
     enum SliderRowStyle: String, CaseIterable {
         case standard
 
-        var labelSize: CGFloat { 10 }
+        var labelSize: CGFloat { 11 }
         var labelWeight: Font.Weight { .medium }
-        var readoutSize: CGFloat { 10 }
+        var readoutSize: CGFloat { 11 }
         var rowSpacing: CGFloat { 1 }
         var headSpacing: CGFloat { 6 }
         /// The tone rows have always been `.mini`; the detail rows now are too.
@@ -2228,26 +2176,16 @@ public struct InspectorView: View {
                   })
     }
 
-    /// 060: the panel's **only** slider view — `.mini`, 16 pt high, and the accent colour that says
-    /// which domain a parameter lives in: `.bar` → yellow (raw/decode), `.linear` → `#FF375F`
-    /// (linear-domain arithmetic, 071), `.knob` → no tint at all (the system accent, blue unless the
-    /// user changed it). The colours themselves are `SliderShape.accent` — one definition, in one
-    /// place, so a third category could not grow a second palette.
-    ///
-    /// It is a function, not a copy-pasted modifier chain, because the colour test has to render **this
-    /// view** to sample a pixel: a test that re-declares `.tint(…)` on its own copy would keep passing
-    /// after the panel's tint was deleted, which is exactly the counter-proof 060 asks for.
-    ///
-    /// No `step:` — SwiftUI draws tick marks the moment it is handed one (046), on all three shapes.
+    /// The panel's shared slider: a rounded rectangular handle, 16 pt high, with processing-domain
+    /// colors from SliderShape.accent. Readouts, reset and edit transactions stay in SliderRow.
     static func shapeSlider(_ value: Binding<Double>,
                             in range: ClosedRange<Double>,
                             shape: SliderShape,
                             controlSize: ControlSize = .mini,
                             onEditingChanged: @escaping (Bool) -> Void) -> some View {
-        Slider(value: value, in: range, onEditingChanged: onEditingChanged)
+        AdjustmentSlider(value: value, in: range, accent: shape.accent, onEditingChanged: onEditingChanged)
             .controlSize(controlSize)
             .frame(height: SliderValueMap.rowHeight)
-            .tint(shape.accent)
     }
 
     /// One slider's readout, with the negative zero taken out.
@@ -2339,9 +2277,9 @@ public struct InspectorView: View {
 
     /// 色温 / 色调, in display order — Kelvin first, as the decoder takes them.
     public static let whiteBalanceRows: [WhiteBalanceRow] = [
-        WhiteBalanceRow(title: "色温", isTemperature: true,
+        WhiteBalanceRow(title: L10n.tr("84ac609620e5"), isTemperature: true,
                         range: WhiteBalance.temperatureRange, format: "%.0f K"),
-        WhiteBalanceRow(title: "色调", isTemperature: false,
+        WhiteBalanceRow(title: L10n.tr("5bddf6a1c0f5"), isTemperature: false,
                         range: WhiteBalance.tintRange, format: "%+.0f"),
     ]
 
@@ -2367,18 +2305,18 @@ public struct InspectorView: View {
     /// `lastPresetID` tie-break only decides between two presets that carry the same numbers.
     private var presetRow: some View {
         HStack(spacing: 6) {
-            Text("预设")
+            Text(L10n.tr("f1de1e2621de"))
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
-            Picker("预设", selection: Binding(
+            Picker(L10n.tr("f1de1e2621de"), selection: Binding(
                 get: { WhiteBalancePresets.match(documentWhiteBalance,
                                                  preferred: lastPresetID)?.id ?? WhiteBalanceCommands.customID },
                 set: { id in applyPreset(id) })) {
                 ForEach(WhiteBalancePresets.all) { preset in
                     Text(menuTitle(for: preset)).tag(preset.id)
                 }
-                Text("自定义").tag(WhiteBalanceCommands.customID)
+                Text(L10n.tr("4eafa9e925b3")).tag(WhiteBalanceCommands.customID)
             }
             .labelsHidden()
             .pickerStyle(.menu)
@@ -2418,46 +2356,18 @@ public struct InspectorView: View {
         // Only a fallback for "no decode yet": the file's value, never a claim about the photo.
         let shown = draft ?? stored ?? shot ?? (isTemperature ? 6500 : 0)
 
-        return VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
+        return HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(row.title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                     .modifier(ResetOnDoubleClick(
                         action: { resets.whiteBalanceField(isTemperature: isTemperature) },
                         help: Self.resetParameterHelp))
-                // 118: the same slot as 「as shot」. Same height, same baseline, same place: the preview
-                // label replaces the state word while the canvas is a simulation, then the real frame
-                // arriving puts the state word back.
                 WhiteBalanceStatusLabel(kind: whiteBalancePreviewing ? .simulated
                                                                      : (stored == nil ? .asShot : nil))
                     .accessibilityIdentifier("inspector.whiteBalance.status.\(row.title)")
-                Spacer(minLength: 4)
-                SliderNumberField(value: shown,
-                                  range: row.range,
-                                  format: row.format,
-                                  fontSize: 10,
-                                  width: 52,
-                                  accessibilityID: "inspector.whiteBalance.\(row.title)",
-                                  onCommit: { typed in
-                                      let revisionBefore = session.editRevision
-                                      commitWhiteBalanceValue(typed, isTemperature: isTemperature)
-                                      if whiteBalancePreviewing {
-                                          loupe?.releaseWhiteBalancePreview(
-                                              awaiting: session.editRevision != revisionBefore
-                                                  ? session.editRevision : nil)
-                                      }
-                                  })
-            }
-            // 194: 两段式。拖动时 色温/色调 是场景线性的 S1 增益（`WhiteBalanceEstimate`），画的是已经
-            // 在屏幕上的那张缓冲 —— 一次渲染、零次解码；松手写进文档，下一次 develop 把它交给
-            // `CIRAWFilter.neutralTemperature`，定格帧才是真值（S1 增益在该帧里是恒等）。黄色卡片仍是
-            // 「解 RAW 参数」的承诺，只是它现在描述的是**落定**的那一帧。
-            // label / 数值 / 抬起才提交的语义与 `sliderRow` 完全相同，滑杆也是同一个 `shapeSlider`
-            // （`row.shape` 是 `.bar`，颜色因此也是同一处给的）。
-            // 242: 色温's track is mired, tint's is its own units. The row owns the two conversions
-            // (`sliderPosition(of:)` / `value(atSliderPosition:)`), and those call the one Core
-            // implementation — the view never spells a mired formula itself.
+            }.frame(width: StudioTheme.labelWidth, alignment: .leading)
             Self.shapeSlider(Binding(get: { row.sliderPosition(of: shown) },
                                      set: { position in
                                          let newValue = row.value(atSliderPosition: position)
@@ -2467,15 +2377,22 @@ public struct InspectorView: View {
                                      }),
                              in: row.sliderRange,
                              shape: row.shape) { editing in
-                if editing {
-                    beginWhiteBalancePreview()
-                } else {
-                    // Release = quantize + one document write = one development (`commitWhiteBalance`),
-                    // and the simulated preview survives until that frame lands.
-                    commitWhiteBalance(isTemperature: isTemperature)
-                }
+                if editing { beginWhiteBalancePreview() }
+                else { commitWhiteBalance(isTemperature: isTemperature) }
             }
-        }
+            SliderNumberField(value: shown, range: row.range, format: row.format,
+                              fontSize: 11, width: StudioTheme.valueWidth - 10,
+                              accessibilityID: "inspector.whiteBalance.\(row.title)",
+                              onCommit: { typed in
+                                  let revisionBefore = session.editRevision
+                                  commitWhiteBalanceValue(typed, isTemperature: isTemperature)
+                                  if whiteBalancePreviewing {
+                                      loupe?.releaseWhiteBalancePreview(
+                                          awaiting: session.editRevision != revisionBefore
+                                              ? session.editRevision : nil)
+                                  }
+                              })
+        }.frame(minHeight: 30)
     }
 
     /// The dropper (派单 009 C): arm, then the next canvas click samples the **decode buffer**.
@@ -2489,12 +2406,12 @@ public struct InspectorView: View {
             }
             .buttonStyle(.borderless)
             .disabled(loupe == nil)
-            .help("吸管：点击画布上的中性灰取样（Esc 取消）")
+            .help(L10n.tr("49c1a56f69f6"))
             .accessibilityIdentifier("inspector.whiteBalance.eyedropper")
             // 253 — armed = accent fill + white glyph; off = secondary glyph + clear fill.
             .toolActive(eyedropperArmed)
 
-            Text(eyedropperArmed ? "点击画布取样 · Esc 取消" : "吸管")
+            Text(eyedropperArmed ? L10n.tr("0cfb8071577e") : L10n.tr("6f11ed20eb70"))
                 .font(.system(size: 10))
                 .foregroundStyle(eyedropperArmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
             Spacer(minLength: 4)
@@ -2512,7 +2429,7 @@ public struct InspectorView: View {
             return
         }
         eyedropperArmed = true
-        hint = "点击画布上的中性灰取样…"
+        hint = L10n.tr("01edd90ed0f4")
         loupe.armEyedropper { outcome in applyDropper(outcome) }
     }
 
@@ -2529,7 +2446,7 @@ public struct InspectorView: View {
             eyedropperArmed = false
             lastPresetID = nil
             if let loupe, let native = loupe.dropperNativeProbe(for: sample) {
-                hint = "吸管：正在读取 RAW 中性点…"
+                hint = L10n.tr("73cc98a1086e")
                 let started = Date()
                 commands.beginNativeDropper(native) { pair in
                     guard let pair else {
@@ -2561,7 +2478,7 @@ public struct InspectorView: View {
             // No resident buffer to iterate against: the analytic answer is all that is on offer,
             // and it is still one development of the same document.
             guard let solve = commands.applyDropper(sample.rgb) else {
-                hint = "吸管：取样点几乎无颜色信息，未写入"
+                hint = L10n.tr("03fbd17c1412")
                 return
             }
             lastPresetID = nil
@@ -2570,12 +2487,12 @@ public struct InspectorView: View {
         }
         lastPresetID = nil
         if startHint {
-            hint = "吸管精修：正在对解码器迭代（最多 \(WhiteBalanceDropperRefiner.maxDecodes) 次解码）…"
+            hint = L10n.tr("c4cc41ec1c3e" , String(describing: (WhiteBalanceDropperRefiner.maxDecodes)))
         }
         let started = Date()
         let immediate = commands.beginDropper(sample.rgb, probe: probe) { solve, report in
             guard let solve else {
-                hint = "吸管：取样点几乎无颜色信息，未写入"
+                hint = L10n.tr("03fbd17c1412")
                 return
             }
             let elapsed = Date().timeIntervalSince(started) * 1000
@@ -2585,13 +2502,13 @@ public struct InspectorView: View {
                              + "(wall %.0f ms) → %@%@",
                              report.residual * 100, report.decodes, report.milliseconds,
                              elapsed, report.final.summary,
-                             report.converged ? "" : " · 未达 2%"))
+                             report.converged ? "" : L10n.tr("92bf04035ccb")))
             } else {
                 hint = nil
             }
         }
         guard immediate != nil else {
-            hint = "吸管：取样点几乎无颜色信息，未写入"
+            hint = L10n.tr("03fbd17c1412")
             return
         }
     }
@@ -2603,25 +2520,25 @@ public struct InspectorView: View {
         case .asShot:
             commands.resetToAsShot()
             lastPresetID = preset.id
-            hint = "原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）"
+            hint = L10n.tr("efebb2711444")
         case .fixed:
             guard let wb = preset.whiteBalance else { return }
-            commands.commit(wb, label: "预设 \(preset.name)")
+            commands.commit(wb, label: L10n.tr("d30256810c6e" , String(describing: (preset.name))))
             lastPresetID = preset.id
             hint = "\(preset.name) · \(preset.valueText)"
         case .auto:
             guard let average = loupe?.averageSceneRGB() else {
-                hint = "自动白平衡：画面尚未就绪，未写入"
+                hint = L10n.tr("76da8e56954d")
                 return
             }
             guard let solve = commands.applyAuto(average) else {
-                hint = "自动白平衡：画面没有可用的颜色信息，未写入"
+                hint = L10n.tr("d219bf2a061d")
                 return
             }
             lastPresetID = preset.id
-            hint = String(format: "自动（灰世界）· %@ · 画面均值 RGB %@%@",
+            hint = String(format: L10n.tr("cb95f005b0b2"),
                           solve.whiteBalance.summary, average.text,
-                          solve.clamped ? " · 已到量程边界（近似）" : "")
+                          solve.clamped ? L10n.tr("d02a9db9609c") : "")
         }
     }
 
@@ -2684,7 +2601,7 @@ public struct InspectorView: View {
         if !isTemperature, let v = wb.tint, let s = shot.tint, abs(v - s) <= WhiteBalance.tintStep / 2 {
             wb.tint = nil
         }
-        commands.commit(wb, label: isTemperature ? "色温" : "色调")
+        commands.commit(wb, label: isTemperature ? L10n.tr("84ac609620e5") : L10n.tr("5bddf6a1c0f5"))
         lastPresetID = nil
         hint = nil
     }
@@ -2700,8 +2617,8 @@ public struct InspectorView: View {
 
     /// The two tooltips: `SliderRow`、蒙版与 `InspectorCardShell` 都用它们，所以是面板的，不是某张卡的。
     /// `internal`（不是 `private`）：`InspectorCardShell` 在文件作用域，裁切卡的头部件要用同一套标题行。
-    static let resetParameterHelp = "双击复位此参数"
-    static let resetGroupHelp = "双击整组复位"
+    static let resetParameterHelp = L10n.tr("534852c87fdd")
+    static let resetGroupHelp = L10n.tr("059343880dec")
 
     /// Double-click on a card's title: the whole card back to its defaults, in one snapshot.
     private func resetGroup(_ group: PanelResets.Group) {
@@ -2719,7 +2636,7 @@ public struct InspectorView: View {
         draftTint = nil
         guard resets.group(.whiteBalance) else { return }
         lastPresetID = WhiteBalancePresets.asShot.id
-        hint = "原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）"
+        hint = L10n.tr("efebb2711444")
     }
 
     private var divider: some View {
@@ -2743,7 +2660,7 @@ struct WhiteBalanceStatusLabel: View {
         var text: String {
             switch self {
             case .asShot: return "as shot"
-            case .simulated: return "模拟预览"
+            case .simulated: return L10n.tr("e55b6bdd2bc1")
             }
         }
 
@@ -2855,29 +2772,48 @@ struct InspectorCardShell<Accessory: View, Content: View>: View {
         self.content = content
     }
 
+    @State private var collapsed = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 7) {
+                Button { collapsed.toggle() } label: {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 16, height: 26).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help(collapsed ? L10n.tr("00bd3960fea8") : L10n.tr("84a07f292f1f"))
+                .accessibilityLabel("\(collapsed ? L10n.tr("00bd3960fea8") : L10n.tr("84a07f292f1f"))\(title)")
                 Text(title)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.primary)
                     .accessibilityIdentifier(titleAccessibilityID ?? "")
                     .modifier(ResetOnDoubleClick(action: reset, help: InspectorView.resetGroupHelp))
                 Spacer(minLength: 0)
                 accessory()
+                if let reset {
+                    Button(action: reset) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 10)).frame(width: 22, height: 26)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help(L10n.tr("87a894ed1aec" , String(describing: (title)))).accessibilityLabel(L10n.tr("87a894ed1aec" , String(describing: (title))))
+                }
             }
-            content()
+            .padding(.horizontal, 10).padding(.vertical, 2)
+            .background(Color(nsColor: StudioTheme.raised))
+            if !collapsed {
+                VStack(alignment: .leading, spacing: 6) { content() }
+                    .padding(.horizontal, WorkspaceLayout.cardInsetH)
+                    .padding(.vertical, WorkspaceLayout.cardInsetV)
+            }
         }
-        .padding(.horizontal, WorkspaceLayout.cardInsetH)
-        .padding(.vertical, WorkspaceLayout.cardInsetV)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Small widget container: glass here, matte everywhere else (§2b item 5).
-        .background(.regularMaterial,
-                    in: RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: WorkspaceLayout.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
+        .background(Color(nsColor: StudioTheme.panel))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4)
+            .strokeBorder(Color(nsColor: StudioTheme.separator).opacity(0.7), lineWidth: 0.5))
     }
 }
 
@@ -3169,8 +3105,10 @@ struct SliderNumberField: View {
                         accessibilityID: accessibilityID,
                         onCommit: onCommit)
             .frame(width: width, height: fontSize + 4)
+            .padding(.horizontal, 5).padding(.vertical, 4)
+            .background(Color(nsColor: StudioTheme.well), in: RoundedRectangle(cornerRadius: 4))
             .accessibilityIdentifier(accessibilityID ?? "")
-            .help("点击数值可键盘输入：↵ 提交 · Esc 取消 · 点别处取消并退回原值")
+            .help(L10n.tr("3fa8bd7acc8d"))
     }
 }
 
@@ -3230,7 +3168,7 @@ public struct WhiteBalanceCommands {
             model.light.temperature = nil
             model.light.tint = nil
         }
-        session.commitEdit(label: "原照设置", coalesce: false)
+        session.commitEdit(label: L10n.tr("f61860846778"), coalesce: false)
         return true
     }
 
@@ -3255,7 +3193,7 @@ public struct WhiteBalanceCommands {
     /// `beginDropper` are the fallback for a file/point the native property cannot answer, and they are
     /// the ones the A/B comparison test measures against it.
     @discardableResult
-    public func applyDropper(_ sample: RGBSample, label: String = "吸管白平衡") -> WhiteBalanceSolve? {
+    public func applyDropper(_ sample: RGBSample, label: String = L10n.tr("ff5d8d4c0f3a")) -> WhiteBalanceSolve? {
         // 195 tried inverting the preview's 3×3 here (`WhiteBalanceEstimate.neutral`) on the theory
         // that the dropper should invert the function it draws with. Measured on L1030433's grey
         // patch it is **worse**, not better: the 3×3 model's tint axis is not `CIRAWFilter`'s (it
@@ -3274,7 +3212,7 @@ public struct WhiteBalanceCommands {
     /// `applyDropperRefined` / `beginDropper` as the fallback. The document is untouched on `nil`.
     @discardableResult
     public func nativeDropper(_ probe: WhiteBalanceNativeDropper.Probe,
-                              label: String = "吸管白平衡") -> WhiteBalance? {
+                              label: String = L10n.tr("ff5d8d4c0f3a")) -> WhiteBalance? {
         guard let pair = WhiteBalanceNativeDropper.whiteBalance(at: probe) else { return nil }
         commit(pair, label: label)
         return pair
@@ -3287,7 +3225,7 @@ public struct WhiteBalanceCommands {
     /// answer (a refused file, or a point outside the document's range), which is the signal to run
     /// the iterative fallback; it is called on the main thread either way.
     public func beginNativeDropper(_ probe: WhiteBalanceNativeDropper.Probe,
-                                   label: String = "吸管白平衡",
+                                   label: String = L10n.tr("ff5d8d4c0f3a"),
                                    finish: @escaping (WhiteBalance?) -> Void) {
         let session = self.session
         let asShot = self.asShot
@@ -3313,7 +3251,7 @@ public struct WhiteBalanceCommands {
     public func applyDropperRefined(_ sample: RGBSample,
                                     probe: WhiteBalanceDropperRefiner.Probe,
                                     maxDecodes: Int = WhiteBalanceDropperRefiner.maxDecodes,
-                                    label: String = "吸管白平衡")
+                                    label: String = L10n.tr("ff5d8d4c0f3a"))
         -> (solve: WhiteBalanceSolve?, refinement: WhiteBalanceDropperRefiner.Refinement?) {
         guard let solve = solveDropper(sample) else { return (nil, nil) }
         let report = WhiteBalanceDropperRefiner.refine(initial: solve.whiteBalance, probe: probe,
@@ -3333,7 +3271,7 @@ public struct WhiteBalanceCommands {
     public func beginDropper(_ sample: RGBSample,
                              probe: WhiteBalanceDropperRefiner.Probe,
                              maxDecodes: Int = WhiteBalanceDropperRefiner.maxDecodes,
-                             label: String = "吸管白平衡",
+                             label: String = L10n.tr("ff5d8d4c0f3a"),
                              finish: @escaping (WhiteBalanceSolve?, WhiteBalanceDropperRefiner.Refinement?) -> Void)
         -> WhiteBalanceSolve? {
         guard let solve = solveDropper(sample) else {
@@ -3357,7 +3295,7 @@ public struct WhiteBalanceCommands {
 
     /// 自动: the same solve against the picture's mean colour (grey-world).
     @discardableResult
-    public func applyAuto(_ average: RGBSample, label: String = "自动白平衡") -> WhiteBalanceSolve? {
+    public func applyAuto(_ average: RGBSample, label: String = L10n.tr("9495b7c64315")) -> WhiteBalanceSolve? {
         guard let solve = WhiteBalanceSolver.auto(forAverage: average, reference: reference) else {
             return nil
         }
@@ -3499,7 +3437,7 @@ public struct PanelResets {
             $0.detailSettings = .identity
         }
         // 077: 换解码版本是**一个命令**，不参与"同参数连续拖动"的合并。
-        let committed = session.commitEdit(label: "解码模型", coalesce: false)
+        let committed = session.commitEdit(label: L10n.tr("1f2ad22d94bc"), coalesce: false)
         // A command, not a slider tick: the user is already looking at the result and will not move
         // the pointer to make the low-resolution whole picture follow. Arm its rebuild now; the next
         // landed frame (the new development) is what actually renders it.
@@ -3539,7 +3477,7 @@ public struct PanelResets {
     public func moire() -> Bool {
         guard session.edit.detailSettings.moire != nil else { return false }
         session.applyEdit { $0.detailSettings.moire = nil }
-        let committed = session.commitEdit(label: "去摩尔纹", coalesce: false)
+        let committed = session.commitEdit(label: L10n.tr("c6b72ac37f82"), coalesce: false)
         loupe?.endDetailAdjustment()
         return committed
     }
@@ -3601,7 +3539,7 @@ public struct PanelResets {
             model.light.temperature = next.temperature
             model.light.tint = next.tint
         }
-        return session.commitEdit(label: isTemperature ? "色温" : "色调", coalesce: false)
+        return session.commitEdit(label: isTemperature ? L10n.tr("84ac609620e5") : L10n.tr("5bddf6a1c0f5"), coalesce: false)
     }
 
     // MARK: a whole card
@@ -3900,7 +3838,7 @@ public struct PanelResets {
         guard set.swatches[index][axis] != fallback[axis] else { return false }
         set.swatches[index][axis] = fallback[axis]
         session.applyEdit { $0.color.point = set }
-        return session.commitEdit(label: "点颜色 \(axis.title)", coalesce: false)
+        return session.commitEdit(label: L10n.tr("85b1f31c4eb3" , String(describing: (axis.title))), coalesce: false)
     }
 }
 

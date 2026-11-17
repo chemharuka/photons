@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 
@@ -22,9 +23,9 @@ final class BlackAndWhiteProbe: NSView {
 
     /// The id the card itself is probed under (`blackAndWhiteCard`'s own `.background`): the row probes
     /// measure rows, and the layout test also needs the card's frame to say 「行在卡里」.
-    static let cardID = "黑白卡"
+    static let cardID = L10n.tr("fcac10f00bfe")
     /// The switch row's id — not 「黑白」, which is also the card's title: one string, one meaning.
-    static let switchID = "开关"
+    static let switchID = L10n.tr("92d9be0a0e94")
 
     private(set) var rowID: String = ""
     /// The switch row's state as SwiftUI drew it; `nil` on the eight slider rows.

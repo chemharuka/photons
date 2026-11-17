@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -259,7 +260,7 @@ public struct AssetBadges: Equatable {
 /// the prefix is composed here and fitted afterwards (`PlaceholderStyle.fitted` on the *joined*
 /// string), so the truncation is solved for the string the eye actually sees.
 public enum StackText {
-    public static let prefix = "堆叠 "
+    public static let prefix = L10n.tr("54bb8712bd77")
     public static let empty = ""
 
     /// 「堆叠 XXX.dng」 for a stack's 置顶, the filename untouched otherwise.
@@ -269,7 +270,7 @@ public enum StackText {
 
     /// 「堆叠5张」 — Arabic digits, as the user asked (16:2x).
     public static func countLabel(_ count: Int) -> String {
-        "堆叠\(count)张"
+        L10n.tr("72d109955aed" , String(describing: (count)))
     }
 }
 

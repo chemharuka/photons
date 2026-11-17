@@ -126,6 +126,14 @@ final class RawLosslessJPEGTests: XCTestCase {
         try roundTrip(tile, width: w, height: h, tables: tables)
     }
 
+    func testRoundTripsThreeComponentRGB() throws {
+        var rng = SplitMix64(seed: 0xD0616)
+        let w = 96, h = 32
+        let tile = (0..<(w * h)).map { _ in UInt16(truncatingIfNeeded: rng.next()) }
+        let tables = RawLosslessJPEG.buildTables([tile], width: w, height: h, components: 3)
+        try roundTrip(tile, width: w, height: h, tables: tables)
+    }
+
     func testRoundTripsAStuffingWorstCase() throws {
         // Alternating 0 and 65535 makes every difference the extreme category; the packed stream
         // ends up full of 0xFF bytes, which is exactly what the 0x00 stuffing has to survive.
@@ -250,7 +258,8 @@ private enum SOF3Decoder {
                         }
                     }
                     var d: Int32 = 0
-                    if category > 0 {
+                    if category == 16 { d = -32768 }
+                    else if category > 0 {
                         let extra = Int32(reader.read(category))
                         let threshold = Int32(1) << Int32(category - 1)
                         d = extra >= threshold ? extra : extra - (Int32(1) << Int32(category)) + 1

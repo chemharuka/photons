@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - Copy/paste settings (M5)
@@ -139,21 +140,21 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// headers cannot drift apart (`CopySheetCardTests` holds them to `InspectorView`'s titles).
     public var title: String {
         switch self {
-        case .geometry: return "裁切"
-        case .whiteBalance: return "白平衡"
-        case .blackLevel: return "黑电平"
-        case .light: return "Light"
-        case .curve: return "曲线"
-        case .color: return "Color"
-        case .blackAndWhite: return "黑白"
+        case .geometry: return L10n.tr("e9f8face2f69")
+        case .whiteBalance: return L10n.tr("d926341c8b0a")
+        case .blackLevel: return L10n.tr("5454c06bc55f")
+        case .light: return L10n.tr("751d6ddba1e9")
+        case .curve: return L10n.tr("937dc7bf30af")
+        case .color: return L10n.tr("e40fffdb9798")
+        case .blackAndWhite: return L10n.tr("47d88357c5ea")
         case .hsl: return "HSL"
-        case .colorGrading: return "色彩分级"
-        case .calibration: return "校准"
-        case .detail: return "开发"
-        case .correction: return "校正"
-        case .detailFX: return "细节"
-        case .effects: return "效果"
-        case .masks: return "蒙版"
+        case .colorGrading: return L10n.tr("00c482421fa9")
+        case .calibration: return L10n.tr("45230cc916f6")
+        case .detail: return L10n.tr("9ec428625fee")
+        case .correction: return L10n.tr("bf73d1a0a939")
+        case .detailFX: return L10n.tr("5ce4ed5694c3")
+        case .effects: return L10n.tr("86a00cf74253")
+        case .masks: return L10n.tr("e7c802f4a183")
         }
     }
 
@@ -170,7 +171,7 @@ public enum EditSnapshotSection: String, CaseIterable, Sendable, Hashable, Codab
     /// short-edge anchoring).
     public var help: String? {
         self == .masks
-            ? "蒙版按目标照片的短边重新锚定，粘贴时生成新的蒙版 id（目标照片自己的蒙版保留）"
+            ? L10n.tr("fae0f730b9e0")
             : nil
     }
 }
@@ -248,33 +249,33 @@ public enum EditSnapshotChild: String, CaseIterable, Sendable, Hashable, Codable
     /// 「高光恢复」 and 「白 / 黑 / 自然饱和度」 drift away from the panel.
     public var standaloneTitle: String? {
         switch self {
-        case .temperature: return "色温"
-        case .tint: return "色调"
-        case .blackOffset: return "黑电平"
-        case .blackAndWhiteSwitch: return "开关"
-        case .blackAndWhiteMix: return "混合"
-        case .hslHue: return "色相"
-        case .hslSaturation: return "饱和度"
-        case .hslLuminance: return "亮度"
-        case .gradeShadows: return "阴影"
-        case .gradeMidtones: return "中间调"
-        case .gradeHighlights: return "高光"
-        case .sharpening: return "锐化"
-        case .sharpeningRadius: return "锐化半径"
-        case .noiseLuminance: return "降噪"
-        case .noiseColor: return "色彩降噪"
-        case .lensCorrections: return "镜头校正"
-        case .decoderVersion: return "解码器版本"
+        case .temperature: return L10n.tr("84ac609620e5")
+        case .tint: return L10n.tr("5bddf6a1c0f5")
+        case .blackOffset: return L10n.tr("5454c06bc55f")
+        case .blackAndWhiteSwitch: return L10n.tr("92d9be0a0e94")
+        case .blackAndWhiteMix: return L10n.tr("1b76c104f489")
+        case .hslHue: return L10n.tr("3ff6d1c07cfc")
+        case .hslSaturation: return L10n.tr("762f17e26780")
+        case .hslLuminance: return L10n.tr("8e2f643ad160")
+        case .gradeShadows: return L10n.tr("a0fb1c62d0e8")
+        case .gradeMidtones: return L10n.tr("280d2d14de93")
+        case .gradeHighlights: return L10n.tr("f799c2308083")
+        case .sharpening: return L10n.tr("fc538f246da7")
+        case .sharpeningRadius: return L10n.tr("e9c8b36e09c7")
+        case .noiseLuminance: return L10n.tr("e6e3a4abdbcc")
+        case .noiseColor: return L10n.tr("462d8c4e2cd2")
+        case .lensCorrections: return L10n.tr("96038cde015a")
+        case .decoderVersion: return L10n.tr("8aa38971de29")
 
-        case .curveWhite: return "白色"
-        case .curveRed: return "红"
-        case .curveGreen: return "绿"
-        case .curveBlue: return "蓝"
-        case .crop: return "裁切"
-        case .straighten: return "拉直"
-        case .flips: return "翻转"
-        case .aspectLock: return "比例"
-        case .quarterTurns: return "旋转"
+        case .curveWhite: return L10n.tr("f56e7eff58bf")
+        case .curveRed: return L10n.tr("0eb7ee7e38ef")
+        case .curveGreen: return L10n.tr("84b34ffba5aa")
+        case .curveBlue: return L10n.tr("52f354ecfccb")
+        case .crop: return L10n.tr("e9f8face2f69")
+        case .straighten: return L10n.tr("7df1c3a41535")
+        case .flips: return L10n.tr("3733e06a5224")
+        case .aspectLock: return L10n.tr("82a59f3d1c16")
+        case .quarterTurns: return L10n.tr("68eb90fa809e")
 
         // 325: these are `PanelCardSpec` rows — 曝光/对比/高光/中间调/阴影/白色/黑色, 自然饱和/饱和,
         // 色差 R/B, 暗角, 纹理/清晰度/去噪/去彩噪, 锐化四参, 去雾, 颗粒. Their names are the panel's,
@@ -319,12 +320,12 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
 
         public var title: String {
             switch self {
-            case .all: return "全部"
-            case .basic: return "基本：白平衡 + 黑电平 + 曝光 + 曲线"
-            case .color: return "颜色：颜色 + 黑白 + HSL + 色彩分级 + 开发 + 细节 + 效果"
-            case .geometry: return "几何：裁切"
-            case .whiteBalance: return "仅白平衡"
-            case .none: return "全不选"
+            case .all: return L10n.tr("5c55a67935af")
+            case .basic: return L10n.tr("1b9da17d230e")
+            case .color: return L10n.tr("466de970a7d3")
+            case .geometry: return L10n.tr("5bdad4030075")
+            case .whiteBalance: return L10n.tr("3a95d8539ab1")
+            case .none: return L10n.tr("ab9084a640fb")
             }
         }
 
@@ -439,9 +440,9 @@ public struct CopySettingsSelection: Sendable, Equatable, Codable {
 
     /// One line for the dialog's status label.
     public var summary: String {
-        if sections.isEmpty { return "未选任何组：粘贴什么也不会发生" }
+        if sections.isEmpty { return L10n.tr("5fe84946add6") }
         let names = EditSnapshotSection.panelOrder.filter { sections.contains($0) }.map(\.title)
-        return "将复制：\(names.joined(separator: " · "))"
+        return L10n.tr("e925ae18f664" , String(describing: (names.joined(separator: " · "))))
     }
 }
 

@@ -1,7 +1,7 @@
 # Third-party notices
 
 Photons is MIT-licensed (see `LICENSE`). It links exactly **one** third-party package, and uses
-one third-party model (not vendored, not linked) in the optional `PhotonsExtensions` denoise plugin.
+third-party model data (not linked) in the optional `PhotonsExtensions` denoise plugin.
 
 ## GRDB.swift
 
@@ -130,10 +130,10 @@ ledger, `content_hash`/`quick_hash` pair) was designed from those readings and i
   FAQ (`#MereAggregation`) draws the line at "pipes, sockets and command-line arguments" versus
   "linked together in a shared address space". See `VENDOR-hdrmerge-swift.md` and
   `LICENSE-SCOPE.md`.
-- Obligations discharged at bundle time (`scripts/bundle-hdrmerge.sh`): the GPL text and a §6(d)
-  source offer are written into `Contents/Resources/licenses/`, and the binary's sha256 into
-  `Contents/Resources/bin/`. Because the source is vendored in this same tree, the offer points at
-  something the recipient already has.
+- At app bundle time (`scripts/bundle-gpl-sources.py`), the GPL text, corresponding-source
+  archive including fork modifications, and source/binary hashes are written into
+  `Contents/Resources/licenses/`. An installed app includes this archive; it does not claim
+  that an app user already has the repository checkout.
 - Only this executable and `Vendor/hdrmerge-swift/` are GPLv3. The Photons application remains MIT.
 - The feature is optional at runtime: with no tool built, the 合并 HDR DNG… entry is unavailable and
   nothing else changes.
@@ -159,7 +159,8 @@ Same arrangement as `hdrmerge-swift` above, for the same reason.
 - What it computes: a **denoised RGGB mosaic**. Pair it with `DNGRawWriter` to get a legal
   lossless DNG. Upstream uses the same design (mosaic in one full-resolution plane, CFA and noise
   level as input planes) so one weight set serves every profiled camera without retraining.
-- Model weights (`.anselnn`) are **not** vendored. They are fetched from the upstream
+- Model weights (`.anselnn`) are not tracked in this source tree. The app bundle includes the
+  quarter/single model as separate runtime data. It is fetched from the upstream
   `models/manifest.json` and verified by sha256. Upstream licenses its training corpus
   (CC0 / per-shard CC / ATDL-1.1) in a way that permits training and commercial use of the
   resulting weights, but places no extra restriction on the weights themselves.

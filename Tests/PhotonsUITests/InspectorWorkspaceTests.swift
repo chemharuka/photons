@@ -66,7 +66,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         // (user: 「黑白移动到色彩栏，不放在调整中」). 081 (2026-10-28): 预设 left the panel entirely —
         // 「预设卡片删掉，系统顶部菜单栏出现预设」 — so 调整 ends at 效果.
         XCTAssertEqual(titles[.adjust],
-                       ["白平衡", "黑电平", "Light", "Color", "曲线", "开发", "校正", "细节", "效果"])
+                       ["白平衡", "黑电平", "明暗", "色彩", "曲线", "开发", "校正", "细节", "效果"])
         XCTAssertEqual(titles[.masks], ["蒙版"])
         // 变换 有卡片了（裁切），色彩 有卡片了（HSL + 2026-10-28 的色彩分级），历史记录有卡片了（077）。
         // 334: 「现在有三个卡片：裁切，校正，变换」.
@@ -143,11 +143,11 @@ final class InspectorWorkspaceTests: XCTestCase {
                           "切换器必须在直方图卡下方（plot 底 \(panel.histogramPlot.maxY) vs 按钮顶 \(panel.tabsTop)）")
         XCTAssertLessThanOrEqual(panel.tabsBottom, panel.scrollViewport.minY,
                                  "切换器必须在滚动区上方（按钮底 \(panel.tabsBottom) vs 视口顶 \(panel.scrollViewport.minY)）")
-        XCTAssertLessThanOrEqual(panel.tabRowHeight, 24,
+        XCTAssertLessThanOrEqual(panel.tabRowHeight, 40,
                                  "切换器行高 \(panel.tabRowHeight) pt —— 「高度尽量小」")
         // 直方图 plot 底 → 视口顶 = 10（卡片自己的 cardInsetV）+ 10（面板间距）+ 20（按钮）+ 10（面板间距）。
-        XCTAssertEqual(panel.switcherFootprint, 20 + 3 * 10, accuracy: 0.51,
-                       "切换器只花掉 20 pt 按钮 + 它上下各 10 pt 的面板间距："
+        XCTAssertEqual(panel.switcherFootprint, InspectorWorkspaceTabs.rowHeight + 3 * 10, accuracy: 0.51,
+                       "切换器只花掉带标签的按钮高度 + 它上下各 10 pt 的面板间距："
                        + "\(panel.switcherFootprint) pt")
         // 直方图仍然只有一份，而且在滚动区外面。
         XCTAssertEqual(panel.histogramCards, 1)
@@ -182,8 +182,8 @@ final class InspectorWorkspaceTests: XCTestCase {
                            "整行从面板内缩 12 pt 处开始")
             XCTAssertEqual(panel.tabs.last?.frame.maxX ?? -1, width - 12, accuracy: 0.51,
                            "整行在面板内缩 12 pt 处结束（不越界、不截断）")
-            XCTAssertEqual(panel.tabs.map(\.frame.height), Array(repeating: 20, count: 5),
-                           "五个按钮同高 20 pt")
+            XCTAssertEqual(panel.tabs.map(\.frame.height), Array(repeating: InspectorWorkspaceTabs.rowHeight, count: 5),
+                           "五个带文字的按钮同高")
             // 不重叠：每一个的 minX 都在前一个的 maxX 右边（允许 2 pt 间距）。
             for (a, b) in zip(panel.tabs, panel.tabs.dropFirst()) {
                 XCTAssertGreaterThanOrEqual(b.frame.minX, a.frame.maxX,
@@ -225,7 +225,7 @@ final class InspectorWorkspaceTests: XCTestCase {
         // 2026-10-28 (user): 黑白 moved to the 色彩 workspace. 081: 预设 card deleted, so 调整 has
         // seven cards and the panel's last card is 效果.
         XCTAssertEqual(panel.cards.cardTitles,
-                       ["白平衡", "黑电平", "Light", "Color", "曲线", "开发", "校正", "细节", "效果"])
+                       ["白平衡", "黑电平", "明暗", "色彩", "曲线", "开发", "校正", "细节", "效果"])
         // 真的渲染出来了，不只是表里有：调整工作区里蒙版卡不在树上，白平衡的数值框在。
         XCTAssertTrue(panel.numberFields > 0, "调整工作区里应该有真的控件（数值框），实际 \(panel.numberFields)")
         XCTAssertEqual(panel.maskCards, 0, "调整工作区里不该有蒙版卡")

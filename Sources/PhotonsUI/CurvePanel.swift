@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -109,10 +110,10 @@ public enum CurveChannel: String, CaseIterable, Identifiable, Sendable {
     /// The channel's name, for undo labels and the tooltip.
     public var name: String {
         switch self {
-        case .white: return "亮度"
-        case .red: return "红"
-        case .green: return "绿"
-        case .blue: return "蓝"
+        case .white: return L10n.tr("8e2f643ad160")
+        case .red: return L10n.tr("0eb7ee7e38ef")
+        case .green: return L10n.tr("84b34ffba5aa")
+        case .blue: return L10n.tr("52f354ecfccb")
         }
     }
 
@@ -130,10 +131,10 @@ public enum CurveChannel: String, CaseIterable, Identifiable, Sendable {
     /// misdescribe what the kernel does with it.
     public var help: String {
         switch self {
-        case .white: return "W 是亮度增益：整像素按 luma 平移，保色相，不是第四张逐通道表"
-        case .red: return "R 通道曲线（逐通道映射）"
-        case .green: return "G 通道曲线（逐通道映射）"
-        case .blue: return "B 通道曲线（逐通道映射）"
+        case .white: return L10n.tr("b03c07babd79")
+        case .red: return L10n.tr("b488b83cba63")
+        case .green: return L10n.tr("30a3ca1f64f7")
+        case .blue: return L10n.tr("99dfac1c5458")
         }
     }
 
@@ -211,8 +212,8 @@ public enum CurveViewMode: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .sdr: return "SDR 视图"
-        case .hdr: return "HDR 视图"
+        case .sdr: return L10n.tr("f53026e7259d")
+        case .hdr: return L10n.tr("8065eeb2e93b")
         }
     }
 
@@ -801,7 +802,7 @@ public enum CurvePointReadout {
 
     /// `输入 233 输出 +1.22` — one space, no colon, no brackets (the owner's own spelling).
     public static func text(for point: CurvePoint) -> String {
-        "输入 \(input(point)) 输出 \(output(point))"
+        L10n.tr("be3b42c6a802" , String(describing: (input(point))), String(describing: (output(point))))
     }
 
     /// The x reading: a display code `0…255` while the point is in the SDR half, the stop count
@@ -953,7 +954,7 @@ public struct CurveEditorModel {
     public func resetChannel() -> Bool {
         guard !isCurrentChannelIdentity else { return false }
         session.applyEdit { $0.curve[keyPath: channel.keyPath] = CurvePoint.linear }
-        return session.commitEdit(label: "复位本通道")
+        return session.commitEdit(label: L10n.tr("a6a06b49fc95"))
     }
 
     /// 全部复位 / double-click on the card title: all four tables back to the identity in **one**
@@ -1074,8 +1075,8 @@ public struct CurvePanelFooter: View {
                 .frame(height: CurvePanelMetrics.footerHeight, alignment: .leading)
                 .accessibilityIdentifier("curve.readout")
             Spacer(minLength: 6)
-            CurvePanelButton("复位本通道", identifier: "curve.button.复位本通道", action: resetChannel)
-            CurvePanelButton("全部复位", identifier: "curve.button.全部复位", action: resetAll)
+            CurvePanelButton(L10n.tr("a6a06b49fc95"), identifier: L10n.tr("c6b25d17dd8c"), action: resetChannel)
+            CurvePanelButton(L10n.tr("ab1a38d7e28f"), identifier: L10n.tr("30999803de9b"), action: resetAll)
         }
         .frame(height: CurvePanelMetrics.footerHeight)
     }
@@ -1100,7 +1101,8 @@ public struct CurvePanel: View {
 
     /// The plot's zoom (069). View state as well, and for the same reason: switching the region
     /// changes nothing in the document, the history or the sidecar.
-    @State private var viewMode: CurveViewMode = .sdr
+    @AppStorage(ApplicationPreferences.Key.hdrPreview) private var hdrPreview = true
+    private var viewMode: CurveViewMode { hdrPreview ? .hdr : .sdr }
 
     /// The press in flight: which point, its value at press, and how far it has travelled.
     @State private var press: Press?
@@ -1167,7 +1169,7 @@ public struct CurvePanel: View {
     /// cannot steal height from the plot or shift the footer's line.
     private func regionRow(mode: CurveViewMode) -> some View {
         HStack(spacing: 4) {
-            Text("区域")
+            Text(L10n.tr("3382870bc4ad"))
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("curve.region.label")
@@ -1177,13 +1179,13 @@ public struct CurvePanel: View {
             // so the press is its own inverse. `.fixedSize` is not cosmetic: squeezed into the tab row
             // the label truncated to 「HDR…」, which reads as a broken control.
             CurvePanelButton(mode.buttonTitle, identifier: "curve.view") {
-                viewMode = viewMode.next
+                ApplicationPreferences.shared.hdrPreview.toggle()
             }
             .fixedSize()
-            .help("视图：\(mode.title)。SDR 只显示 x 0…1（显示码 0–255），HDR 显示整条 x 0…2"
-                  + "（SDR 半区 0…1 加 HDR 半区 1…2 / +0…+4 EV），两个视图都把各自的轴铺满绘图区；"
-                  + "再按一次切到另一个")
-            .accessibilityLabel("区域 \(mode.buttonTitle)")
+            .help(L10n.tr("a17c3ea55307" , String(describing: (mode.title)))
+                  + L10n.tr("642edc7196b3")
+                  + L10n.tr("03d062575371"))
+            .accessibilityLabel(L10n.tr("c125d3a93bf4" , String(describing: (mode.buttonTitle))))
         }
         .frame(height: CurvePanelMetrics.modeRowHeight)
     }
@@ -1228,9 +1230,9 @@ public struct CurvePanel: View {
                     .onEnded { value in released(value, geometry: geometry) }
             )
             .accessibilityIdentifier("curve.plot")
-            .help("拖动控制点：末段（最后两点之间）的斜率上限 2.0 —— +4 EV 以上的高光尾巴"
-                  + "可以画得比 1× 更陡，渲染与拖动用同一个上限；其它段不受这个上限约束"
-                  + "（它们只在表内插值，不会外延）")
+            .help(L10n.tr("2e9d2be605f9")
+                  + L10n.tr("6d41d3cdaff7")
+                  + L10n.tr("7e26a08082bd"))
         }
         .frame(height: CurvePanelMetrics.plotHeight)
     }

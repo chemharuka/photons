@@ -72,10 +72,17 @@ final class ThumbnailMetalRenderer {
 
         fragment float4 thumbnail_fragment(ThumbOut in [[stage_in]],
                                            texture2d<float> src [[texture(0)]],
-                                           constant ThumbParams &p [[buffer(0)]]) {
+                                           constant ThumbParams &p [[buffer(0)]],
+                                           constant uint &hdr [[buffer(1)]]) {
             constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
             float2 uv = p.uv.xy + in.uv * p.uv.zw;
-            return float4(src.sample(smp, uv).rgb, 1.0);
+            float3 rgb = src.sample(smp, uv).rgb;
+            if (hdr == 0) {
+                rgb=max(rgb,0.0);
+                float peak=max(rgb.r,max(rgb.g,rgb.b));
+                if (peak>0.8) {rgb *= (0.8+0.2*(peak-0.8)/(peak-0.6))/peak;}
+            }
+            return float4(rgb,1.0);
         }
         """
         guard let library = try? device.makeLibrary(source: source, options: nil),
@@ -100,6 +107,7 @@ final class ThumbnailMetalSurface {
     private var lastDrawableSize = CGSize.zero
     private var drawGeneration = 0
     private var pendingUnhide: (() -> Void)?
+    private var preferencesObserver: NSObjectProtocol?
     private(set) var presentCount = 0
     private(set) var lastFailure: String?
 
@@ -118,7 +126,23 @@ final class ThumbnailMetalSurface {
             layer.preferredDynamicRange = .high
         }
         // EDR 1.0 is reference white; the drawable's values keep that meaning (no tone map).
-        layer.wantsExtendedDynamicRangeContent = true
+        applyDynamicRange()
+        preferencesObserver = NotificationCenter.default.addObserver(
+            forName: .photonsPreferencesDidChange, object: nil, queue: .main) { [weak self] note in
+                guard note.userInfo?["key"] as? String == "photons.hdrPreviewEnabled" else { return }
+                self?.applyDynamicRange()
+                self?.drawIfPossible()
+            }
+    }
+
+    deinit {
+        if let preferencesObserver { NotificationCenter.default.removeObserver(preferencesObserver) }
+    }
+
+    private func applyDynamicRange() {
+        let enabled = ProcessingPreferences.hdrPreview
+        layer.wantsExtendedDynamicRangeContent = enabled
+        if #available(macOS 26.0, *) { layer.preferredDynamicRange = enabled ? .high : .standard }
     }
 
     /// 227 — replace the layer's contents. `onPresented` runs only after the **new** drawable has
@@ -139,6 +163,9 @@ final class ThumbnailMetalSurface {
         let pixels = CGSize(width: max(1, (size.width * s).rounded()),
                             height: max(1, (size.height * s).rounded()))
         if layer.drawableSize != pixels { layer.drawableSize = pixels }
+        // AppKit re-lays out cells during selection, scrolling and sidebar updates. The existing
+        // drawable is still valid when the bitmap and pixel size have not changed.
+        guard pixels != lastDrawableSize || lastFailure != nil else { return }
         drawIfPossible()
     }
 
@@ -176,6 +203,8 @@ final class ThumbnailMetalSurface {
         var params = aspectFillWindow(image: image,
                                       drawable: CGSize(width: width, height: height))
         encoder.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        var hdr: UInt32 = ProcessingPreferences.hdrPreview ? 1 : 0
+        encoder.setFragmentBytes(&hdr, length: MemoryLayout<UInt32>.stride, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
         if !device.hasUnifiedMemory, let blit = command.makeBlitCommandEncoder() {
@@ -222,6 +251,8 @@ final class ThumbnailMetalSurface {
         encoder.setFragmentTexture(texture, index: 0)
         var params = aspectFillWindow(image: image, drawable: layer.drawableSize)
         encoder.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        var hdr: UInt32 = ProcessingPreferences.hdrPreview ? 1 : 0
+        encoder.setFragmentBytes(&hdr, length: MemoryLayout<UInt32>.stride, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
         if let pendingUnhide {
@@ -239,6 +270,7 @@ final class ThumbnailMetalSurface {
         command.present(drawable)
         command.commit()
         presentCount += 1
+        lastDrawableSize = layer.drawableSize
         lastFailure = nil
     }
 

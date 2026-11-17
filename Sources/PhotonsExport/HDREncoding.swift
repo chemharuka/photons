@@ -145,6 +145,14 @@ public enum HDREncoding {
         private static let b = 0.28466892
         private static let c = 0.55991073
 
+        /// The input has only 65,536 half-float bit patterns. This 128 KiB table evaluates the
+        /// exact existing curve and quantizer once per pattern; it is not an interpolated LUT.
+        /// Opaque photographs then need three lookups per pixel instead of three pow/log pairs.
+        static let opaqueCodes: [UInt16] = (0...UInt16.max).map { bits in
+            let value = Double(Float(Float16(bitPattern: bits)))
+            return UInt16(min(max((signal(forLinear: value) * 65535.0).rounded(), 0), 65535))
+        }
+
         /// Absolute linear (SDR white = 1.0) → HLG signal 0…1.
         static func signal(forLinear value: Double,
                            referenceWhite: Double = referenceWhiteNits,
@@ -162,8 +170,16 @@ public enum HDREncoding {
                                    colorSpace: CGColorSpace) throws -> CGImage {
         let w = linear.width, h = linear.height
         var words = [UInt16](repeating: 0, count: w * h * 4)
+        let codes = HLGCurve.opaqueCodes
         for i in stride(from: 0, to: words.count, by: 4) {
             let alpha = Double(min(max(Float(linear.rgba[i + 3]), 0), 1))
+            if alpha == 1 {
+                words[i] = codes[Int(linear.rgba[i].bitPattern)]
+                words[i + 1] = codes[Int(linear.rgba[i + 1].bitPattern)]
+                words[i + 2] = codes[Int(linear.rgba[i + 2].bitPattern)]
+                words[i + 3] = 65535
+                continue
+            }
             for c in 0..<3 {
                 let signal = HLGCurve.signal(forLinear: Double(Float(linear.rgba[i + c])))
                 // premultipliedLast: the exporter's frames are opaque, but keep the semantics.

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -309,7 +310,7 @@ public final class HistogramCardView: NSView {
     /// the 11 pt the highlight-warning dot occupies (2 pt gap + 5 pt dot). The *percentage* starts here,
     /// on every column, so a dash and a `100%` sit at the same x.
     public static let clipLabelSlot: CGFloat = {
-        let widest = ["过白", "削顶", "削底"]
+        let widest = [L10n.tr("4a992de52aca"), L10n.tr("c08de948f396"), L10n.tr("63b98ddec268")]
             .map { ($0 as NSString).size(withAttributes: [.font: clipLabelFont]).width }
             .max() ?? 0
         return widest + 3 + 11
@@ -415,7 +416,7 @@ public final class HistogramCardView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityIdentifier("histogram-card")
-        setAccessibilityLabel("直方图")
+        setAccessibilityLabel(L10n.tr("50c884e953ed"))
         setAccessibilityRole(.group)
         installAppHeadroomObservers()
         updateAccessibilityHelp()
@@ -431,7 +432,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B 三组曲线，重叠处按光叠加（R+G 为黄，三路齐为白）；亮度仍测量并用于过白/削顶/削底读数，但不再画线。横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（画面本身的光，不是屏幕渲染后的值：SDR 区为 0–255 码值，超白通道为 +x.x 档并画成削顶品红），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。")
+        setAccessibilityHelp(L10n.tr("6270304d33b8", String(bins), String(ProcessingPreferences.hdrPreview ? tail : 0)))
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -746,7 +747,7 @@ public final class HistogramCardView: NSView {
     private var liveAxis: HistogramAxis? {
         guard bounds.width > 80, bounds.height > 60 else { return nil }
         return HistogramAxis(plot: NSRect(x: 0, y: Self.plotInsetTop, width: bounds.width,
-                                          height: Self.plotHeight))
+                                          height: Self.plotHeight),hdrEnabled:ProcessingPreferences.hdrPreview)
     }
 
     public override func mouseMoved(with event: NSEvent) {
@@ -842,62 +843,48 @@ public final class HistogramCardView: NSView {
         lastHoverColor = readoutColor
 
         let plot = NSRect(x: 0, y: Self.plotInsetTop, width: bounds.width, height: Self.plotHeight)
-        let axis = HistogramAxis(plot: plot)
+        let axis = HistogramAxis(plot: plot,hdrEnabled:ProcessingPreferences.hdrPreview)
         lastAxis = axis
         lastCeilingMarkerX = .nan
         lastCeilingStops = 0
         drawAxis(axis)
 
-        // **Three series, added like light** (403). The owner's rule: 「直方图取消白色线，只绘制 RGB，RGB
-        // 重叠部分的颜色按光叠加展示——即都有的话白色，R+G 就是黄色」. So the luma outline is gone from the
-        // *paint* (its bins, its clipping numbers and the pointer readout are all untouched) and the three
-        // colour curves are filled with `plusLighter`, each at full strength: red + green = yellow, and all
-        // three = white. Coefficients below 1.0 would add up to grey instead, which is not what was asked.
-        //
-        // The **transparency layer is load-bearing, not an optimisation**: `plusLighter` on the card would
-        // mix the curves with the bed, so the sum would depend on the appearance (and a single channel would
-        // wash out on a light bed). Inside a layer the sums start from transparent black — the overlap
-        // colour is a function of the data only — and the finished layer is composited over the bed once.
-        // Nothing opaque goes in the layer: the bed, the grid and the ticks are painted *before* it and the
-        // axis chrome *after* it.
-        //
-        // Both segments are still **one** path per series, so the curve crosses the SDR/tail boundary
-        // without a seam.
+        // Add RGB in a bounded sRGB bitmap, before converting to the display's color space.
+        // Adding wide-gamut/extended colors directly in the window can clip negative components
+        // independently and turn the neutral overlap into an EDR pink highlight.
         lastDrawnSeries = 0
         lastDrawnBins = 0
         lastDrawnHDRBins = 0
         if let histogram {
             let bins = histogram.binCount
-            let series: [(channel: Histogram.Channel, color: NSColor)] = [
-                (.red, NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)),
-                (.green, NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1)),
-                (.blue, NSColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)),
-            ]
-            if let context = NSGraphicsContext.current {
-                let cg = context.cgContext
-                cg.saveGState()
-                cg.beginTransparencyLayer(auxiliaryInfo: nil)
-                context.compositingOperation = .plusLighter
-                for (channel, color) in series {
+            let scale = window?.backingScaleFactor ?? 2
+            if let composite = HistogramRGBComposite.context(size: axis.plot.size, scale: scale) {
+                composite.translateBy(x: -axis.plot.minX, y: -axis.plot.minY)
+                composite.setBlendMode(.plusLighter)
+                let channels: [Histogram.Channel] = [.red, .green, .blue]
+                for (index, channel) in channels.enumerated() {
                     let c = histogram[channel]
                     let points = HistogramCardFormat.points(c, binCount: bins, axis: axis,
                                                             peak: HistogramCardFormat.scalePeak(c))
                     guard points.count > 2 else { continue }
-                    let path = NSBezierPath()
-                    path.move(to: points[0])
-                    for p in points.dropFirst() { path.line(to: p) }
-                    path.close()
-                    color.setFill()
-                    path.fill()
+                    let path = CGMutablePath()
+                    path.addLines(between: points)
+                    path.closeSubpath()
+                    composite.setFillColor(red: index == 0 ? 1 : 0,
+                                           green: index == 1 ? 1 : 0,
+                                           blue: index == 2 ? 1 : 0, alpha: 1)
+                    composite.addPath(path)
+                    composite.fillPath()
                     lastDrawnSeries += 1
                     lastDrawnBins = max(lastDrawnBins, points.count - 2)
                     lastDrawnHDRBins = max(lastDrawnHDRBins, c.hdrBins.count)
                 }
-                // Back to sourceOver *before* the layer is flattened: the layer as a whole goes onto the
-                // bed normally, so only the curves inside it were added to each other.
-                context.compositingOperation = .sourceOver
-                cg.endTransparencyLayer()
-                cg.restoreGState()
+                if let image = composite.makeImage(), let destination = NSGraphicsContext.current?.cgContext {
+                    destination.saveGState()
+                    destination.setBlendMode(.normal)
+                    destination.draw(image, in: axis.plot)
+                    destination.restoreGState()
+                }
             }
             // The 0.999 / 0.001 thresholds as tick marks: they are what the numbers below mean.
             drawThresholdTicks(in: axis)
@@ -907,7 +894,7 @@ public final class HistogramCardView: NSView {
             drawCeilingTick(axis)
         } else {
             drawStopLabels(axis)
-            drawText("还没有可测的帧", at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
+            drawText(L10n.tr("e419b0ff536a"), at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
                      font: .systemFont(ofSize: 9), color: Self.plotLabelColor)
         }
 
@@ -982,7 +969,7 @@ public final class HistogramCardView: NSView {
 
         // One line per stop of the tail.
         Self.plotStopLineColor.setStroke()
-        for stop in 1..<axis.stops {
+        for stop in 1..<axis.stops where axis.hdrEnabled {
             let x = axis.x(stopsAboveWhite: Double(stop))
             let line = NSBezierPath()
             line.move(to: CGPoint(x: x, y: plot.minY))
@@ -1110,7 +1097,7 @@ public final class HistogramCardView: NSView {
         // three x's the `R`/`G`/`B` letters below sit on, so the two rows read as one table and the
         // numbers' widths cannot push anything sideways. Each percentage starts at
         // `columnStart + clipLabelSlot`, a fixed slot, so a `—` and a `100%` land on the same pixel.
-        let highLabel = drawText("过白", at: CGPoint(x: starts[0], y: y), font: labelFont,
+        let highLabel = drawText(L10n.tr("4a992de52aca"), at: CGPoint(x: starts[0], y: y), font: labelFont,
                                  color: .secondaryLabelColor)
         if showsHighlightWarning {
             NSColor.systemOrange.setFill()
@@ -1123,14 +1110,14 @@ public final class HistogramCardView: NSView {
         clipHighHitRect = NSRect(x: highLabel.minX, y: y - 2,
                                  width: highNumber.maxX - highLabel.minX, height: 14)
 
-        let ceilLabel = drawText("削顶", at: CGPoint(x: starts[1], y: y),
+        let ceilLabel = drawText(L10n.tr("c08de948f396"), at: CGPoint(x: starts[1], y: y),
                                  font: labelFont, color: .secondaryLabelColor)
         let ceilNumber = drawText(clipCeilingText,
                                   at: CGPoint(x: starts[1] + Self.clipLabelSlot, y: y),
                                   font: numberFont,
                                   color: clipCeilingText == "0.0%" ? .labelColor : .systemRed)
 
-        let lowLabel = drawText("削底", at: CGPoint(x: starts[2], y: y),
+        let lowLabel = drawText(L10n.tr("63b98ddec268"), at: CGPoint(x: starts[2], y: y),
                                 font: labelFont, color: .secondaryLabelColor)
         let lowNumber = drawText(clipLowText, at: CGPoint(x: starts[2] + Self.clipLabelSlot, y: y),
                                  font: numberFont, color: .labelColor)
@@ -1574,5 +1561,19 @@ private struct HistogramCardHost: NSViewRepresentable {
         view.onToggleHighlightWarning = onToggle
         if loupe?.pointerReadoutTarget !== view { loupe?.pointerReadoutTarget = view }
         view.needsDisplay = true
+    }
+}
+
+/// The bounded intermediate prevents extended-range additive blending in an HDR window.
+enum HistogramRGBComposite {
+    static func context(size: CGSize, scale: CGFloat) -> CGContext? {
+        guard size.width > 0, size.height > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: Int(ceil(size.width * scale)),
+                                      height: Int(ceil(size.height * scale)), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.scaleBy(x: scale, y: scale)
+        return context
     }
 }

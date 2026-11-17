@@ -625,7 +625,44 @@ kernel void s1_9_dehaze_apply(texture2d<float, access::read> src [[texture(0)]],
                     w = knee * (1.0 - smoothstep(0.0, 1.0, x));
                 }
             }
-            float Lout = mix(L, recovered, w);
+            // 401 — **the recovery's darkening depth is capped, not its participation.**
+            //
+            // 374 fixed the *shape* of `w` (a C¹ band, no step at `1.33·A`) but left the
+            // **asymmetry of the two sides' slopes** alone: below `A` the blend moves `L` by the full
+            // `1/t` (≈ 7× at `t = 0.14`) and above `A` it moves it by 1. On a frame whose airlight is
+            // near SDR white (`A ≈ 0.95`, every 135-capped highlight frame) the band is
+            // `[0.71, 1.26]`, so `L = 0.9` lands inside it (darkened, `w ≈ 0.12` on the ramp) while
+            // `L = 1.4` lands outside it (byte-untouched): the user's "0.9 掉了、1.4 不动，对比度被
+            // 拉爆". `L > A` **cannot** darken — `J − L = (L − A)(1 − t)/t > 0` — so "let the
+            // highlight participate" would lift the tail, which is 117 (and 280 put the edge back).
+            //
+            // The defect that *is* fixable is the depth: the model asks for `gModel = J/L` as low as
+            // `1/t` (0.24 measured at `L = 0.5·A`, `t = 0.54`), i.e. the fog band is darkened 4× while
+            // a pixel a few percent brighter is darkened 1.6×. Capping the **gain** at a constant
+            // floor bounds that ratio without touching `w`, `A`, `t`, `hi = 1.33` or the legibility of
+            // the fog: measured on `A = 0.95`, `dehaze = 100`, `gain(0.5)` 0.2406 → 0.4000 and
+            // `gain(0.9)` 0.9605 → 0.9603, so `gain(0.9)/gain(0.5)` falls 3.99 → 2.40 (the "contrast
+            // is stretched" measurement) while the deep fog is still darkened 60 %.
+            //
+            // The floor is a **constant**, not `k·amount`: the amount's linearity lives in the
+            // `mix(In, clear, amount)` at the end of this kernel, and a floor that read `amount`
+            // there would make the half-amount render disagree with `L + α(clear − L)` by 5·10⁻²
+            // (measured) instead of 0. The upper clamp keeps 280's contract — a `L > A` pixel is
+            // never lifted — and in fact pulls the measured `p99–p99.9` band from 1.007/1.008 to
+            // 1.000 on 437/428 (v1's measurement, re-verified here).
+            //
+            // `legacyDehazeUnboundedRecovery` (`p.l.w`) is deliberately **outside** the cap: it is
+            // the identity `t = (L − A)/(J − A)` DehazeLinearTests inverts, and the pre-401 arithmetic
+            // byte for byte.
+            constexpr float kDehazeGainFloor = 0.4;
+            float Lout;
+            if (legacy || p.l.w > 0.5) {
+                Lout = mix(L, recovered, w);
+            } else {
+                float gModel = recovered / max(L, 1e-6);
+                float gCapped = clamp(gModel, kDehazeGainFloor, 1.0);
+                Lout = mix(L, L * gCapped, w);
+            }
             float gain = max(Lout, 0.0) / max(L, 1e-6);
             clear = In * gain;
         }

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -45,11 +46,11 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
     /// The button's accessibility label and its tooltip's stem — the user's own words.
     public var title: String {
         switch self {
-        case .adjust: return "调整"
-        case .transform: return "变换"
-        case .colour: return "色彩"
-        case .masks: return "蒙版"
-        case .history: return "历史记录"
+        case .adjust: return L10n.tr("f65c42a2540b")
+        case .transform: return L10n.tr("ca4842bc9e80")
+        case .colour: return L10n.tr("e40fffdb9798")
+        case .masks: return L10n.tr("e7c802f4a183")
+        case .history: return L10n.tr("5467922dce50")
         }
     }
 
@@ -135,7 +136,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         switch self {
         case .transform: return []
         case .colour: return []
-        case .history: return ["历史记录"]
+        case .history: return [L10n.tr("5467922dce50")]
         case .adjust, .masks: return []
         }
     }
@@ -145,7 +146,7 @@ public enum InspectorWorkspace: String, CaseIterable, Identifiable, Hashable, Se
         guard hasCards else {
             let planned = plannedControls
             let body = planned.isEmpty ? "" : "：\(planned.joined(separator: "、"))"
-            return "\(title)\(body)（尚未实现，暂无卡片）"
+            return L10n.tr("52dc4b577116" , String(describing: (title)), String(describing: (body)))
         }
         return "\(title)：\(cards.map(\.title).joined(separator: "、"))"
     }
@@ -236,7 +237,7 @@ public final class InspectorWorkspaceState {
 
 /// The row of five icon buttons between the histogram and the scroll area (派单 073).
 ///
-/// It is deliberately the smallest thing that can carry five targets: **20 pt** tall, 11 pt glyphs,
+/// It is deliberately the smallest thing that can carry five targets: **38 pt** tall, 13 pt glyphs with text labels,
 /// 2 pt between tabs, one equal-width cell each (so 244 pt and 364 pt both lay out without clipping —
 /// there is no minimum width a tab can be starved below). The selected tab is the **system accent**
 /// (`Color.accentColor` — the same 「默认参数色」 060/071 use for the sliders that follow the system
@@ -249,12 +250,10 @@ public struct InspectorWorkspaceTabs: View {
 
     @Binding public var selection: InspectorWorkspace
 
-    /// The row's height — the whole vertical cost of the switcher. 20 pt is a hit target small enough
-    /// to leave the cards alone and still a comfortable click (the top bar's buttons are 26–28 pt, the
-    /// slider rows 16 pt).
-    public static let rowHeight: CGFloat = 20
+    /// The row includes both a glyph and a visible label, with a full-height click target.
+    public static let rowHeight: CGFloat = 38
     /// The glyph size. One size for selected and unselected, so the row cannot jump on a switch.
-    public static let iconSize: CGFloat = 11
+    public static let iconSize: CGFloat = 13
     /// Gap between two tabs. The cells themselves are equal-width, so this is the only horizontal
     /// constant a narrow panel has to pay for.
     public static let tabSpacing: CGFloat = 2
@@ -281,8 +280,7 @@ public struct InspectorWorkspaceTabs: View {
 
     /// One tab: an SF Symbol in a full-width cell.
     ///
-    /// No text label on screen (the ask is an icon row); the name lives in `.help` and in the
-    /// accessibility label. The probe behind it is the test's readback of *what was built* — the
+    /// The visible label names the workspace; `.help` lists its tools for discoverability. The probe behind it is the test's readback of *what was built* — the
     /// same seam `MaskListPanel` uses, because SwiftUI draws its own views and a `Text`/`Image` has no
     /// AppKit leaf to measure under `swift test`.
     private func tab(_ workspace: InspectorWorkspace) -> some View {
@@ -290,8 +288,12 @@ public struct InspectorWorkspaceTabs: View {
         return Button {
             selection = workspace
         } label: {
-            Image(systemName: workspace.symbol)
-                .font(.system(size: Self.iconSize, weight: isSelected ? .semibold : .regular))
+            VStack(spacing: 3) {
+                Image(systemName: workspace.symbol)
+                    .font(.system(size: Self.iconSize, weight: isSelected ? .semibold : .regular))
+                Text(workspace.title).font(.system(size: 9, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
         }

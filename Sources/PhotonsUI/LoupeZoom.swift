@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import PhotonsCore
@@ -97,7 +98,7 @@ public struct LoupeViewState: Equatable, Sendable {
     /// reader can see it move (`"适应 31%"`).
     public var zoomLabel: String {
         switch mode {
-        case .fit: return "适应"
+        case .fit: return L10n.tr("53c9aca4b68c")
         case .actual: return Self.percentLabel(of: Self.clampZoom(zoom))
         }
     }

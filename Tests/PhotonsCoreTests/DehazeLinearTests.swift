@@ -331,8 +331,16 @@ final class DehazeLinearTests: XCTestCase {
         // measures −45.9 %; see below.) The guard that matters — 去雾 still does something — stays a
         // real one, and the contrast check (2.62×, within 6 % of the clean original's) is the criterion
         // the operator actually owes.
-        XCTAssertLessThanOrEqual(d1 / d0, 0.75,
-                                 String(format: "暗通道均值必须下降 ≥ 25 %%（实测 %+.1f %%，旧 t %+.1f %%）",
+        //
+        // **401 — the floor moved 0.75 → 0.80 because the recovery's gain is now capped at 0.4.** The
+        // cap is the fix for the "contrast is stretched" symptom: it bounds how much darker the deepest
+        // fog may become relative to the near-`A` band, and on this frame the fog band's mean gain
+        // moves from 0.2420 (uncapped) to 0.3998, so the dark channel's drop falls from −31.5 % to
+        // −21.1 %. The number is re-measured, not relaxed for slack: the contrast criterion above
+        // (2.61×) and the counterproof below (the block minimum still suppresses visibly more, −47.8 %)
+        // are unchanged, so "the dark channel still drops materially" is still a real assertion.
+        XCTAssertLessThanOrEqual(d1 / d0, 0.80,
+                                 String(format: "暗通道均值必须下降 ≥ 20 %%（实测 %+.1f %%，旧 t %+.1f %%；401 的压暗封顶把深雾 gain 从 0.2420 抬到 0.3998，故降幅上限相应下降）",
                                         (d1 / d0 - 1) * 100, (dLegacy / d0 - 1) * 100))
         // 2026-10-31 (160): the counterproof's block minimum now lives on the canonical 512 proxy,
         // not on the render texture, so its over-suppression measures −45.9 % here (was −58.3 %);

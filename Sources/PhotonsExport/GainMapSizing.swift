@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import PhotonsCore
 
@@ -25,9 +26,9 @@ public struct HalfSizeCrop: Sendable, Equatable {
     /// `（右/下各 1 px）`, `（右 1 px）` or `（下 1 px）` — the parenthetical the UI and the note share.
     public var sideText: String {
         switch (dx > 0, dy > 0) {
-        case (true, true): return "右/下各 \(dx) px"
-        case (true, false): return "右 \(dx) px"
-        case (false, true): return "下 \(dy) px"
+        case (true, true): return L10n.tr("ce43afe62d83" , String(describing: (dx)))
+        case (true, false): return L10n.tr("4e05e22f0f7d" , String(describing: (dx)))
+        case (false, true): return L10n.tr("14e8cc678708" , String(describing: (dy)))
         case (false, false): return ""
         }
     }
@@ -35,13 +36,13 @@ public struct HalfSizeCrop: Sendable, Equatable {
     /// The sheet's grey line; `nil` when nothing is cropped (the row is not built at all).
     public func hint(current: ImageSize) -> String? {
         guard isNeeded else { return nil }
-        return "半尺寸需要偶数像素：当前 \(current.width)×\(current.height)，将裁到 "
+        return L10n.tr("dd9a86ddd236" , String(describing: (current.width)), String(describing: (current.height)))
             + "\(current.width - dx)×\(current.height - dy)（\(sideText)）"
     }
 
     /// The batch note — same numbers, past tense, and the (dx, dy) pair the metrics carry.
     public func exportNote(source: ImageSize) -> String {
-        "半尺寸增益图：源 \(source.width)×\(source.height)，已裁 (\(dx),\(dy)) → "
+        L10n.tr("b788f1d8b85b" , String(describing: (source.width)), String(describing: (source.height)), String(describing: (dx)), String(describing: (dy)))
             + "\(source.width - dx)×\(source.height - dy)（\(sideText)）"
     }
 }

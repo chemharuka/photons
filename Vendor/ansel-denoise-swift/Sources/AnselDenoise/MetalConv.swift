@@ -160,14 +160,20 @@ public final class MetalConv {
 
     public func conv(_ input: Tensor, w: AnselWeights, b: [Float]?,
                      kind: ConvKind, cmd: MTLCommandBuffer) throws -> Tensor {
+        return try conv(input, prepared: prepare(w: w, b: b), kind: kind, cmd: cmd)
+    }
+
+    public func conv(_ input: Tensor, prepared w: PreparedConvolution,
+                     kind: ConvKind, cmd: MTLCommandBuffer) throws -> Tensor {
+        precondition(input.channels == w.inC)
         let (kh, kw, stride, pad) = (w.kh, w.kw, kind.stride, kind.pad)
         let outH = (input.height + 2 * pad - kh) / stride + 1
         let outW = (input.width + 2 * pad - kw) / stride + 1
         let outC = w.outC
 
         let out = try makeTensor(width: outW, height: outH, channels: outC)
-        let (wb, _) = try weightBuffer(w)
-        let (bb, _) = try biasBuffer(b)
+        let wb = w.weights
+        let bb = w.bias
 
         let pipe = kind == .same3x3 ? convSame3x3 : (kind == .point1x1 ? convPoint1x1 : convDown2x2)
         guard let enc = cmd.makeComputeCommandEncoder() else {
@@ -186,7 +192,7 @@ public final class MetalConv {
         enc.setBytes(&dims, length: MemoryLayout<SIMD4<Int32>>.size, index: 4)
         enc.setBytes(&dims2, length: MemoryLayout<SIMD4<Int32>>.size, index: 5)
         enc.setBytes(&str, length: MemoryLayout<SIMD2<Int32>>.size, index: 6)
-        var hasBias = Int32(b == nil ? 0 : 1)
+        var hasBias = Int32(bb == nil ? 0 : 1)
         enc.setBytes(&hasBias, length: MemoryLayout<Int32>.size, index: 7)
 
         let tg = MTLSize(width: 16, height: 16, depth: 1)
@@ -214,6 +220,24 @@ public final class MetalConv {
         case same3x3, point1x1, down2x2
         var stride: Int { self == .down2x2 ? 2 : 1 }
         var pad: Int { self == .same3x3 ? 1 : 0 }
+    }
+
+    /// Packed once per immutable model layer, then shared by every tile and image size.
+    /// Explicit ownership avoids a global name-keyed cache mixing two different models.
+    public struct PreparedConvolution {
+        fileprivate let weights: MTLBuffer
+        fileprivate let bias: MTLBuffer?
+        fileprivate let inC: Int
+        fileprivate let outC: Int
+        fileprivate let kh: Int
+        fileprivate let kw: Int
+    }
+
+    public func prepare(w: AnselWeights, b: [Float]?) throws -> PreparedConvolution {
+        let (weights, _) = try weightBuffer(w)
+        let (bias, _) = try biasBuffer(b)
+        return PreparedConvolution(weights: weights, bias: bias, inC: w.inC,
+                                   outC: w.outC, kh: w.kh, kw: w.kw)
     }
 
     /// `a - b` on the first `b.channels` planes of `a` (residual output).

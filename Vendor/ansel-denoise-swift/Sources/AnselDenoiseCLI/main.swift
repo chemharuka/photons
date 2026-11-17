@@ -31,6 +31,13 @@ func parseDoubles(_ s: String) -> [Double] {
     s.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
 }
 
+let sandboxFileGrants: SandboxFileGrants
+do { sandboxFileGrants = try SandboxFileGrants() }
+catch {
+    FileHandle.standardError.write(Data(("Unable to restore file access: \(error.localizedDescription)\n").utf8))
+    exit(2)
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 guard let cmd = args.first else {
     die("usage: ansel-denoise-swift <image|info|tile|batch|bench|capabilities> ...")

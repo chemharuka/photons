@@ -214,7 +214,7 @@ final class HistoryRevertTests: XCTestCase {
         XCTAssertFalse(source.contains("xmark"), "旧 × 图标必须整体删掉")
         XCTAssertTrue(source.contains("public static let undoWidth: CGFloat = 26"))
         XCTAssertTrue(source.contains("public static let undoHitHeight: CGFloat = 18"))
-        XCTAssertTrue(source.contains("Text(\"撤销\")"))
+        XCTAssertTrue(source.contains("Text(L10n.tr(\"926a50b98ece\"))"))
         XCTAssertTrue(source.contains("session.revertHistoryEntry(at: row.index)"))
         XCTAssertTrue(source.contains("if row.canUndo {"))
         XCTAssertTrue(source.contains("inspector.history.undo.\\(row.seq)"))

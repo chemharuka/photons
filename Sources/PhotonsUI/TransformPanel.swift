@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import PhotonsCore
@@ -157,8 +158,8 @@ extension InspectorView {
                 .fixedSize()
                 .background(CropRowProbeHost(rowID: CropCardID.staysInsidePixels))
             Spacer(minLength: 8)
-            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
-                     help: "裁切框上的三分线（视图态，不进文档）",
+            CropChip(title: L10n.tr("f9edbf5994a5"), on: tool?.showsGrid ?? true,
+                     help: L10n.tr("561266708d88"),
                      action: { loupe?.cropTool.toggleGrid() })
                 .background(CropRowProbeHost(rowID: CropCardID.grid))
         }
@@ -169,8 +170,8 @@ extension InspectorView {
     @ViewBuilder
     private func cropGridRow(_ tool: CropToolController?) -> some View {
         HStack(spacing: 6) {
-            CropChip(title: "九宫格", on: tool?.showsGrid ?? true,
-                     help: "裁切框上的三分线（视图态，不进文档）",
+            CropChip(title: L10n.tr("f9edbf5994a5"), on: tool?.showsGrid ?? true,
+                     help: L10n.tr("561266708d88"),
                      action: { loupe?.cropTool.toggleGrid() })
             Spacer(minLength: 4)
         }
@@ -205,7 +206,7 @@ extension InspectorView {
                       onEditingChanged: { editing in
                           // 356 — press opens the gesture's session; the release writes the angle and
                           // closes it (`commitStraighten` → one row). Neither end asks the history.
-                          if editing { session.beginToolGesture(tool: "裁切", label: "转动") }
+                          if editing { session.beginToolGesture(tool: L10n.tr("e9f8face2f69"), label: L10n.tr("0cf81e4c2481")) }
                           else { _ = tool?.commitStraighten() }
                       })
         }
@@ -262,7 +263,7 @@ extension InspectorView {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("清除引导线")
+                .help(L10n.tr("29ff7128a14f"))
                 .accessibilityIdentifier(CorrectionCardRow.guideLines.clearID)
             }
             if let status = tool?.guideLineStatusText {
@@ -304,13 +305,13 @@ extension InspectorView {
                       accessibilityID: "inspector.crop.perspective.vertical",
                       onReset: {
                           session.applyEdit { $0.geometry.perspectiveVertical = 0 }
-                          _ = session.commitEdit(label: "透视", coalesce: false)
+                          _ = session.commitEdit(label: L10n.tr("17e14283a497"), coalesce: false)
                       },
                       onEditingChanged: { editing in
                           // 356 — the drag is the gesture: press opens its session, release closes it
                           // with one row. Nothing has to know whether a session happened to be open.
-                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
-                          else { session.endToolGesture(label: "透视", coalesce: true) }
+                          if editing { session.beginToolGesture(tool: L10n.tr("17e14283a497"), label: L10n.tr("17e14283a497")) }
+                          else { session.endToolGesture(label: L10n.tr("17e14283a497"), coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveVertical.probeID))
             sliderRow(CorrectionCardRow.perspectiveHorizontal.title,
@@ -325,12 +326,12 @@ extension InspectorView {
                       accessibilityID: "inspector.crop.perspective.horizontal",
                       onReset: {
                           session.applyEdit { $0.geometry.perspectiveHorizontal = 0 }
-                          _ = session.commitEdit(label: "透视", coalesce: false)
+                          _ = session.commitEdit(label: L10n.tr("17e14283a497"), coalesce: false)
                       },
                       onEditingChanged: { editing in
                           // 356 — the same two ends as 垂直透视.
-                          if editing { session.beginToolGesture(tool: "透视", label: "透视") }
-                          else { session.endToolGesture(label: "透视", coalesce: true) }
+                          if editing { session.beginToolGesture(tool: L10n.tr("17e14283a497"), label: L10n.tr("17e14283a497")) }
+                          else { session.endToolGesture(label: L10n.tr("17e14283a497"), coalesce: true) }
                       })
                 .background(CropRowProbeHost(rowID: CorrectionCardRow.perspectiveHorizontal.probeID))
         }
@@ -418,11 +419,11 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
     /// The row's display name — what the card prints next to its slider / button.
     public var title: String {
         switch self {
-        case .straighten: return "拉直"
-        case .drawStraighten: return "画线拉直"
-        case .guideLines: return "引导线"
-        case .perspectiveVertical: return "垂直透视"
-        case .perspectiveHorizontal: return "水平透视"
+        case .straighten: return L10n.tr("7df1c3a41535")
+        case .drawStraighten: return L10n.tr("267549f4a4f7")
+        case .guideLines: return L10n.tr("05aa77ec19ba")
+        case .perspectiveVertical: return L10n.tr("cfb8519677bc")
+        case .perspectiveHorizontal: return L10n.tr("1ebf0a707159")
         }
     }
 
@@ -452,13 +453,13 @@ public enum CropSection: String, CaseIterable, Sendable, Hashable {
         switch self {
         // 086: the first section's small title is the user's new word. The *card* title (「裁切」) is
         // `InspectorView.Section.crop.title` and is not this enum, so it does not move with this.
-        case .crop: return "宽高比"
-        case .angle: return "角度"
+        case .crop: return L10n.tr("22aca111bd1d")
+        case .angle: return L10n.tr("8d855790e87a")
         // 183: 透视 — the two keystone knobs. It is a first-class section (not a bare header inside
         // the panel) so that "nothing else calls itself a section" (082 §4) stays checkable.
-        case .perspective: return "透视"
-        case .rotation: return "旋转"
-        case .mirror: return "镜像"
+        case .perspective: return L10n.tr("17e14283a497")
+        case .rotation: return L10n.tr("68eb90fa809e")
+        case .mirror: return L10n.tr("176c09844e0f")
         }
     }
 
@@ -516,7 +517,7 @@ struct CropSectionTitle: View {
         Text(title)
             .font(.system(size: CropSectionHeader.titleFontSize, weight: .medium))
             .foregroundStyle(.secondary)
-            .modifier(ResetOnDoubleClick(action: reset, help: "双击复位「\(title)」"))
+            .modifier(ResetOnDoubleClick(action: reset, help: L10n.tr("40b2b7a78a37" , String(describing: (title)))))
             .accessibilityIdentifier("inspector.crop.section.\(title)")
     }
 }
@@ -652,7 +653,7 @@ struct CropAspectRow: View {
                                          revision &+= 1
                                      })
                     .frame(width: Self.swapHitSize, height: Self.swapHitSize)
-                    .help("交换长宽")
+                    .help(L10n.tr("48f67733fc2b"))
                     .background(CropRowProbeHost(rowID: Self.swapProbeID))
             }
             .background(CropRowProbeHost(rowID: Self.customProbeID))
@@ -839,7 +840,7 @@ final class RatioPresetButton: NSButton {
         layer?.borderColor = isOn
             ? NSColor.controlAccentColor.cgColor
             : NSColor.tertiaryLabelColor.withAlphaComponent(0.6).cgColor
-        setAccessibilityValue(isOn ? "已选中" : "未选中")
+        setAccessibilityValue(isOn ? L10n.tr("a737fd72b016") : L10n.tr("0e0c21de6988"))
         invalidateIntrinsicContentSize()
     }
 }
@@ -899,7 +900,7 @@ final class SwapAspectButton: NSButton {
         alignment = .center
         wantsLayer = true
         attributedTitle = NSAttributedString(string: "⇄", attributes: [.font: Self.font])
-        setAccessibilityLabel("交换长宽")
+        setAccessibilityLabel(L10n.tr("48f67733fc2b"))
         refresh(enabled: enabled)
     }
 
@@ -913,7 +914,7 @@ final class SwapAspectButton: NSButton {
     func refresh(enabled: Bool) {
         isEnabled = enabled
         contentTintColor = enabled ? .labelColor : .tertiaryLabelColor
-        setAccessibilityValue(enabled ? "可交换" : "无裁切工具")
+        setAccessibilityValue(enabled ? L10n.tr("0fc6ecd501ab") : L10n.tr("29f0269b1504"))
     }
 }
 
@@ -978,12 +979,12 @@ final class CustomRatioField: NSTextField, NSTextFieldDelegate {
         controlSize = .mini
         focusRingType = .default
         alignment = .center
-        toolTip = "键入比例：5:4 或 1.85（回车生效，非法输入不写入）"
+        toolTip = L10n.tr("3f8f6a203851")
         delegate = self
         target = self
         action = #selector(commitAction)
         setAccessibilityIdentifier(CropAspectRow.customID)
-        setAccessibilityLabel("自定义比例")
+        setAccessibilityLabel(L10n.tr("b49d6bdf6e80"))
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -1076,11 +1077,11 @@ struct CropMirrorRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            MirrorButtonHost(symbol: "flip.horizontal", title: "水平翻转", isOn: horizontal,
+            MirrorButtonHost(symbol: "flip.horizontal", title: L10n.tr("44775fbf3342"), isOn: horizontal,
                              identifierID: Self.horizontalID, action: onHorizontal)
                 .fixedSize()
             MirrorButtonHost(symbol: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                             title: "垂直翻转", isOn: vertical,
+                             title: L10n.tr("fcd75ef0a054"), isOn: vertical,
                              identifierID: Self.verticalID, action: onVertical)
                 .fixedSize()
             Spacer(minLength: 4)
@@ -1113,11 +1114,11 @@ struct CropTurnRow: View {
         HStack(spacing: 6) {
             // `.fixedSize()`: the leaves are `NSView`s, and without it SwiftUI proposes the row's
             // width and AppKit stretches them (measured: two 88 pt buttons in a 308 pt card).
-            TurnButtonHost(symbol: "rotate.left", title: "逆时针旋转 90°",
+            TurnButtonHost(symbol: "rotate.left", title: L10n.tr("d4b56c062003"),
                            identifierID: Self.counterClockwiseID,
                            isEnabled: isEnabled, action: onCounterClockwise)
                 .fixedSize()
-            TurnButtonHost(symbol: "rotate.right", title: "顺时针旋转 90°",
+            TurnButtonHost(symbol: "rotate.right", title: L10n.tr("980edb5bf6fd"),
                            identifierID: Self.clockwiseID,
                            isEnabled: isEnabled, action: onClockwise)
                 .fixedSize()
@@ -1166,7 +1167,7 @@ class BareIconButton: NSButton {
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: Self.glyphPointSize,
                                                                  weight: .regular))
-        toolTip = title + "（一次 ⌘Z）"
+        toolTip = title + L10n.tr("d7dfdfdf033e")
         setAccessibilityLabel(title)
         wantsLayer = true
         layer?.cornerRadius = Self.cornerRadius
@@ -1331,7 +1332,7 @@ final class TurnBadgeLabel: NSTextField {
     func refresh(_ text: String, isTurned: Bool) {
         stringValue = text
         textColor = isTurned ? .controlAccentColor : .secondaryLabelColor
-        toolTip = "当前方向：顺时针 \(text)（4 次回到原位，逐字节相同）"
+        toolTip = L10n.tr("7adb78027187" , String(describing: (text)))
         setAccessibilityValue(text)
         invalidateIntrinsicContentSize()
     }
@@ -1365,8 +1366,8 @@ struct CropApplyRow: View {
     static let applyID = "inspector.crop.apply"
     static let cancelID = "inspector.crop.cancel"
     /// The two keys `DetailRowEnabledLog` records them under (the panel's existing readback seam).
-    static let applyProbe = "裁切.应用"
-    static let cancelProbe = "裁切.取消"
+    static let applyProbe = L10n.tr("cda112365c45")
+    static let cancelProbe = L10n.tr("04531351799e")
     /// 336: one probe per **button**, so the acceptance can size each one instead of the pair.
     static let applyButtonProbe = "apply.button"
     static let cancelButtonProbe = "cancel.button"
@@ -1387,7 +1388,7 @@ struct CropApplyRow: View {
         // which is also the order §3.2 measures (`应用`.maxX == content right − 16).
         HStack(spacing: Self.spacing) {
             Button(action: onCancel) {
-                Text("取消")
+                Text(L10n.tr("2cd0f3be8738"))
                     .padding(.horizontal, Self.labelInset)
             }
             .buttonStyle(.bordered)
@@ -1395,10 +1396,10 @@ struct CropApplyRow: View {
             .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
             .background(DetailRowEnabledProbe(title: Self.cancelProbe))
             .background(CropRowProbeHost(rowID: Self.cancelButtonProbe))
-            .help("放弃这次裁切，文档一个字节都不动")
+            .help(L10n.tr("3f205fb11e86"))
             .accessibilityIdentifier(Self.cancelID)
             Button(action: onApply) {
-                Text("应用")
+                Text(L10n.tr("63c73c4730f4"))
                     .padding(.horizontal, Self.labelInset)
             }
             // 341 (user): 应用是主操作 —— 用强调色（蓝），取消保持普通 bordered。
@@ -1407,7 +1408,7 @@ struct CropApplyRow: View {
             .frame(minWidth: Self.minSize.width, minHeight: Self.minSize.height)
             .background(DetailRowEnabledProbe(title: Self.applyProbe))
             .background(CropRowProbeHost(rowID: Self.applyButtonProbe))
-            .help("应用裁切（一条历史，一次 ⌘Z）")
+            .help(L10n.tr("a82b94de987d"))
             .accessibilityIdentifier(Self.applyID)
         }
         .background(CropRowProbeHost(rowID: Self.probeID))
@@ -1516,8 +1517,8 @@ final class DrawStraightenButton: NSButton {
     static let cornerRadius: CGFloat = 5
     /// The symbol the panel draws — the acceptance's one readback (`image name == level`).
     static let symbol = "level"
-    static let label = "画线拉直"
-    static let help = "在画面上画一条线，松手后按线的方向把照片摆正（横/竖自动判断）；Esc 或再点一次取消"
+    static let label = L10n.tr("267549f4a4f7")
+    static let help = L10n.tr("7f3e11905725")
     static let identifierID = "inspector.crop.drawStraighten"
 
     private(set) var symbolName: String = DrawStraightenButton.symbol
@@ -1613,9 +1614,9 @@ final class GuideLinesButton: NSButton {
     static let cornerRadius: CGFloat = 5
     /// The symbol the panel draws — the acceptance's one readback (`image name == perspective`).
     static let symbol = "perspective"
-    static let label = "引导线"
-    static let help = "沿本该竖直/水平的边画两条线，松手后解出透视（2 竖 + 2 横，最多 4 条）；"
-        + "Esc 或再点一次取消"
+    static let label = L10n.tr("05aa77ec19ba")
+    static let help = L10n.tr("d193f9de4dfc")
+        + L10n.tr("09c161819adf")
     static let identifierID = "inspector.crop.guideLines"
 
     private(set) var symbolName: String = GuideLinesButton.symbol
@@ -1707,7 +1708,7 @@ struct CropGuideLinesToggle: NSViewRepresentable {
 /// disagree, which is 082's rule for every row of this card.
 struct StaysInsidePixelsCheckbox: NSViewRepresentable {
 
-    static let title = "不出像素"
+    static let title = L10n.tr("813d3cebe72c")
     static let identifier = "inspector.crop.staysInsidePixels"
 
     let isOn: Bool
@@ -1720,7 +1721,7 @@ struct StaysInsidePixelsCheckbox: NSViewRepresentable {
         box.controlSize = .small
         box.font = .systemFont(ofSize: 11)
         box.state = isOn ? .on : .off
-        box.toolTip = "勾选后裁切框只能在照片像素内移动（不出黑角），尺寸不变"
+        box.toolTip = L10n.tr("8baa2686d5d3")
         box.setAccessibilityIdentifier(Self.identifier)
         return box
     }
