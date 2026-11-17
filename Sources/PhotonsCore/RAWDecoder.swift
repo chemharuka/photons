@@ -340,6 +340,20 @@ public struct RAWProbe: Sendable {
     public let make: String?
     public let model: String?
     public let iso: Int?
+    /// 409 — the two focal lengths the crop factor is computed from, straight off the same filter
+    /// (`FocalLenIn35mmFilm / FocalLength`). `nil` when the file does not carry one.
+    public let focalLength: Double?
+    public let focalLength35mm: Double?
+    /// 409 — the crop factor this file is decoded at, or `nil` when the EXIF cannot answer (the caller
+    /// then treats it as full frame, per the user's rule). `DecoderAutoVersion.cropFactor`.
+    public let cropFactor: Double?
+    /// 409 — what the automatic rule would ask this file for, i.e. what a document with
+    /// `decoderVersion == nil` gets **today**. `nil` = Apple's default (the pre-409 decode).
+    ///
+    /// It is a fact of the file, not of any document: `supportedVersions` (above) decides whether v9 is
+    /// offered and the EXIF decides whether it is wanted. `photonsctl info` prints it, and it is what
+    /// makes 「这台机器上没有高 ISO 文件」 checkable instead of merely believed.
+    public let autoVersion: String?
     /// §11.3: lens correction is a **per-file** fact, never a per-camera one — the EOS R5 + Sigma
     /// 50/1.4 CR3 body reports the switch as unavailable while RW2/RAF from the same era honour it.
     /// So this is `isLensCorrectionSupported` *and* a successful toggle-and-read-back on this very
@@ -521,6 +535,49 @@ public final class RAWDecoder {
 
     public static func versionString(_ v: CIRAWDecoderVersion) -> String { v.rawValue }
 
+    /// 409 — the three EXIF facts the automatic version rule reads, taken from a **live filter's own**
+    /// `properties` (measured on this machine: `L1030433.dng` reports `FocalLength = 50`,
+    /// `FocalLenIn35mmFilm = 50`, `ISOSpeedRatings = [100]` right here, so the rule needs neither a
+    /// second `CIRAWFilter` nor an ImageIO scan on the decode path).
+    public struct ExifFacts: Sendable, Equatable {
+        public var iso: Int?
+        public var focalLength: Double?
+        public var focalLength35mm: Double?
+        public init(iso: Int? = nil, focalLength: Double? = nil, focalLength35mm: Double? = nil) {
+            self.iso = iso
+            self.focalLength = focalLength
+            self.focalLength35mm = focalLength35mm
+        }
+    }
+
+    /// Both spellings ImageIO uses for the EXIF dictionary, and both shapes of `ISOSpeedRatings`
+    /// (`[NSNumber]` on a DNG, a bare number on some JPEGs) — the same tolerance `probe` already has.
+    /// `CIRAWFilter.properties` is `[AnyHashable: Any]`, so the subscript takes both key types.
+    static func exifFacts(from properties: [AnyHashable: Any]) -> ExifFacts {
+        let exif = (properties[kCGImagePropertyExifDictionary as String] as? [String: Any])
+            ?? (properties["{Exif}"] as? [String: Any]) ?? [:]
+        return exifFacts(fromExif: exif)
+    }
+
+    static func exifFacts(from filter: CIRAWFilter) -> ExifFacts {
+        exifFacts(from: filter.properties)
+    }
+
+    static func exifFacts(fromExif exif: [String: Any]) -> ExifFacts {
+        let isoKeys = [kCGImagePropertyExifISOSpeedRatings as String]
+        var iso: Int?
+        for key in isoKeys {
+            if let arr = exif[key] as? [NSNumber] { iso = arr.first?.intValue }
+            else if let arr = exif[key] as? [Int] { iso = arr.first }
+            else if let n = exif[key] as? NSNumber { iso = n.intValue }
+            if iso != nil { break }
+        }
+        return ExifFacts(
+            iso: iso,
+            focalLength: (exif[kCGImagePropertyExifFocalLength as String] as? NSNumber)?.doubleValue,
+            focalLength35mm: (exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] as? NSNumber)?.doubleValue)
+    }
+
     public static func availableVersions(for url: URL) throws -> [String] {
         guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.unsupportedFile(url) }
         return filter.supportedDecoderVersions.map { versionString($0) }
@@ -532,11 +589,9 @@ public final class RAWDecoder {
         let props = filter.properties
         let tiff = (props[kCGImagePropertyTIFFDictionary as String] as? [String: Any])
             ?? (props["{TIFF}"] as? [String: Any])
-        let exif = (props[kCGImagePropertyExifDictionary as String] as? [String: Any])
-            ?? (props["{Exif}"] as? [String: Any])
-        var iso: Int?
-        if let arr = exif?[kCGImagePropertyExifISOSpeedRatings as String] as? [Int] { iso = arr.first }
-        else if let arr = exif?[kCGImagePropertyExifISOSpeedRatings as String] as? [Any] { iso = (arr.first as? NSNumber)?.intValue }
+        let facts = Self.exifFacts(from: props)
+        let crop = DecoderAutoVersion.cropFactor(focalLength: facts.focalLength,
+                                                 focalLength35mm: facts.focalLength35mm)
 
         return RAWProbe(supportedVersions: versions,
                         defaultVersion: Self.versionString(filter.decoderVersion),
@@ -544,7 +599,14 @@ public final class RAWDecoder {
                         nativeHeight: Int(filter.nativeSize.height),
                         make: tiff?[kCGImagePropertyTIFFMake as String] as? String,
                         model: tiff?[kCGImagePropertyTIFFModel as String] as? String,
-                        iso: iso,
+                        iso: facts.iso,
+                        focalLength: facts.focalLength,
+                        focalLength35mm: facts.focalLength35mm,
+                        cropFactor: crop,
+                        autoVersion: DecoderAutoVersion.requestedVersion(
+                            explicit: nil, iso: facts.iso,
+                            focalLength: facts.focalLength, focalLength35mm: facts.focalLength35mm,
+                            offered: versions),
                         lensCorrectionSupported: Self.probeLensCorrection(filter),
                         lensCorrectionEnabled: filter.isLensCorrectionEnabled,
                         asShotTemperature: Self.saneTemperature(filter.neutralTemperature),
@@ -839,13 +901,34 @@ public final class RAWDecoder {
         let offered = filter.supportedDecoderVersions.map { Self.versionString($0) }
         let filterDefault = Self.versionString(filter.decoderVersion)
 
+        // ── 409: the automatic version, from THIS filter's own facts ─────────────────────────
+        // The rule needs three things: ISO, the crop factor and the file's version list. All three
+        // are already in hand here — `offered` above, and `filter.properties` (the same EXIF
+        // dictionary `probe` reads) — so the automatic choice costs **no second filter** and no
+        // ImageIO scan. That is the timing constraint the brief names: v9 冷启 4.86 s.
+        //
+        // Only a document that asks for nothing is eligible; an explicit `decoderVersion` is the
+        // user's choice and is never second-guessed (`DecoderAutoVersion.requestedVersion`).
+        // A measurement decode keeps today's recipe: its whole point is a fixed, comparable decode,
+        // and a version that follows the EXIF would make the black-level numbers depend on the
+        // threshold.
+        var resolvedRequest = options.decoderVersion
+        if !measurement, options.decoderVersion == nil {
+            let exif = Self.exifFacts(from: filter)
+            resolvedRequest = DecoderAutoVersion.requestedVersion(
+                explicit: nil,
+                iso: exif.iso,
+                focalLength: exif.focalLength,
+                focalLength35mm: exif.focalLength35mm,
+                offered: offered)
+        }
+
         // ── 前置 ① D2′: v8 default + read-back assert ────────────────────────────────────────
         // Assign, then read back. A body that does not whitelist the request keeps the old value
         // (measurably: v9 on an SL3 stays v8), so the read-back — not the assignment — is the
         // truth. On a mismatch we pin the D2′ default and report `effectiveVersion`.
         var effective = filterDefault
-        let resolvedRequest = options.decoderVersion
-        if let wanted = options.decoderVersion {
+        if let wanted = resolvedRequest {
             guard DecoderCapabilities.knownVersions.contains(wanted) else {
                 throw DecodeError.unsupportedVersion(requested: wanted, available: offered)
             }
