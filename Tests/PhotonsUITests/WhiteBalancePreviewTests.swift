@@ -247,7 +247,7 @@ final class WhiteBalancePreviewTests: XCTestCase {
     // MARK: - 6. the badge's box
 
     func testPreviewBadgeUsesTheAsShotBox() throws {
-        XCTAssertEqual(WhiteBalanceStatusLabel.Kind.asShot.text, "as shot")
+        XCTAssertEqual(WhiteBalanceStatusLabel.Kind.asShot.text, "原照")
         XCTAssertEqual(WhiteBalanceStatusLabel.Kind.simulated.text, "模拟预览")
         XCTAssertEqual(WhiteBalanceStatusLabel.Kind.asShot.fontSize, 8)
         XCTAssertEqual(WhiteBalanceStatusLabel.Kind.simulated.fontSize, 9)

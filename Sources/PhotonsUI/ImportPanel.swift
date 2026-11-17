@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -158,9 +159,9 @@ public struct ImportRequest: Equatable, Sendable {
 /// kind of per-operation switch at the bottom.
 @MainActor
 public enum ImportPanel {
-    public static let prompt = "导入"
-    public static let message = "选择要导入的照片或文件夹"
-    public static let includeSubfoldersTitle = "包含子文件夹"
+    public static let prompt = Loc.t("导入")
+    public static let message = Loc.t("选择要导入的照片或文件夹")
+    public static let includeSubfoldersTitle = Loc.t("包含子文件夹")
 
     /// One 20 pt checkbox with 5 pt of air above and below. The frame is required: an accessory
     /// view with a zero frame collapses and the box is invisible.
@@ -226,7 +227,7 @@ public enum ImportPanel {
         func refresh() {
             let shape = ImportSelectionShape.classify(panel.urls)
             include.isEnabled = shape.subfolderOptionEnabled
-            include.toolTip = shape.hasFolders ? nil : "只选了照片，子文件夹选项不适用"
+            include.toolTip = shape.hasFolders ? nil : Loc.t("只选了照片，子文件夹选项不适用")
         }
     }
 
@@ -268,7 +269,7 @@ public struct ImportProgress: Equatable, Sendable {
     /// 「导入中 12/48」. Before the walk knows its size (the enumeration hashes nothing, so this is
     /// only the first few milliseconds) it reads 「导入中…」 instead of a fake denominator.
     public var text: String {
-        total > 0 ? "导入中 \(processed)/\(total)" : "导入中…"
+        total > 0 ? Loc.t("导入中 {0}/{1}", String(describing: (processed)), String(describing: (total))) : Loc.t("导入中…")
     }
 }
 
@@ -315,7 +316,7 @@ public final class ImportProgressBar: NSView {
     public var onCancel: (() -> Void)?
 
     private let label = NSTextField(labelWithString: "")
-    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    private let cancelButton = NSButton(title: Loc.t("取消"), target: nil, action: nil)
     private var hideToken = 0
 
     /// What the line currently reads — the thing a test asserts instead of a screenshot.
@@ -365,7 +366,7 @@ public final class ImportProgressBar: NSView {
 
     /// A finished run with failures: one word, no paragraph (`用户: 摘要文案暂时不需要`).
     public func showFailure(_ count: Int) {
-        show("\(count) 个失败")
+        show(Loc.t("{0} 个失败", String(describing: (count))))
         cancelButton.isHidden = true
         cancelButton.isEnabled = false      // nothing left to cancel once the run is over
         scheduleHide(after: 4)

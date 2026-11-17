@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import CryptoKit
 
@@ -93,14 +94,14 @@ public enum ImageOrientation: Int, Sendable, Hashable, Codable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .up: return "upright"
-        case .upMirrored: return "mirrored horizontally"
-        case .down: return "rotated 180°"
-        case .downMirrored: return "mirrored vertically"
-        case .leftMirrored: return "transposed"
-        case .right: return "rotated 90° CW"
-        case .rightMirrored: return "anti-transposed"
-        case .left: return "rotated 270° CW"
+        case .up: return Loc.t("正立")
+        case .upMirrored: return Loc.t("水平镜像")
+        case .down: return Loc.t("旋转 180°")
+        case .downMirrored: return Loc.t("垂直镜像")
+        case .leftMirrored: return Loc.t("转置")
+        case .right: return Loc.t("顺时针旋转 90°")
+        case .rightMirrored: return Loc.t("反转置")
+        case .left: return Loc.t("顺时针旋转 270°")
         }
     }
 }

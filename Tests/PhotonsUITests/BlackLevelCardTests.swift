@@ -27,7 +27,7 @@ final class BlackLevelCardTests: XCTestCase {
         }
         // 用户 2026-10-27：「黑电平移动到白平衡下方」。
         XCTAssertEqual(titles[wb + 1], "黑电平", "黑电平必须紧跟 白平衡，实际 \(titles)")
-        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "Light") else {
+        guard let black = titles.firstIndex(of: "黑电平"), let light = titles.firstIndex(of: "明暗") else {
             return XCTFail("missing 黑电平/Light in \(titles)")
         }
         XCTAssertEqual(black + 1, light, "黑电平在白平衡与 Light 之间，实际 \(titles)")

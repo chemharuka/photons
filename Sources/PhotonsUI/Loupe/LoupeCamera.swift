@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import PhotonsCore
 
@@ -36,7 +37,7 @@ public struct LoupeCamera: Equatable, Sendable {
     /// `"适应 31%"` / `"50%"` / `"33.3%"` — `LoupeController.zoomLabel`'s rule.
     public var label: String {
         guard !state.isActualSize else { return state.zoomLabel }
-        return "适应 \(Int((viewport.framing.fitZoom * 100).rounded()))%"
+        return Loc.t("适应 {0}%", String(describing: (Int((viewport.framing.fitZoom * 100).rounded()))))
     }
 
     /// What `⌘=` / `⌘−` should do next; the caller still owns the action.

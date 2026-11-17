@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -20,11 +21,11 @@ public enum PointColorAxis: String, CaseIterable, Sendable, Identifiable {
 
     public var title: String {
         switch self {
-        case .range: return "范围"
-        case .feather: return "过渡"
-        case .hue: return "色相"
-        case .saturation: return "饱和"
-        case .luminance: return "亮度"
+        case .range: return Loc.t("范围")
+        case .feather: return Loc.t("过渡")
+        case .hue: return Loc.t("色相")
+        case .saturation: return Loc.t("饱和")
+        case .luminance: return Loc.t("亮度")
         }
     }
 
@@ -126,7 +127,7 @@ public struct PointColorCommands {
         var set = session.edit.color.point ?? PointColorSet()
         guard let index = set.append(swatch) else { return .full }
         session.applyEdit { $0.color.point = set }
-        session.commitEdit(label: "点颜色 取样", coalesce: false)
+        session.commitEdit(label: Loc.t("点颜色 取样"), coalesce: false)
         return .appended(index)
     }
 
@@ -148,7 +149,7 @@ public struct PointColorCommands {
         guard var set = session.edit.color.point, set.remove(at: index) else { return false }
         let next: PointColorSet? = set.swatches.isEmpty ? nil : set
         session.applyEdit { $0.color.point = next }
-        session.commitEdit(label: "点颜色 删除色框", coalesce: false)
+        session.commitEdit(label: Loc.t("点颜色 删除色框"), coalesce: false)
         return true
     }
 }
@@ -203,7 +204,7 @@ public struct PointColorSwatchStrip: View {
                             .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
                             .foregroundStyle(.secondary.opacity(0.7))
                     }
-                    .help("尚未取样")
+                    .help(Loc.t("尚未取样"))
                     .accessibilityIdentifier("inspector.pointColor.emptySwatch")
             }
 
@@ -214,7 +215,7 @@ public struct PointColorSwatchStrip: View {
                     .font(.system(size: 11))
             }
             .buttonStyle(.borderless)
-            .help("点颜色吸管：点击画布上要调的颜色（Esc 取消）")
+            .help(Loc.t("点颜色吸管：点击画布上要调的颜色（Esc 取消）"))
             .accessibilityIdentifier("inspector.pointColor.dropper")
             // 253 — the same armed fill as the white-balance dropper.
             .toolActive(dropperArmed)
@@ -266,7 +267,7 @@ public struct PointColorSwatchView: View {
             }
             .background(PointColorProbeHost(rowID: PointColorProbe.swatchID, point: point))
             .accessibilityIdentifier("inspector.pointColor.swatch")
-            .help(point.map { Self.summary($0) } ?? "尚未取样")
+            .help(point.map { Self.summary($0) } ?? Loc.t("尚未取样"))
     }
 
     /// The swatch's sRGB components. The lightness is fixed: only the sample's **hue and chroma** are
@@ -291,8 +292,8 @@ public struct PointColorSwatchView: View {
     }
 
     public static func summary(_ point: PointColor) -> String {
-        guard point.isSampled else { return "尚未取样" }
-        return String(format: "采样色 H %.0f° · C %.3f", point.sampleHue, point.sampleChroma)
+        guard point.isSampled else { return Loc.t("尚未取样") }
+        return String(format: Loc.t("采样色 H %.0f° · C %.3f"), point.sampleHue, point.sampleChroma)
     }
 }
 
@@ -306,8 +307,8 @@ public struct PointColorSwatchView: View {
 /// Inert in production (`hitTest` answers `nil`, nothing is drawn).
 final class PointColorProbe: NSView {
 
-    static let cardID = "点颜色卡"
-    static let swatchID = "点颜色色块"
+    static let cardID = Loc.t("点颜色卡")
+    static let swatchID = Loc.t("点颜色色块")
 
     private(set) var rowID: String = ""
     private(set) var sampleHue: Double = 0

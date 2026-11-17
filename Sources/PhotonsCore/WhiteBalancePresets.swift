@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - sample
@@ -118,19 +119,19 @@ public struct WhiteBalancePreset: Sendable, Equatable, Hashable, Identifiable {
 
 public enum WhiteBalancePresets {
 
-    public static let asShot = WhiteBalancePreset(id: "asShot", name: "原照设置", kind: .asShot)
-    public static let auto = WhiteBalancePreset(id: "auto", name: "自动", kind: .auto)
-    public static let daylight = WhiteBalancePreset(id: "daylight", name: "日光", kind: .fixed,
+    public static let asShot = WhiteBalancePreset(id: "asShot", name: Loc.t("原照设置"), kind: .asShot)
+    public static let auto = WhiteBalancePreset(id: "auto", name: Loc.t("自动"), kind: .auto)
+    public static let daylight = WhiteBalancePreset(id: "daylight", name: Loc.t("日光"), kind: .fixed,
                                                     temperature: 5500, tint: 0)
-    public static let cloudy = WhiteBalancePreset(id: "cloudy", name: "阴天", kind: .fixed,
+    public static let cloudy = WhiteBalancePreset(id: "cloudy", name: Loc.t("阴天"), kind: .fixed,
                                                   temperature: 6500, tint: 10)
-    public static let shade = WhiteBalancePreset(id: "shade", name: "阴影", kind: .fixed,
+    public static let shade = WhiteBalancePreset(id: "shade", name: Loc.t("阴影"), kind: .fixed,
                                                  temperature: 7500, tint: 10)
-    public static let tungsten = WhiteBalancePreset(id: "tungsten", name: "钨丝灯", kind: .fixed,
+    public static let tungsten = WhiteBalancePreset(id: "tungsten", name: Loc.t("钨丝灯"), kind: .fixed,
                                                     temperature: 2850, tint: 0)
-    public static let fluorescent = WhiteBalancePreset(id: "fluorescent", name: "荧光灯", kind: .fixed,
+    public static let fluorescent = WhiteBalancePreset(id: "fluorescent", name: Loc.t("荧光灯"), kind: .fixed,
                                                        temperature: 3800, tint: 21)
-    public static let flash = WhiteBalancePreset(id: "flash", name: "闪光灯", kind: .fixed,
+    public static let flash = WhiteBalancePreset(id: "flash", name: Loc.t("闪光灯"), kind: .fixed,
                                                  temperature: 5500, tint: 0)
 
     /// Menu order: the two states first (as shot, auto), then the illuminants from cool to warm —
@@ -158,7 +159,7 @@ public enum WhiteBalancePresets {
     /// What the menu shows: a preset name, or `自定义` when the pair is nobody's constant.
     public static func menuLabel(_ wb: WhiteBalance, preferred: String? = nil) -> String {
         if wb.isAsShot { return asShot.name }
-        return match(wb, preferred: preferred)?.name ?? "自定义"
+        return match(wb, preferred: preferred)?.name ?? Loc.t("自定义")
     }
 }
 

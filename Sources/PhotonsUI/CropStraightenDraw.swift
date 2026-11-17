@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import PhotonsCore
@@ -51,8 +52,8 @@ public enum CropStraightenAxis: String, Sendable, Equatable, Hashable {
 
     public var label: String {
         switch self {
-        case .horizontal: return "横"
-        case .vertical: return "竖"
+        case .horizontal: return Loc.t("横")
+        case .vertical: return Loc.t("竖")
         }
     }
 

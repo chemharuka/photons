@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -21,9 +22,9 @@ public enum HSLAxis: String, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .hue: return "色相"
-        case .saturation: return "饱和"
-        case .luminance: return "亮度"
+        case .hue: return Loc.t("色相")
+        case .saturation: return Loc.t("饱和")
+        case .luminance: return Loc.t("亮度")
         }
     }
 
@@ -176,8 +177,8 @@ public struct HSLBandStrip: View {
         }
         .buttonStyle(.plain)
         .background(HSLBandProbeHost(band: i, title: name, isSelected: selected, swatch: colour))
-        .help("\(name)：色相 / 饱和 / 亮度")
-        .accessibilityLabel("\(name)色带")
+        .help(Loc.t("{0}：色相 / 饱和 / 亮度", String(describing: (name))))
+        .accessibilityLabel(Loc.t("{0}色带", String(describing: (name))))
         .accessibilityAddTraits(selected ? [.isSelected] : [])
         .accessibilityIdentifier("inspector.hsl.band.\(i)")
     }

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// Decodes a DNG's **mosaic** — the `PhotometricInterpretation = 32803` pixels, before demosaicing.
@@ -27,12 +28,12 @@ extension SourceDNG {
 
         public var description: String {
             switch self {
-            case .missingTileGeometry: return "既没有 Tile 也没有 Strip 的几何信息"
-            case .unsupportedCompression(let c): return "不支持的压缩方式 \(c)（支持 1 和 7）"
-            case .unsupportedPredictor(let s): return "不支持的 SOF3 预测器 Ss=\(s)（支持 1 和 7）"
-            case .unsupportedComponents(let n): return "不支持的 SOF3 分量数 \(n)（支持 1 和 2）"
-            case .truncatedTile(let i): return "瓦片 \(i) 的数据被截断"
-            case .badHuffmanTable: return "DHT 损坏"
+            case .missingTileGeometry: return Loc.t("既没有 Tile 也没有 Strip 的几何信息")
+            case .unsupportedCompression(let c): return Loc.t("不支持的压缩方式 {0}（支持 1 和 7）", String(describing: (c)))
+            case .unsupportedPredictor(let s): return Loc.t("不支持的 SOF3 预测器 Ss={0}（支持 1 和 7）", String(describing: (s)))
+            case .unsupportedComponents(let n): return Loc.t("不支持的 SOF3 分量数 {0}（支持 1 和 2）", String(describing: (n)))
+            case .truncatedTile(let i): return Loc.t("瓦片 {0} 的数据被截断", String(describing: (i)))
+            case .badHuffmanTable: return Loc.t("DHT 损坏")
             }
         }
     }
@@ -168,9 +169,9 @@ enum SOF3 {
         case noSOF3, noSOS, badTable
         var description: String {
             switch self {
-            case .noSOF3: return "JPEG 流里没有 SOF3"
-            case .noSOS: return "JPEG 流里没有 SOS"
-            case .badTable: return "Huffman 表损坏"
+            case .noSOF3: return Loc.t("JPEG 流里没有 SOF3")
+            case .noSOS: return Loc.t("JPEG 流里没有 SOS")
+            case .badTable: return Loc.t("Huffman 表损坏")
             }
         }
     }

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 
 // MARK: - geometry (pure, window-free)
@@ -409,7 +410,7 @@ public final class ZoomGlassSlider: NSView {
             track.thumbX = geometry.x(forIndex: currentIndex)
         } else {
             showingFit = true
-            chipLabel.stringValue = "适应"
+            chipLabel.stringValue = Loc.t("适应")
             // The fit ratio is *displayed*, never parked: the first pointer event snaps away from
             // this position (`select(index:)`).
             track.thumbX = geometry.fitThumbCenter(forZoom: fitZoom ?? 1)
@@ -578,7 +579,7 @@ private final class ZoomGlassSliderLabel: NSTextField {
         textColor = .secondaryLabelColor
         alignment = .center
         lineBreakMode = .byClipping
-        stringValue = "适应"
+        stringValue = Loc.t("适应")
     }
 
     required init?(coder: NSCoder) { fatalError("no nibs in this app") }

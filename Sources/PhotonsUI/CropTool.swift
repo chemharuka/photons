@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import CoreGraphics
 import Foundation
 import PhotonsCore
@@ -113,16 +114,16 @@ public enum CropToolHandle: String, Sendable, Equatable, Hashable, CaseIterable 
 
     public var label: String {
         switch self {
-        case .topLeft: return "左上角"
-        case .topRight: return "右上角"
-        case .bottomRight: return "右下角"
-        case .bottomLeft: return "左下角"
-        case .top: return "上边"
-        case .right: return "右边"
-        case .bottom: return "下边"
-        case .left: return "左边"
-        case .inside: return "框内"
-        case .outside: return "框外"
+        case .topLeft: return Loc.t("左上角")
+        case .topRight: return Loc.t("右上角")
+        case .bottomRight: return Loc.t("右下角")
+        case .bottomLeft: return Loc.t("左下角")
+        case .top: return Loc.t("上边")
+        case .right: return Loc.t("右边")
+        case .bottom: return Loc.t("下边")
+        case .left: return Loc.t("左边")
+        case .inside: return Loc.t("框内")
+        case .outside: return Loc.t("框外")
         }
     }
 }

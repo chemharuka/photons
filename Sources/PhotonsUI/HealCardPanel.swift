@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import SwiftUI
 import PhotonsCore
 
@@ -31,7 +32,7 @@ public struct MaskWorkspaceCardSpec: Equatable, Sendable {
                                                    reset: .selectedMask)
 
     /// 修复 — the card this task split out of 蒙版. No reset by design.
-    public static let heal = MaskWorkspaceCardSpec(title: "修复", reset: .none)
+    public static let heal = MaskWorkspaceCardSpec(title: Loc.t("修复"), reset: .none)
 
     /// Top-to-bottom, the order `InspectorView` mounts them.
     public static let all: [MaskWorkspaceCardSpec] = [.mask, .heal]
@@ -95,7 +96,7 @@ public struct HealCardPanel: View {
                     // One canvas gesture at a time: arming the spot tool disarms the brush.
                     if session.healTool { session.maskTool = .off }
                 } label: {
-                    Label("修复", systemImage: "bandage")
+                    Label(Loc.t("修复"), systemImage: "bandage")
                         .font(.system(size: 10, weight: .medium))
                         // 276 — under `.plain` the hit area is the label's **content** (icon and the
                         // text block), not its bounds: a click in the gap between them (the button's
@@ -113,7 +114,7 @@ public struct HealCardPanel: View {
                 // paints its bezel). One style for every tool button: `ToolActiveStyle`.
                 .toolActive(session.healTool)
                 .accessibilityIdentifier("inspector.heal.tool")
-                .help("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径。⌥+滚轮 或 [ / ] 调大小")
+                .help(Loc.t("点画布 = 在点击处加一个修复点；源点自动搜索，关掉自动取源则取右边一个半径。⌥+滚轮 或 [ / ] 调大小"))
                 // Its frame is the button's, so a hosted test can click the real SwiftUI button
                 // (AX is empty under `swift test`). `hitTest` is nil: the probe never eats a click.
                 .background(HealToolProbeHost(isArmed: session.healTool))
@@ -149,17 +150,17 @@ public struct HealCardPanel: View {
                 }
             }
             .accessibilityIdentifier("inspector.redeye.mode")
-            .help("红眼是 修复 的一个预设：点一次找红瞳并修正，拖动连续修补")
+            .help(Loc.t("红眼是 修复 的一个预设：点一次找红瞳并修正，拖动连续修补"))
             if session.healToolMode == .redeye {
                 redEyeControls
             }
-            Toggle("自动取源", isOn: Binding(get: { session.autoHealSource },
+            Toggle(Loc.t("自动取源"), isOn: Binding(get: { session.autoHealSource },
                                             set: { session.autoHealSource = $0 }))
                 .toggleStyle(.checkbox)
                 .font(.system(size: 10))
                 .controlSize(.mini)
                 .accessibilityIdentifier("inspector.heal.autoSource")
-                .help("搜索缺陷周围 2–4 个半径的环形带，取边界最像的一块做源；关掉 = 老行为（右移一个半径）")
+                .help(Loc.t("搜索缺陷周围 2–4 个半径的环形带，取边界最像的一块做源；关掉 = 老行为（右移一个半径）"))
             if let source = session.lastHealSource {
                 Text(healSourceStatus(source))
                     .font(.system(size: 9))
@@ -167,7 +168,7 @@ public struct HealCardPanel: View {
                     .accessibilityIdentifier("inspector.heal.sourceStatus")
             }
             if session.edit.healSpots.isEmpty {
-                Text("还没有修复点")
+                Text(Loc.t("还没有修复点"))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("inspector.heal.empty")
@@ -183,7 +184,7 @@ public struct HealCardPanel: View {
     private var redEyeControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Text("半径")
+                Text(Loc.t("半径"))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Slider(value: redEyeRadiusBinding, in: RedEye.radiusPointsRange)
@@ -195,7 +196,7 @@ public struct HealCardPanel: View {
                     .frame(width: 44, alignment: .trailing)
             }
             HStack(spacing: 6) {
-                Text("强度")
+                Text(Loc.t("强度"))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Slider(value: redEyeStrengthBinding, in: 0 ... 100)
@@ -206,7 +207,7 @@ public struct HealCardPanel: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 44, alignment: .trailing)
             }
-            Text("点一下修一只红眼；拖动连续修补")
+            Text(Loc.t("点一下修一只红眼；拖动连续修补"))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .accessibilityIdentifier("inspector.redeye.hint")
@@ -215,7 +216,7 @@ public struct HealCardPanel: View {
 
     private func healRow(_ spot: HealSpot) -> some View {
         HStack(spacing: 6) {
-            Text(spot.kind == .redeye ? "红眼" : spot.mode.label)
+            Text(spot.kind == .redeye ? Loc.t("红眼") : spot.mode.label)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(width: 26, alignment: .leading)
@@ -223,7 +224,7 @@ public struct HealCardPanel: View {
                                   set: { session.setHealRadius($0, for: spot.id, commit: false) }),
                    in: HealSpot.radiusRange,
                    onEditingChanged: { editing in
-                       if !editing { session.commitEdit(label: "修复 半径") }
+                       if !editing { session.commitEdit(label: Loc.t("修复 半径")) }
                    })
             .controlSize(.mini)
             Text(String(format: "%.3f", spot.radius))
@@ -238,7 +239,7 @@ public struct HealCardPanel: View {
             .buttonStyle(.borderless)
             .controlSize(.mini)
             .accessibilityIdentifier("inspector.heal.delete.\(spot.id)")
-            .help("删除这个修复点")
+            .help(Loc.t("删除这个修复点"))
         }
         .accessibilityIdentifier("inspector.heal.row.\(spot.id)")
     }
@@ -248,11 +249,11 @@ public struct HealCardPanel: View {
     private func healSourceStatus(_ source: HealSourceResult) -> String {
         switch source.status {
         case .found:
-            return String(format: "源：自动（%.1f 个半径）", source.distanceInRadii)
+            return String(format: Loc.t("源：自动（%.1f 个半径）"), source.distanceInRadii)
         case .noCandidateAccepted:
-            return "源：带内无可用源，用默认"
+            return Loc.t("源：带内无可用源，用默认")
         case .searchSkipped:
-            return "源：默认"
+            return Loc.t("源：默认")
         }
     }
 

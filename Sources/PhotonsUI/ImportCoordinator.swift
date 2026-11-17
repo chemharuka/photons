@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -66,7 +67,7 @@ public final class ImportCoordinator {
     public func start(_ request: ImportRequest, completion: ((ImportSummary) -> Void)? = nil) {
         guard !isImporting else { return }
         guard let service = session.makeImportService() else {
-            lastError = "未打开库"
+            lastError = Loc.t("未打开库")
             return
         }
         isImporting = true

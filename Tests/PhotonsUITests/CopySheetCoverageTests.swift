@@ -210,7 +210,7 @@ final class CopySheetCoverageTests: XCTestCase {
                 })
         }
         let lines = audit(specs: mutated)
-        let light = lines.first { $0.card == "Light" }!
+        let light = lines.first { $0.card == "明暗" }!
         print("REVERSE GATE · \(light) · \(light.missing)")
         XCTAssertEqual(light.missing, ["测试行（没有复制项）"],
                        "面板多一行而复制清单没动 ⇒ 覆盖测试必须红")

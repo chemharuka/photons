@@ -211,14 +211,14 @@ final class HistoryTests: XCTestCase {
 
         let snap = h.commit(edit { $0.light.exposure = 1 }, now: t0)
         XCTAssertEqual(snap?.seq, 0)
-        XCTAssertEqual(snap?.label, "Light")                 // label derived from the dirty group
+        XCTAssertEqual(snap?.label, "明暗")                 // label derived from the dirty group
         XCTAssertEqual(h.count, 1)
         XCTAssertFalse(h.canUndo)
 
         // derived against the state on screen, not against the document: exposure is already 1,
         // so only Color is dirty here
         h.commit(edit { $0.light.exposure = 1; $0.color.saturation = 5 }, label: "  ", now: t0)
-        XCTAssertEqual(h.snapshots.last?.label, "Color")
+        XCTAssertEqual(h.snapshots.last?.label, "色彩")
         h.commit(edit { $0.light.exposure = 2; $0.color.saturation = 9 }, label: "", now: t0)
         XCTAssertEqual(h.snapshots.last?.label, "Light + Color")
     }

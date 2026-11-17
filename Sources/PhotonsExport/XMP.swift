@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -131,14 +132,14 @@ public enum XMPExportError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .namespaceRegistration(let p): return "could not register the '\(p)' XMP namespace"
-        case .setValueFailed(let path): return "could not write XMP path \(path)"
-        case .xmpSerializationFailed: return "CGImageMetadataCreateXMPData returned nothing"
-        case .unreadableXMP(let u): return "not a readable XMP packet: \(u.path)"
+        case .namespaceRegistration(let p): return Loc.t("无法注册 XMP 命名空间「{0}」", String(describing: (p)))
+        case .setValueFailed(let path): return Loc.t("无法写入 XMP 路径 {0}", String(describing: (path)))
+        case .xmpSerializationFailed: return Loc.t("CGImageMetadataCreateXMPData 没有返回任何数据")
+        case .unreadableXMP(let u): return Loc.t("不是可读的 XMP 数据包：{0}", String(describing: (u.path)))
         case .unsupportedContainer(let ext):
-            return "'\(ext)' cannot carry XMP natively — write a sidecar instead"
-        case .embedFailed(let u, let why): return "could not embed XMP into \(u.path): \(why)"
-        case .writeFailed(let u, let why): return "could not write \(u.path): \(why)"
+            return Loc.t("「{0}」不能原生携带 XMP —— 请改写边车文件", String(describing: (ext)))
+        case .embedFailed(let u, let why): return Loc.t("无法把 XMP 嵌入 {0}：{1}", String(describing: (u.path)), String(describing: (why)))
+        case .writeFailed(let u, let why): return Loc.t("无法写入 {0}：{1}", String(describing: (u.path)), String(describing: (why)))
         }
     }
 }

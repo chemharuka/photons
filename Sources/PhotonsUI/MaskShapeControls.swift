@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -32,12 +33,12 @@ public enum MaskCreationKind: String, Sendable, CaseIterable {
     /// What the 新建 menu says.
     public var label: String {
         switch self {
-        case .brush: return "画笔"
-        case .linearGradient: return "线性渐变"
-        case .radialGradient: return "径向渐变"
-        case .colorRange: return "颜色范围"
-        case .luminanceRange: return "亮度范围"
-        case .semantic: return "语义"
+        case .brush: return Loc.t("画笔")
+        case .linearGradient: return Loc.t("线性渐变")
+        case .radialGradient: return Loc.t("径向渐变")
+        case .colorRange: return Loc.t("颜色范围")
+        case .luminanceRange: return Loc.t("亮度范围")
+        case .semantic: return Loc.t("语义")
         }
     }
 
@@ -271,14 +272,14 @@ extension SemanticKind {
     /// What the inspector prints for this kind (the menu's submenu and the mask list row).
     public var displayName: String {
         switch self {
-        case .sky: return "天空"
-        case .subject: return "主体"
-        case .person: return "人物"
-        case .hair: return "头发"
-        case .skin: return "皮肤"
-        case .teeth: return "牙齿"
-        case .glasses: return "眼镜"
-        case .foreground: return "主体（旧）"
+        case .sky: return Loc.t("天空")
+        case .subject: return Loc.t("主体")
+        case .person: return Loc.t("人物")
+        case .hair: return Loc.t("头发")
+        case .skin: return Loc.t("皮肤")
+        case .teeth: return Loc.t("牙齿")
+        case .glasses: return Loc.t("眼镜")
+        case .foreground: return Loc.t("主体（旧）")
         }
     }
 }
@@ -371,7 +372,7 @@ extension CatalogSession {
         let mask = Mask(name: "\(kind.label) \(edit.masks.count + 1)", components: [component])
         applyEdit { $0.masks.append(mask) }
         guard edit.masks.contains(where: { $0.id == mask.id }) else { return nil }
-        commitEdit(label: "新建\(kind.label)蒙版")
+        commitEdit(label: Loc.t("新建{0}蒙版", String(describing: (kind.label))))
         pendingMaskShape = nil
         setSelectedMaskID(mask.id)
         // 粘滞的「修复」武装必须在用户显式选择新建蒙版时清掉，否则下一次点击又被它吃掉。
@@ -401,7 +402,7 @@ extension CatalogSession {
         let mask = Mask(name: "\(kind.label) \(edit.masks.count + 1)", components: [component])
         applyEdit { $0.masks.append(mask) }
         guard edit.masks.contains(where: { $0.id == mask.id }) else { return nil }
-        commitEdit(label: "新建\(kind.label)蒙版")
+        commitEdit(label: Loc.t("新建{0}蒙版", String(describing: (kind.label))))
         pendingMaskShape = nil
         setSelectedMaskID(mask.id)
         // 粘滞的「修复」武装必须在用户显式选择新建蒙版时清掉，否则下一次点击又被它吃掉。

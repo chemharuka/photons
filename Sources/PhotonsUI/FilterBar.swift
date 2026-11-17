@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 
@@ -11,20 +12,20 @@ enum FilterDisplay {
     /// Short enough to sit in a 34 pt popup: 星级 / 旗标 / 相机 / 镜头 / 后缀 / 月 / 日 …
     static func title(_ dimension: FilterDimension) -> String {
         switch dimension {
-        case .month: return "月"
-        case .day: return "日"
-        case .ext: return "后缀"
-        case .rating: return "星级"
-        case .flag: return "旗标"
-        case .color: return "色标"
-        case .camera: return "相机"
-        case .serial: return "序列号"
-        case .lens: return "镜头"
-        case .focal: return "焦距"
-        case .shutter: return "快门"
-        case .aperture: return "光圈"
+        case .month: return Loc.t("月")
+        case .day: return Loc.t("日")
+        case .ext: return Loc.t("后缀")
+        case .rating: return Loc.t("星级")
+        case .flag: return Loc.t("旗标")
+        case .color: return Loc.t("色标")
+        case .camera: return Loc.t("相机")
+        case .serial: return Loc.t("序列号")
+        case .lens: return Loc.t("镜头")
+        case .focal: return Loc.t("焦距")
+        case .shutter: return Loc.t("快门")
+        case .aperture: return Loc.t("光圈")
         case .iso: return "ISO"
-        case .flash: return "闪光灯"
+        case .flash: return Loc.t("闪光灯")
         case .gps: return "GPS"
         }
     }
@@ -32,10 +33,10 @@ enum FilterDisplay {
     /// The checklist entry in the dimension picker — what the 15-row list prints.
     static func longTitle(_ dimension: FilterDimension) -> String {
         switch dimension {
-        case .ext: return "文件后缀"
-        case .shutter: return "快门速度"
-        case .gps: return "GPS 数据"
-        case .focal: return "焦距"
+        case .ext: return Loc.t("文件后缀")
+        case .shutter: return Loc.t("快门速度")
+        case .gps: return Loc.t("GPS 数据")
+        case .focal: return Loc.t("焦距")
         default: return title(dimension)
         }
     }
@@ -44,22 +45,22 @@ enum FilterDisplay {
                       cameraLabels: [String: String] = [:]) -> String {
         switch dimension {
         case .month:
-            return "\(Int(value) ?? 0) 月"
+            return Loc.t("{0} 月", String(describing: (Int(value) ?? 0)))
         case .day:
-            return "\(Int(value) ?? 0) 日"
+            return Loc.t("{0} 日", String(describing: (Int(value) ?? 0)))
         case .ext:
             return value.uppercased()
         case .rating:
-            return value == "0" ? "未评级" : "\(value)★"
+            return value == "0" ? Loc.t("未评级") : "\(value)★"
         case .flag:
             switch value {
-            case "pick": return "留用"
-            case "reject": return "排除"
-            case FilterValue.none: return "未标记"
+            case "pick": return Loc.t("留用")
+            case "reject": return Loc.t("排除")
+            case FilterValue.none: return Loc.t("未标记")
             default: return value
             }
         case .color:
-            if value == FilterValue.none { return "无" }
+            if value == FilterValue.none { return Loc.t("无") }
             return ColorLabel.normalized(value)?.displayName ?? value
         case .camera:
             // The key is `make|model`, lowercased; the model is what the user recognises.
@@ -73,7 +74,7 @@ enum FilterDisplay {
             if let d = Double(value), d == d.rounded() { return "f/\(Int(d))" }
             return "f/\(value)"
         case .flash, .gps:
-            return value == FilterValue.yes ? "有" : "无"
+            return value == FilterValue.yes ? Loc.t("有") : Loc.t("无")
         }
     }
 
@@ -88,14 +89,14 @@ enum FilterDisplay {
     /// the bar is the only place that says which one.
     static func slotTitle(_ slot: FilterSlot, cameraLabels: [String: String] = [:]) -> String {
         let name = title(slot.dimension)
-        guard !slot.values.isEmpty else { return "全部\(name)" }
+        guard !slot.values.isEmpty else { return Loc.t("全部{0}", String(describing: (name))) }
         if Self.isBoolean(slot.dimension) || slot.values.count == 1 {
             let shown = slot.values
                 .map { value(slot.dimension, $0, cameraLabels: cameraLabels) }
                 .joined(separator: "、")
             return "\(name) \(shown)"
         }
-        return "部分\(name)"
+        return Loc.t("部分{0}", String(describing: (name)))
     }
 
     /// 有/无 dimensions — the two whose facet list is a fixed pair rather than a ladder.
@@ -441,7 +442,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
 
     /// 050: 「清除全部」 — the only control right of the slots. Width = measured ink + 8 pt, so a
     /// system font that measures wider than expected can never clip the word.
-    static let clearTitle = "清除全部"
+    static let clearTitle = Loc.t("清除全部")
     static let clearFont = NSFont.systemFont(ofSize: 10.5)
     /// How far the button's right edge sits from the bar's right edge.
     static let clearTrailingInset: CGFloat = 12
@@ -462,7 +463,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     /// chosen glyph at 16 × 16, inside the 24 × 24 box.
     static func dimensionSymbolImage(pointSize: CGFloat = 13) -> NSImage? {
         for name in dimensionSymbolCandidates {
-            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "选择筛选维度")
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: Loc.t("选择筛选维度"))
             else { continue }
             let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             let image = symbol.withSymbolConfiguration(config) ?? symbol
@@ -513,8 +514,8 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         dimensionButton.contentTintColor = .secondaryLabelColor
         dimensionButton.target = self
         dimensionButton.action = #selector(dimensionButtonTapped)
-        dimensionButton.toolTip = "选择筛选维度"
-        dimensionButton.setAccessibilityLabel("选择筛选维度")
+        dimensionButton.toolTip = Loc.t("选择筛选维度")
+        dimensionButton.setAccessibilityLabel(Loc.t("选择筛选维度"))
         if let symbol = Self.dimensionSymbolImage() {
             dimensionButton.image = symbol
             dimensionButton.imagePosition = .imageOnly
@@ -613,7 +614,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
             let slot = filter.slots[index]
             button.isHidden = false
             button.title = FilterDisplay.slotTitle(slot, cameraLabels: cameraLabels)
-            button.toolTip = "选择\(FilterDisplay.title(slot.dimension))的值（可多选）"
+            button.toolTip = Loc.t("选择{0}的值（可多选）", String(describing: (FilterDisplay.title(slot.dimension))))
             button.setAccessibilityLabel(button.toolTip ?? "")
         }
     }
@@ -656,7 +657,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
                                       kind: .toggle,
                                       tag: dimension.rawValue)
         }
-        rows.append(FilterChecklistRow(title: "全部不选",
+        rows.append(FilterChecklistRow(title: Loc.t("全部不选"),
                                        enabled: !filter.slots.isEmpty,
                                        kind: .action))
         return rows
@@ -671,13 +672,13 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         // It used to repeat the selection (「星级 1★、2★、5★」) in blue, which read as a value and made
         // the list's first line longer than the button that opened it.
         var rows = [FilterChecklistRow(title: slot.values.isEmpty
-                                        ? "全部\(FilterDisplay.title(slot.dimension))"
-                                        : "取消选择",
+                                        ? Loc.t("全部{0}", String(describing: (FilterDisplay.title(slot.dimension))))
+                                        : Loc.t("取消选择"),
                                        enabled: !slot.values.isEmpty,
                                        kind: .action)]
         let values = facetValues(slot.dimension)
         if values.isEmpty {
-            rows.append(FilterChecklistRow(title: "本库无此数据", enabled: false, kind: .note))
+            rows.append(FilterChecklistRow(title: Loc.t("本库无此数据"), enabled: false, kind: .note))
         } else {
             rows += values.map { value in
                 FilterChecklistRow(title: FilterDisplay.value(slot.dimension, value,

@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import CoreGraphics
 import PhotonsCore
@@ -84,8 +85,8 @@ public enum GuideLineAxis: String, Sendable, Equatable, Hashable, CaseIterable {
     /// The document field this axis' solve writes.
     public var title: String {
         switch self {
-        case .vertical: return "垂直透视"
-        case .horizontal: return "水平透视"
+        case .vertical: return Loc.t("垂直透视")
+        case .horizontal: return Loc.t("水平透视")
         }
     }
 
@@ -204,25 +205,25 @@ public enum GuideLineFailure: String, Sendable, Equatable, CaseIterable {
     public func message(measuredWorstPairwise measured: Double?,
                         spacingFraction: Double? = nil) -> String {
         switch self {
-        case .notEnoughLines: return "再画一条（需 2 条）"
-        case .tooManyLines: return "每个方向最多 2 条"
-        case .nearParallel: return "两条线几乎平行，没有信息"
+        case .notEnoughLines: return Loc.t("再画一条（需 2 条）")
+        case .tooManyLines: return Loc.t("每个方向最多 2 条")
+        case .nearParallel: return Loc.t("两条线几乎平行，没有信息")
         case .linesTooFarFromAxis:
-            guard let measured, measured.isFinite else { return "这两条线偏轴太多，校正不了（先记下）" }
-            return String(format: "这两条线偏轴 %.1f°，校正不了（先记下）", measured)
+            guard let measured, measured.isFinite else { return Loc.t("这两条线偏轴太多，校正不了（先记下）") }
+            return String(format: Loc.t("这两条线偏轴 %.1f°，校正不了（先记下）"), measured)
         case .inconsistent:
-            guard let measured, measured.isFinite else { return "这些线互相矛盾，未应用" }
-            return String(format: "这些线互相矛盾（差 %.1f°），未应用", measured)
-        case .degenerate: return "新线与已有线重复，未应用"
+            guard let measured, measured.isFinite else { return Loc.t("这些线互相矛盾，未应用") }
+            return String(format: Loc.t("这些线互相矛盾（差 %.1f°），未应用"), measured)
+        case .degenerate: return Loc.t("新线与已有线重复，未应用")
         case .outOfRange:
             if let spacingFraction, spacingFraction.isFinite,
                spacingFraction < GuideLinesSolve.nearGapFraction {
-                return "两条线挨太近，判断不出透视"
+                return Loc.t("两条线挨太近，判断不出透视")
             }
             let limit = Int(PerspectiveMap.limit)
-            guard let measured, measured.isFinite else { return "需要的透视超出 ±\(limit)" }
-            return String(format: "线间还差 %.1f°", measured) + "，透视超出 ±\(limit)"
-        case .rotationOutOfRange: return "摆正超 ±45°（透视已应用）"
+            guard let measured, measured.isFinite else { return Loc.t("需要的透视超出 ±{0}", String(describing: (limit))) }
+            return String(format: Loc.t("线间还差 %.1f°"), measured) + Loc.t("，透视超出 ±{0}", String(describing: (limit)))
+        case .rotationOutOfRange: return Loc.t("摆正超 ±45°（透视已应用）")
         }
     }
 }
@@ -301,19 +302,19 @@ public struct GuideLineSolution: Equatable, Sendable {
     public var summary: String {
         let values: String
         switch (axes.contains(.vertical), axes.contains(.horizontal)) {
-        case (true, true): values = String(format: "垂直透视 %+.1f / 水平透视 %+.1f", vertical, horizontal)
-        case (true, false): values = String(format: "垂直透视 %+.1f", vertical)
-        default: values = String(format: "水平透视 %+.1f", horizontal)
+        case (true, true): values = String(format: Loc.t("垂直透视 %+.1f / 水平透视 %+.1f"), vertical, horizontal)
+        case (true, false): values = String(format: Loc.t("垂直透视 %+.1f"), vertical)
+        default: values = String(format: Loc.t("水平透视 %+.1f"), horizontal)
         }
-        var text = String(format: "%@ · 残差 %.2f°", values, worstResidual)
+        var text = String(format: Loc.t("%@ · 残差 %.2f°"), values, worstResidual)
         if rotationFailure == nil, abs(straightenDelta) >= 0.05 {
-            text += String(format: " · 摆正 %+.1f°", straightenDelta)
+            text += String(format: Loc.t(" · 摆正 %+.1f°"), straightenDelta)
         }
         // 407 — 切变 is printed only when the fit used it, so every existing readout is unchanged
         // character for character. `k × 100` is the slider's own reading (the row is 0…±50, i.e.
         // `k` 0…±0.5), which is ART's convention: bare numbers, no unit.
         if abs(shear) >= 0.0005 {
-            text += String(format: " · 切变 %+.1f", shear * 100)
+            text += String(format: Loc.t(" · 切变 %+.1f"), shear * 100)
         }
         return text
     }

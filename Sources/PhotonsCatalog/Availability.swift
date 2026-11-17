@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import GRDB
 
@@ -81,13 +82,13 @@ public enum AvailabilityError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .contentMismatch(let id, let expected, let found):
-            return "文件内容与库中记录不一致（\(id)）：期望 \(expected.prefix(12))…，实际 \(found.prefix(12))…"
+            return Loc.t("文件内容与库中记录不一致（{0}）：期望 {1}…，实际 {2}…", String(describing: (id)), String(describing: (expected.prefix(12))), String(describing: (found.prefix(12))))
         case .notRegularFile(let url):
-            return "不是一个文件：\(url.path)"
+            return Loc.t("不是一个文件：{0}", String(describing: (url.path)))
         case .assetNotFound(let id):
-            return "库中没有这个条目：\(id)"
+            return Loc.t("库中没有这个条目：{0}", String(describing: (id)))
         case .relinkConflict(let path):
-            return "已有另一个条目指向 \(path)"
+            return Loc.t("已有另一个条目指向 {0}", String(describing: (path)))
         }
     }
 }

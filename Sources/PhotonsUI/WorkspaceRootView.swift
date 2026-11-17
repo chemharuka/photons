@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCatalog
@@ -21,7 +22,7 @@ public enum ForwardCompatNotice {
     /// `该文件来自更新的版本 v14，未知设置已原样保留` — or `nil` when there is nothing to say.
     public static func text(for version: Int?) -> String? {
         guard let version else { return nil }
-        return "该文件来自更新的版本 v\(version)，未知设置已原样保留"
+        return Loc.t("该文件来自更新的版本 v{0}，未知设置已原样保留", String(describing: (version)))
     }
 }
 
@@ -109,10 +110,10 @@ public final class TopBarView: NSView {
     /// 排序按钮（`新→旧 / 旧→新`）。One click flips the order the grid, the browser and the strip read.
     public var onToggleSort: (() -> Void)?
 
-    private let openButton = ToolButton(title: "打开", symbol: "folder")
-    private let modeControl = NSSegmentedControl(labels: ["网格", "单图"],
+    private let openButton = ToolButton(title: Loc.t("打开"), symbol: "folder")
+    private let modeControl = NSSegmentedControl(labels: [Loc.t("网格"), Loc.t("单图")],
                                                  trackingMode: .selectOne, target: nil, action: nil)
-    private let stripButton = ToolButton(title: "胶片条", symbol: "rectangle.split.1x2")
+    private let stripButton = ToolButton(title: Loc.t("胶片条"), symbol: "rectangle.split.1x2")
     /// 胶片条按钮右边那一个：同款 `ToolButton`、同高、10 pt 间距。
     ///
     /// 文字是**当前顺序**（`新→旧` / `旧→新`），图标是通用的 `arrow.up.arrow.down` 且不随方向变——
@@ -843,7 +844,7 @@ public final class WorkspaceRootView: NSView {
         coordinator.onError = { [weak self] _ in
             // The only throw here is "the folder is gone"; a whole-import failure is one word, not
             // a paragraph.
-            self?.importProgressBar.show("导入失败")
+            self?.importProgressBar.show(Loc.t("导入失败"))
         }
         importProgressBar.onCancel = { [weak coordinator] in coordinator?.cancel() }
 
@@ -857,8 +858,8 @@ public final class WorkspaceRootView: NSView {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.message = "打开 .photonslibrary"
-        panel.prompt = "打开"
+        panel.message = Loc.t("打开 .photonslibrary")
+        panel.prompt = Loc.t("打开")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try session.open(url)

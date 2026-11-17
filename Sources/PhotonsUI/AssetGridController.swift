@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
@@ -1349,10 +1350,10 @@ public final class StackMenuTarget: NSObject {
 @MainActor
 public enum StackMenuBuilder {
 
-    public static let title = "堆叠"
-    public static let makeTitle = "堆叠所选照片"
-    public static let ungroupTitle = "取消堆叠"
-    public static let setTopTitle = "设为置顶"
+    public static let title = Loc.t("堆叠")
+    public static let makeTitle = Loc.t("堆叠所选照片")
+    public static let ungroupTitle = Loc.t("取消堆叠")
+    public static let setTopTitle = Loc.t("设为置顶")
 
     public static func menu(session: CatalogSession?, target: StackMenuTarget,
                             selectedIDs: [String]) -> NSMenu? {
@@ -1456,21 +1457,21 @@ public final class HDRMenuTarget: NSObject {
 @MainActor
 public enum HDRMenuBuilder {
 
-    public static let title = "HDR 合成…"
+    public static let title = Loc.t("HDR 合成…")
 
     /// Why the item is grey for this selection, or nil when it is usable. Public because it is the
     /// whole rule: the menu, its tooltip and the verb's own re-check must agree, and a test should be
     /// able to read the sentence without walking an `NSMenu`.
     public static func unavailableReason(session: CatalogSession?, selectedIDs: [String]) -> String? {
-        guard let session else { return "未打开库" }
-        guard selectedIDs.count >= 2 else { return "至少需要选中两张 DNG" }
+        guard let session else { return Loc.t("未打开库") }
+        guard selectedIDs.count >= 2 else { return Loc.t("至少需要选中两张 DNG") }
         let nonRaw = session.selectedAssets.first {
             !HDRMergeService.mergeableExtensions.contains($0.ext.lowercased())
         }
-        if let nonRaw { return "只支持 DNG：\(nonRaw.filename)" }
+        if let nonRaw { return Loc.t("只支持 DNG：{0}", String(describing: (nonRaw.filename))) }
         // Checked **last** so the reason names the real blocker: a missing tool with one photo
         // selected should complain about the selection first.
-        guard session.isHDRMergeAvailable else { return "未找到 hdrmerge-swift" }
+        guard session.isHDRMergeAvailable else { return Loc.t("未找到 hdrmerge-swift") }
         return nil
     }
 
@@ -1487,7 +1488,7 @@ public enum HDRMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            entry.toolTip = "把选中的 \(selectedIDs.count) 张 DNG 合成一张，结果与参与的照片组成新堆叠"
+            entry.toolTip = Loc.t("把选中的 {0} 张 DNG 合成一张，结果与参与的照片组成新堆叠", String(describing: (selectedIDs.count)))
         }
         return entry
     }
@@ -1540,7 +1541,7 @@ public final class DenoiseMenuTarget: NSObject {
 @MainActor
 public enum DenoiseMenuBuilder {
 
-    public static let title = "模型降噪…"
+    public static let title = Loc.t("模型降噪…")
 
     /// 这一行为什么灰，或 nil（可点）。public 是因为它就是全部规则：菜单、tooltip 和动词
     /// 自己的复查必须说的是同一句话，测试也该能读到那句话而不必去走一棵 `NSMenu`。
@@ -1577,14 +1578,14 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            entry.toolTip = "在照片旁生成 \(denoisedFileNameHint(session: session))，并与原图组成堆叠（降噪结果置顶）"
+            entry.toolTip = Loc.t("在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）", String(describing: (denoisedFileNameHint(session: session))))
         }
         return entry
     }
 
     /// 可点时的说明里那个文件名：`L1030552.dng` → `L1030552-denoised.dng`。
     private static func denoisedFileNameHint(session: CatalogSession?) -> String {
-        guard let name = session?.selectedAssets.first?.filename else { return "<原名>-denoised.dng" }
+        guard let name = session?.selectedAssets.first?.filename else { return Loc.t("<原名>-denoised.dng") }
         let stem = (name as NSString).deletingPathExtension
         return "\(stem)-denoised.dng"
     }

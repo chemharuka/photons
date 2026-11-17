@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - 080 · 原图 / 前后对比
@@ -62,8 +63,8 @@ public struct CompareSplit: Sendable, Equatable, Codable {
 
         public var displayName: String {
             switch self {
-            case .vertical: return "左右"
-            case .horizontal: return "上下"
+            case .vertical: return Loc.t("左右")
+            case .horizontal: return Loc.t("上下")
             }
         }
     }

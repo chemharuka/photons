@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 /// Writes a DNG whose **pixels are new and whose metadata is not**.
@@ -41,10 +42,10 @@ public enum DNGRawWriter {
 
         public var description: String {
             switch self {
-            case .notATIFF: return "源文件不是 TIFF/DNG（字节序标记缺失）"
-            case .missingTag(let t): return "源文件缺少必需的 tag \(t)"
-            case .unexpectedLayout(let s): return "源文件结构不符合预期：\(s)"
-            case .pixelCountMismatch(let e, let n): return "像素数不符：期望 \(e)，收到 \(n)"
+            case .notATIFF: return Loc.t("源文件不是 TIFF/DNG（字节序标记缺失）")
+            case .missingTag(let t): return Loc.t("源文件缺少必需的 tag {0}", String(describing: (t)))
+            case .unexpectedLayout(let s): return Loc.t("源文件结构不符合预期：{0}", String(describing: (s)))
+            case .pixelCountMismatch(let e, let n): return Loc.t("像素数不符：期望 {0}，收到 {1}", String(describing: (e)), String(describing: (n)))
             }
         }
     }
@@ -246,7 +247,7 @@ public enum DNGRawWriter {
         while out.count < offTiles { out.append(0) }
         for (i, blob) in blobs.enumerated() {
             guard out.count == Int(tileOffsets[i]) else {
-                throw WriteError.unexpectedLayout("瓦片 \(i) 偏移 \(out.count) ≠ 表内 \(tileOffsets[i])")
+                throw WriteError.unexpectedLayout(Loc.t("瓦片 {0} 偏移 {1} ≠ 表内 {2}", String(describing: (i)), String(describing: (out.count)), String(describing: (tileOffsets[i]))))
             }
             out.append(contentsOf: blob)
             pad4(&out)

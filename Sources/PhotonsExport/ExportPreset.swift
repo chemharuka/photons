@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 import CoreGraphics
 import PhotonsCore
@@ -13,9 +14,9 @@ public enum ExportConflict: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .overwrite: return "覆盖"
-        case .skip: return "跳过"
-        case .rename: return "重命名"
+        case .overwrite: return Loc.t("覆盖")
+        case .skip: return Loc.t("跳过")
+        case .rename: return Loc.t("重命名")
         }
     }
 }
@@ -42,9 +43,9 @@ public enum ExportSizingMode: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .longEdge: return "长边"
-        case .percent: return "百分比"
-        case .none: return "原尺寸"
+        case .longEdge: return Loc.t("长边")
+        case .percent: return Loc.t("百分比")
+        case .none: return Loc.t("原尺寸")
         }
     }
 }
@@ -57,9 +58,9 @@ public enum ExportMetadataLevel: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .copyright: return "仅版权"
-        case .none: return "无"
+        case .all: return Loc.t("全部")
+        case .copyright: return Loc.t("仅版权")
+        case .none: return Loc.t("无")
         }
     }
 }
@@ -75,9 +76,9 @@ public enum ExportMetadataPolicy: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .copyrightOnly: return "仅版权"
-        case .none: return "无"
+        case .all: return Loc.t("全部")
+        case .copyrightOnly: return Loc.t("仅版权")
+        case .none: return Loc.t("无")
         }
     }
 
@@ -108,10 +109,10 @@ public enum WatermarkPosition: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .topLeft: return "左上"
-        case .topRight: return "右上"
-        case .bottomLeft: return "左下"
-        case .bottomRight: return "右下"
+        case .topLeft: return Loc.t("左上")
+        case .topRight: return Loc.t("右上")
+        case .bottomLeft: return Loc.t("左下")
+        case .bottomRight: return Loc.t("右下")
         }
     }
 }
@@ -128,8 +129,8 @@ public enum SDRToneMapping: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .global: return "全局"
-        case .none: return "无（硬截断）"
+        case .global: return Loc.t("全局")
+        case .none: return Loc.t("无（硬截断）")
         }
     }
 }
@@ -189,7 +190,7 @@ public enum ExportPresetError: LocalizedError, CustomStringConvertible {
         case .emptyNameTemplate:
             return "nameTemplate is empty — the files would all be called '.jpg'"
         case .unreadable(let url, let why):
-            return "could not read the preset at \(url.path): \(why)"
+            return Loc.t("无法读取 {0} 处的预设：{1}", String(describing: (url.path)), String(describing: (why)))
         }
     }
 
@@ -213,7 +214,7 @@ public enum HDRKind: String, Codable, Sendable, CaseIterable {
     public var displayName: String {
         switch self {
         case .none: return "SDR"
-        case .gainMap: return "增益图"
+        case .gainMap: return Loc.t("增益图")
         case .hlg: return "HLG"
         case .pq: return "PQ"
         }
@@ -584,12 +585,12 @@ public struct ExportPreset: Sendable, Equatable {
     public var summary: String {
         let size: String
         switch sizingMode {
-        case .longEdge: size = longEdge.map { "长边 \($0)" } ?? "原尺寸"
-        case .percent: size = "长边 \(percent ?? 100)%"
-        case .none: size = "原尺寸"
+        case .longEdge: size = longEdge.map { Loc.t("长边 {0}", String(describing: ($0))) } ?? Loc.t("原尺寸")
+        case .percent: size = Loc.t("长边 {0}%", String(describing: (percent ?? 100)))
+        case .none: size = Loc.t("原尺寸")
         }
         var parts = [format.rawValue.uppercased(),
-                     "\(effectiveBitDepth) 位",
+                     Loc.t("{0} 位", String(describing: (effectiveBitDepth))),
                      colorSpace.displayName,
                      size,
                      conflict.displayName]
@@ -597,7 +598,7 @@ public struct ExportPreset: Sendable, Equatable {
         switch hdrKind {
         case .gainMap where format.supports(.gainMap):
             let hdr = hdr ?? HDRExport()
-            parts.append("HDR " + hdr.gainMap.displayName + (hdr.halfSize ? " 半尺寸" : ""))
+            parts.append("HDR " + hdr.gainMap.displayName + (hdr.halfSize ? Loc.t(" 半尺寸") : ""))
         case .hlg, .pq:
             parts.append("HDR " + hdrKind.displayName)
         case .none, .gainMap:
@@ -606,12 +607,12 @@ public struct ExportPreset: Sendable, Equatable {
         // 111 — an explicit size target plus `noUpscale` is worth saying out loud.
         if noUpscale && ((sizingMode == .longEdge && longEdge != nil)
                          || (sizingMode == .percent && percent != nil)) {
-            parts.append("未放大")
+            parts.append(Loc.t("未放大"))
         }
         // 180 — only when the watermark really paints: an inactive preset's summary stays byte-for-byte
         // what 099/111 asserted.
         if isWatermarkActive {
-            parts.append("水印 " + watermarkPosition.displayName + " "
+            parts.append(Loc.t("水印 ") + watermarkPosition.displayName + " "
                          + String(Int(watermarkOpacity.rounded())) + "%")
         }
         return parts.joined(separator: " · ")

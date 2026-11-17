@@ -17,7 +17,7 @@ final class LightCardTests: XCTestCase {
         XCTAssertEqual(rows.map(\.title), ["曝光", "对比", "高光", "中间调", "阴影", "白色", "黑色"],
                        "the tone card's seven rows, in display order")
         XCTAssertEqual(rows.count, 7)
-        XCTAssertEqual(InspectorView.Section.light.title, "Light")
+        XCTAssertEqual(InspectorView.Section.light.title, "明暗")
         XCTAssertTrue(InspectorView.scrollingSections.contains(.light))
 
         // The travel and the number format of each row — unchanged by 046.

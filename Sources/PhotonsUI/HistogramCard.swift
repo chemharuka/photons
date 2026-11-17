@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import AppKit
 import SwiftUI
 import PhotonsCore
@@ -309,7 +310,7 @@ public final class HistogramCardView: NSView {
     /// the 11 pt the highlight-warning dot occupies (2 pt gap + 5 pt dot). The *percentage* starts here,
     /// on every column, so a dash and a `100%` sit at the same x.
     public static let clipLabelSlot: CGFloat = {
-        let widest = ["过白", "削顶", "削底"]
+        let widest = [Loc.t("过白"), Loc.t("削顶"), Loc.t("削底")]
             .map { ($0 as NSString).size(withAttributes: [.font: clipLabelFont]).width }
             .max() ?? 0
         return widest + 3 + 11
@@ -415,7 +416,7 @@ public final class HistogramCardView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         setAccessibilityIdentifier("histogram-card")
-        setAccessibilityLabel("直方图")
+        setAccessibilityLabel(Loc.t("直方图"))
         setAccessibilityRole(.group)
         installAppHeadroomObservers()
         updateAccessibilityHelp()
@@ -431,7 +432,7 @@ public final class HistogramCardView: NSView {
     private func updateAccessibilityHelp() {
         let bins = histogram?.binCount ?? 256
         let tail = histogram?.hdrBinCount ?? Histogram.hdrBinCount
-        setAccessibilityHelp("直方图：R/G/B 三组曲线，重叠处按光叠加（R+G 为黄，三路齐为白）；亮度仍测量并用于过白/削顶/削底读数，但不再画线。横轴 \(bins) 档 SDR 码值 + \(tail) 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（画面本身的光，不是屏幕渲染后的值：SDR 区为 0–255 码值，超白通道为 +x.x 档并画成削顶品红），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。")
+        setAccessibilityHelp(Loc.t("直方图：R/G/B 三组曲线，重叠处按光叠加（R+G 为黄，三路齐为白）；亮度仍测量并用于过白/削顶/削底读数，但不再画线。横轴 {0} 档 SDR 码值 + {1} 档高光尾。下面一行随鼠标变化：鼠标在画面上时是鼠标处像素的 R/G/B 三通道值（画面本身的光，不是屏幕渲染后的值：SDR 区为 0–255 码值，超白通道为 +x.x 档并画成削顶品红），鼠标在直方图上时是那一箱的 R/G/B 样本数，其他位置为空但行高不变。", String(describing: (bins)), String(describing: (tail))))
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -896,7 +897,7 @@ public final class HistogramCardView: NSView {
             drawCeilingTick(axis)
         } else {
             drawStopLabels(axis)
-            drawText("还没有可测的帧", at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
+            drawText(Loc.t("还没有可测的帧"), at: CGPoint(x: plot.minX + 6, y: plot.midY - 6),
                      font: .systemFont(ofSize: 9), color: Self.plotLabelColor)
         }
 
@@ -1281,7 +1282,7 @@ public final class HistogramCardView: NSView {
         // three x's the `R`/`G`/`B` letters below sit on, so the two rows read as one table and the
         // numbers' widths cannot push anything sideways. Each percentage starts at
         // `columnStart + clipLabelSlot`, a fixed slot, so a `—` and a `100%` land on the same pixel.
-        let highLabel = drawText("过白", at: CGPoint(x: starts[0], y: y), font: labelFont,
+        let highLabel = drawText(Loc.t("过白"), at: CGPoint(x: starts[0], y: y), font: labelFont,
                                  color: .secondaryLabelColor)
         if showsHighlightWarning {
             NSColor.systemOrange.setFill()
@@ -1294,14 +1295,14 @@ public final class HistogramCardView: NSView {
         clipHighHitRect = NSRect(x: highLabel.minX, y: y - 2,
                                  width: highNumber.maxX - highLabel.minX, height: 14)
 
-        let ceilLabel = drawText("削顶", at: CGPoint(x: starts[1], y: y),
+        let ceilLabel = drawText(Loc.t("削顶"), at: CGPoint(x: starts[1], y: y),
                                  font: labelFont, color: .secondaryLabelColor)
         let ceilNumber = drawText(clipCeilingText,
                                   at: CGPoint(x: starts[1] + Self.clipLabelSlot, y: y),
                                   font: numberFont,
                                   color: clipCeilingText == "0.0%" ? .labelColor : .systemRed)
 
-        let lowLabel = drawText("削底", at: CGPoint(x: starts[2], y: y),
+        let lowLabel = drawText(Loc.t("削底"), at: CGPoint(x: starts[2], y: y),
                                 font: labelFont, color: .secondaryLabelColor)
         let lowNumber = drawText(clipLowText, at: CGPoint(x: starts[2] + Self.clipLabelSlot, y: y),
                                  font: numberFont, color: .labelColor)

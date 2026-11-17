@@ -1,3 +1,4 @@
+import PhotonsLocalization
 import Foundation
 
 // MARK: - corner-based crop rectangle (XMP `crs:Crop*` semantics)
@@ -169,7 +170,7 @@ public enum AspectLock: Sendable, Equatable, Hashable {
 
     public var displayName: String {
         switch self {
-        case .original: return "Original"
+        case .original: return Loc.t("原始")
         case .square: return "1:1"
         case .threeTwo: return "3:2"
         case .fourThree: return "4:3"
