@@ -116,4 +116,21 @@ final class LocalizationTableTests: XCTestCase {
         XCTAssertEqual(Loc.localizedName(of: "zh-Hans"), "中文")
         XCTAssertEqual(Loc.localizedName(of: "en"), "English")
     }
+
+    /// **端到端**：把进程语言钉成 en，同一个 `Loc.t` 必须读出英文。
+    ///
+    /// `PHOTONS_LANGUAGE` 是进程级开关（测试与命令行用它，不必写用户偏好），
+    /// `Loc.language` 每次读都重新解析，所以这里改环境变量立刻生效 —— 这条是「表真的被读到」
+    /// 的唯一证据，前面几条只证明表本身没写错。
+    func testEnglishTakesEffectThroughTheEnvironmentSwitch() throws {
+        let key = "效果卡"
+        let previous = ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"]
+        setenv("PHOTONS_LANGUAGE", "en", 1)
+        defer {
+            if let previous { setenv("PHOTONS_LANGUAGE", previous, 1) } else { unsetenv("PHOTONS_LANGUAGE") }
+        }
+        XCTAssertEqual(Loc.language, "en")
+        XCTAssertEqual(Loc.t(key), "Effects panel", "英文表里 \(key) 的译文没被读到")
+        XCTAssertEqual(english.values[key], "Effects panel")
+    }
 }

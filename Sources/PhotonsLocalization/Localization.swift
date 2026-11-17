@@ -45,15 +45,29 @@ public enum Loc {
         }
     }
 
-    /// 当前语言的 `.lproj` 包。缺表时回落到 `Bundle.module` 本身（于是返回 key 即中文原文）。
-    private static let table: Bundle = {
-        let code = language
-        if let path = Bundle.module.path(forResource: code, ofType: "lproj"),
-           let bundle = Bundle(path: path) {
-            return bundle
+    /// 每种语言的 `.lproj` 包，按语言缓存（`Bundle(path:)` 不必重复打开）。
+    /// 缺表时回落到 `Bundle.module` 本身 —— 于是返回 key 即中文原文，不会返回空串。
+    ///
+    /// 用字典而**不是**一个 `static let`：语言在进程内实际上不变（改了要重启），
+    /// 但测试要在同一进程里验「语言切换真的换表」，一次性缓存会让那条用例变成假红。
+    private static let bundles = BundleCache()
+    private final class BundleCache: @unchecked Sendable {
+        private var cache: [String: Bundle] = [:]
+        private let lock = NSLock()
+        func bundle(for code: String) -> Bundle {
+            lock.lock(); defer { lock.unlock() }
+            if let hit = cache[code] { return hit }
+            let resolved: Bundle
+            if let path = Bundle.module.path(forResource: code, ofType: "lproj"),
+               let bundle = Bundle(path: path) {
+                resolved = bundle
+            } else {
+                resolved = .module
+            }
+            cache[code] = resolved
+            return resolved
         }
-        return .module
-    }()
+    }
 
     /// 资源包本身 —— 给**表级验收**用（`LocalizationTableTests`）。
     /// 测试 target 的 `Bundle.module` 指向测试自己的 bundle，读不到这里的 `.lproj`，
@@ -68,7 +82,7 @@ public enum Loc {
     }
 
     private static func raw(_ key: String) -> String {
-        table.localizedString(forKey: key, value: key, table: nil)
+        bundles.bundle(for: language).localizedString(forKey: key, value: key, table: nil)
     }
 
     // MARK: - 文案
