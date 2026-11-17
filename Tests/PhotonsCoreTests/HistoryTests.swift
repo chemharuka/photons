@@ -220,7 +220,7 @@ final class HistoryTests: XCTestCase {
         h.commit(edit { $0.light.exposure = 1; $0.color.saturation = 5 }, label: "  ", now: t0)
         XCTAssertEqual(h.snapshots.last?.label, "色彩")
         h.commit(edit { $0.light.exposure = 2; $0.color.saturation = 9 }, label: "", now: t0)
-        XCTAssertEqual(h.snapshots.last?.label, "Light + Color")
+        XCTAssertEqual(h.snapshots.last?.label, "明暗 + 色彩")
     }
 
     // MARK: ⑤ group-level dirty marking
