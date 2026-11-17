@@ -111,6 +111,30 @@ public enum ThumbSpec: String, Sendable, CaseIterable, Codable {
     public var schemaVersion: Int { self == .hd ? 3 : 1 }
 }
 
+/// 405 — the thumbnail fingerprint's version baseline: a **captured literal**, not derived from
+/// `StageAlgorithmVersion`.
+///
+/// Why it has to be a literal: `editFingerprint` must satisfy both of
+///   (a) every thumbnail key of today is byte-identical (no one-time full-library rebuild), and
+///   (b) a bump of one stage evicts only the caches that **actually run** that stage.
+/// If an unused stage's version followed `StageAlgorithmVersion.version(of:)`, (b) fails — a dehaze
+/// bump would move every key. If the unused stages were dropped from the string, (a) fails — the
+/// version segment and `stageKeys` would lose twelve entries. The only solution is to freeze today's
+/// values as data.
+///
+/// Maintenance: **adding a `RenderStage` requires adding an entry here**
+/// (`ThumbFingerprintScope405Tests.testTheBaselineTableCoversEveryStage` goes red otherwise).
+/// A stage that has been bumped must **not** change this table — the entry is the neutral
+/// placeholder for stages a document does not run, and its value never affects rendered pixels.
+public enum ThumbFingerprintBaseline {
+    static let version: [RenderStage: Int] = [
+        .heal: 2, .geometry: 5, .sceneLinear: 10, .maskAtlas: 6, .localApply: 6,
+        .curve: 3, .dehaze: 11, .vignette: 3, .toneMap: 7, .contrast: 3,
+        .color: 1, .bw: 1, .localColor: 1, .hsl: 1, .pointColour: 3, .grade: 1,
+        .detailFX: 4, .sharpen: 3, .grain: 1, .display: 1,
+    ]
+}
+
 /// The constants that decide pixels, plus the digest that enters the cache key.
 ///
 /// D1/D2′ froze the **legacy preview** recipe: its placeholder/preview keys carry no document at all,
@@ -158,14 +182,42 @@ public enum ThumbRecipe {
     /// NR/detail amounts — are appended last, and only when non-default. A neutral document keeps
     /// every pre-change HD key byte for byte; a `9.dng` / adjusted-detail document gets a new key,
     /// which is what makes the grid rebuild instead of serving the default decoder's picture.
-    public static func editFingerprint(_ document: EditModel, spec: ThumbSpec = .hd) -> String {
-        let stageKeys = RenderStage.order.map { document.keyMaterial($0) }.joined(separator: "|")
-        var material = "\(stageKeys)|\(StageAlgorithmVersion.material)|\(spec.rawValue)"
+    ///
+    /// 405 — **the version of a stage the document does not run comes from `ThumbFingerprintBaseline`,
+    /// not from `StageAlgorithmVersion`.** A dehaze bump must evict only the thumbnails that carry
+    /// dehaze; every other document's key has to stay byte-identical (no one-time full-library
+    /// rebuild). Because the version appears **twice** in the material — inside `keyMaterial`'s
+    /// `;alg=N` and in the version segment — both halves read the same resolved `v(stage)`.
+    /// `versions:` defaults to the live table, so no existing caller changes.
+    public static func editFingerprint(_ document: EditModel, spec: ThumbSpec = .hd,
+                                       versions: (RenderStage) -> Int
+                                           = StageAlgorithmVersion.version(of:)) -> String {
+        sha256Hex(fingerprintMaterial(document, spec: spec, versions: versions))
+    }
+
+    /// The pre-hash text of `editFingerprint`, exposed to `@testable` callers so
+    /// `ThumbFingerprintScope405Tests` can assert on the **version segment** itself (`s1.9-dehaze=11`)
+    /// rather than only on a 64-hex digest that cannot say which stage moved.
+    static func fingerprintMaterial(_ document: EditModel, spec: ThumbSpec = .hd,
+                                    versions: (RenderStage) -> Int
+                                        = StageAlgorithmVersion.version(of:)) -> String {
+        let used = Set(document.renderStages)
+        // A local function, not a closure stored in a variable: `versions` is non-escaping.
+        func v(_ s: RenderStage) -> Int {
+            used.contains(s) ? versions(s) : ThumbFingerprintBaseline.version[s]!
+        }
+        // `algorithmVersion: false` drops `keyMaterial`'s own live token; `v(s)` re-adds it here so
+        // the two halves cannot disagree about which version this key names.
+        let stageKeys = RenderStage.order
+            .map { document.keyMaterial($0, algorithmVersion: false) + ";alg=\(v($0))" }
+            .joined(separator: "|")
+        let versionSegment = RenderStage.order.map { "\($0.rawValue)=\(v($0))" }.joined(separator: ";")
+        var material = "\(stageKeys)|\(versionSegment)|\(spec.rawValue)"
             + "|sv\(spec.schemaVersion)"
         let inputs = document.decodeInputs
         if let version = inputs.versionComponent { material += "|\(version)" }
         if let detail = inputs.detailComponent { material += "|\(detail)" }
-        return sha256Hex(material)
+        return material
     }
 
     /// The neutral document's fingerprint, for callers that have no document (a missing row, a probe).

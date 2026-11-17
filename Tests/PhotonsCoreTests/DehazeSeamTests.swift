@@ -12,14 +12,18 @@ import PhotonsCore
 /// 这个文件把断层量化成两个探针，并钉住修复后的契约：
 ///
 ///   1. **ramp**：一张 0.2 → 2.0 的 256 级线性灰度 ramp，`dehaze = 20/50/100`。输出必须单调
-///      不减；1.0 两侧 ±1 %（以及 `A` 两侧 ±1 %，旧截断真正所在）的斜率比 ≤ 1.2；相邻级差
-///      不许超过模型自己的 `1/t0` 上限 —— 这是「没有 cliff」的判据。字面上的「≤ 1.5× 输入
-///      步长」在这个 ramp 上做不到：`t(0.9·A) ≈ 0.13`，物理反演本身就是 `1/t ≈ 7.7×`
-///      （见报告）。
+///      不减；1.0 两侧 ±1 % 的斜率比 ≤ 1.2；`A` 两侧 ±1 % 的斜率比不许超过**模型自己的闭式**
+///      `1 + α(1 − gLo·t0)/t0`（417 之后 `L ≤ A` 全参与，两侧斜率本来就不同 —— 374 那个 1.2 是它
+///      自己 `w(A) = 0.04` 的肩部造出来的）；相邻级差不许超过模型自己的 `1/t0` 上限 —— 这才是
+///      「没有 cliff」的判据。字面上的「≤ 1.5× 输入步长」在这个 ramp 上做不到：`t(0.9·A) ≈ 0.13`，
+///      物理反演本身就是 `1/t ≈ 7.7×`（见报告）。
 ///   2. **真图**：`L1030437`（HDR 高光）与 `L1030428`（暗场）的 p95–p99 / p99–p99.9 /
 ///      p99.9–p100 分箱 gain，以及跨 1.0 的 gain 台阶。高光尾不许被抬（280 的成果），
 ///      跨 1.0 也不许有台阶。
 final class DehazeSeamTests: XCTestCase {
+
+    /// Mirrors `kDehazeGainFloor` in `s1_9_dehaze.metal` (401) — the closed-form slope bound needs it.
+    private static let gainFloor = 0.4
 
     // MARK: - fixtures
 
@@ -134,12 +138,32 @@ final class DehazeSeamTests: XCTestCase {
             // The model's own ceiling: `J = (L − A(1−t))/t` is `1/t0` steep at its steepest, so no
             // participation function can make the adjacent-level step smaller than
             // `1 + amount·(1/t0 − 1)` on this ramp at `amount`. A **cliff** is a step above that.
-            let t0 = 0.1
+            // **417** — `t0` is read from the shipped call site (`RenderGraph.dehazeTransmissionFloor`),
+            // not typed as 0.1: the literal was what let the old 0.1 stay here after the call site
+            // moved to 0.05.
+            let t0 = RenderGraph.dehazeTransmissionFloor
             let physical = 1.0 + Double(amount) / 100.0 * (1.0 / t0 - 1.0)
-            rows.append(String(format: "dehaze %3d: maxΔ %.5f @ %.3f (%.2f×step, 物理上限 %.2f×) · 1.0 斜率 %.3f/%.3f 比 %.3f · A=%.3f 斜率 %.3f/%.3f 比 %.3f · 回退 %d",
+            // 417 — **the slope at `A` is the model's own leg, and the bound is its closed form.**
+            //
+            // 374 pinned `seamRatio ≤ 1.2` because its log band put a *shoulder* at `A`
+            // (`w(A) = 0.04`), which multiplied the recovery's `1/t` leg down until the two sides had
+            // the same slope. 417 removed the shoulder on purpose (`L ≤ A` participates fully, the
+            // verdict 「天空先压暗试试看」), so the two sides genuinely differ: above `A` the output is
+            // the identity (`g ≡ 1`), below it is the capped recovery, whose steepest leg is the
+            // transmission floor's:
+            //
+            //     sup d(gain)/dL = (1 − gLo·t0)/(t0·A)   ⇒   sup dOut/dL = 1 + α·(1 − gLo·t0)/t0
+            //
+            // with `α = amount/100`, `gLo = 0.4` and the **shipped** `t0`. That is the ceiling this
+            // ratio is asserted against — the same closed form `DehazeContrast401Tests` uses, scaled by
+            // the final `mix`. What is *not* allowed is a **value** step at `A`, and that is pinned
+            // separately by the adjacent-level check above (`maxΔ ≤ 1/t0`'s own step).
+            let seamLimit = 1.0 + Double(amount) / 100.0
+                * (1.0 - Self.gainFloor * t0) / t0
+            rows.append(String(format: "dehaze %3d: maxΔ %.5f @ %.3f (%.2f×step, 物理上限 %.2f×) · 1.0 斜率 %.3f/%.3f 比 %.3f · A=%.3f 斜率 %.3f/%.3f 比 %.3f（闭式上限 %.2f）· 回退 %d",
                                amount, maxDelta, xs[maxAt], maxDelta / max(step, 1e-9), physical,
                                one.below, one.above, ratio,
-                               A, seam.below, seam.above, seamRatio, drops))
+                               A, seam.below, seam.above, seamRatio, seamLimit, drops))
             if drops > 0 { failures.append("dehaze \(amount) 输出不单调（\(drops) 处回退）") }
             if maxDelta > physical * step * 1.05 {
                 failures.append(String(format: "dehaze %d 相邻级差 %.5f 超过模型的 1/t 上限 %.5f（%.2f×，cliff 还在）",
@@ -148,8 +172,9 @@ final class DehazeSeamTests: XCTestCase {
             if !(ratio <= 1.2) {
                 failures.append(String(format: "dehaze %d 的 1.0±1%% 斜率比 %.3f > 1.2", amount, ratio))
             }
-            if !(seamRatio <= 1.2) {
-                failures.append(String(format: "dehaze %d 的 A±1%% 斜率比 %.3f > 1.2", amount, seamRatio))
+            if !(seamRatio <= seamLimit) {
+                failures.append(String(format: "dehaze %d 的 A±1%% 斜率比 %.3f 超过模型的闭式上限 %.3f",
+                                       amount, seamRatio, seamLimit))
             }
         }
         print(String(format: "SEAM-RAMP · 输入级差 %.6f · A_raw %.4f · A_used %.4f · A 处输入 %.3f",

@@ -1647,6 +1647,16 @@ public final class RenderGraph {
     /// included, both of which now have slots of their own).
     public private(set) var stageRuns: [RenderStage: Int] = [:]
     public private(set) var stageHits: [RenderStage: Int] = [:]
+    /// 417 — the transmission floor **the shipped path passes** (`DehazeParamsU.a.z`, `t0`).
+    ///
+    /// One number with two readers: `s1_9_dehaze_apply`'s `t0`, and the acceptance tests that state
+    /// their bounds in closed form rather than as literals — the adjacent-level slope ceiling
+    /// `(1 − kDehazeGainFloor·t0)/(t0·A)` (`DehazeContrast401Tests`) and the model's own slope at `A`
+    /// (`DehazeSeamTests`). Reading the literal in a test was what let 374's shoulder hide a slope
+    /// that the shipped `t0` does not satisfy; tying both to this constant keeps them from drifting
+    /// apart again.
+    public static let dehazeTransmissionFloor: Double = 0.05
+
     /// **Tests only** — the airlight `A` S1.9 estimated on the last frame, when
     /// `RenderOptions.probesDehazeAirlight` asked for it. `nil` when the stage did not run or the flag
     /// is off, which is what makes "the production path never reads it back" checkable.
@@ -5489,7 +5499,10 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
         let veilH = max(1, (h + qTex - 1) / qTex)
 
         var params = DehazeParamsU(
-            a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, 0.1, 0.02),
+            // 417 — `t0 = RenderGraph.dehazeTransmissionFloor` (0.05; was a literal 0.1). See the 417
+            // note in `s1_9_dehaze.metal`: on scene light `t = t0` is where *every* foggy pixel lands,
+            // and at 0.1 the gain's whole swing happened inside a 0.05-wide luminance window.
+            a: SIMD4(Float(edit.effects.dehaze) / 100, 0.95, Float(Self.dehazeTransmissionFloor), 0.02),
             b: SIMD4(plan.origin.x, plan.origin.y,
                      Float(plan.content.width), Float(plan.content.height)),
             c: SIMD4(Int32(proxyW), Int32(proxyH), Int32(qProxy), Int32(qW)),

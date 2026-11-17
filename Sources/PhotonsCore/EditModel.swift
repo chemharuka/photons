@@ -446,6 +446,29 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// the card must keep the pre-S3.8 chain byte for byte.
     public var hasGrade: Bool { !colorGrading.isIdentity }
 
+    /// 405 — the stages this document will actually run. Pure CPU (no graph, no GPU), because the
+    /// thumbnail fingerprint is computed in the grid's fast path as well.
+    ///
+    /// The judgement lives in exactly one place, `RenderStage.pipeline`; this only wires up the
+    /// twelve booleans from the sources `RenderKeyChain.links` already uses (see the line references
+    /// in `Stage.swift`). Nothing here decides *whether* a stage runs — if a source changes, it
+    /// changes in `Stage.swift` first and this call site follows.
+    public var renderStages: [RenderStage] {
+        RenderStage.pipeline(
+            hasMasks: hasActiveMasks,                                      // Stage.swift:659
+            hasLocalColor: hasLocalColor,                                  // :771
+            hasHSL: hasHSL,                                                // :783
+            hasPointColor: hasPointColor,                                  // :795
+            hasGrain: hasGrain,                                            // :850
+            hasBW: hasBlackAndWhite,                                       // :757
+            hasGrade: hasGrade,                                            // :809
+            hasDetailFX: hasDetailFX,                                      // :822
+            hasHeal: hasHeal,                                              // :613
+            hasContrast: hasContrastStage || hasLocalContrast,             // :741
+            hasDehaze: hasDehaze,                                          // :679
+            hasSharpen: hasSharpen)                                        // :835
+    }
+
     public init(from decoder: any Decoder) throws {
         // 205: the raw tree is what lets the keys this build does not know survive the decode. Read
         // before the keyed container and independently of it — a value of the wrong type still falls
