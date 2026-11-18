@@ -31,6 +31,16 @@ public struct DecoderCapabilities: Sendable, Equatable {
     /// screen.
     public let supportedVersions: [String]
 
+    /// 425 — **what a document that asks for nothing would get today**: the answer of the 409 rule
+    /// (`DecoderAutoVersion.requestedVersion(explicit: nil, …)`) for this file, byte for byte the same
+    /// value `RAWProbe.autoVersion` reports. `nil` = the rule does not upgrade (Apple's default, v8).
+    ///
+    /// It is **not** `requestedVersion`: that one is the final request of *this* decode, and it differs
+    /// whenever the document named a version explicitly or the decode is a measurement. This field is a
+    /// fact about the file, independent of both, because it is what the 解码模型 picker must show for an
+    /// untouched document — the bug 425 fixes (picker pinned to `8` while the decode ran `9.dng`).
+    public let autoVersion: String?
+
     /// The request did not survive: the decoder handed back a different version.
     public var downgraded: Bool { requestedVersion.map { $0 != effectiveVersion } ?? false }
 
@@ -64,12 +74,14 @@ public struct DecoderCapabilities: Sendable, Equatable {
     ///   `detailAxesProvenance` says `.versionTable` so a caller can tell the two apart.
     public init(requestedVersion: String?, effectiveVersion: String, defaultVersion: String,
                 supportedVersions: [String] = [],
+                autoVersion: String? = nil,
                 detailAxes: DetailAxes? = nil,
                 asShotTemperature: Double? = nil, asShotTint: Double? = nil) {
         self.requestedVersion = requestedVersion
         self.effectiveVersion = effectiveVersion
         self.defaultVersion = defaultVersion
         self.supportedVersions = supportedVersions
+        self.autoVersion = autoVersion
         if let detailAxes {
             self.detailAxes = detailAxes
             self.detailAxesProvenance = .filterFlags

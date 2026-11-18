@@ -1214,12 +1214,14 @@ public struct InspectorView: View {
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
-        let chosen = chosenDecoderSpelling(offered: caps?.supportedVersions ?? [])
+        let chosen = chosenDecoderSpelling(offered: caps?.supportedVersions ?? [],
+                                           auto: caps?.autoVersion)
         let axes = Self.detailAxes(capabilities: caps,
                                    requested: chosen,
                                    document: session.edit.decoderVersion)
         return card(Section.detail.title, reset: { resetGroup(.detail) }) {
             decoderModelRow(chosen: chosen, offered: caps?.supportedVersions ?? [],
+                            auto: caps?.autoVersion,
                             effective: caps?.effectiveVersion)
             divider
             ForEach(Self.detailContent.rows, id: \.axis) { row in
@@ -1399,7 +1401,8 @@ public struct InspectorView: View {
     /// The line underneath is the **read-back**, never the request: `session.capabilities.effectiveVersion`
     /// is what the filter reported *after* the assignment, so a version this file cannot honour says
     /// `已退回 v8` instead of the panel claiming something that did not run.
-    private func decoderModelRow(chosen: String, offered: [String], effective: String?) -> some View {
+    private func decoderModelRow(chosen: String, offered: [String], auto: String?,
+                                 effective: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: SliderRowStyle.standard.headSpacing) {
                 Text(Loc.t("解码模型"))
@@ -1409,7 +1412,8 @@ public struct InspectorView: View {
                 Spacer(minLength: 4)
                 Picker(Loc.t("解码模型"), selection: Binding(get: { chosen },
                                                      set: { spelling in
-                                                         resets.decoderVersion(spelling, offered: offered)
+                                                         resets.decoderVersion(spelling, offered: offered,
+                                                                               auto: auto)
                                                      })) {
                     ForEach(Self.decoderChoices(chosen: chosen, offered: offered), id: \.self) { spelling in
                         Text(Self.decoderVersionLabel(spelling)).tag(spelling)
@@ -1638,9 +1642,27 @@ public struct InspectorView: View {
     ///
     /// `offered` is empty until the first development lands (the list arrives with
     /// `DecoderCapabilities.supportedVersions`), in which case `8` is shown and the note stays silent.
-    private func chosenDecoderSpelling(offered: [String]) -> String {
-        if let stored = session.edit.decoderVersion { return stored }
-        return Self.defaultDecoderSpelling(offered: offered)
+    private func chosenDecoderSpelling(offered: [String], auto: String?) -> String {
+        Self.chosenDecoderSpelling(stored: session.edit.decoderVersion, offered: offered, auto: auto)
+    }
+
+    /// **Which item is on screen**, as one pure function: the document's own spelling, else the 409
+    /// automatic choice for this file, else the file's default choice.
+    ///
+    /// 425 — the middle step is the fix. The 409 rule runs at decode time and the document stays
+    /// `nil`, so before this the picker fell straight through to `defaultDecoderSpelling` and displayed
+    /// `8` on a file that was actually decoded at `9.dng` (the user saw 「选择框固定在了 8」 while the
+    /// pixels were v9). `auto` is `DecoderCapabilities.autoVersion`, i.e. the rule's answer for a
+    /// document that asks for nothing — **not** `requestedVersion`, which is this decode's own final
+    /// request and differs whenever the document chose explicitly or the decode is a measurement.
+    ///
+    /// An explicit document choice always wins, so a user who picked `8` on a high-ISO file keeps
+    /// seeing `8`. `auto == nil` (the rule does not upgrade) and "no capabilities yet" both land on
+    /// `defaultDecoderSpelling` — the pre-first-frame answer is still `8`.
+    public static func chosenDecoderSpelling(stored: String?, offered: [String], auto: String?) -> String {
+        if let stored { return stored }
+        if let auto, !auto.isEmpty { return auto }
+        return defaultDecoderSpelling(offered: offered)
     }
 
     /// What the picker lists: the file's own versions in the file's own order, with the current
@@ -3506,6 +3528,13 @@ public struct PanelResets {
     /// default and the byte-identical pre-change decode; anything else is stored verbatim. That keeps
     /// "the default is v8" true without inventing an assignment that Apple's own default does not make.
     ///
+    /// 425 — 「ask for nothing」 now means **the automatic choice**, not the literal `"8"`. On a file
+    /// the 409 rule upgrades (`auto == "9.dng"`, i.e. a high-ISO frame) storing `nil` for a picked
+    /// `"8"` would make the decode path re-run the rule and put the user back on `9.dng` — the picker
+    /// would refuse to move. So `nil` is written only for the spelling that *is* the automatic one
+    /// (`auto`, else `defaultDecoderSpelling` → `"8"` before any capabilities); every other pick is an
+    /// explicit assignment, including `"8"` on a v9 file.
+    ///
     /// This is a **decode** input (`EditModel.decodeInputs` carries it, and — since the rung identity
     /// gained its `ver=` component — the ladder, the queue and `isCurrentPhoto` all see it as a
     /// different buffer), so the pick alone re-develops: no slider has to be touched afterwards.
@@ -3525,8 +3554,11 @@ public struct PanelResets {
     /// `false` when the version is already the document's, so a picker reporting its own state cannot
     /// mint empty snapshots (and cannot silently reset four sliders either).
     @discardableResult
-    public func decoderVersion(_ spelling: String, offered: [String]) -> Bool {
-        let stored: String? = (spelling == "8" && (offered.isEmpty || offered.contains("8"))) ? nil : spelling
+    public func decoderVersion(_ spelling: String, offered: [String], auto: String? = nil) -> Bool {
+        // 425: 「回到自动」= picking the automatic spelling itself. `nil` then means "let the 409 rule
+        // decide at decode time", which is exactly what the picker's own `auto` branch displays.
+        let autoSpelling = auto ?? InspectorView.defaultDecoderSpelling(offered: offered)
+        let stored: String? = (spelling == autoSpelling) ? nil : spelling
         guard stored != session.edit.decoderVersion else { return false }
         session.applyEdit {
             $0.decoderVersion = stored

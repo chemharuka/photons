@@ -912,15 +912,21 @@ public final class RAWDecoder {
         // A measurement decode keeps today's recipe: its whole point is a fixed, comparable decode,
         // and a version that follows the EXIF would make the black-level numbers depend on the
         // threshold.
+        // 425: the rule's answer for a document that asks for nothing, computed **once** and
+        // unconditionally — `measurement` and an explicit `options.decoderVersion` decide what this
+        // decode *requests*, never what the picker must show on an untouched document. This is the
+        // same call `probe` makes, so `capabilities.autoVersion` and `RAWProbe.autoVersion` cannot
+        // drift apart.
+        let exif = Self.exifFacts(from: filter)
+        let autoVersion = DecoderAutoVersion.requestedVersion(
+            explicit: nil,
+            iso: exif.iso,
+            focalLength: exif.focalLength,
+            focalLength35mm: exif.focalLength35mm,
+            offered: offered)
         var resolvedRequest = options.decoderVersion
         if !measurement, options.decoderVersion == nil {
-            let exif = Self.exifFacts(from: filter)
-            resolvedRequest = DecoderAutoVersion.requestedVersion(
-                explicit: nil,
-                iso: exif.iso,
-                focalLength: exif.focalLength,
-                focalLength35mm: exif.focalLength35mm,
-                offered: offered)
+            resolvedRequest = autoVersion
         }
 
         // ── 前置 ① D2′: v8 default + read-back assert ────────────────────────────────────────
@@ -992,6 +998,7 @@ public final class RAWDecoder {
                                                effectiveVersion: effective,
                                                defaultVersion: filterDefault,
                                                supportedVersions: offered,
+                                               autoVersion: autoVersion,
                                                detailAxes: detailAxes,
                                                asShotTemperature: asShot.temperature,
                                                asShotTint: asShot.tint)
