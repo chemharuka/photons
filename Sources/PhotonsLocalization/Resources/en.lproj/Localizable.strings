@@ -1541,3 +1541,7 @@
 "（无窗口）" = " (no window)";
 "（还没有预设）" = "(No presets yet)";
 "，透视超出 ±{0}" = "; perspective exceeds ±{0}";
+
+"自动调节" = "Auto";
+"自动调节：按纹理损失安排曝光、高光、白色、黑色与对比" = "Auto: arrange exposure, highlights, whites, blacks and contrast by texture loss";
+"明暗 · 自动" = "Light · Auto";

@@ -4585,6 +4585,54 @@ public final class LoupeController: NSViewController, HeadroomSource {
                          LightGroup.blackOffsetRange.upperBound)
     }
 
+    // MARK: 自动调节 (422)
+
+    /// 422 — the five reverse gates the algorithm is tested through. `AutoLight.Gates()` in production;
+    /// a test sets one and shows the assertion that guards it going red. Never part of a key or a
+    /// document, and read once per run.
+    nonisolated(unsafe) static var autoLightGates = AutoLight.Gates()
+
+    /// 明暗 · 自动 — one press writes the seven 明暗 fields and **one** history entry.
+    ///
+    /// The five steps live in `AutoLight.plan` (pure, testable without a GPU); this is the wiring: the
+    /// frame's own graph is what measures, so the numbers are the ones the picture on screen is made of.
+    /// `light.blackOffset` is **read, never written** — 黑电平 owns it, and step 4 only cancels its lift.
+    ///
+    /// Returns the plan (so a test can argue with every number it used), or `nil` when there is no
+    /// frame to measure or when the plan equals the document it started from (a second press on a
+    /// settled picture is a no-op, exactly like 自动黑电平).
+    @discardableResult
+    public func autoLight() -> AutoLight.Plan? {
+        let frame = frameState
+        guard let session, session.mode == .loupe, let graph = frame.graph else { return nil }
+        let gates = Self.autoLightGates
+        let plan: AutoLight.Plan
+        do {
+            plan = try AutoLight.plan(for: session.edit, gates: gates) { document in
+                try graph.measureAutoLightSample(document)
+            }
+        } catch {
+            print("AUTO LIGHT · measurement failed: \(error)")
+            return nil
+        }
+        print(String(format: "AUTO LIGHT · p99 %.4f → EV %+.2f → p99 %.4f (p99.9/p99 %.2f, 回退 %d) · "
+                     + "高光 %.0f (损失 %.2f%% / 门 %.1f%%) · 白色 %.0f · "
+                     + "中间调 %.0f 阴影 %.0f · 黑色 %.0f (削底 %.2f%%) · 对比 %.0f · %d renders %.0f ms",
+                     plan.report.baseP99, plan.report.exposureEV, plan.report.p99AfterExposure,
+                     plan.report.p999OverP99AfterExposure, plan.report.exposureBackstops,
+                     plan.highlights, plan.report.textureLoss * 100,
+                     plan.report.textureLossThreshold * 100, plan.whites,
+                     plan.midtones, plan.shadows, plan.blacks,
+                     plan.report.clippedLowAfterBlacks * 100, plan.contrast,
+                     plan.report.renderCount, plan.report.milliseconds))
+        let next = plan.apply(to: session.edit)
+        guard next.light != session.edit.light else { return nil }
+        session.applyEdit { $0 = next }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("明暗 · 自动"), coalesce: false)
+        return plan
+    }
+
     /// The document's flips — what the menu ticks and the bar's two switches show.
 
     /// The crop frame's layout in view points, for the overlay and for the tests.

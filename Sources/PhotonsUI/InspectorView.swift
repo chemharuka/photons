@@ -277,6 +277,8 @@ public struct InspectorView: View {
     /// The 自动黑电平 icon's hover state: the only thing about it that changes on pointer-over
     /// (no frame, no fill — see `autoBlackLevelButton`).
     @State private var autoBlackHovered = false
+    /// 422 — the same for the Light card's 自动调节 icon.
+    @State private var autoLightHovered = false
 
     /// **Which cards are on screen** (派单 073).
     ///
@@ -1519,13 +1521,45 @@ public struct InspectorView: View {
     /// card says so instead of leaving three sliders at 0 and implying nothing happened.
     @ViewBuilder
     private func toneCardAccessory(_ spec: PanelCardSpec) -> some View {
-        if spec.section == .correction, let note = autoProfileNote {
+        if spec.section == .light {
+            // 422 — the 明暗 card's 自动调节, drawn exactly like 黑电平's 自动 (one button family).
+            autoLightButton
+        } else if spec.section == .correction, let note = autoProfileNote {
             Text(note)
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .accessibilityIdentifier("inspector.correction.autoProfile")
         }
+    }
+
+    /// 422 — 「明暗」标题行右侧的 自动调节 (the same bare-icon family as 自动黑电平).
+    ///
+    /// 14 pt `wand.and.stars`, no bottom, no border, no capsule; hover only lifts the icon from
+    /// secondary to primary. The hit area is ≥ 18×18, and the −2 tail padding cancels the 2 pt a
+    /// `NSTextField` cell overhangs on each side, so the icon's right edge lands on the value column's
+    /// own right edge — the geometry `BlackLevelCardTests` measures for the other one.
+    ///
+    /// The action is `LoupeController.autoLight()`: it measures through the frame's own graph, writes
+    /// the seven fields and commits **one** snapshot. Nothing is mirrored into `@State` here — the rows
+    /// observe the document, so they follow the plan by themselves.
+    private var autoLightButton: some View {
+        Button {
+            _ = loupe?.autoLight()
+        } label: {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 14))
+                .foregroundStyle(autoLightHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+                .background(LightAutoProbeHost())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, -2)
+        .onHover { autoLightHovered = $0 }
+        .help(Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
+        .accessibilityLabel(Loc.t("自动调节"))
+        .accessibilityIdentifier("inspector.light.auto")
     }
 
     /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.
