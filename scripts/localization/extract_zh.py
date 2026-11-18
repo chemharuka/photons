@@ -57,6 +57,39 @@ def arg_expr(raw: str) -> str:
     return "String(describing: (%s))" % raw.strip()
 
 
+def _inside_print(text: str, pos: int) -> bool:
+    """`pos` 处这个字符串字面量是否在某个尚未闭合的 `print(` 调用里。
+
+    从 `pos` 往回找最后一个 `print(`，然后从它的开括号扫到 `pos`，数括号深度：
+    深度仍 > 0 就说明字面量还在这次调用内（跨行拼接串因此也能挡住）。
+    往回最多找 4000 字符，足够覆盖一个长的 `print(String(format: ...))`。
+    """
+    window_start = max(0, pos - 4000)
+    window = text[window_start:pos]
+    m = None
+    for m in re.finditer(r'\bprint\s*\(', window):
+        pass
+    if m is None:
+        return False
+    depth = 0
+    i = window_start + m.end() - 1     # 指向那个 '('
+    n = len(text)
+    while i < pos and i < n:
+        ch = text[i]
+        if ch == '"':                  # 跳过字符串字面量内部
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == '\\' else 1
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return False           # 这次 print 已在 pos 之前闭合
+        i += 1
+    return depth > 0
+
+
 def scan(text: str, path: str) -> tuple[str, list[tuple[str, list[str]]]]:
     """返回 (改写后的源码, [(模板, [参数表达式])])。"""
     out = []
@@ -143,6 +176,14 @@ def scan(text: str, path: str) -> tuple[str, list[tuple[str, list[str]]]]:
 
         line_start = text.rfind('\n', 0, start) + 1
         prefix = text[line_start:start]
+        # `print(...)` 是诊断输出，不是界面文案 —— 不进表、也不包 `Loc.t`。
+        # （2026-11-18: 505 搬 422 时，`LoupeController.autoLight()` 里那个跨行的
+        #  `print(String(format: \"…\" + \"…\" + \"…\", …))` 被拆开包装，第二三段进了「缺译文」。
+        #  只查「本行有没有 print(」不够 —— 拼接串的第二行、第三行看不见 print。）
+        # 判法：从该字面量往回找最近的 `print(`，再看它的括号到本字面量处是否还没闭合。
+        if _inside_print(text, start):
+            out.append(raw)
+            continue
         # enum case 的裸值是 Codable/磁盘格式的一部分，不是文案 → 原样保留，也不进表
         if re.search(r'\bcase\s+\w+\s*=\s*$', prefix):
             out.append(raw)
@@ -171,11 +212,21 @@ def scan(text: str, path: str) -> tuple[str, list[tuple[str, list[str]]]]:
 def main() -> int:
     write = '--write' in sys.argv
     catalog: dict[str, set[str]] = {}
+    skipped_texts: dict[Path, str] = {}
     changed_files = 0
     occurrences = 0
     for target in TARGETS:
         for path in sorted((ROOT / 'Sources' / target).rglob('*.swift')):
             if path.name in SKIP_FILES or path.name.endswith(SKIP_SUFFIX):
+                # 被跳过的文件**不重写**（验收探针要钉死中文原文）。但它们里面出现的
+                # 中文字面量如果**表里已有**，那就是真实界面文案的复用，不能当死条目删掉。
+                # 2026-11-18 实测：`EffectsRowProbe.swift:20` 的 `static let cardID = "效果卡"`
+                # 是 `Loc.t("效果卡")` 的同一文案，删了它
+                # `LocalizationTableTests.testEnglishTakesEffectThroughTheEnvironmentSwitch` 就红。
+                #
+                # 注意：**只做「保留」不做「新增」** —— 探针里还有断言串、诊断串，
+                # 整文件扫进 catalog 会多收 200 条噪音（实测 928 → 1130）。
+                skipped_texts[path] = path.read_text(encoding='utf-8')
                 continue
             text = path.read_text(encoding='utf-8')
             new, found = scan(text, str(path))
@@ -202,16 +253,39 @@ def main() -> int:
                 existing_en[unescape(m.group(1))] = unescape(m.group(2))
 
     new_keys = sorted(k for k in catalog if k not in existing_en)
-    print('\n模板 %d 个（已有译文 %d，缺译文 %d）· 改写 %d 处 / %d 文件'
-          % (len(catalog), len(catalog) - len(new_keys), len(new_keys), occurrences, changed_files))
+    # 死条目：表里有、源码里已经没有的 key。**必须剔掉**，否则 `both` 会把它原样写回，
+    # 表就只增不减（2026-11-18 实测：511 建表时源码 927 条模板却写出 1541 条，
+    # 多出的 614 条来自 PR1 的 catalog.json，一次污染之后每跑一次脚本都继承下来）。
+    # 「被跳过文件里出现过」的已有条目不算死条目（见上面 skipped_texts 的说明）。
+    revived = set()
+    for k in set(existing_en) - set(catalog):
+        if any(k in text for text in skipped_texts.values()):
+            revived.add(k)
+    if revived:
+        print('\n保留 %d 条「仅出现在被跳过文件里」的条目（探针复用真实文案，不是死条目）' % len(revived))
+        for k in sorted(revived)[:10]:
+            print('    留: %s' % k[:90])
+    dead_keys = sorted(set(existing_en) - set(catalog) - revived)
+    print('\n模板 %d 个（已有译文 %d，缺译文 %d，死条目 %d）· 改写 %d 处 / %d 文件'
+          % (len(catalog), len(catalog) - len(new_keys), len(new_keys),
+             len(dead_keys), occurrences, changed_files))
     for k in new_keys[:20]:
         print('  缺译文: %s' % k[:90])
+    if dead_keys:
+        print('  死条目 %d 条（源码里已无此文案，--write 时会从两张表删掉）' % len(dead_keys))
+        for k in dead_keys[:10]:
+            print('    死: %s' % k[:90])
 
     if write:
         RES.mkdir(parents=True, exist_ok=True)
-        both = dict(existing_en)
+        # 只写「源码里还存在的模板」—— 这正是上一步算出的 dead_keys 的反面。
+        # 旧写法 `both = dict(existing_en); for k in catalog: both.setdefault(k, '')`
+        # 把表里每一条都留下，于是死条目永远删不掉。
+        both = {}
         for k in catalog:
-            both.setdefault(k, '')
+            both[k] = existing_en.get(k, '')
+        for k in revived:
+            both[k] = existing_en.get(k, k)
         order = sorted(both)
         for lang in ('zh-Hans', 'en'):
             d = RES / ('%s.lproj' % lang)
