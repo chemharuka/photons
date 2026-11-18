@@ -287,4 +287,68 @@ final class DecoderAutoVersion409Tests: XCTestCase {
         let measured = try decoder.decodeForMeasurement(url, scale: 0.2)
         XCTAssertEqual(measured.decoderVersion, outcome.capabilities.defaultVersion)
     }
+
+    // MARK: - G. 425: the automatic answer travels in `DecoderCapabilities.autoVersion`
+
+    /// The file the 409 rule **does** upgrade: the user's own high-ISO frame (ISO 3200, full frame).
+    private func highISOFixtureURL() throws -> URL {
+        let path = NSString(string: "~/Desktop/test/L1030437.dng").expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("no L1030437.dng (the ISO 3200 frame); 425's A② needs it")
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// **A①②③** — `capabilities.autoVersion` is `RAWProbe.autoVersion` verbatim, on a file the rule
+    /// upgrades and on one it does not.
+    ///
+    /// This is the field 425 adds: the picker had only `requestedVersion` (this decode's final request,
+    /// which an explicit document choice or a measurement changes) and therefore showed `8` on a file
+    /// decoded at `9.dng`. The two answers are computed by the same call, so the test can only pass if
+    /// the decode path passes the rule's answer through untouched.
+    func testCapabilitiesAutoVersionEqualsTheProbeAndFollowsTheRule() throws {
+        let decoder = try RAWDecoder()
+        let cases: [(url: URL, iso: Int?, auto: String?)] = [
+            (try highISOFixtureURL(), 3200, "9.dng"),
+            (try fixtureURL(), 100, nil),
+        ]
+        for c in cases {
+            let probe = try decoder.probe(c.url)
+            let caps = try decoder.decodeDetailed(c.url, options: DecodeOptions(scale: 0.2)).capabilities
+            print("425 \(c.url.lastPathComponent) iso \(String(describing: probe.iso))"
+                  + " · probe.autoVersion \(String(describing: probe.autoVersion))"
+                  + " · capabilities.autoVersion \(String(describing: caps.autoVersion))"
+                  + " · effective v\(caps.effectiveVersion)")
+
+            if let expectedISO = c.iso {
+                XCTAssertEqual(probe.iso, expectedISO, "the fixture's ISO is the one the rule keys on")
+            }
+            // A① — byte for byte, not merely "both upgrade".
+            XCTAssertEqual(caps.autoVersion, probe.autoVersion,
+                           "the same file must not answer twice: probe \(String(describing: probe.autoVersion))"
+                           + " vs capabilities \(String(describing: caps.autoVersion))")
+            // A② / A③
+            XCTAssertEqual(caps.autoVersion, c.auto,
+                           "\(c.url.lastPathComponent) (ISO \(String(describing: probe.iso))) must answer"
+                           + " auto \(String(describing: c.auto))")
+        }
+    }
+
+    /// `autoVersion` is a fact about the **file**, so neither an explicit document choice nor the
+    /// decode's own request may move it. (`requestedVersion` does move — that is exactly why the UI
+    /// could not use it.)
+    func testAutoVersionIgnoresTheDocumentsOwnRequest() throws {
+        let url = try highISOFixtureURL()
+        let auto = try RAWDecoder().decodeDetailed(url, options: DecodeOptions(scale: 0.2)).capabilities
+        let explicit = try RAWDecoder().decodeDetailed(url, options: DecodeOptions(decoderVersion: "8",
+                                                                                   scale: 0.2)).capabilities
+        print("425 explicit v8 on the high-ISO file · requested \(String(describing: explicit.requestedVersion))"
+              + " · auto \(String(describing: explicit.autoVersion)) · effective v\(explicit.effectiveVersion)")
+
+        XCTAssertEqual(explicit.requestedVersion, "8", "the document's pick is what this decode requested")
+        XCTAssertEqual(explicit.effectiveVersion, "8", "…and it ran")
+        XCTAssertEqual(explicit.autoVersion, auto.autoVersion,
+                       "`autoVersion` keeps answering for a document that asks for nothing")
+        XCTAssertEqual(explicit.autoVersion, "9.dng")
+    }
 }
