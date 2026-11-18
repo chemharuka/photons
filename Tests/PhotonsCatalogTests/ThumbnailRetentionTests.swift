@@ -187,13 +187,27 @@ final class ThumbnailRetentionTests: XCTestCase {
         XCTAssertEqual(again.hdLayoutSweep.removedFiles, 0)
         XCTAssertTrue(again.exists(key), "a stamped tree is left alone")
 
-        // …and a stamp written by another kernel generation resets it: HD pixels are this build's
-        // render graph, not the camera's preview, so they cannot outlive the arithmetic that made them.
+        // 424 — a stamp written by another **kernel generation** no longer deletes anything: the key
+        // itself carries the edit fingerprint (405), so a bumped file is unreachable by key and the
+        // tree is only stale, not wrong. The stamp is refreshed in place, so the log still names the
+        // generation that wrote the files.
         try Data("hd3|0000000000000000".utf8).write(to: again.hdLayoutMarkerURL)
         let upgraded = try ThumbnailCache(root: root)
-        XCTAssertTrue(upgraded.hdLayoutSweep.didReset)
-        XCTAssertEqual(upgraded.hdLayoutSweep.removedFiles, 1)
-        XCTAssertFalse(upgraded.exists(key))
+        XCTAssertFalse(upgraded.hdLayoutSweep.didReset, "the layout did not move, so nothing is deleted")
+        XCTAssertTrue(upgraded.hdLayoutSweep.stampRefreshed, "only the generation moved")
+        XCTAssertEqual(upgraded.hdLayoutSweep.removedFiles, 0)
+        XCTAssertTrue(upgraded.exists(key), "the file of a previous generation stays on disk")
+        XCTAssertEqual(try String(contentsOf: upgraded.hdLayoutMarkerURL, encoding: .utf8),
+                       "hd3|\(StageAlgorithmVersion.fingerprint)",
+                       "the stamp is rewritten to this build's generation")
+
+        // …but a **layout** change still resets the tree: `hd2` files carry no content hash in their
+        // path, so they cannot be attributed to a key and must go in one `removeItem` (308).
+        try Data("hd2|0000000000000000".utf8).write(to: upgraded.hdLayoutMarkerURL)
+        let relaid = try ThumbnailCache(root: root)
+        XCTAssertTrue(relaid.hdLayoutSweep.didReset, "a different layout is still a wholesale reset")
+        XCTAssertEqual(relaid.hdLayoutSweep.removedFiles, 1)
+        XCTAssertFalse(relaid.exists(key))
     }
 
     /// Deleting a library entry must not leave the photo's HD pixels behind — with a content-hash

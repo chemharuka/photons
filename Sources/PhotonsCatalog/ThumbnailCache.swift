@@ -556,37 +556,58 @@ public final class ThumbnailCache {
 
     /// What the `hd` tree looked like when this cache opened it.
     ///
-    /// `removedFiles` is the number of `.heic` files the migration deleted: the **whole** previous
-    /// `hd` tree (digest-sharded) and, when the kernel generation moved, the current one too. HD is
-    /// derived data — deleting it costs one re-render and reclaims the 353 MB a long edit session
-    /// leaves behind — so this is a reclaim, not a data loss.
+    /// `removedFiles` is the number of `.heic`/`.jpg` files the migration deleted: the **whole**
+    /// previous `hd` tree, and only when the *layout* changed (a pre-308 digest-sharded tree cannot
+    /// be attributed file by file, so it is deleted in one `removeItem`). HD is derived data —
+    /// deleting it costs one re-render — so this is a reclaim, not a data loss.
+    ///
+    /// 424 — `stampRefreshed` is the other half: the **arithmetic generation** moved while the layout
+    /// stayed `hd3`, so the stamp is rewritten and **not one file is deleted**. Invalidation belongs
+    /// to the key, not to the directory: `ThumbRecipe.editFingerprint` versions only the stages a
+    /// document actually runs (405), so a bump makes exactly the affected documents miss. Keeping the
+    /// files is what stops "recompile ⇒ reload the whole library" (a dehaze bump must not cost 1.8
+    /// hours on a 3 000-photo library).
     public struct HDLayoutSweep: Sendable, Equatable {
         public var removedFiles = 0
         public var didReset = false
+        public var stampRefreshed = false
         public var summary: String {
-            didReset ? "hd layout → v3: removed \(removedFiles) file(s), tree rebuilt"
-                     : "hd layout v3: up to date"
+            if didReset { return "hd layout → v3: removed \(removedFiles) file(s), tree rebuilt" }
+            if stampRefreshed { return "hd layout v3: generation stamp refreshed, 0 file(s) removed" }
+            return "hd layout v3: up to date"
         }
     }
 
     public private(set) var hdLayoutSweep = HDLayoutSweep()
 
     /// The stamp file *inside* the `hd` directory (`thumbs/hd/.layout-v3`). It names both the layout
-    /// and the arithmetic generation: an unreadable/missing stamp is the pre-308 digest-sharded tree,
-    /// a different fingerprint is a tree whose pixels this build would not produce.
+    /// and the arithmetic generation: an unreadable/missing stamp is the pre-308 digest-sharded tree
+    /// (deleted), while a *different fingerprint* with the same layout is only a generation the keys
+    /// already answer for (424 — refreshed in place, no file removed).
     public var hdLayoutMarkerURL: URL {
         root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
             .appendingPathComponent(Self.hdLayoutMarkerName)
     }
     private static let hdLayoutMarkerName = ".layout-v3"
-    private var hdLayoutStamp: String { "hd3|\(StageAlgorithmVersion.fingerprint)" }
+    /// The half of the stamp that decides whether the **tree** is reachable at all. `hd3` is the
+    /// content-hash-sharded layout (308); a future layout change moves this and gets the wholesale
+    /// delete, because a v2 file has no `contentHash` in its path and cannot be attributed.
+    private static let hdLayoutVersion = "hd3"
+    private var hdLayoutStamp: String { "\(Self.hdLayoutVersion)|\(StageAlgorithmVersion.fingerprint)" }
 
-    /// Delete the `hd` tree unless it is stamped as this build's layout **and** arithmetic.
+    /// Delete the `hd` tree only when its **layout** is not this build's; refresh the stamp otherwise.
     ///
-    /// Why wholesale rather than per-file: the old tree is keyed by `sha256(keyString)`, so nothing in
+    /// Why wholesale when the layout moved: the old tree is keyed by `sha256(keyString)`, so nothing in
     /// it is reachable from a v3 key and nothing in it says which photo (or which edit) it belongs to.
-    /// Enumerating it per asset would be a full walk of 982 files to delete data that is regenerable
-    /// by definition (§3: losing the directory costs one regeneration).
+    /// Enumerating it per asset would be a full walk to delete data that is regenerable by definition
+    /// (§3: losing the directory costs one regeneration).
+    ///
+    /// 424 — why **not** wholesale when only the arithmetic generation moved: 308 put
+    /// `StageAlgorithmVersion.fingerprint` (all 20 stages, unconditionally) in this stamp, so any bump
+    /// anywhere deleted every HD file. 405 already made `ThumbRecipe.editFingerprint` version exactly
+    /// the stages a document runs, so a bumped file is unreachable **by key** and a miss is enough —
+    /// deleting the tree only re-renders the photos that did not need it. The stamp stays a diagnostic
+    /// (which generation wrote what is in here) and is rewritten in place.
     @discardableResult
     public func migrateHDLayoutIfNeeded() -> HDLayoutSweep {
         var sweep = HDLayoutSweep()
@@ -594,6 +615,15 @@ public final class ThumbnailCache {
         let found = (try? String(contentsOf: hdLayoutMarkerURL, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if found == expected { return sweep }
+
+        // A missing/unreadable stamp has no layout segment, so it falls through to the delete branch —
+        // the 308 semantics for a tree written before the layout existed stay intact.
+        let expectedLayout = Self.layoutSegment(of: expected)
+        if let found, Self.layoutSegment(of: found) == expectedLayout {
+            try? Data(expected.utf8).write(to: hdLayoutMarkerURL, options: .atomic)
+            sweep.stampRefreshed = true
+            return sweep
+        }
 
         let hdRoot = root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
         var isDir: ObjCBool = false
@@ -605,6 +635,13 @@ public final class ThumbnailCache {
         try? Data(expected.utf8).write(to: hdLayoutMarkerURL, options: .atomic)
         sweep.didReset = true
         return sweep
+    }
+
+    /// The `hd3` half of a `hd3|<fingerprint>` stamp. `nil` for text that has no `|` — a stamp of
+    /// another scheme cannot promise the content-hash layout, so it must not match.
+    private static func layoutSegment(of stamp: String) -> String? {
+        guard let bar = stamp.firstIndex(of: "|") else { return nil }
+        return String(stamp[stamp.startIndex..<bar])
     }
 
     // MARK: - 311 · the retired HEIC family
@@ -1075,6 +1112,39 @@ public final class ThumbnailCache {
     }
 
     public func totalBytes() -> Int64 { inventory().reduce(0) { $0 + $1.bytes } }
+
+    /// 424 — reclaim the `hd` files whose key this build can no longer name.
+    ///
+    /// `knownKeys` is the set of keys this build can still produce (typically `ThumbKey.hdJPEG` for
+    /// every document of every asset the catalog still holds). Every `hd` payload whose digest is not
+    /// in that set is deleted: unreachable by construction, so no read can ever hit it again.
+    ///
+    /// Deliberately **not** `trim(knownKeys:)`: there the array is a *whitelist for the two cheaper
+    /// LRU rules* ("these digests I can explain"), files outside it are skipped, and the whole pass
+    /// returns early unless the directory is over budget. Here membership is the criterion itself and
+    /// the budget does not apply — an orphan is dead weight at 146 MB exactly as it is at 2 GB.
+    ///
+    /// No production caller yet: wiring it into a library open needs the cost of `inventory()` (a
+    /// full walk) measured on a real 50 000-file cache, which no developer machine here has. Until
+    /// then the method and its test are the whole deliverable (retention without a caller is at
+    /// least a *bounded* leak, not the unbounded one 424 removes).
+    @discardableResult
+    public func sweepUnreachable(knownKeys: [ThumbKey]) -> Int {
+        let reachable = Set(knownKeys.map(\.digest))
+        let hdRoot = root.appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+        guard let en = fm.enumerator(at: hdRoot, includingPropertiesForKeys: [.isDirectoryKey],
+                                     options: [.skipsHiddenFiles]) else { return 0 }
+        // Collect first, delete after: mutating the directory mid-enumeration is undefined behaviour
+        // for `FileManager` on some volumes.
+        var orphans: [URL] = []
+        for case let url as URL in en where Self.isThumbPayload(url.pathExtension) {
+            let digest = url.deletingPathExtension().lastPathComponent
+            if !reachable.contains(digest) { orphans.append(url) }
+        }
+        var removed = 0
+        for url in orphans where (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        return removed
+    }
 
     /// Evict until the directory fits the budget.
     ///
