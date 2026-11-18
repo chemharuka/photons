@@ -144,9 +144,25 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         XCTAssertEqual(hits, 0, "数值框/滑杆宽度必须走 ExportSliderRowMetrics，命中 \(hits) 处字面量")
     }
 
+    /// 427 —— 五个数值行仍然是「同一条构造路径」，但分成两类：
+    ///
+    ///   · 质量 / 水印不透明度：`exportSliderRow(label:`（滑杆 + 读数，行型没变）；
+    ///   · 尺寸（长边 / 百分比 / 原尺寸）：`sizeGridRow`（双行）；
+    ///   · PPI：`ppiRow`（placeholder 要拿自己的宽，读数块不能把它钉在 46 里）。
+    ///
+    /// 真正要守的是「数值框只有一处构造」：`SliderNumberField(` 仍只有 1 个调用点（上一条测试），
+    /// 而三类行都走 `numberReadout(` —— 所以读数宽度仍是同一个 `valueWidth`。
+    /// 旧值 5（全部走 `exportSliderRow`）→ 新值 2 + `numberReadout(` ≥ 5：口径变的是**行型**，
+    /// 不是「每行各写一份数值框」。
     func testEveryNumericRowGoesThroughTheConstructor() throws {
         let text = try sourceText()
-        XCTAssertGreaterThanOrEqual(text.components(separatedBy: "exportSliderRow(label:").count - 1, 5)
+        XCTAssertGreaterThanOrEqual(text.components(separatedBy: "exportSliderRow(label:").count - 1, 2,
+                                    "质量 / 水印不透明度仍走滑杆行")
+        XCTAssertGreaterThanOrEqual(text.components(separatedBy: "numberReadout(").count - 1, 4,
+                                    "五个数值行都从同一个 numberReadout 取读数（1 处定义 + 3 处调用："
+                                    + "滑杆行 / 尺寸行 / PPI 行）")
+        XCTAssertEqual(text.components(separatedBy: "sizeGridRow(").count - 1, 4,
+                       "尺寸行的构造 1 处定义 + 3 个模式各 1 个调用")
     }
 
     // MARK: layout
@@ -199,6 +215,9 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         let longRect = rect(of: longNumber, in: longHosted.host)
         // 335 —— 主列探针要在**改 sizingMode 之前**取：视图与 model 共享，改了模式这一行就没了。
         let longControl = try XCTUnwrap(controlRect("export.size.longEdge", in: longHosted.host))
+        // 427 —— 单位探针同理，必须在切模式之前读。
+        let longUnitRect = rect(of: try probe(.unit, "export.size.longEdge", in: longHosted.host),
+                                in: longHosted.host)
 
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
@@ -209,13 +228,17 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         XCTAssertEqual(longRect.width, 46, accuracy: 0.5)
         XCTAssertEqual(percentRect.width, 46, accuracy: 0.5)
         // 335 —— 长边（px）与百分比（%）的单位宽度不同，值贴的是同一根右沿（540）。
-        let pxWidth = ("px" as NSString).size(withAttributes: [
-            .font: NSFont.systemFont(ofSize: ExportRowGrid.Font.unit)
-        ]).width
-        XCTAssertEqual(longRect.maxX, longControl.maxX - 8 - pxWidth, accuracy: 0.5,
-                       "长边行的值右沿 = 540 − 8 − 「px」")
-        XCTAssertEqual(percentRect.maxX, qualityRect.maxX, accuracy: 0.5,
-                       "百分比行与质量行走同一行型（值 + %）")
+        //
+        // 427 —— 尺寸行改成**双行**之后，第二行从主列左端 138 起排（值 46 → 单位 → 像素量 →
+        // 不扩大），不再贴 540：贴 540 是「值 + 单位独占一行」时代的排法，而双行的第二行左边还有
+        // 像素量这类次级读数要放。所以这条断言改成「值 + 8 + 单位」的**左起**关系（左沿 138），
+        // 也正是 `testUnitColumnIsTheSameOnEveryRowWithAUnit` 量同一条 x 的口径。
+        XCTAssertEqual(longRect.minX, longControl.minX, accuracy: 0.5,
+                       "427 · 长边行的值从主列起点 138 起（双行第二行）")
+        XCTAssertEqual(longUnitRect.minX, longRect.maxX + ExportRowGrid.readoutGap, accuracy: 0.5,
+                       "427 · 「px」紧跟数值框（8 pt）")
+        XCTAssertEqual(percentRect.minX, longRect.minX, accuracy: 0.5,
+                       "427 · 百分比行与长边行走同一行型（值在第二行左端）")
     }
 
     /// The trailing unit sits on the same right edge on every row that has one. 288 made 质量 a `%`
@@ -246,11 +269,18 @@ final class ExportSliderRowUnificationTests: XCTestCase {
         sheet.preset.sizingMode = .percent
         let percentHosted = try host(model: sheet)
         let percentUnit = try probe(.unit, "export.size.percent", in: percentHosted.host)
+        let percentNumber = try probe(.number, "export.size.percent", in: percentHosted.host)
+        // 427 —— 尺寸行是双行：第二行从主列左端 138 起排，所以百分比行的单位不再贴 540，
+        // 而是紧跟自己的数值框（与 PPI 同一关系）。旧值「= 质量行的 % 左沿（540 − 11）」→
+        // 新值「138 + 46 + 8 = 192」→ 因为双行把「值 + 单位」挪到了第二行左端。
         XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).minX,
-                       qualityUnitX, accuracy: 0.5)
+                       rect(of: percentNumber, in: percentHosted.host).maxX
+                       + ExportRowGrid.readoutGap, accuracy: 0.5,
+                       "427 · 百分比行的「%」紧跟自己的数值框")
         let percentControl = try XCTUnwrap(controlRect("export.size.percent", in: percentHosted.host))
-        XCTAssertEqual(rect(of: percentUnit, in: percentHosted.host).maxX,
-                       percentControl.maxX, accuracy: 0.5)
+        XCTAssertEqual(rect(of: percentNumber, in: percentHosted.host).minX,
+                       percentControl.minX, accuracy: 0.5,
+                       "427 · 百分比行的值从主列起点起（双行第二行）")
     }
 
     /// The audit table's source: every numeric row's number / slider / unit rect.

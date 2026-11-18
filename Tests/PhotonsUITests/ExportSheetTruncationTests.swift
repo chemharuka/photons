@@ -371,10 +371,19 @@ final class ExportSheetTruncationTests: XCTestCase {
                      taller.sorted { $0.key < $1.key }
                         .map { String(format: "%@ h %.1f 到下一 band %.1f", $0.key, $0.value.0, $0.value.1) }
                         .joined(separator: ", ")))
-        XCTAssertGreaterThanOrEqual(pitch32, 15)
+        // 427 —— 尺寸行是双行（h 52），它两侧的 32 的 pitch 少两组：15 → 13。
+        XCTAssertGreaterThanOrEqual(pitch32, 13)
         // 335 —— 主列 286 → 402，那条本来要两行的「半尺寸」说明（需要 377.9 pt）现在一行放得下，
         // 所以两行行**可以是 0 个**：pitch 于是整表都是 32。若还有两行行，它只能是那一行。
-        XCTAssertLessThanOrEqual(taller.count, 1, "最多只有半尺寸说明那一行是两行")
+        //
+        // 427 —— 多了一个结构性双行行：尺寸行（三种模式都一样高，24 + 4 + 24 = 52）。
+        XCTAssertLessThanOrEqual(taller.count, 2, "最多两个双行行：尺寸行 + 半尺寸说明那一行")
+        if let row = taller["export.size.longEdge"] {
+            XCTAssertEqual(row.0, ExportRowGrid.rowHeight * 2 + 4, accuracy: 0.5,
+                           "427 · 尺寸行双行高 = 24 + 4 + 24")
+        } else {
+            XCTFail("427 · 尺寸行必须是双行（当前尺寸模式是长边）")
+        }
         if let row = taller["export.hdr.halfSize"] {
             XCTAssertGreaterThan(row.0, ExportRowGrid.rowHeight + 2, "两行行要比 24 高")
             XCTAssertLessThanOrEqual(row.0, 2 * ExportRowGrid.rowHeight, "两行行不超过两行")

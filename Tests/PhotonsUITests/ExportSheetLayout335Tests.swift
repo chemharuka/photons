@@ -4,6 +4,7 @@ import SwiftUI
 @testable import PhotonsCore
 @testable import PhotonsExport
 @testable import PhotonsUI
+import PhotonsLocalization
 
 /// 335 — 导出面板「去掉独立读数列」的量尺与门。
 ///
@@ -309,6 +310,56 @@ final class ExportSheetLayout335Tests: XCTestCase {
         ]).width, accuracy: 1.0, "单位按自然宽（不再挤在 58 宽的列里）")
     }
 
+    /// 427 — **the placeholder owns at least `valueWidth`**, so the unit after it starts clear of it.
+    ///
+    /// The defect this guards (user report 2026-11-18, English UI): with PPI off the row prints the
+    /// placeholder instead of a number field, and the placeholder used to be sized by its own text.
+    /// `Do not write` (63.99 pt) is much wider than `240` (46 pt), so it pushed `pixels/inch` under
+    /// itself — the user saw a truncated `Do not`. The fix gives the placeholder
+    /// `.frame(minWidth: ExportRowGrid.valueWidth, alignment: .trailing)`; the unit then starts at
+    /// `placeholder.maxX + 8` exactly as it does for a number field.
+    ///
+    /// Why the *width* and not only the adjacency: `unit.minX == number.maxX + 8` is asserted above and
+    /// stays true even when the frame is removed (both move together), which is why deleting the frame
+    /// left every existing assertion green. The load-bearing quantity is the **placeholder's own
+    /// width**: it must never be narrower than `valueWidth`, and it must be its own natural text width
+    /// when that is wider. That is the sentence this test holds.
+    func testThePlaceholdersOwnWidthKeepsTheUnitClearOfIt() throws {
+        let (controller, window, content) = try presentSheet()
+        // `presentSheet()` opens at a written 240 PPI, i.e. the number-field branch. The placeholder
+        // branch is the *PPI off* state — set it here and re-lay the sheet, which is the state the
+        // user reported `Do not` in.
+        controller.model.setPPI(nil)
+        for _ in 0..<10 {
+            window.layoutIfNeeded()
+            content.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        }
+
+        let value = try XCTUnwrap(rect(.value, "export.ppi", in: content),
+                                  "427 · PPI 关闭时 placeholder 应有 .value 探针")
+        let unit = try XCTUnwrap(sliderRect(.unit, "export.ppi", in: content), "PPI 单位")
+
+        // The placeholder's own text, in the face the row paints it with.
+        let placeholderFont = NSFont.systemFont(ofSize: ExportRowGrid.Font.hint)
+        let text = (Loc.t("不写入") as NSString)
+            .size(withAttributes: [.font: placeholderFont]).width
+        let expected = max(ExportRowGrid.valueWidth, text)
+
+        print(String(format: "427 B③ · placeholder %.1f pt (text %.2f, valueWidth %.0f) · unit 起 %.1f = value 右沿 %.1f + 8",
+                     value.width, text, ExportRowGrid.valueWidth, unit.minX, value.maxX))
+
+        XCTAssertGreaterThanOrEqual(value.width, ExportRowGrid.valueWidth - 0.5,
+                                    "427 · placeholder 至少占住 valueWidth，不许被自己的文字缩窄")
+        XCTAssertEqual(value.width, expected, accuracy: 1.0,
+                       "427 · placeholder 宽 = max(valueWidth, 文本自然宽)")
+        XCTAssertEqual(unit.minX, value.maxX + ExportRowGrid.readoutGap, accuracy: 0.5,
+                       "427 · 单位排在 placeholder 之后，间距 = readoutGap")
+        // The user's own symptom: the placeholder must be printed whole, not clipped to `Do not`.
+        XCTAssertGreaterThanOrEqual(value.width, text - 0.5,
+                                    "427 · placeholder 文本必须完整显示（不许被截成「Do not」）")
+    }
+
     // MARK: - 4. 「更改」按钮
 
     func testTheChangeButtonSaysChangeWithoutEllipsisAndStartsInTheMainColumn() throws {
@@ -326,10 +377,13 @@ final class ExportSheetLayout335Tests: XCTestCase {
                        "路径紧跟按钮")
         XCTAssertLessThanOrEqual(path.maxX, 540 + 0.5, "路径不许越过面板右 padding")
 
-        // 文案逐字节：源里是 `Button("更改")`，且这一行没有省略号。
+        // 文案逐字节：源里是 `Button(Loc.t("更改"))`，且这一行没有省略号。
+        // （511 的本地化把 `Button("更改")` 换成了 `Loc.t("更改")`；这条断言当时没跟着改，
+        //  所以在 511 之后一直是红的 —— 与本单无关，顺手改回「真的在验文案」。）
         let text = try sourceText()
-        XCTAssertTrue(text.contains("Button(\"更改\")"), "按钮文案必须是「更改」")
+        XCTAssertTrue(text.contains("Button(Loc.t(\"更改\"))"), "按钮文案必须是「更改」")
         XCTAssertFalse(text.contains("Button(\"更改…\")"), "335 · 按钮文案不许再带省略号")
+        XCTAssertFalse(text.contains("Loc.t(\"更改…\")"), "335 · 按钮文案不许再带省略号")
 
         // 宽度 = 文字宽 + 原按钮内边距（= 改前「更改…」51.0 减去多出来的那个省略号）。
         // 小尺寸控件（`.controlSize(.small)`）的文字是 11 pt；改前按钮实测 51.0。
@@ -391,7 +445,9 @@ final class ExportSheetLayout335Tests: XCTestCase {
         for pitch in pitches {
             XCTAssertEqual(pitch, ExportRowGrid.rowPitch, accuracy: 0.5, "335 · 行 pitch 32")
         }
-        XCTAssertGreaterThanOrEqual(pitches.count, 15)
+        // 427 —— 尺寸行现在是双行（h 52），所以 32 的 pitch 少一组：16 → 15。少的这一组不是
+        // 布局退化，是「尺寸行占两个行高」的直接结果（16 个同节行对里有一对跨过它）。
+        XCTAssertGreaterThanOrEqual(pitches.count, 14)
         print("335 pitch · \(pitches.count) 组 32 的 pitch · \(bands.count) band")
 
         // 默认折叠：6 个常驻行 + 3 个折叠标题 = 9 band ≤ 10。

@@ -164,10 +164,17 @@ final class ExportSheetLayout288Tests: XCTestCase {
         }
 
         // 行高 24、同节内行距 8（pitch 32）—— 节与节之间是 48（32 + 16），没有第三种。
+        //
+        // 427 —— 例外只有**尺寸行**：它是双行（模式一行 24 + 4 + 数值/单位/像素量/不扩大一行 24），
+        // 行高 52、pitch 60。为什么必须变：英文三段 `Original size / Long edge / Percentage`
+        // 要 254 pt，一段行只能给它 150（`presetWidth`）—— 用户要的「三条一行、剩下的第二行」
+        // 说的就是这个高度。三个尺寸模式（长边 / 百分比 / 原尺寸）都用同一个常数，所以高度不随模式变。
+        let doubleRowHeight = ExportRowGrid.rowHeight * 2 + 4
+        func isSizeRow(_ id: String) -> Bool { id.hasPrefix("export.size.") }
         for row in rows {
-            XCTAssertEqual(frame(of: row, in: hosted.host).height,
-                           ExportRowGrid.rowHeight, accuracy: 0.5,
-                           "302 · \(row.rowID) 行高")
+            let height = frame(of: row, in: hosted.host).height
+            XCTAssertEqual(height, isSizeRow(row.rowID) ? doubleRowHeight : ExportRowGrid.rowHeight,
+                           accuracy: 0.5, "302 · \(row.rowID) 行高")
         }
         // 行带之间的缝只有 8（pitch 32）；折叠段标题之前是 16。没有第三种。
         let sorted = rows.map { frame(of: $0, in: hosted.host) }.sorted { $0.minY < $1.minY }
@@ -184,7 +191,10 @@ final class ExportSheetLayout288Tests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(pitches.count, 12, "同节内至少要能量到 12 组 pitch")
         for pitch in pitches {
-            XCTAssertEqual(pitch, ExportRowGrid.rowPitch, accuracy: 0.5, "行 pitch")
+            // 427 —— 双行行的 pitch 是它自己的高度 + 8。
+            XCTAssertTrue(abs(pitch - ExportRowGrid.rowPitch) <= 0.5
+                          || abs(pitch - (doubleRowHeight + ExportRowGrid.rowSpacing)) <= 0.5,
+                          "行 pitch \(pitch)（只许 32 或双行行的 \(doubleRowHeight + ExportRowGrid.rowSpacing)）")
         }
 
         // 长边 / 百分比 / 原尺寸：三种模式各自成视图，数值框仍落在同一根 x。

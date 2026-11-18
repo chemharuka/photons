@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import PhotonsCore
 import PhotonsUI
+import PhotonsLocalization
 
 /// The histogram card's **channel row** — `R 245 G 128 B 64`, the pixel under the pointer.
 ///
@@ -319,8 +320,10 @@ final class HistogramChannelRowTests: XCTestCase {
         XCTAssertEqual(starts[0][0], 0, accuracy: 0, "colR 仍是卡片内容左端")
         XCTAssertGreaterThan(starts[0][1], starts[0][0] + 40, "colG 在 R 列之后")
         XCTAssertGreaterThan(starts[0][2], starts[0][1] + 40, "colB 在 G 列之后")
-        XCTAssertLessThan(starts[0][2] + HistogramCardView.channelColumnWidths[2], cardWidth,
-                          "三列在 244 pt 卡内放得下")
+        XCTAssertLessThanOrEqual(starts[0][2] + HistogramCardView.channelColumnWidths[2],
+                                 cardWidth + 0.5,
+                                 "三列在 244 pt 卡内放得下（427：英文恰好在 244.00 贴边，见 "
+                                 + "`testTheColumnsStayEqualAndEquallySpacedInWhateverLanguage`)")
 
         // A value much wider than anything a channel can print: the string is complete (nothing
         // truncated) and the group starts are unchanged. `grouped` is what the card serialises, so a
@@ -660,6 +663,93 @@ final class HistogramChannelRowTests: XCTestCase {
                                  Double(card.channelRowRect.height)))
         }
         print("letter frames across three measurements:\n        " + report.joined(separator: "\n        "))
+    }
+
+    // MARK: - ⑦ 427：三列等宽、等距、放得下（把「恰好成立」钉成事实）
+
+    /// 427 —— 英文标签改成 `White+ / Clipped / Black` 之后，244 pt 卡上三列加 24 的间隙**恰好**
+    /// 塞满（实测 244.00）。这条测试钉住的是三件事，而这三件事以前都只是「算出来恰好相等」：
+    ///
+    ///   ① **三列同宽**（`accuracy: 0`）—— `channelColumnWidths` 对三列用同一个
+    ///      `max(字母 + 空格 + 最宽数值, 标签槽 + 最宽百分比)`，一旦某天标签短到两项交叉，
+    ///      三列会各取不同的值，等距立刻崩，而旧断言一条都不会红；
+    ///   ② **R-G 间距 == G-B 间距**（`accuracy: 0`）—— `channelColumnStarts` 用一个 gap 常数，
+    ///      所以两条缝恒等；这条测试把「恒等」变成量出来的事实，在三个卡宽上各跑一次；
+    ///   ③ **244 pt 放得下** —— `starts[2] + widths[2] ≤ cardWidth + 0.5`。英文改标签后实测
+    ///      244.00（真实值 243.9978）：这是**贴边上限**，不是余量。0.5 是承认它贴边，不是宽容。
+    ///
+    /// 语言：`clipLabelSlot` / `channelColumnWidths` 是 `static let`（进程内只算一次），所以这一条
+    /// 在**当前进程的语言**下跑；两种语言各跑一遍靠的是两次 `PHOTONS_LANGUAGE=… swift test`
+    /// （见 `local/REPORT.md` 的回归表）。
+    func testTheColumnsStayEqualAndEquallySpacedWhateverTheCardWidth() {
+        let widths = HistogramCardView.channelColumnWidths
+        XCTAssertEqual(widths.count, 3)
+        XCTAssertEqual(widths[0], widths[1], accuracy: 0, "三列同宽（R == G）")
+        XCTAssertEqual(widths[1], widths[2], accuracy: 0, "三列同宽（G == B）")
+
+        let widestLabel = [Loc.t("过白"), Loc.t("削顶"), Loc.t("削底")]
+            .map { ($0 as NSString).size(withAttributes: [.font: HistogramCardView.clipLabelFont]).width }
+            .max() ?? 0
+        var report: [String] = []
+        for width in [CGFloat(244), 260, 300] {
+            let starts = HistogramCardView.channelColumnStarts(in: width)
+            XCTAssertEqual(starts.count, 3)
+            let rightGap = starts[1] - starts[0] - widths[0]
+            let leftGap = starts[2] - starts[1] - widths[1]
+            XCTAssertEqual(rightGap, leftGap, accuracy: 0,
+                           "\(Int(width)) pt · R-G 间距 \(rightGap) != G-B 间距 \(leftGap)")
+            XCTAssertGreaterThanOrEqual(rightGap, 0, "\(Int(width)) pt · 两列压在一起了")
+            XCTAssertLessThanOrEqual(starts[2] + widths[2], width + 0.5,
+                                     "\(Int(width)) pt · 第三列右沿 \(starts[2] + widths[2]) 出了卡片")
+
+            // B⑨ —— `Clipped`（本语言下最宽的标签）在任何宽度下都不被截断：画出来的 rect
+            // 就是这段字的完整行宽。
+            let card = drawnCard(width: width)
+            XCTAssertEqual(card.clipLabelRects.count, 3)
+            for (index, rect) in card.clipLabelRects.enumerated() {
+                let text = [Loc.t("过白"), Loc.t("削顶"), Loc.t("削底")][index]
+                let needed = (text as NSString)
+                    .size(withAttributes: [.font: HistogramCardView.clipLabelFont]).width
+                XCTAssertGreaterThanOrEqual(rect.width, needed - 0.01,
+                                            "\(Int(width)) pt · 「\(text)」画出来只有 \(rect.width) pt"
+                                            + "（完整行宽 \(needed)）")
+            }
+            report.append(String(format: "%.0f pt · col %.4f×3 · starts %.4f/%.4f/%.4f · R-G %.4f G-B %.4f · right %.4f",
+                                 Double(width), Double(widths[0]), Double(starts[0]),
+                                 Double(starts[1]), Double(starts[2]), Double(rightGap),
+                                 Double(leftGap), Double(starts[2] + widths[2])))
+        }
+        // 「百分比还剩多少」这条证据：标签槽之外的宽度就是百分比能用的地方，改标签只动这一项。
+        let percent = (HistogramCardView.widestPercentText as NSString)
+            .size(withAttributes: [.font: HistogramCardView.numberFont]).width
+        print(String(format: "427 hist grid · lang %@ · widest label %.4f · slot %.4f · percent %.4f · 244 上百分比可用 %.4f",
+                     Loc.language, widestLabel, HistogramCardView.clipLabelSlot, percent,
+                     widths[0] - HistogramCardView.clipLabelSlot))
+        for line in report { print("427 hist grid · " + line) }
+    }
+
+    /// 427 —— 三个标签就是 `White+ / Clipped / Black`（英文）与 `过白 / 削顶 / 削底`（中文），
+    /// 而且**两张表都有这条 key**（漏译会让英文界面掉回中文，宽度的账就又变了）。
+    func testTheThreeClippingLabelsAreTheShortOnes() {
+        let expected: [String: [String: String]] = [
+            "en": ["过白": "White+", "削顶": "Clipped", "削底": "Black"],
+            "zh-Hans": ["过白": "过白", "削顶": "削顶", "削底": "削底"]
+        ]
+        for (language, table) in expected {
+            guard let url = Loc.stringsURL(for: language),
+                  let text = try? String(contentsOf: url, encoding: .utf8) else {
+                return XCTFail("找不到 \(language) 的表")
+            }
+            for (key, value) in table {
+                XCTAssertTrue(text.contains("\"\(key)\" = \"\(value)\";"),
+                              "\(language) 表里应写 \"\(key)\" = \"\(value)\";")
+            }
+        }
+        if Loc.language == "en" {
+            XCTAssertEqual(Loc.t("过白"), "White+")
+            XCTAssertEqual(Loc.t("削顶"), "Clipped")
+            XCTAssertEqual(Loc.t("削底"), "Black")
+        }
     }
 
     /// 反证, kept as a passing test: under the old **flow** layout 削顶's x is a function of 过白's

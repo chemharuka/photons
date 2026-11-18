@@ -228,9 +228,15 @@ final class ExportSheetLayout301Tests: XCTestCase {
         }
 
         // 行 pitch 32、标题 24、标题到首行 8、节标题左沿 20。
+        //
+        // 427 —— 尺寸行是**双行**（模式 24 + 4 + 数值/单位/像素量/不扩大 24 = 52，pitch 60）：
+        // 英文三段 `Original size / Long edge / Percentage` 要 254 pt，一段行只给它 150，
+        // 这是用户「三条一行、剩下的第二行」的直接结果。只有这一行，高度是常数。
+        let doubleRowHeight = ExportRowGrid.rowHeight * 2 + 4
         for band in bands {
-            XCTAssertEqual(band.rect.height,
-                           band.isHeader ? ExportRowGrid.headerHeight : ExportRowGrid.rowHeight,
+            let expected: CGFloat = band.isHeader ? ExportRowGrid.headerHeight
+                : (band.id.hasPrefix("export.size.") ? doubleRowHeight : ExportRowGrid.rowHeight)
+            XCTAssertEqual(band.rect.height, expected,
                            accuracy: 0.5, "301 · \(band.id) 行高")
         }
         for band in bands where band.isHeader {
@@ -243,7 +249,10 @@ final class ExportSheetLayout301Tests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(pitches.count, 12, "同节内行 pitch 至少要量到 12 组")
         for pitch in pitches {
-            XCTAssertEqual(pitch, ExportRowGrid.rowPitch, accuracy: 0.5, "行 pitch")
+            XCTAssertTrue(abs(pitch - ExportRowGrid.rowPitch) <= 0.5
+                          || abs(pitch - (doubleRowHeight + ExportRowGrid.rowSpacing)) <= 0.5,
+                          "301 · 行 pitch \(pitch)（只许 32 或双行行的 "
+                          + "\(doubleRowHeight + ExportRowGrid.rowSpacing)）")
         }
         print(String(format: "301 pitch · %d band · 行 pitch 32 有 %d 组 · 节首额外 16 有 %d 处",
                      bands.count, pitches.count, gapsBeforeHeader.count))

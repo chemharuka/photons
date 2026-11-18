@@ -197,8 +197,8 @@
 "删除这个修复点" = "Delete this healing spot";
 "删除选中的蒙版" = "Delete selected mask";
 "删除预设" = "Delete Preset";
-"削底" = "Low clip";
-"削顶" = "High clip";
+"削底" = "Black";
+"削顶" = "Clipped";
 "前后对比" = "Before/After";
 "前后对比（{0} " = "Before/After ({0} ";
 "剪贴板里没有设置：先按 ⌘C 复制" = "No settings on the clipboard; press ⌘C to copy first";
@@ -217,7 +217,7 @@
 "半尺寸需要偶数像素：{0} 张照片将裁到偶数边（右/下各 1 px）" = "Half-size gain maps require even dimensions: {0} photos will lose up to 1 px at the right/bottom edge";
 "半尺寸需要偶数像素：当前 {0}×{1}，将裁到 " = "Half-size maps require even dimensions: {0}×{1} will be cropped to ";
 "半径" = "Radius";
-"单图" = "Single Photo";
+"单图" = "Single";
 "历史记录" = "History";
 "原图" = "Original";
 "原始" = "Original";
@@ -557,7 +557,7 @@
 "比例" = "Ratio";
 "水印 " = "Watermark ";
 "水印不透明度" = "Watermark opacity";
-"水印位置" = "Watermark position";
+"水印位置" = "Position";
 "水印文字" = "Watermark text";
 "水平翻转" = "Flip horizontally";
 "水平透视" = "Horizontal perspective";
@@ -661,7 +661,7 @@
 "移出照片库" = "Remove from library";
 "移出相册" = "Remove from album";
 "移除" = "Remove";
-"移除位置" = "Remove location";
+"移除位置" = "Remove GPS";
 "空" = "Empty";
 "窗口" = "Window";
 "立即重启" = "Restart Now";
@@ -808,7 +808,7 @@
 "输入 {0} 输出 {1}" = "Input {0} Output {1}";
 "输出后" = "Output Options";
 "过渡" = "Transition";
-"过白" = "Over white";
+"过白" = "White+";
 "还没有修复点" = "No healing spots yet";
 "还没有可测的帧" = "No frame available to measure";
 "还没有导出。选择照片，点“导出”。" = "No exports yet. Select photos and click “Export”.";

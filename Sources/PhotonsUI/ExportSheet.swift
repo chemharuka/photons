@@ -1216,16 +1216,7 @@ public struct ExportSheetView: View {
             model.setQuality(typed / 100)
         }
         sizeRow
-        exportSliderRow(label: "PPI", value: Double(model.preset.effectivePPI ?? 240),
-                        range: 72 ... 600, format: "%.0f", decimals: 0,
-                        unit: Loc.t("像素/英寸"), enabled: model.phase != .running,
-                        axID: "export.ppi", showsSlider: false,
-                        labelToggle: ExportRowToggle(title: "PPI", isOn: ppiEnabledBinding,
-                                                     axID: "export.ppi.enabled"),
-                        placeholder: model.preset.ppi == nil ? Loc.t("不写入") : nil,
-                        readoutPlacement: .inline) { typed in
-            model.setPPI(Int(typed.rounded()))
-        }
+        ppiRow
         // 322 —— 水印不透明度不再是常驻行：它是水印的三件事之一（文字 → 位置 → 不透明度），
         // 现在整个在水印折叠段里。常驻行因此 7 → 6。
         directoryRow
@@ -1293,66 +1284,164 @@ public struct ExportSheetView: View {
 
     /// 302 草图里的 `尺寸 [长边 ▾] [4096] px`：模式、数值、单位在**同一行**，
     /// 数值走唯一的 `SliderNumberField`，所以三种尺寸模式的数值框都落在同一根 x 上。
+    ///
+    /// 427 —— 改成**双行**。用户口径：「尺寸…三个选项 original size / long edge / percentage 已经很宽
+    /// 了，后面 40 MP（不扩大）多少 px 等信息固定占了空间挤不下，设计上 Size 做成双行，三个选项
+    /// …一行，剩下的全部放在第二行」。
+    ///
+    /// 为什么必须是布局而不是文案：三段是 `.segmented`，英文
+    /// `Original size / Long edge / Percentage` 在 small + 12 pt 下要 **254 pt**（实测），
+    /// 322 把它压在 `ExportRowGrid.presetWidth` 的 150 里 ⇒ 每段 ~50 pt，怎么都截。
+    /// 双行之后第一行只有分段控件（主列 402 pt 装 254 pt 有余），第二行放数值、单位、像素量与
+    /// 「不扩大」。**列线一条都没动**：双行只在主列内部（138…540）重排。
     @ViewBuilder
     private var sizeRow: some View {
         switch model.preset.sizingMode {
         case .longEdge:
-            exportSliderRow(label: Loc.t("尺寸"), value: Double(model.preset.longEdge ?? 2400),
-                            range: 1 ... 20_000, format: "%.0f", decimals: 0,
-                            unit: "px", enabled: model.phase != .running,
-                            axID: "export.size.longEdge", showsSlider: false,
-                            picker: AnyView(sizeModePicker),
-                            trailingToggle: ExportRowToggle(
-                                title: Loc.t("不扩大"), isOn: $model.preset.noUpscale,
-                                axID: "export.size.noUpscale",
-                                help: Loc.t("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大"))) { typed in
+            sizeGridRow(axID: "export.size.longEdge",
+                        value: Double(model.preset.longEdge ?? 2400), range: 1 ... 20_000,
+                        format: "%.0f", unit: "px",
+                        trailingToggle: ExportRowToggle(
+                            title: Loc.t("不扩大"), isOn: $model.preset.noUpscale,
+                            axID: "export.size.noUpscale",
+                            help: Loc.t("勾选时输出长边 = min(请求值, 源长边)，永远不会放大；取消才允许放大"))) { typed in
                 model.preset.longEdge = max(1, Int(typed.rounded()))
             }
         case .percent:
-            exportSliderRow(label: Loc.t("尺寸"), value: Double(model.preset.percent ?? 100),
-                            range: 10 ... 100, format: "%.0f", decimals: 0,
-                            unit: "%", enabled: model.phase != .running,
-                            axID: "export.size.percent", showsSlider: false,
-                            picker: AnyView(sizeModePicker)) { typed in
+            sizeGridRow(axID: "export.size.percent",
+                        value: Double(model.preset.percent ?? 100), range: 10 ... 100,
+                        format: "%.0f", unit: "%") { typed in
                 model.preset.percent = min(100, max(10, Int(typed.rounded())))
             }
         case .none:
-            exportSliderRow(label: Loc.t("尺寸"), value: 0, range: 0 ... 1, format: "%.0f", decimals: 0,
-                            enabled: false, axID: "export.size.original", showsSlider: false,
-                            picker: AnyView(sizeModePicker), placeholder: Loc.t("原始像素")) { _ in }
+            sizeGridRow(axID: "export.size.original", value: 0, range: 0 ... 1, format: "%.0f",
+                        unit: nil, placeholder: Loc.t("原始像素")) { _ in }
         }
     }
 
-    /// 尺寸模式 + 预测像素量：同一行里，模式是控件，像素量是它右边的次级读数。
-    private var sizeModePicker: some View {
-        HStack(spacing: 8) {
-            Picker("", selection: sizingModeBinding) {
-                // 161 §2 —— UI 顺序是 原尺寸 / 长边 / 比例；`allCases` 是存储顺序，不能改。
-                ForEach(ExportSizingMode.displayOrder, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+    /// 427 —— 尺寸行（双行）：第一行是三个尺寸模式，第二行是数值 / 单位 / 像素量 / 行修饰。
+    ///
+    /// 读数的落位与原来一致（`numberReadout` 仍是那唯一一处 `SliderNumberField`），
+    /// `.number` / `.unit` / `.accessory` / `.toggle` 四条探针的 rowID 一个都没变 —— 250 的点击
+    /// 测试、322 的截断表、388 的读数右沿都还量得到原来的东西。`.readout` 探针（原来是值 + 单位
+    /// 那一块）现在包第二行整条：它仍从 138 起、仍到 540 止。
+    private func sizeGridRow(axID: String, value: Double, range: ClosedRange<Double>,
+                             format: String, unit: String?,
+                             placeholder: String? = nil,
+                             trailingToggle: ExportRowToggle? = nil,
+                             write: @escaping (Double) -> Void) -> some View {
+        ExportRowGridRow(
+            rowID: axID,
+            label: { rowLabel(Loc.t("尺寸")) },
+            control: {
+                VStack(alignment: .leading, spacing: 4) {
+                    sizeModePicker
+                    HStack(spacing: ExportRowGrid.readoutGap) {
+                        numberReadout(axID: axID, value: value, range: range, format: format,
+                                      decimals: 0, enabled: model.phase != .running,
+                                      placeholder: placeholder, write: write)
+                        if let unit {
+                            Text(unit)
+                                .font(.system(size: ExportRowGrid.Font.unit))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .background(ExportSliderRowProbeHost(kind: .unit, rowID: axID))
+                                .background(ExportRowGridProbeHost(kind: .unit, rowID: axID))
+                        }
+                        if let megapixels = model.predictedMegapixelText {
+                            predictedMegapixels(megapixels)
+                        }
+                        Spacer(minLength: 0)
+                        if let trailingToggle {
+                            rowToggle(trailingToggle, enabled: model.phase != .running, isLabel: false)
+                        }
+                    }
+                    // 427 —— 两条线**各占一个行高**：三种尺寸模式的第二行内容不同（数值框 / 一句
+                    // placeholder），不钉高的话「原尺寸」会比「长边」矮 10 pt，整表 pitch 就跟着模式变。
+                    .frame(maxWidth: .infinity, minHeight: ExportRowGrid.rowHeight,
+                           alignment: .leading)
+                    .background(ExportRowGridProbeHost(kind: .readout, rowID: axID))
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            value: { EmptyView() },
+            unit: { EmptyView() },
+            accessory: { EmptyView() })
+    }
+
+    /// 335 / 427 —— PPI 行：勾选框当标签，输入框在主列左端，单位紧跟其后。
+    ///
+    /// 427 —— 它不再是 `exportSliderRow(..., readoutPlacement: .inline)` 的调用点：那个行的读数块
+    /// 把「值」框在 46 pt 里（`readoutBlock` 的 `frame(width: valueWidth)`），而 PPI 关闭时那里画的
+    /// 是一句话而不是一个数值 —— `"不写入"` 33.0 pt 塞得下，`"Do not write"` 63.99 pt 塞不下，
+    /// 于是界面上是 `Do not…`（用户报「只看到 Do not」）。这一行自己排：输入框仍是那个 46 宽的
+    /// `SliderNumberField`，placeholder 至少占 46、更长的译文拿自己的理想宽，**单位一律排在它
+    /// 后面 8 pt**。列线不变（138 起，`.readout` 探针仍在这一行上）。
+    private var ppiRow: some View {
+        ExportRowGridRow(
+            rowID: "export.ppi",
+            label: {
+                rowToggle(ExportRowToggle(title: "PPI", isOn: ppiEnabledBinding,
+                                          axID: "export.ppi.enabled"),
+                          enabled: model.phase != .running)
+            },
+            control: {
+                HStack(spacing: ExportRowGrid.readoutGap) {
+                    numberReadout(axID: "export.ppi",
+                                  value: Double(model.preset.effectivePPI ?? 240),
+                                  range: 72 ... 600, format: "%.0f", decimals: 0,
+                                  enabled: model.phase != .running,
+                                  placeholder: model.preset.ppi == nil ? Loc.t("不写入") : nil) { typed in
+                        model.setPPI(Int(typed.rounded()))
+                    }
+                    Text(Loc.t("像素/英寸"))
+                        .font(.system(size: ExportRowGrid.Font.unit))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .background(ExportSliderRowProbeHost(kind: .unit, rowID: "export.ppi"))
+                        .background(ExportRowGridProbeHost(kind: .unit, rowID: "export.ppi"))
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(ExportRowGridProbeHost(kind: .readout, rowID: "export.ppi"))
+            },
+            value: { EmptyView() },
+            unit: { EmptyView() },
+            accessory: { EmptyView() })
+    }
+
+    /// 尺寸模式：三个选项独占一行。
+    ///
+    /// 427 —— 不再压到 `presetWidth`（150）：量出来英文三段要 254 pt，150 里每段只剩 50 pt。
+    /// `.fixedSize(horizontal:)` 让它拿**自己的理想宽**（主列 402 pt，装得下；中文更窄），
+    /// 于是既没有截断，也没有「拉满 402 的一长条」。
+    private var sizeModePicker: some View {
+        Picker("", selection: sizingModeBinding) {
+            // 161 §2 —— UI 顺序是 原尺寸 / 长边 / 比例；`allCases` 是存储顺序，不能改。
+            ForEach(ExportSizingMode.displayOrder, id: \.self) { mode in
+                Text(mode.displayName).tag(mode)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .exportControlFont("export.size.mode", kind: .picker)
-            .frame(maxWidth: ExportRowGrid.presetWidth)
-            .disabled(model.phase == .running)
-            if let megapixels = model.predictedMegapixelText {
-                Text(megapixels)
-                    .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    // 322 —— 它排在模式选择后面，`HStack` 先压它：模式选择拿 150 之后只剩 41 pt，
-                    // 像素量一长（「11.2 MP」量出来 47.6）就成「11.2 M…」。它不参与压缩：
-                    // 拿自己的理想宽，剩下的给模式选择与空白。
-                    .fixedSize(horizontal: true, vertical: false)
-                    .accessibilityIdentifier("export.size.megapixels")
-                    // 322 —— 它是「尺寸」行的次级读数：自己的探针，量的是布局真分给它的宽度。
-                    .background(ExportRowGridProbeHost(kind: .accessory,
-                                                       rowID: "export.size.megapixels"))
-            }
-            Spacer(minLength: 0)
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .exportControlFont("export.size.mode", kind: .picker)
+        .fixedSize(horizontal: true, vertical: false)
+        // 427 —— 第一条线也钉在 24：双行的高度因此是个**常数**（24 + 4 + 24 = 52），不随
+        // 分段控件自己的理想高变化。行高变了 pitch 就会跟着变，那是全表的事，不能是「量出来多少算多少」。
+        .frame(height: ExportRowGrid.rowHeight)
+        .disabled(model.phase == .running)
+    }
+
+    /// 322 —— 预测像素量：排在模式选择后面，`HStack` 先压它，所以它拿自己的理想宽、不参与压缩
+    /// （「11.2 MP」量出来 47.6，压一下就成「11.2 M…」）。
+    private func predictedMegapixels(_ megapixels: String) -> some View {
+        Text(megapixels)
+            .font(.system(size: ExportRowGrid.Font.hint, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("export.size.megapixels")
+            .background(ExportRowGridProbeHost(kind: .accessory, rowID: "export.size.megapixels"))
     }
 
     private var directoryRow: some View {
@@ -1928,6 +2017,12 @@ public struct ExportSheetView: View {
             Text(placeholder)
                 .font(.system(size: ExportRowGrid.Font.hint))
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                // 427 —— placeholder 是**一句话**（「不写入」= 33.0，"Do not write" = 63.99），
+                // 不是 46 pt 的数值框。它至少占住 `valueWidth`（32 位的中文译文仍与数值框同宽），
+                // 更长的译文拿自己的理想宽 —— 单位因此排在它**后面**，而不是压在它身上。
+                .frame(minWidth: ExportRowGrid.valueWidth, alignment: .trailing)
+                .background(ExportRowGridProbeHost(kind: .value, rowID: axID))
                 .background(ExportSliderRowProbeHost(kind: .number, rowID: axID))
         } else {
             SliderNumberField(value: value, range: range, format: format,
@@ -1951,7 +2046,6 @@ public struct ExportSheetView: View {
         format: String, decimals: Int, unit: String? = nil,
         enabled: Bool, axID: String,
         showsSlider: Bool = true,
-        picker: AnyView? = nil,
         labelToggle: ExportRowToggle? = nil,
         trailingToggle: ExportRowToggle? = nil,
         placeholder: String? = nil,
@@ -1969,9 +2063,7 @@ public struct ExportSheetView: View {
                 }
             },
             control: {
-                if let picker {
-                    picker
-                } else if showsSlider {
+                if showsSlider {
                     Slider(value: Binding(get: { value }, set: write), in: range)
                         .controlSize(.small)
                         .frame(minWidth: ExportRowGrid.sliderWidth, maxWidth: .infinity)
