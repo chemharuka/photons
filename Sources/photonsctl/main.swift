@@ -99,6 +99,10 @@ func cmdInfo(_ a: Args) {
     note("camera          \(probe.make ?? "?") / \(probe.model ?? "?")  ISO \(probe.iso.map(String.init) ?? "?")")
     note("nativeSize      \(probe.nativeWidth) x \(probe.nativeHeight)")
     note("defaultVersion  \(probe.defaultVersion)")
+    // 425 — the 409 automatic rule's answer for this file: what a document with `decoderVersion == nil`
+    // gets today (the same value `DecoderCapabilities.autoVersion` carries to the 解码模型 picker).
+    // `RAWProbe.autoVersion`'s own comment promised `photonsctl info` printed it; it did not.
+    note("autoVersion     \(probe.autoVersion ?? "nil (no upgrade)")")
     note("versions        \(probe.supportedVersions.joined(separator: ", "))")
     // 派单 006 A: the file's own white balance — what the inspector shows while the document is
     // as shot, instead of the nominal 6500 K the panel used to print.
