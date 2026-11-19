@@ -188,7 +188,15 @@ private final class CardOverlayView: NSView {
 /// bitmap. Its two siblings keep the old drawing path: the card itself paints the gradient under
 /// it, and a transparent overlay paints the ring/badges over it.
 public final class AssetCardView: NSView {
-    public var asset: Asset? { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var asset: Asset? {
+        didSet {
+            // 431 — the swatch box depends on the frame's orientation, so a recycled cell has to
+            // re-place its thumbnail view when the new photo is portrait (or the old one was).
+            needsLayout = true
+            needsDisplay = true
+            overlay.needsDisplay = true
+        }
+    }
     public var isActive: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     public var isPicked: Bool = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
 
@@ -229,6 +237,15 @@ public final class AssetCardView: NSView {
     /// for, so a test can state "at 100 pt the drawn string is `fitted(…, width: 100)`".
     public private(set) var lastDrawnCaption: String?
     public private(set) var lastCaptionRect: NSRect = .zero
+
+    /// 431 — the swatch box `layout()` gave the thumbnail view. Recorded where the frame is set, so a
+    /// test can read the portrait/landscape geometry off the surface that actually laid it out.
+    public private(set) var lastSwatchRect: NSRect = .zero
+
+    /// 431 — the rect the selection/active ring was stroked in, recorded by `drawForeground()`.
+    /// The ring is `lastSwatchRect.insetBy(0.75)`; keeping the number it actually used is what makes
+    /// 「the ring follows the narrow portrait box」 an observation rather than an inference.
+    public private(set) var lastRingRect: NSRect?
 
     /// The badge this cell would draw — handy for a log line and for the smoke's expected value.
     public var badgeSignature: String { badges.signature }
@@ -300,12 +317,30 @@ public final class AssetCardView: NSView {
         let rect = swatchRect
         thumbnailView.frame = rect
         overlay.frame = bounds
+        lastSwatchRect = rect
     }
 
+    /// 431 — the swatch box: **full card width for a landscape frame** (that is the largest picture the
+    /// cell can hold, so it is the landscape maximum), and a **3:4 narrow box centred horizontally** for
+    /// a portrait frame. Height never changes, so `GridLayout.metrics` and the whole grid are untouched;
+    /// `ThumbnailMetal` crops with `.resizeAspectFill`, so narrowing the box is all it takes to show the
+    /// portrait crop — no decode change, no `displayPixels` change.
+    ///
+    /// `nil` width/height (an old library, missing metadata) is treated as landscape: an unknown
+    /// orientation must look like today's cell, not like an empty box.
     private var swatchRect: NSRect {
         let labelHeight = GridLayout.labelHeight
-        return NSRect(x: 0, y: 0, width: bounds.width,
-                      height: max(1, bounds.height - labelHeight))
+        let full = NSRect(x: 0, y: 0, width: bounds.width,
+                          height: max(1, bounds.height - labelHeight))
+        guard let asset, Self.isPortrait(asset) else { return full }
+        let w = (full.height * 3.0 / 4.0).rounded()
+        return NSRect(x: ((full.width - w) / 2).rounded(), y: 0, width: w, height: full.height)
+    }
+
+    /// `height > width` is a portrait frame. **Unknown is landscape** (see `swatchRect`).
+    static func isPortrait(_ asset: Asset) -> Bool {
+        guard let w = asset.width, let h = asset.height, w > 0, h > 0 else { return false }
+        return h > w
     }
 
     public override func draw(_ dirtyRect: NSRect) {
@@ -330,7 +365,8 @@ public final class AssetCardView: NSView {
             diag.stroke()
 
             let ext = asset.ext.uppercased()
-            (ext as NSString).draw(at: NSPoint(x: 8, y: 6), withAttributes: PlaceholderStyle.captionAttributes)
+            (ext as NSString).draw(at: NSPoint(x: swatchRect.minX + 8, y: 6),
+                                   withAttributes: PlaceholderStyle.captionAttributes)
         }
         NSGraphicsContext.restoreGraphicsState()
     }
@@ -345,12 +381,15 @@ public final class AssetCardView: NSView {
         let radius: CGFloat = WorkspaceLayout.cardCornerRadius
 
         // Selection / active ring: accent for the anchor, softer accent for the rest of the selection.
+        lastRingRect = nil
         if isPicked || isActive {
-            let ring = NSBezierPath(roundedRect: swatchRect.insetBy(dx: 0.75, dy: 0.75),
+            let ringRect = swatchRect.insetBy(dx: 0.75, dy: 0.75)
+            let ring = NSBezierPath(roundedRect: ringRect,
                                     xRadius: radius, yRadius: radius)
             (isActive ? NSColor.controlAccentColor : NSColor.controlAccentColor.withAlphaComponent(0.55)).setStroke()
             ring.lineWidth = isActive ? 2 : 1.5
             ring.stroke()
+            lastRingRect = ringRect
         }
 
         let captionRect = NSRect(x: 2, y: swatchRect.maxY + 4, width: bounds.width - 4,
