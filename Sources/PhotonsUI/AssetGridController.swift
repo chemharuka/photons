@@ -583,6 +583,77 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var lastLibraryURL: URL?
     private var loggedMissingCache = false
 
+    // MARK: 437 — the warm band
+
+    /// 437 — how far past the viewport the **warm** band reaches, in rows. A photo in this extra
+    /// ring is only asked for if its 1920 px JPEG is already on disk (or in the memory LRU), so the
+    /// ask costs a file decode, never a render. Twelve rows is symmetric and was chosen from the
+    /// A⑨ measurement, not from the old ±4 arithmetic.
+    static let warmSlackRows: CGFloat = 12
+
+    /// 437 — the most **new** warm asks one reconcile pass may issue. A fast jump can put a hundred
+    /// newly-cached rows inside the warm ring; issuing them all at once would push the visible
+    /// cells behind them in the queue. The rest is carried in `warmBacklog` and issued by the next
+    /// pass (a continuation work item, not a per-frame resend).
+    static let warmBudgetPerPass = 32
+
+    /// 437 — indices the latest pass classified as warm-eligible but did not ask for because the
+    /// pass budget ran out. Pruned to the current band every pass, so scrolling away drops them.
+    private var warmBacklog: Set<Int> = []
+    private var warmContinuationScheduled = false
+
+    /// 437 — `peek` answers, by key digest. `fileExists` measured ~0.4 ms a call on the demo
+    /// library's cache (72 cold calls = 29–37 ms), so A⑧'s "> 3 ms ⇒ add a cache" branch is the one
+    /// that shipped. A bitmap that lands through this grid flips its entry to `true` in
+    /// `thumbnailDidLoad`; a negative answer expires after a second so another surface's write is
+    /// picked up without a per-pass `stat`.
+    private struct PeekAnswer {
+        var exists: Bool
+        var at: CFTimeInterval
+    }
+    private var peekCache: [String: PeekAnswer] = [:]
+    private static let peekNegativeTTL: CFTimeInterval = 1.0
+
+    /// 437 — derived keys for the warm ring, by asset id. Building one costs a `develop_json`
+    /// decode and a document digest; doing that for ~150 candidates twice a pass was the other
+    /// 38 ms A⑧ measured. Validity is the row's own `develop_json`, plus "not the anchor" (the
+    /// anchor's document is the live one, which a cache must not pin).
+    private struct WarmKey {
+        var developJson: String
+        var key: ThumbKey
+    }
+    private var warmKeyCache: [String: WarmKey] = [:]
+
+    /// 437 — the warm filter's answer per index. Once a photo is eligible it stays eligible for the
+    /// life of this view (the HD file is content-addressed and only a cache trim removes it), so the
+    /// steady-state pass over a full band is a few dictionary hits, not 144 `NSCache` lookups.
+    /// Ineligible answers carry the same one-second TTL as a negative `peek`.
+    private struct WarmEligibility {
+        var assetID: String
+        var eligible: Bool
+        var checkedAt: CFTimeInterval
+    }
+    private var warmEligibility: [Int: WarmEligibility] = [:]
+
+    /// 437 — warm asks actually handed to the provider. The acceptance reads deltas of this instead
+    /// of inferring "was it warm?" from timings.
+    public private(set) var warmRequests = 0
+    /// 437 — `peek` calls made by the last reconcile pass, and their wall time on the main thread.
+    public private(set) var lastWarmPeekCount = 0
+    public private(set) var lastWarmPeekMilliseconds: Double = 0
+    /// 437 — new warm asks issued by the latest pass alone (≤ `warmBudgetPerPass`).
+    public private(set) var lastReconcileWarmRequests = 0
+    /// 437 — passes that passed the `wanted == lastWanted` gate and did work. Read by A④: an idle
+    /// reconcile must not increment it (429's "wanted 变了才干活" half).
+    public private(set) var reconcilePasses = 0
+    /// 437 — the priority of every request issued by the latest pass, in issue order. Visible cells
+    /// must come before the prefetch work, so this list is non-increasing in `ThumbPriority`.
+    private(set) var lastReconcilePriorities: [ThumbPriority] = []
+    /// 437 — every request this controller has issued, in issue order (bounded). Unlike the per-pass
+    /// list above, this survives a pass, so the acceptance can include the cells' own `configure`
+    /// asks that land between a scroll and the coalesced reconcile.
+    private(set) var requestLog: [(index: Int, priority: ThumbPriority)] = []
+
     /// Open the anchor in the loupe (double-click / Return).
     public var onActivate: ((String) -> Void)?
 
@@ -988,20 +1059,24 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         for (_, token) in thumbRequests { token.cancel() }
         thumbRequests.removeAll()
         providerCache = cache
+        peekCache.removeAll()
+        warmKeyCache.removeAll()
+        warmEligibility.removeAll()
         let made = ThumbnailProvider.shared(for: cache)
         thumbnailProvider = made
         return made
     }
 
+    @discardableResult
     private func requestThumbnail(index: Int, asset: Asset, tier: ThumbTier,
-                                  display: ImageSize, priority: ThumbPriority) {
-        guard let provider = provider() else { return }
-        guard let session, let url = session.fileURL(for: asset) else { return }
+                                  display: ImageSize, priority: ThumbPriority) -> Bool {
+        guard let provider = provider() else { return false }
+        guard let session, let url = session.fileURL(for: asset) else { return false }
         let document = document(for: asset)
         let wanted = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
         if let pending = thumbRequests[index] {
             // Already asking for exactly this: one request per cell.
-            guard pending.key.digest != wanted.digest else { return }
+            guard pending.key.digest != wanted.digest else { return false }
             // 363 — a **later** document superseded it. The old ask is condemned instead of being
             // left to land: an older frame repainting a cell that has moved on is the same class of
             // bug as the pre-edit key coming back, and it also keeps the queue free of renders
@@ -1016,12 +1091,24 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
         }
         thumbRequests[index] = token
+        lastReconcilePriorities.append(priority)
+        requestLog.append((index, priority))
+        if requestLog.count > 4096 { requestLog.removeFirst(requestLog.count - 4096) }
+        return true
     }
 
     private func thumbnailDidLoad(index: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
         thumbRequests[index] = nil
         // A nil image is a real answer ("no preview / unreadable"): the card keeps its placeholder.
         guard let image, let session, index >= 0, index < session.assets.count else { return }
+        // 437 — the file this key names is now on disk; the next reconcile can warm it without a
+        // `peek`.
+        let now = CACurrentMediaTime()
+        peekCache[key.digest] = PeekAnswer(exists: true, at: now)
+        if let known = warmEligibility[index] {
+            warmEligibility[index] = WarmEligibility(assetID: known.assetID, eligible: true,
+                                                     checkedAt: now)
+        }
         let path = IndexPath(item: index, section: 0)
         guard let cell = collectionView.item(at: path) as? AssetGridItem else { return }
         // The cell may have been recycled between request and delivery; the asset id is the guard.
@@ -1140,35 +1227,174 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             }
         }
 
-        let wanted = wantedIndexes()
-        if !force, wanted == lastWanted { return }
+        let display = displayPixels
+        let core = bandIndexes(rows: 4)
+        let wide = bandIndexes(rows: Self.warmSlackRows)
+        let warm = warmEligibleIndexes(in: wide.subtracting(core), provider: provider, display: display)
+        let wanted = core.union(warm)
+        // 437 — a pass is also due when a budget-deferred warm backlog is still waiting, even if
+        // the band itself has not moved. Everything else keeps 429's "only when wanted changed".
+        if !force, wanted == lastWanted, warmBacklog.isEmpty { return }
         lastWanted = wanted
+        reconcilePasses += 1
+        lastReconcileWarmRequests = 0
+        lastReconcilePriorities.removeAll(keepingCapacity: true)
 
+        let visible = Set(collectionView.indexPathsForVisibleItems().map { $0.item })
+        // 437 — issue in priority order: what is on screen, then the ±4-row core slack, then the
+        // warm ring under this pass's budget. A `Set` has no order, so each stage is sorted; the
+        // resulting request order is the thing A⑤ asserts (visible before prefetch).
+        requestBand(visible.sorted(), priority: .onScreen, session: session, provider: provider,
+                    display: display)
+        requestBand(core.subtracting(visible).sorted(), priority: .prefetch, session: session,
+                    provider: provider, display: display)
+
+        var deferred: Set<Int> = []
+        var warmIssued = 0
+        for index in warm.subtracting(core).sorted() {
+            if warmIssued >= Self.warmBudgetPerPass {
+                deferred.insert(index)
+                continue
+            }
+            if issue(index: index, priority: .prefetch, session: session, provider: provider,
+                     display: display) {
+                warmIssued += 1
+                warmRequests += 1
+            }
+        }
+        lastReconcileWarmRequests = warmIssued
+        warmBacklog = deferred
+        if !deferred.isEmpty { scheduleWarmContinuation() }
+
+        // 437 — the cancellation moved **after** the asks so a pass ends with exactly `wanted`
+        // queued: issue the new band first, then condemn what it left. (Nothing can land in
+        // between: this whole function runs synchronously on the main actor.)
         for (index, token) in thumbRequests where !wanted.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
         }
 
-        let visible = Set(collectionView.indexPathsForVisibleItems().map { $0.item })
-        let display = displayPixels
-        for index in wanted {
-            guard index < session.assets.count else { continue }
-            let asset = session.assets[index]
-            if provider.memoryImage(for: ThumbnailProvider.hdJPEGKey(for: asset,
-                                                                 document: document(for: asset)),
-                                     display: display) != nil { continue }
-            if thumbRequests[index] != nil { continue }
-            // §4 ②③: what is on screen is on-screen work; the four-row slack is prefetch.
-            requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
-                             priority: visible.contains(index) ? .onScreen : .prefetch)
-        }
         // 429 — the structural proof that the cancellation above ran: after a rebuild, every queued
         // index is inside the band. Recorded rather than asserted here because it is a *reading*, and
         // `pendingThumbnailIndexesOutsideWindow` can go back to 0 on its own when a request lands
         // (`thumbnailDidLoad` clears it) — which is exactly why a timing-based gate could not see the
         // cancellation being deleted. This counter is written **synchronously at the end of the
         // rebuild**, before any landing can interfere, so it is 0 iff the loop above did its job.
+        //
+        // 437 — `wanted` is now core ∪ the warm ring, so this is still exactly "nothing queued
+        // outside what this pass asked for"; the *window* reading below widened to match.
         lastRebuildOutsideCount = Set(thumbRequests.keys).subtracting(wanted).count
+    }
+
+    /// 437 — ask for one band stage unless the memory LRU already has the pixels or a request for
+    /// the index is already outstanding. Returns whether a request was handed to the provider.
+    @discardableResult
+    private func requestBand(_ indexes: [Int], priority: ThumbPriority,
+                             session: CatalogSession, provider: ThumbnailProvider,
+                             display: ImageSize) -> Int {
+        var issued = 0
+        for index in indexes {
+            if issue(index: index, priority: priority, session: session, provider: provider,
+                     display: display) { issued += 1 }
+        }
+        return issued
+    }
+
+    private func issue(index: Int, priority: ThumbPriority, session: CatalogSession,
+                       provider: ThumbnailProvider, display: ImageSize) -> Bool {
+        guard index < session.assets.count else { return false }
+        let asset = session.assets[index]
+        if provider.memoryImage(for: warmKey(for: asset), display: display) != nil { return false }
+        if thumbRequests[index] != nil { return false }
+        return requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
+                                priority: priority)
+    }
+
+    /// 437 — the warm ring's membership rule: a **cached** photo (1920 px JPEG on disk, or a bitmap
+    /// already in the memory LRU) may be asked for out to ±`warmSlackRows`; a photo that has never
+    /// been rendered stays exactly where it was, in the ±4-row core band. That is what keeps the
+    /// wide band from turning a first visit into a render storm (A③).
+    ///
+    /// `peek` is one `fileExists` (no decode, no ImageIO); the count and wall time of the calls are
+    /// kept on `lastWarmPeekCount` / `lastWarmPeekMilliseconds` so A⑧ can state the cost instead of
+    /// guessing. The ring minus the ±4-row core is 16 rows; at nine columns that is 144 probes on
+    /// the first pass and none once the answers are cached.
+    private func warmEligibleIndexes(in candidates: Set<Int>, provider: ThumbnailProvider,
+                                     display: ImageSize) -> Set<Int> {
+        let start = CACurrentMediaTime()
+        var peeks = 0
+        var eligible = Set<Int>()
+        guard let session else {
+            lastWarmPeekCount = 0
+            lastWarmPeekMilliseconds = 0
+            return eligible
+        }
+        for index in candidates where index < session.assets.count {
+            let asset = session.assets[index]
+            if let known = warmEligibility[index], known.assetID == asset.id {
+                if known.eligible {
+                    eligible.insert(index)
+                    continue
+                }
+                if start - known.checkedAt < Self.peekNegativeTTL { continue }
+            }
+            let key = warmKey(for: asset)
+            if let known = peekCache[key.digest],
+               known.exists || start - known.at < Self.peekNegativeTTL {
+                if known.exists {
+                    eligible.insert(index)
+                    warmEligibility[index] = WarmEligibility(assetID: asset.id, eligible: true,
+                                                             checkedAt: start)
+                } else {
+                    warmEligibility[index] = WarmEligibility(assetID: asset.id, eligible: false,
+                                                             checkedAt: known.at)
+                }
+                continue
+            }
+            if provider.memoryImage(for: key, display: display) != nil {
+                peekCache[key.digest] = PeekAnswer(exists: true, at: start)
+                warmEligibility[index] = WarmEligibility(assetID: asset.id, eligible: true,
+                                                         checkedAt: start)
+                eligible.insert(index)
+                continue
+            }
+            peeks += 1
+            let exists = provider.cache.peek(key)
+            peekCache[key.digest] = PeekAnswer(exists: exists, at: start)
+            warmEligibility[index] = WarmEligibility(assetID: asset.id, eligible: exists,
+                                                     checkedAt: start)
+            if exists { eligible.insert(index) }
+        }
+        lastWarmPeekCount = peeks
+        lastWarmPeekMilliseconds = (CACurrentMediaTime() - start) * 1000
+        return eligible
+    }
+
+    /// 437 — memoised `ThumbnailProvider.hdJPEGKey` for the warm ring. The anchor is never cached:
+    /// its document is `session.edit`, which changes without `develop_json` moving.
+    private func warmKey(for asset: Asset) -> ThumbKey {
+        if session?.loadedEditAssetID != asset.id,
+           let cached = warmKeyCache[asset.id],
+           cached.developJson == asset.developJson {
+            return cached.key
+        }
+        let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset))
+        if session?.loadedEditAssetID != asset.id {
+            warmKeyCache[asset.id] = WarmKey(developJson: asset.developJson, key: key)
+        }
+        return key
+    }
+
+    /// 437 — a pass that hit `warmBudgetPerPass` leaves the rest in `warmBacklog`; this is the
+    /// "下一 pass 继续" half, coalesced into one item so a jump does not pile up continuations.
+    private func scheduleWarmContinuation() {
+        guard !warmContinuationScheduled else { return }
+        warmContinuationScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self else { return }
+            self.warmContinuationScheduled = false
+            self.reconcileThumbnails(force: false)
+        }
     }
 
     /// Indices still queued after the last `reconcileThumbnails` rebuild that were **not** in that
@@ -1181,12 +1407,32 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// outside the band is cancelled in `reconcileThumbnails`, so a fast drag does not accumulate
     /// work; the wanted set is the only thing that got bigger.
     ///
+    /// 437 — this is the **effective** set: the ±4-row core band for every photo, plus the warm ring
+    /// (±`warmSlackRows`) restricted to photos whose HD JPEG is already on disk or in memory. It is
+    /// still **one** set feeding both the request loop and the cancellation loop, so 429's "outside
+    /// the band ⇒ cancelled" has not been forked into a second queue.
+    ///
     /// Internal, not private, so the 429 acceptance can read the band's size off the live view
     /// (`wantedIndexes().count`) instead of recomputing the arithmetic in a test.
     func wantedIndexes() -> Set<Int> {
+        let core = bandIndexes(rows: 4)
+        guard let provider = provider(), !core.isEmpty else { return core }
+        let display = displayPixels
+        let wide = bandIndexes(rows: Self.warmSlackRows)
+        return core.union(warmEligibleIndexes(in: wide.subtracting(core), provider: provider,
+                                              display: display))
+    }
+
+    /// 437 — the widest band this controller may hold, **without** the cache filter. This is the
+    /// new meaning of "outside the window": the reverse gate (429 ⑧d) and `--ui-smoke` ask "is
+    /// anything queued beyond ±`warmSlackRows`?", not "beyond the ±4-row core?".
+    func wideWantedIndexes() -> Set<Int> { bandIndexes(rows: Self.warmSlackRows) }
+
+    /// 429 — the geometry half of `wantedIndexes()`, shared by both bands.
+    private func bandIndexes(rows: CGFloat) -> Set<Int> {
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
-        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight) * 4)
+        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight) * rows)
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
         return Set(attributes.compactMap { $0.indexPath?.item })
@@ -1203,14 +1449,42 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Requests the grid believes are still outstanding (queued or running).
     public var pendingThumbnailRequests: Int { thumbRequests.count }
 
+    /// 437 — the indices currently outstanding. Read by the warm acceptance (`thumbRequests.keys`
+    /// is private); one set, exactly what the cancellation loop is using.
+    var queuedThumbnailIndexes: Set<Int> { Set(thumbRequests.keys) }
+
     /// Outstanding requests for item indices that are no longer visible or prefetched. Must be 0
     /// once the scroll handler has run: "cancel what scrolled away" is an invariant, not a hope.
+    ///
+    /// 437 — "the window" is now the **wide** band (±`warmSlackRows`), not the ±4-row core: the warm
+    /// ring is legitimately allowed to hold requests, so subtracting the core would report it as a
+    /// leak. This is a re-definition, not a relaxation — anything past ±12 rows is still a bug.
     public var pendingThumbnailIndexesOutsideWindow: Int {
-        Set(thumbRequests.keys).subtracting(wantedIndexes()).count
+        Set(thumbRequests.keys).subtracting(wideWantedIndexes()).count
     }
 
     /// Worker-pool depth at this instant — queued + running, from the shared service.
     public var thumbnailQueueDepth: Int { thumbnailProvider?.queueDepth ?? 0 }
+
+    // MARK: 437 acceptance hooks
+
+    /// Run one reconcile pass synchronously, so a test can read `queuedThumbnailIndexes` in the same
+    /// turn the requests were issued (the async coalescer would otherwise let a decoder land first).
+    func reconcileThumbnailsForTesting(force: Bool = true) { reconcileThumbnails(force: force) }
+
+    /// Drop the coalesced work item so a test can run its own pass without a queued one landing
+    /// first (the two would share `thumbRequests`, and the second would look like a no-op).
+    func cancelScheduledThumbnailReconcileForTesting() {
+        reconcileWork?.cancel()
+        reconcileWork = nil
+    }
+
+    /// Start a fresh request-order reading. The acceptance calls this after the bands settle.
+    func resetRequestLogForTesting() { requestLog.removeAll() }
+
+    /// The **core** band (±4 rows) without the warm filter — the set a library with an empty disk
+    /// cache must degrade to.
+    func coreWantedIndexes() -> Set<Int> { bandIndexes(rows: 4) }
 
     /// The provider this grid draws from — `--ui-smoke` asserts it is the filmstrip's too.
     public var thumbnailProviderForSmoke: ThumbnailProvider? { provider() }
@@ -1248,6 +1522,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         lastTier = nil
         thumbnailProvider = nil
         providerCache = nil
+        peekCache.removeAll()
+        warmKeyCache.removeAll()
+        warmEligibility.removeAll()
+        warmBacklog.removeAll()
+        requestLog.removeAll()
     }
 
     // MARK: right-click (「原文件已移动」 → 删除 or 重新链接)
