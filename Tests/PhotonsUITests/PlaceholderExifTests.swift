@@ -5,17 +5,18 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 290 — the first-frame stand-in must use the **upright** picture before the first ingest.
+/// 290 / 436 — the first-frame stand-in must use the **upright** picture before the first ingest.
 ///
-/// The catalog row's `width/height` are the **stored** (sensor) dimensions. For an EXIF orientation
-/// of 5…8 the picture the user sees is those two swapped, and the thumbnail the stand-in draws is
-/// already upright. Until `publishIngestedSource` publishes the real frame, the fallback projection
-/// used to be built from the stored pair, so an EXIF portrait was laid out as a landscape: wider and
-/// shorter than the frame that followed.
+/// **436 changed where "upright" lives.** The catalog row's `width/height` are **display pixels**:
+/// import applies the EXIF quarter turn and schema v7 backfilled the rows that had not been swapped, so
+/// the row the loupe reads is already the frame the user sees. 290's fallback used to transpose it from
+/// the stored pair, and once the rows were upright that swap ran a second time — a portrait shot opened
+/// as a landscape, truncated stand-in (the reported 2026-11-19 defect).
 ///
 /// These tests pin the two fallback authorities and the hand-off:
-///   1. a recorded orientation 6 swaps the stored dimensions (the reverse gate: the raw pair must red);
-///   2. an unknown orientation uses the thumbnail's own (upright) aspect instead of the stored pair;
+///   1. a recorded orientation does **not** transpose the (already upright) row — the reverse gate is
+///      `testDisplayPixelRowIsNotTransposedASecondTime`;
+///   2. an unknown orientation uses the thumbnail's own (upright) aspect instead of the row;
 ///   3. once the real upright size is ingested, the stand-in's rectangle does not move.
 @MainActor
 final class PlaceholderExifTests: XCTestCase {
@@ -45,10 +46,10 @@ final class PlaceholderExifTests: XCTestCase {
 
     // MARK: - the acceptance
 
-    /// Orientation known (EXIF 6), not ingested: the stand-in is the portrait the user sees, not the
-    /// landscape the catalog row spells. The second assertion is 290's reverse gate — reverting the
-    /// fallback to the raw stored pair turns this test red.
-    func testExifPortraitUsesTheUprightAspectBeforeIngest() throws {
+    /// Orientation known (EXIF 6), row already upright, not ingested: the stand-in is the portrait the
+    /// user sees. The second assertion is the reverse gate — transposing the row a second time lays the
+    /// stand-in out as the landscape it is not.
+    func testExifPortraitUsesTheUprightRowBeforeIngest() throws {
         let (loupe, session, _) = try makeLoupe(orientation: 6, thumbnail: (640, 960))
         XCTAssertNil(session.ingestedSourceFrame, "the test is not before ingest")
 
@@ -64,14 +65,14 @@ final class PlaceholderExifTests: XCTestCase {
                      loupe.canvasView.bounds.width, loupe.canvasView.bounds.height))
 
         XCTAssertEqual(aspect, uprightAspect, accuracy: 0.02,
-                       "290 未 ingest 的 EXIF 竖幅仍按目录里的横值算")
+                       "436 竖幅的 stand-in 不是竖的：目录行已是显示像素，不该再交换")
         XCTAssertGreaterThan(abs(aspect - storedAspect), 0.02,
-                             "290 reverse gate: the raw stored dimensions passed as upright")
+                             "reverse gate: the display row was transposed a second time")
     }
 
-    /// The orientation half alone: even with no thumbnail size handed to the seam, a recorded EXIF 6
-    /// swaps the catalog pair. (The test above could otherwise pass through the thumbnail authority.)
-    func testRecordedOrientationAloneSwapsTheStoredDimensions() throws {
+    /// The orientation half alone: even with no thumbnail size handed to the seam, the stand-in reads
+    /// the row as it stands. (The test above could otherwise pass through the thumbnail authority.)
+    func testRecordedOrientationAloneKeepsTheDisplayRow() throws {
         let (loupe, session, _) = try makeLoupe(orientation: 6, thumbnail: (640, 960))
         XCTAssertNil(session.ingestedSourceFrame, "the test is not before ingest")
 
@@ -82,16 +83,35 @@ final class PlaceholderExifTests: XCTestCase {
                      rect.width, rect.height, aspect, uprightAspect, storedAspect))
 
         XCTAssertEqual(aspect, uprightAspect, accuracy: 0.02,
-                       "290 已记录的 EXIF 方向没有交换目录里的宽高")
-        XCTAssertGreaterThan(abs(aspect - storedAspect), 0.02,
-                             "290 reverse gate: the raw stored dimensions passed as upright")
+                       "436 已记录的 EXIF 方向又被用在已经是显示像素的目录行上")
     }
 
-    /// Orientation unknown (no metadata row): the thumbnail is the upright authority. The stored pair
-    /// is landscape, the thumbnail is portrait, so the fallback must swap — and keep the stored
+    /// 436's reverse gate: a row that happens to be the **stored** landscape pair with a recorded
+    /// quarter turn is *not* transposed. Before the fix this exact fixture produced the portrait
+    /// aspect (3264 test below), i.e. the portrait-in-a-landscape-frame stand-in the user reported.
+    func testDisplayPixelRowIsNotTransposedASecondTime() throws {
+        let (loupe, session, _) = try makeLoupe(orientation: 6, thumbnail: (960, 640),
+                                                row: stored)
+        XCTAssertNil(session.ingestedSourceFrame, "the test is not before ingest")
+
+        loupe.zoomToFit()
+        loupe.scheduleRender()
+        XCTAssertTrue(loupe.firstFramePlaceholderVisible, "the stand-in did not install")
+
+        let rect = loupe.placeholderRectForTesting
+        let aspect = rect.height / max(rect.width, 1e-9)
+        XCTAssertEqual(aspect, storedAspect, accuracy: 0.02,
+                       "436 目录行是显示像素，stand-in 再转一次就成了竖的")
+        XCTAssertGreaterThan(abs(aspect - uprightAspect), 0.02,
+                             "436 reverse gate: the row was transposed again")
+    }
+
+    /// Orientation unknown (no metadata row): the thumbnail is the upright authority. The row is the
+    /// stored landscape pair, the thumbnail is portrait, so the fallback must swap — and keep the row's
     /// magnitude (100 % / 400 % use the file's pixel scale, not the preview's).
     func testUnknownOrientationUsesTheUprightThumbnailAspect() throws {
-        let (loupe, session, _) = try makeLoupe(orientation: nil, thumbnail: (640, 960))
+        let (loupe, session, _) = try makeLoupe(orientation: nil, thumbnail: (640, 960),
+                                                row: stored)
         XCTAssertNil(session.ingestedSourceFrame, "the test is not before ingest")
 
         loupe.zoom(to: 1.0)
@@ -140,11 +160,13 @@ final class PlaceholderExifTests: XCTestCase {
     // MARK: - fixtures
 
     private func makeLoupe(orientation: Int?,
-                           thumbnail: (width: Int, height: Int))
+                           thumbnail: (width: Int, height: Int),
+                           row: ImageSize? = nil)
         throws -> (LoupeController, CatalogSession, Asset) {
+        let row = row ?? upright
         let library = try CropUITestSupport.makeLibrary(in: workDir,
-                                                        width: stored.width,
-                                                        height: stored.height)
+                                                        width: row.width,
+                                                        height: row.height)
         if let orientation {
             try library.catalog.dbQueue.write { db in
                 try db.execute(sql: """

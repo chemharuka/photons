@@ -3010,8 +3010,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if let asset = session?.anchorAsset, asset.width != nil, asset.height != nil {
             // No decoded rung yet: the frame comes from the **same** authority the mask drag maths
             // uses (`maskSourceSize`, task 028). It stops disagreeing with the decoded framing the
-            // moment this photo's first frame is ingested, and it never mixes the stored dimensions
-            // into a projection that is otherwise display-oriented.
+            // moment this photo's first frame is ingested, and both sides are display-oriented (436
+            // made the catalog row upright, so the fallback cannot flip a portrait into a landscape).
             let source = session?.maskSourceSize
                 ?? ImageSize(width: max(1, asset.width ?? 1), height: max(1, asset.height ?? 1))
             return LoupeFraming(viewport: size,
@@ -4098,8 +4098,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     //     touching the document.
     //
     // The frame is `session.maskSourceSize` — the upright frame the renderer ingested (task 028) —
-    // and never `asset.width/height`, which are the *stored* dimensions and are transposed for
-    // EXIF 5…8.
+    // and never `asset.width/height`, which are the whole file's display pixels, not the rung the
+    // crop is measured in.
 
     public var isCropToolActive: Bool { cropTool.isActive }
     /// 123 — the acceptance's name for the same view state.
@@ -6544,28 +6544,34 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return session?.ingestedSourceFrame?.assetID == asset.id
     }
 
-    /// 290 — the upright source size for the fallback projection.
+    /// 290 / 436 — the upright source size for the fallback projection.
     ///
-    /// The catalog row's dimensions are the stored ones; an EXIF orientation of 5…8 swaps them. When
-    /// the import did not record an orientation, the thumbnail's own aspect (already upright) is the
-    /// authority for **which way up** the picture is, while the stored magnitude is kept so 100 %
-    /// and 400 % still use the file's pixel scale rather than the preview's.
+    /// **`assets.width/height` are display pixels** since 436: import applies the EXIF quarter turn
+    /// (`ImportService`) and schema v7 backfilled every row that had not been swapped. The row is
+    /// therefore already the frame the user sees, and applying `ImageOrientation.uprightSize` to it a
+    /// second time transposed every portrait shot — the stand-in was laid out as a landscape picture
+    /// inside a portrait frame, so a portrait photo opened as "a landscape, truncated, low-res"
+    /// (2026-11-19). The row is returned **unchanged**.
+    ///
+    /// The one case that still needs an inference is a row with **no recorded orientation**: its
+    /// dimensions may be stored (sensor) pixels with a quarter turn the catalog never learned. There the
+    /// thumbnail's own (already upright) aspect decides *which way up* the picture is, while the stored
+    /// magnitude is kept so 100 % and 400 % still use the file's pixel scale rather than the preview's.
     private func placeholderSourceSize(thumbnail: ImageSize?) -> ImageSize? {
         guard let asset = session?.anchorAsset else { return thumbnail }
-        guard let storedWidth = asset.width, let storedHeight = asset.height,
-              storedWidth > 0, storedHeight > 0 else { return thumbnail }
-        if let orientation = placeholderOrientation(for: asset) {
-            let upright = orientation.uprightSize(width: storedWidth, height: storedHeight)
-            return ImageSize(width: upright.width, height: upright.height)
+        guard let width = asset.width, let height = asset.height,
+              width > 0, height > 0 else { return thumbnail }
+        if placeholderOrientation(for: asset) != nil {
+            return ImageSize(width: width, height: height)
         }
         guard let thumbnail else {
-            return ImageSize(width: storedWidth, height: storedHeight)
+            return ImageSize(width: width, height: height)
         }
-        let storedIsPortrait = storedHeight > storedWidth
+        let rowIsPortrait = height > width
         let thumbnailIsPortrait = thumbnail.height > thumbnail.width
-        return storedIsPortrait == thumbnailIsPortrait
-            ? ImageSize(width: storedWidth, height: storedHeight)
-            : ImageSize(width: storedHeight, height: storedWidth)
+        return rowIsPortrait == thumbnailIsPortrait
+            ? ImageSize(width: width, height: height)
+            : ImageSize(width: height, height: width)
     }
 
     private func placeholderOrientation(for asset: Asset) -> ImageOrientation? {
@@ -8458,9 +8464,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if backdropWanted { serveWantedBackdrop() }
         // Task 028: the mask UI measures its normalised geometry against the frame the renderer
         // actually ingested (upright, EXIF orientation already applied). Published here — on the main
-        // thread, next to the pixels it belongs to — because the catalog row's `PixelWidth/PixelHeight`
-        // are the *stored* dimensions, which are transposed for EXIF 5…8 and made a portrait drag
-        // render as a landscape-shaped ellipse.
+        // thread, next to the pixels it belongs to — because the catalog row describes the whole file,
+        // not the rung this frame was made from, and mixing the two made a serial portrait drag render
+        // as a landscape-shaped ellipse.
         //
         // 231 — **full-resolution source pixels, not the rung's.** `graphAtFrame.sourceSize` is the
         // size of the *buffer* this frame was made from (the 0.5 preview rung is half-size), while

@@ -115,7 +115,15 @@ public struct PointerPixel: Equatable, Sendable {
         ///
         /// Negative light (a curve can undershoot) reads as code 0, the same clamp `srgbEncode` gets in
         /// the measurement.
+        ///
+        /// **A non-finite sample is not a level** (437). The histogram already has this rule in so many
+        /// words — `binIndex` compares instead of converting, because 「a curve that produces a NaN must
+        /// degrade to a wrong bin, not to a crash」 — and the row is the same pixel reading: `Int(NaN)`
+        /// traps, so a broken frame used to take the process down on the first pointer move
+        /// (`EXC_BREAKPOINT` in this line). NaN and ±∞ degrade to black, which is the bin the plot puts
+        /// them in (`Histogram.binIndex` sends NaN to bin 0), so the number and the plot still agree.
         public static func channel(linear: Float) -> Level {
+            guard linear.isFinite else { return .code(0) }
             let value = Double(linear)
             if value > 1 {
                 return .stops(log2(value))
@@ -198,14 +206,22 @@ public struct PointerPixel: Equatable, Sendable {
     /// own formula, so `bin` is the bin the plot counted this pixel into.
     public init(linearRed: Float, green: Float, blue: Float, histogram: Histogram?,
                 source: PointerSampleSource = .sceneLinear) {
+        // 437 — one sanitiser for the whole pixel: a broken frame can hand a NaN/±∞ through the
+        // scene-linear grid, and this initialiser feeds three places that convert to `Int` (the level,
+        // the bin, the code). The histogram's own rule is that such a sample *degrades* to black rather
+        // than trapping (`Histogram.binIndex`), so the pixel does the same, once, before any maths —
+        // that is what keeps the row, the bin and the channel codes agreeing about which bin it is.
+        let red = linearRed.isFinite ? linearRed : 0
+        let grn = green.isFinite ? green : 0
+        let blu = blue.isFinite ? blue : 0
         let wr = Float(Histogram.lumaWeights.r)
         let wg = Float(Histogram.lumaWeights.g)
         let wb = Float(Histogram.lumaWeights.b)
-        let linear = Double(wr * linearRed + wg * green + wb * blue)
+        let linear = Double(wr * red + wg * grn + wb * blu)
         let sdrBins = max(histogram?.binCount ?? 256, 2)
         // The three channels' own levels travel with the pixel: the channel row is their printout.
-        let channels = [Level.channel(linear: linearRed), .channel(linear: green),
-                        .channel(linear: blue)]
+        let channels = [Level.channel(linear: red), .channel(linear: grn),
+                        .channel(linear: blu)]
 
         if linear > 1 {
             // The tail: 1/64 stop per bin, the last bin is the overflow ("4 stops or more").

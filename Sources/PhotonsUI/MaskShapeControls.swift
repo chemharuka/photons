@@ -329,9 +329,9 @@ extension CatalogSession {
     /// The source size the normalised geometry is expressed against — **one** answer for the drag
     /// maths, the brush's spacing metric and the loupe's pre-decode framing.
     ///
-    /// It is the *upright* frame (`MaskSourceFrame`): the catalog row's dimensions are the stored ones
-    /// and are transposed for EXIF 5…8, which is what made a portrait drag render as a landscape-shaped
-    /// ellipse (task 028).
+    /// It is the *upright* frame (`MaskSourceFrame`): the ingested frame while a decode is resident, and
+    /// the catalog row before that — and the row is display pixels since 436, so the fallback and the
+    /// pixels now agree about which way up the picture is (task 028's portrait ellipse).
     var maskSourceSize: ImageSize {
         let asset = anchorAsset
         let ingested = ingestedSourceFrame.flatMap { $0.assetID == asset?.id ? $0.size : nil }

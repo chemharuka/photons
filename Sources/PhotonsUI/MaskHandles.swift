@@ -33,7 +33,8 @@ import PhotonsCore
 // The frame is `ImageSize` and every distance is divided by its **short edge** (`MaskFrame`), which
 // is the unit `RadialGradientShape.radius` and `Stroke.radius` are already expressed in. Callers pass
 // `CatalogSession.maskSourceSize` — the upright frame the renderer ingested (task 028) — never
-// `asset.width/height`, which are the *stored* dimensions and are transposed for EXIF 5…8.
+// `asset.width/height`, which describe the whole file and not the rung (or the crop) the hand is
+// drawing in.
 //
 // Borrowed from the MIT references (see the report): Brightroom's crop handles inflate their hit
 // target by a fixed **16 pt** around each control point and let the container itself fall through

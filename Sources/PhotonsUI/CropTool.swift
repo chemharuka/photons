@@ -28,7 +28,7 @@ import PhotonsCore
 // `LoupeMapping.viewPoint`, the inverse of S0 that the mask grips and the loupe already share. That
 // is what makes a portrait file (EXIF 6/8, stored 240×160, upright 160×240) as accurate as a
 // landscape one — the frame handed in is `CatalogSession.maskSourceSize`, the **upright** frame the
-// renderer ingested, never `asset.width/height`.
+// renderer ingested, never `asset.width/height` (the whole file, not the rung).
 //
 // Borrowed from the MIT references (see the report for the line numbers):
 //   · Brightroom's eight control points — four corners that move two edges and four edges that move

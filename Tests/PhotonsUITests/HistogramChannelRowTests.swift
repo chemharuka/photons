@@ -779,4 +779,60 @@ final class HistogramChannelRowTests: XCTestCase {
                      + "网格 colG = %.2f", Double(narrow), Double(wide), Double(wide - narrow),
                      Double(columns[1])))
     }
+
+    // MARK: - ③ a broken frame must not trap
+
+    /// 437 — a non-finite scene-linear sample is **black**, not a crash.
+    ///
+    /// The crash (2026-11-19) was `Double value cannot be converted to Int because it is either infinite
+    /// or NaN`, raised inside `PointerPixel.Level.channel(linear:)` on the main thread while the loupe
+    /// presented a frame — i.e. one NaN texel in the measurement's grid took the whole app down on the
+    /// first pointer move. `Histogram.binIndex` already spells out the rule for the plot ("NaN lands on
+    /// black … a curve that produces a NaN must degrade to a wrong bin, not to a crash"); the row is the
+    /// same pixel read the same way, so it must degrade identically — and to the same bin, or the number
+    /// and the plot would describe different pixels.
+    func testNonFiniteSamplesDegradeToBlackInsteadOfTrapping() {
+        let histogram = measuredHistogram()
+        func code(_ linear: Float) -> PointerPixel.Level {
+            .code(Int((Double(Histogram.srgbEncode(linear)) * 255).rounded()))
+        }
+        var lines: [String] = []
+
+        // One broken channel, two good ones: the broken one reads black, the other two keep their
+        // codes. (A whole-pixel fallback would throw away light the picture does have; the *level* and
+        // the *bin* are built from the sanitised channels, exactly like the measurement counts them.)
+        let partial: [(String, Float, Float, Float)] = [
+            ("NaN red", .nan, 0.50, 0.25),
+            ("+∞ green", 0.50, .infinity, 0.25),
+            ("−∞ blue", 0.50, 0.50, -.infinity),
+        ]
+        for (name, r, g, b) in partial {
+            let pixel = PointerPixel(linearRed: r, green: g, blue: b, histogram: histogram)
+            let expected = [r, g, b].map { $0.isFinite ? code($0) : PointerPixel.Level.code(0) }
+            XCTAssertEqual(pixel.channels, expected, "\(name): 只有坏通道读 0")
+            XCTAssertFalse(pixel.overWhiteChannels.contains(true), "\(name): 不加过白墨色")
+            XCTAssertTrue(pixel.luma.isFinite && pixel.luma >= 0, "\(name): luma 是有限数")
+            lines.append("\(name) → \(pixel.channelRowText) · bin \(pixel.bin)")
+        }
+
+        // Every channel broken: black, bin 0 — the same bin `Histogram.binIndex` files NaN into, so the
+        // row and the plot describe the same pixel. This is the shape the crash had (x0 = 0x7fc00000).
+        let broken = PointerPixel(linearRed: .nan, green: .nan, blue: .nan, histogram: histogram)
+        XCTAssertEqual(broken.channels, [PointerPixel.Level.code(0), .code(0), .code(0)])
+        XCTAssertEqual(broken.bin, 0, "非有限值必须落在 bin 0（和 binIndex 一致）")
+        XCTAssertFalse(broken.isTail)
+        XCTAssertEqual(broken.luma, 0)
+        XCTAssertEqual(broken.channelRowText, "R 0 G 0 B 0")
+        lines.append("all NaN → \(broken.channelRowText) · bin \(broken.bin)")
+
+        // The presented (S4) spelling reaches the same initialiser through `srgbDecode`, which is itself
+        // `NaN → NaN`; the guard has to be after it, so this case is checked too.
+        let encodedNaN = PointerPixel(encodedRed: .nan, green: 0.5, blue: 0.25, histogram: histogram)
+        XCTAssertEqual(encodedNaN.channels,
+                       [PointerPixel.Level.code(0), code(Histogram.srgbDecode(0.5)),
+                        code(Histogram.srgbDecode(0.25))])
+        lines.append("encoded NaN → \(encodedNaN.channelRowText)")
+
+        print("437 非有限采样：\n        " + lines.joined(separator: "\n        "))
+    }
 }

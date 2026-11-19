@@ -419,9 +419,9 @@ public final class MaskCanvasController {
     // wrote.
     //
     // The frame is `session.maskSourceSize` (the upright frame the renderer ingested). The drag maths
-    // never sees `asset.width/height`: those are the *stored* dimensions and are transposed for
-    // EXIF 5…8, so a rim dragged 60 px sideways on a portrait photo would render 90 px wide
-    // (task 028, `MaskPortraitProjectionTests`).
+    // never sees `asset.width/height`: the row describes the whole file, not the rung the mask is drawn
+    // in, so a rim dragged 60 px sideways on a 0.5 rung would render 120 px wide (task 028,
+    // `MaskPortraitProjectionTests`).
 
     public var isDraggingHandle: Bool { handleDrag != nil }
 
@@ -514,8 +514,8 @@ public final class MaskCanvasController {
     /// Distance in **short-edge units**, i.e. the metric `Stroke.radius` is expressed in.
     ///
     /// The frame comes from `maskSourceSize` — the upright one the renderer ingested — not from the
-    /// catalog row's stored dimensions, which are transposed for EXIF 5…8 (task 028: the spacing would
-    /// then be measured in a frame the hand is not drawing in).
+    /// catalog row, whose dimensions are the whole file rather than the rung (task 028: the spacing
+    /// would then be measured in a frame the hand is not drawing in).
     private func shortEdgeDistance(_ a: (x: Double, y: Double), _ b: (x: Double, y: Double),
                                   session: CatalogSession) -> Double {
         let source = session.maskSourceSize

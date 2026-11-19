@@ -1416,18 +1416,19 @@ public struct TilePlan: Sendable, Equatable {
 /// hand drew — the eye reads that as "the mask is in the wrong place".
 ///
 /// The decoded buffer always wins, because it is the frame the GPU evaluates the mask in and no
-/// metadata row may disagree with the pixels. The stored dimensions are the fallback for the window
-/// before the photo's first frame has landed, and they are documented as *stored* — a caller that
-/// wants them to be upright has to apply `ImageOrientation.uprightSize` itself, which only a decode
-/// (or a header read) can licence.
+/// metadata row may disagree with the pixels. Before the first frame lands the **catalog row** is the
+/// fallback, and since 436 those columns are **display pixels** (import and schema v7 apply the EXIF
+/// quarter turn) — so a caller must *not* run `ImageOrientation.uprightSize` over them a second time;
+/// doing that is what laid a portrait photo's stand-in and mask frame out as a landscape (2026-11-19).
 public enum MaskSourceFrame {
 
     /// The upright source size a document's normalised geometry is measured against.
     ///
     /// - Parameters:
     ///   - ingested: the size the renderer ingested (`RenderGraph.sourceSize`, `LinearImage.uprightSize`).
-    ///   - storedWidth/storedHeight: the catalog row's pixel dimensions, *before* orientation. Used
-    ///     only when no frame has been ingested yet, or when the row has no dimensions at all.
+    ///   - storedWidth/storedHeight: the catalog row's pixel dimensions — **display pixels** since
+    ///     436 (orientation already applied). Used only when no frame has been ingested yet, or when
+    ///     the row has no dimensions at all.
     public static func size(ingested: ImageSize?, storedWidth: Int?, storedHeight: Int?) -> ImageSize {
         // `ImageSize` floors both edges at 1, so an "ingested" 0×0 cannot exist and needs no guard.
         if let ingested { return ingested }
