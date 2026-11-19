@@ -1111,7 +1111,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
                              priority: visible.contains(index) ? .onScreen : .prefetch)
         }
+        // 429 — the structural proof that the cancellation above ran: after a rebuild, every queued
+        // index is inside the band. Recorded rather than asserted here because it is a *reading*, and
+        // `pendingThumbnailIndexesOutsideWindow` can go back to 0 on its own when a request lands
+        // (`thumbnailDidLoad` clears it) — which is exactly why a timing-based gate could not see the
+        // cancellation being deleted. This counter is written **synchronously at the end of the
+        // rebuild**, before any landing can interfere, so it is 0 iff the loop above did its job.
+        lastRebuildOutsideCount = Set(thumbRequests.keys).subtracting(wanted).count
     }
+
+    /// Indices still queued after the last `reconcileThumbnails` rebuild that were **not** in that
+    /// rebuild's `wanted` set. Must be 0; read by the 429 gate (`⑧d`).
+    public private(set) var lastRebuildOutsideCount = 0
 
     /// 429 — visible + **four rows** of slack above and below (`rowHeight` already includes the
     /// caption strip). The user's ask is "预加载缓存，这样滚动时不会出现占位纯色图": one screen of

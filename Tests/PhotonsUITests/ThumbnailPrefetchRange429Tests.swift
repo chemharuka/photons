@@ -360,6 +360,14 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
 
         XCTAssertEqual(peakOutside, 0,
                        "after each scroll handler runs, nothing outside the band is still queued")
+        // 429 — **the gate that actually tests the cancellation.** `peakOutside` above can read 0 even
+        // with the `where !wanted.contains(index)` loop deleted, because `thumbnailDidLoad` clears an
+        // entry the moment its request lands: with four-frame settles the queue drains before the next
+        // reading, so the measurement never sees the stale entries. `lastRebuildOutsideCount` is
+        // written **at the end of the rebuild itself**, before any landing can interfere, so it is 0
+        // iff the loop ran. Deleting the loop makes this assertion fail — verified as ⑧d.
+        XCTAssertEqual(h.grid.lastRebuildOutsideCount, 0,
+                       "the rebuild must leave nothing queued outside its own band")
         // 429 — the ceiling is the **widest** band seen during the drag, not the band at the end:
         // `band` is read after the last jump, and a drag through 400 photos passes through positions
         // whose band is wider than the bottom one's. Measured: peak 39 against an end band of 22,
