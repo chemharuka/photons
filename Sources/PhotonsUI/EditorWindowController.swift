@@ -566,8 +566,8 @@ public final class EditorWindowController: NSWindowController {
         case #selector(importAction(_:)):
             // Nowhere to write without a library, and a second import while one runs would put two
             // walks on the same root at once. Grey in both cases instead of starting a panel whose
-            // OK does nothing.
-            return session.isOpen && !rootView.isImporting
+            // OK does nothing. 435: the top-bar button reads the **same** property.
+            return rootView.canImport
         case #selector(ratingAction(_:)):
             // Ticked when the whole selection already holds that rating — a menu that shows 3 stars
             // while the selection is mixed would be lying about what the next click does.
@@ -610,7 +610,8 @@ public final class EditorWindowController: NSWindowController {
             item.title = session.selection.count > 1
                 ? Loc.t("导出 {0} 张…", String(describing: (session.selection.count)))
                 : Loc.t("导出…")
-            return !session.selection.isEmpty
+            // 435: the top-bar button reads the same `canExport` (the title stays fixed there).
+            return rootView.canExport
         case #selector(applyPresetAction(_:)):
             // Tick the default, so the menu shows which look a new photo would get.
             if let name = item.representedObject as? String {

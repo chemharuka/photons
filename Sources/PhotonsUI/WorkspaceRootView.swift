@@ -111,6 +111,11 @@ public final class TopBarView: NSView {
     public var onToggleSort: (() -> Void)?
 
     private let openButton = ToolButton(title: Loc.t("打开"), symbol: "folder")
+    /// 文件 ▸ 导入照片… 的顶栏入口。**与菜单项同一个 selector、同一个 nil target**：走响应链到
+    /// `EditorWindowController.importAction(_:)`，菜单将来加守卫时按钮自动跟着变。
+    private let importButton = ToolButton(title: Loc.t("导入"), symbol: "square.and.arrow.down")
+    /// 文件 ▸ 导出… 的顶栏入口，同上。
+    private let exportButton = ToolButton(title: Loc.t("导出"), symbol: "square.and.arrow.up")
     private let modeControl = NSSegmentedControl(labels: [Loc.t("网格"), Loc.t("单图")],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let stripButton = ToolButton(title: Loc.t("胶片条"), symbol: "rectangle.split.1x2")
@@ -144,6 +149,16 @@ public final class TopBarView: NSView {
 
         openButton.target = self
         openButton.action = #selector(openTapped)
+        // 导入/导出 **不挂在自己的 `@objc` 方法上**：target 留 nil、action 就是菜单项那两个
+        // selector，AppKit 顺着响应链找到窗口控制器，与文件菜单走同一条路。
+        importButton.target = nil
+        importButton.action = #selector(EditorWindowController.importAction(_:))
+        importButton.toolTip = Loc.t("导入照片…") + "（⇧⌘I）"
+        importButton.isEnabled = false
+        exportButton.target = nil
+        exportButton.action = #selector(EditorWindowController.exportAction(_:))
+        exportButton.toolTip = Loc.t("导出…") + "（⇧⌘E）"
+        exportButton.isEnabled = false
         stripButton.target = self
         stripButton.action = #selector(stripTapped)
         sortButton.target = self
@@ -157,7 +172,7 @@ public final class TopBarView: NSView {
         modeControl.controlSize = .small
         modeControl.selectedSegment = 0
 
-        for v: NSView in [openButton, modeControl, stripButton, sortButton, statusCluster] {
+        for v: NSView in [openButton, importButton, exportButton, modeControl, stripButton, sortButton, statusCluster] {
             addSubview(v)
         }
         addSeparator()
@@ -216,10 +231,21 @@ public final class TopBarView: NSView {
         needsLayout = true
     }
 
+    /// 顶栏两个命令按钮的可用性。判据在 `WorkspaceRootView.canImport/canExport` **只写一份**，
+    /// 菜单的 `validateMenuItem` 读同一对属性 —— 菜单灰 ⇔ 按钮灰。
+    public func updateActions(canImport: Bool, canExport: Bool) {
+        importButton.isEnabled = canImport
+        exportButton.isEnabled = canExport
+    }
+
     /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
     public var sortButtonView: ToolButton { sortButton }
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
     public var filmstripButtonView: ToolButton { stripButton }
+    /// 「打开」按钮本体（A①/A⑥ 用它作为样式基准）。
+    public var openButtonView: ToolButton { openButton }
+    public var importButtonView: ToolButton { importButton }
+    public var exportButtonView: ToolButton { exportButton }
 
     public override func layout() {
         super.layout()
@@ -232,6 +258,12 @@ public final class TopBarView: NSView {
         }
 
         place(openButton, width: openButton.intrinsicContentSize.width)
+        x += 10
+        // 435 — 用户口径「在顶栏"打开"的右边」：导入/导出紧贴打开按钮，节奏与其余控件一致
+        // （10 pt 间距），并且都在第一条分隔线之前。
+        place(importButton, width: importButton.intrinsicContentSize.width)
+        x += 10
+        place(exportButton, width: exportButton.intrinsicContentSize.width)
         x += 10
         separators[0].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
@@ -391,6 +423,11 @@ public final class WorkspaceRootView: NSView {
     public private(set) lazy var importCoordinator = ImportCoordinator(session: session)
 
     public var isImporting: Bool { importCoordinator.isImporting }
+
+    /// 435 — 导入/导出两条命令的**唯一判据**。菜单的 `validateMenuItem` 与顶栏按钮都读这里，
+    /// 所以「文件 ▸ 导入照片…」灰掉时顶栏的导入也一定灰，反之亦然。
+    public var canImport: Bool { session.isOpen && !isImporting }
+    public var canExport: Bool { !session.selection.isEmpty }
 
     private let defaults = UserDefaults.standard
 
@@ -653,13 +690,15 @@ public final class WorkspaceRootView: NSView {
         })
     }
 
-    private func updateTopBar() {
+    func updateTopBar() {
         topBar.update(mode: session.mode,
                       assetCount: session.assets.count,
                       selectionCount: session.selection.count,
                       libraryName: session.libraryURL?.deletingPathExtension().lastPathComponent,
                       filmstrip: browserMode == .filmstrip)
         topBar.updateSortOrder(session.sortOrder)
+        // 435 — 菜单与按钮读同一对判据，刷新点也只有一个。
+        topBar.updateActions(canImport: canImport, canExport: canExport)
     }
 
     /// 205 — show/hide the one-line notice. `nil` means the document was written by this build (or an
@@ -867,17 +906,23 @@ public final class WorkspaceRootView: NSView {
             } else {
                 self.importProgressBar.hide()
             }
+            // 导入结束后 `isImporting` 变回 false：顶栏的导入按钮与菜单同时恢复可用。
+            self.updateTopBar()
         }
         coordinator.onError = { [weak self] _ in
             // The only throw here is "the folder is gone"; a whole-import failure is one word, not
             // a paragraph.
             self?.importProgressBar.show(Loc.t("导入失败"))
+            self?.updateTopBar()
         }
         importProgressBar.onCancel = { [weak coordinator] in coordinator?.cancel() }
 
         // A previous run's failure line must not sit under a new run.
         importProgressBar.hide()
         coordinator.presentAndStart()
+        // A run that has just started has `isImporting == true`; refresh the pair now so the button
+        // greys in the same turn as the menu would.
+        updateTopBar()
     }
 
     public func openLibraryPanel() {
