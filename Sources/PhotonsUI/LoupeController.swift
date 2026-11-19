@@ -771,12 +771,30 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private var pictureGraph: RenderGraph?
     private var pictureGraphIdentity: String?
 
-    /// `Histogram.cacheKey` → the numbers. A handful of entries: the current picture's edit chain, so
-    /// sliding back is instant and a re-measurement of the same document cannot produce different
-    /// numbers (it cannot produce anything — the key is the identity).
+    /// `Histogram.cacheKey` → the numbers. The current picture's edit chain, so sliding back is
+    /// instant, and one entry per photo the user has visited — 428 raised this from 8 to 64 so a pass
+    /// through a grid row does not evict the photo they came from.
+    ///
+    /// The price, measured rather than estimated (`HistogramStoreTests.testInMemorySizeOfOneHistogram`):
+    /// one `Histogram` is 8 × 256 bins as `Int` = **16 384 B** of counters (plus 12 ratios and the
+    /// labels), so 64 of them is **1.00 MB** — the task's 750 KB estimate came from the serialised
+    /// file (8.5 KB), and `Int` is 8 bytes here. 1 MB is the ceiling, the LRU still evicts, and the
+    /// disk half means an evicted entry is a 0.5 ms read rather than a re-measurement.
     private var histogramCache: [String: Histogram] = [:]
     private var histogramCacheOrder: [String] = []
-    private var histogramCacheLimit = 8
+    private var histogramCacheLimit = 64
+
+    /// 428 — the disk half of the cache: one file per key, so a photo's numbers survive the memory
+    /// window and the process. `nil` until a library is open (there is nowhere to put it), and a
+    /// test/bench may hand in its own root. See `HistogramStore` for the format.
+    public var histogramStore: HistogramStore?
+    /// The store derived from the open library, memoised: building one hashes the library path.
+    /// Guarded by `histogramLock`.
+    private var resolvedHistogramStore: (root: URL?, store: HistogramStore?)?
+    /// A measurement is handed here after it has reached the card, so the frame never waits for a
+    /// write (0.35 ms measured) and a disk failure can never fail a render.
+    private let histogramDiskQueue = DispatchQueue(label: "photons.loupe.histogram-disk",
+                                                   qos: .utility)
     /// The last document digested, and its digest. `histogramStep` runs on every frame, and a JSON
     /// encode plus a SHA-256 per frame would be a real cost on a 4 ms pan; an `EditModel` comparison is
     /// a field-by-field compare of a small struct. Render-queue only.
@@ -1599,13 +1617,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func observeModel() {
         lastHandledRevision = session?.editRevision ?? 0
         lastHandledAnchorID = session?.anchorID
+        // 428 — the disk cache belongs to the open library. Resolved before the first frame, so the
+        // very first measurement of a session already has somewhere to land.
+        refreshHistogramStore()
         bridge.observe({ [weak self] in
             guard let self else { return }
+            _ = self.session?.libraryURL
             _ = self.session?.anchorID
             _ = self.session?.mode
             _ = self.session?.editRevision
         }, { [weak self] in
             guard let self else { return }
+            // 428: 打开另一个库 is another cache directory.
+            self.refreshHistogramStore()
             // 065: the photo on screen first, because everything below assumes the work in flight
             // belongs to it. In the app this is the **only** place a switch is noticed: `frameSource`
             // is nil there, and `cancelPendingFrames` used to run on leaving the loupe only — so a
@@ -6134,11 +6158,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 323: a scheduled frame waiting for the slot belongs to the photo going away too. The
         // running one finishes and releases the flag; this one would only render to be dropped.
         pendingScheduledJob = nil
-        // A measurement belongs to the picture it was measured for: drop the cache and the dedupe key,
-        // so the next frame of the new picture measures instead of matching a stale key.
+        // 428 — a measurement belongs to the picture it was measured for, but **the cache does not**:
+        // every entry is keyed by the document + recipe (`store(histogram:for:)`,
+        // `Histogram.cacheKey`: rung identity + edit digest + bins + ceiling), so another photo's
+        // entry can never be read for this one. Only the de-dupe key has to go, otherwise the new
+        // picture's first frame would match a stale key and publish nothing.
         histogramLock.lock()
-        histogramCache.removeAll()
-        histogramCacheOrder.removeAll()
         histogramFrameKey = nil
         // 045: the background whole-picture measurement goes with it. A request nobody will read any
         // more is dropped, an outcome already in flight is refused (its key can no longer be the
@@ -9100,7 +9125,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// queue (034 measures on the frame path).
     private func store(histogram: Histogram, for key: String) {
         histogramLock.lock()
-        defer { histogramLock.unlock() }
+        insertMemory(histogram: histogram, for: key)
+        let disk = histogramStore ?? resolvedHistogramStore?.store
+        histogramLock.unlock()
+        if let disk {
+            histogramDiskQueue.async { disk.write(histogram, for: key) }
+        }
+    }
+
+    /// The memory half of `store`, under the caller's lock.
+    private func insertMemory(histogram: Histogram, for key: String) {
         histogramCache[key] = histogram
         histogramCacheOrder.removeAll { $0 == key }
         histogramCacheOrder.append(key)
@@ -9111,10 +9145,65 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// The numbers this picture was measured at, if it has been measured before (A → B → A).
-    private func cachedHistogram(for key: String) -> Histogram? {
+    ///
+    /// 428 — a memory miss now asks the disk (one `Data(contentsOf:)` plus a flat `Int32` load: tens
+    /// of microseconds), which is what makes a photo switch across the 64-entry window — or across a
+    /// relaunch — publish instead of measure. A file that is missing, short, another version or
+    /// another key is a miss.
+    func cachedHistogram(for key: String) -> Histogram? {
+        histogramLock.lock()
+        if let hit = histogramCache[key] {
+            histogramLock.unlock()
+            return hit
+        }
+        let disk = histogramStore ?? resolvedHistogramStore?.store
+        histogramLock.unlock()
+        guard let disk, let loaded = disk.load(key: key) else { return nil }
+        histogramLock.lock()
+        // Not a `store`: the bytes are already on disk, and rewriting them would make a hit a write.
+        insertMemory(histogram: loaded, for: key)
+        histogramLock.unlock()
+        return loaded
+    }
+
+    /// 428 — what the A② assertion reads: a photo switch must not empty this.
+    var histogramCacheCount: Int {
         histogramLock.lock()
         defer { histogramLock.unlock() }
-        return histogramCache[key]
+        return histogramCache.count
+    }
+
+    /// 428 — the key the card's numbers are filed under, for a test that wants to ask the disk for
+    /// exactly what a frame produced. Main thread only (the publish path writes it there).
+    var lastHistogramKeyForTesting: String? { histogramMeasuredKey }
+
+    /// The disk cache of the library that is open right now (`nil` when none is), memoised because
+    /// deriving it hashes the library path. Main thread only: it reads the session's `libraryURL`.
+    ///
+    /// An injected `histogramStore` always wins, so a test or a bench can point the controller at its
+    /// own temporary root without a library at all.
+    private func refreshHistogramStore() {
+        let library = session?.libraryURL?.standardizedFileURL
+        histogramLock.lock()
+        let cached = resolvedHistogramStore
+        histogramLock.unlock()
+        guard histogramStore == nil, cached?.root != library else { return }
+        let store = library.map { url in
+            HistogramStore(root: LibraryLayout(packageURL: url).cacheDirectory
+                .appendingPathComponent(HistogramStore.directoryName, isDirectory: true))
+        }
+        histogramLock.lock()
+        resolvedHistogramStore = (library, store)
+        histogramLock.unlock()
+    }
+
+    /// Where a measurement of `key` would be found on disk (the A③–A⑥ tests read and corrupt this
+    /// file instead of trusting a second code path).
+    func histogramDiskURL(for key: String) -> URL? {
+        histogramLock.lock()
+        let disk = resolvedHistogramStore?.store ?? histogramStore
+        histogramLock.unlock()
+        return disk?.url(for: key)
     }
 
     // MARK: status strip
