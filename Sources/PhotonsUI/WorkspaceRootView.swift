@@ -360,6 +360,10 @@ public final class WorkspaceRootView: NSView {
     public let forwardCompatNotice = NSTextField(labelWithString: "")
 
     private let canvasHost = NSView()
+    /// 430 — set when the loupe is installed, consumed by the next grid install: the grid entry that
+    /// follows a loupe visit is the only one allowed to centre the anchor and rematerialise cells.
+    /// A plain `grid → grid` (⌘1) or a metadata tick never moves this.
+    private var pendingGridEntry = false
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
     private let inspectorBackdrop = NSVisualEffectView()
@@ -684,14 +688,37 @@ public final class WorkspaceRootView: NSView {
         let current = canvasHost.subviews.first
         guard current !== target else {
             if mode == .loupe { loupeController.scheduleRender() }
+            // 430 — a redundant request for the grid (⌘1 while already in the grid) arrives through
+            // this branch too. It does nothing unless the loupe → grid switch below armed it, which
+            // is what keeps a scroll the user made from being undone.
+            if mode == .grid { applyPendingGridEntry() }
             return
         }
         current?.removeFromSuperview()
         target.frame = canvasHost.bounds
         target.autoresizingMask = [.width, .height]
         canvasHost.addSubview(target)
-        if mode == .loupe { loupeController.scheduleRender() }
+        if mode == .loupe {
+            loupeController.scheduleRender()
+            // 430 — arm the one-shot for the way back. The loupe has no scroll position to restore,
+            // so the grid is where "my photo must be centred and already drawn" is decided.
+            pendingGridEntry = true
+        } else {
+            applyPendingGridEntry()
+        }
         updateTopBar()
+    }
+
+    /// 430 — the one `grid` entry that follows a `loupe` visit: centre the photo the loupe was
+    /// showing, and fill the cells the re-entry recreated from the memory layer **synchronously**
+    /// (before the next frame is drawn — a runloop hop would let the placeholder paint once, which
+    /// is the flash the user reported). One-shot by construction: the flag is consumed here, so a
+    /// later ⌘1, metadata tick or layout pass cannot yank the grid back to the anchor.
+    private func applyPendingGridEntry() {
+        guard pendingGridEntry else { return }
+        pendingGridEntry = false
+        gridController.thumbnailRematerializeOnAppear()
+        gridController.centerOnAnchorIfNeeded()
     }
 
     public func setBrowserMode(_ mode: BrowserMode) {
