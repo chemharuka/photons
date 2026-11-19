@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import PhotonsCore
 
 public struct ImportOptions: Sendable {
     public var mode: ManagementMode
@@ -262,6 +263,12 @@ public final class ImportService: @unchecked Sendable {
             relPath = try relativePath(of: url, under: root.pathHint)
         }
 
+        // 436 — `assets.width/height` are **display pixels** (orientation applied), because that is
+        // what the decoder produces and what the grid must measure. `MetadataReader` still reports
+        // the *stored* size (`kCGImagePropertyPixelWidth/Height`, EXIF orientation not applied);
+        // that original pair stays in `PhotoMetadata` and is not changed here.
+        let upright = PixelUpright.upright(width: meta.width, height: meta.height,
+                                           orientation: meta.orientation)
         let asset = Asset(sourceRootId: root.id,
                           relPath: relPath,
                           filename: (relPath as NSString).lastPathComponent,
@@ -271,8 +278,8 @@ public final class ImportService: @unchecked Sendable {
                           mtime: mtime,
                           contentHash: hash,
                           quickHash: quick,
-                          width: meta.width,
-                          height: meta.height,
+                          width: upright.width,
+                          height: upright.height,
                           captureTime: meta.captureTime,
                           captureLocalDate: meta.captureLocalDate,
                           captureTimeSource: meta.captureTimeSource,
