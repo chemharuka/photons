@@ -38,9 +38,9 @@ final class HistogramStoreTests: XCTestCase {
         func channel(_ seed: Int, _ width: Int) -> HistogramChannel {
             HistogramChannel(bins: (0..<width).map { ($0 * (seed &+ 1)) % 97 + seed },
                              hdrBins: (0..<Histogram.hdrBinCount).map { ($0 &+ seed) % 13 },
-                             clippedHigh: Double(seed) / 1000,
-                             clippedCeiling: Double(seed) / 2000,
-                             clippedLow: Double(seed) / 5000)
+                             clippedHDR: Double(seed) / 1000,
+                             clippedScreen: Double(seed) / 2000,
+                             clippedBlack: Double(seed) / 5000)
         }
         return Histogram(binCount: bins, sampleCount: 12_345,
                          canvas: ImageSize(width: 1500, height: 1000),
@@ -71,7 +71,7 @@ final class HistogramStoreTests: XCTestCase {
         XCTAssertEqual(loaded, value)
         XCTAssertEqual(loaded.binsDigest(), value.binsDigest())
         XCTAssertEqual(loaded.red.hdrBins, value.red.hdrBins)
-        XCTAssertEqual(loaded.luma.clippedCeiling, value.luma.clippedCeiling)
+        XCTAssertEqual(loaded.luma.clippedScreen, value.luma.clippedScreen)
 
         let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
         print("428 disk: \(size) B per histogram · key \(key)")
@@ -100,7 +100,7 @@ final class HistogramStoreTests: XCTestCase {
         }
         // Segment 0 red.bins, 1 red.hdrBins, 2 green.bins, 3 green.hdrBins, 4 blue.bins,
         // 5 blue.hdrBins, 6 luma.bins, 7 luma.hdrBins — 4 channels, luma included (403 stopped
-        // drawing it, and `luma.clippedHigh` is still the source of the card's 过白 percentage).
+        // drawing it, and `luma.clippedHDR` is still the source of the card's 过白 percentage).
         for (segment, channel) in value.channels.enumerated() {
             XCTAssertEqual(bin(segment * 512), channel.bins[0], "segment \(segment) bin 0")
             XCTAssertEqual(bin(segment * 512 + 255), channel.bins[255])

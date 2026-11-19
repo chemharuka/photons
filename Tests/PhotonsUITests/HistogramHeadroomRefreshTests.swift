@@ -51,7 +51,7 @@ final class HistogramHeadroomRefreshTests: XCTestCase {
             var hdr = [Int](repeating: 0, count: 64)
             for (i, v) in tail { hdr[i] = v }
             return HistogramChannel(bins: bins, hdrBins: hdr,
-                                    clippedHigh: 0.012, clippedCeiling: 0.004, clippedLow: 0.001)
+                                    clippedHDR: 0.012, clippedScreen: 0.004, clippedBlack: 0.001)
         }
         let red = channel([(128, 1284)], [(8, 812)])
         let green = channel([(128, 1291)], [(8, 819)])

@@ -20,7 +20,7 @@ import PhotonsCore
 ///      second call cannot drift.
 ///   5. **The screen cannot move a bin.** The measurement is pre-S4, so an SDR (`headroom = 1`) and an
 ///      EDR (`headroom = 1.2`) measurement of the same picture agree on all 256 SDR bins *and* the
-///      tail — only `clippedCeiling` differs. An SDR measurement still sees light above white.
+///      tail — only `clippedScreen` differs. An SDR measurement still sees light above white.
 ///   6. **Reduction costs accuracy, and no more than the documented bound.** The thumbnail is compared
 ///      against a full-resolution recount of the same picture; every bin must be within 1 % of the
 ///      total and the numbers are printed so the claim travels with a measurement.
@@ -153,8 +153,8 @@ final class HistogramTests: XCTestCase {
         for channel in h.channels {
             XCTAssertEqual(channel.bins[0], 32)
             XCTAssertEqual(channel.total, 32)
-            XCTAssertEqual(channel.clippedLow, 1.0, accuracy: 1e-12)
-            XCTAssertEqual(channel.clippedHigh, 0.0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedBlack, 1.0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedHDR, 0.0, accuracy: 1e-12)
             XCTAssertEqual(channel.peakBin, 0)
         }
         XCTAssertEqual(h.red.bins.count, 256)
@@ -165,8 +165,8 @@ final class HistogramTests: XCTestCase {
         let h = Histogram.compute(solid(5, 3, rgb: 1))
         for channel in h.channels {
             XCTAssertEqual(channel.bins[255], 15, "white must be the last bin, not one past it")
-            XCTAssertEqual(channel.clippedHigh, 1.0, accuracy: 1e-12)
-            XCTAssertEqual(channel.clippedLow, 0.0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedHDR, 1.0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedBlack, 0.0, accuracy: 1e-12)
         }
     }
 
@@ -175,7 +175,7 @@ final class HistogramTests: XCTestCase {
     func testNearWhiteIsLastBinWithoutBeingClipped() {
         let h = Histogram.compute(solid(4, 4, rgb: 0.998))
         XCTAssertEqual(h.red.bins[255], 16)
-        XCTAssertEqual(h.red.clippedHigh, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(h.red.clippedHDR, 0.0, accuracy: 1e-12)
     }
 
     // MARK: - 2. a ramp, one pixel per bin
@@ -196,8 +196,8 @@ final class HistogramTests: XCTestCase {
             XCTAssertEqual(channel.total, n)
             XCTAssertEqual(channel.bins.filter { $0 == 1 }.count, n,
                            "\(name): every bin must hold exactly one pixel")
-            XCTAssertEqual(channel.clippedHigh, 0, accuracy: 1e-12)
-            XCTAssertEqual(channel.clippedLow, 0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedHDR, 0, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedBlack, 0, accuracy: 1e-12)
         }
         let bins = hist.luma.bins
         XCTAssertEqual(bins.firstIndex(of: 1), 0)
@@ -262,8 +262,8 @@ final class HistogramTests: XCTestCase {
         }
         let hist = Histogram.compute(display(rgba, w, h))
         for channel in hist.channels {
-            XCTAssertEqual(channel.clippedHigh, 0.5, accuracy: 1e-12)
-            XCTAssertEqual(channel.clippedLow, 0.25, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedHDR, 0.5, accuracy: 1e-12)
+            XCTAssertEqual(channel.clippedBlack, 0.25, accuracy: 1e-12)
             XCTAssertEqual(channel.total, 64)
         }
         XCTAssertEqual(hist.red.bins[0], 16)
@@ -289,11 +289,11 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(left.sampleCount, 4)
         XCTAssertEqual(left.roi, ImageRect(x: 0, y: 0, width: 2, height: 2))
         XCTAssertEqual(left.red.bins[255], 4)
-        XCTAssertEqual(left.red.clippedHigh, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(left.red.clippedHDR, 1.0, accuracy: 1e-12)
 
         let right = Histogram.compute(image, rect: ImageRect(x: 2, y: 0, width: 2, height: 2))
         XCTAssertEqual(right.red.bins[0], 4)
-        XCTAssertEqual(right.red.clippedLow, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(right.red.clippedBlack, 1.0, accuracy: 1e-12)
 
         // A rect that leaves the frame is clamped: an oversized rect becomes the whole frame — a count
         // of pixels that exist, never of pixels asked for.
@@ -315,7 +315,7 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(h.sampleCount, 1)
         XCTAssertEqual(h.binCount, 256)
         XCTAssertEqual(h.red.bins[255], 1)
-        XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(h.red.clippedHDR, 1.0, accuracy: 1e-12)
         XCTAssertEqual(h.sampleFraction, 1.0, accuracy: 1e-12)
 
         // An empty rect is a measurement of nothing, not of pixel (0,0).
@@ -324,8 +324,8 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(empty.sampleCount, 0)
         for channel in empty.channels {
             XCTAssertEqual(channel.total, 0)
-            XCTAssertEqual(channel.clippedHigh, 0)
-            XCTAssertEqual(channel.clippedLow, 0)
+            XCTAssertEqual(channel.clippedHDR, 0)
+            XCTAssertEqual(channel.clippedBlack, 0)
             XCTAssertNil(channel.peakBin)
         }
         XCTAssertEqual(empty.sampleFraction, 0)
@@ -435,17 +435,17 @@ final class HistogramTests: XCTestCase {
             XCTAssertLessThan(diff, 0.01,
                               "\(name): one bin moved \(String(format: "%.3f", diff * 100)) % of the "
                               + "pixels; the documented bound is 1 %")
-            XCTAssertEqual(thumbnail[name].clippedHigh, reference[name].clippedHigh, accuracy: 0.01)
-            XCTAssertEqual(thumbnail[name].clippedLow, reference[name].clippedLow, accuracy: 0.01)
+            XCTAssertEqual(thumbnail[name].clippedHDR, reference[name].clippedHDR, accuracy: 0.01)
+            XCTAssertEqual(thumbnail[name].clippedBlack, reference[name].clippedBlack, accuracy: 0.01)
             let tailDiff = zip(tailFractions(thumbnail[name]), tailFractions(reference[name]))
                 .map { abs($0 - $1) }.max() ?? 0
             XCTAssertLessThan(tailDiff, 0.005)
         }
         print(String(format: "histogram reduction: %d px → %d px (%@), worst bin %@ %.4f %% of total "
-                     + "(per-bin ±%.4f pp), clippedHigh Δ %.4f",
+                     + "(per-bin ±%.4f pp), clippedHDR Δ %.4f",
                      w * h, thumbnail.sampleCount, thumbnail.sampleSize.keyString,
                      worstChannel, worstBin * 100, worstBin * 100,
-                     abs(thumbnail.luma.clippedHigh - reference.luma.clippedHigh)))
+                     abs(thumbnail.luma.clippedHDR - reference.luma.clippedHDR)))
     }
 
     // MARK: - 9. off means off, and a frame never measures
@@ -554,7 +554,7 @@ final class HistogramTests: XCTestCase {
         let h = Histogram.compute(solid(2, 2, rgb: encode(Float(pow(2.0, 4.5)))))
         XCTAssertEqual(h.red.hdrBins[255], 4)
         XCTAssertEqual(h.red.hdrBins.reduce(0, +), 4)
-        XCTAssertEqual(h.red.clippedHigh, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(h.red.clippedHDR, 1.0, accuracy: 1e-12)
     }
 
     /// White itself stays on the code axis (last SDR bin); a hair above it is tail bin 0. This is the
@@ -576,12 +576,12 @@ final class HistogramTests: XCTestCase {
     /// now: the bins are of the picture, and this is how much of it that screen would throw away.
     func testClippedCeilingIsTheScreensLossNotThePictures() {
         let inside = Histogram.compute(solid(2, 2, rgb: encode(1.9)), headroom: 2)
-        XCTAssertEqual(inside.red.clippedHigh, 1.0, accuracy: 1e-12, "above white")
-        XCTAssertEqual(inside.red.clippedCeiling, 0.0, accuracy: 1e-12, "but inside the ceiling")
+        XCTAssertEqual(inside.red.clippedHDR, 1.0, accuracy: 1e-12, "above white")
+        XCTAssertEqual(inside.red.clippedScreen, 0.0, accuracy: 1e-12, "but inside the ceiling")
 
         let atCeiling = Histogram.compute(solid(2, 2, rgb: encode(2.0)), headroom: 2)
-        XCTAssertEqual(atCeiling.red.clippedCeiling, 1.0, accuracy: 1e-12)
-        XCTAssertEqual(atCeiling.red.clippedHigh, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(atCeiling.red.clippedScreen, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(atCeiling.red.clippedHDR, 1.0, accuracy: 1e-12)
     }
 
     /// **The acceptance claim of B**, on the CPU: the bins do not know what screen this is. An SDR and a
@@ -597,13 +597,13 @@ final class HistogramTests: XCTestCase {
         XCTAssertEqual(sdr.red.hdrTotal, 32)
         // 2 stops = bin 128 of 1/64 stop.
         XCTAssertEqual(sdr.red.hdrBins[128], 32)
-        XCTAssertEqual(sdr.red.clippedHigh, 1.0, accuracy: 1e-12)
-        XCTAssertEqual(sdr.red.clippedCeiling, 1.0, accuracy: 1e-12, "headroom 1: white is the ceiling")
-        XCTAssertEqual(edr.red.clippedCeiling, 1.0, accuracy: 1e-12, "4.0 > 1.2 too")
+        XCTAssertEqual(sdr.red.clippedHDR, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(sdr.red.clippedScreen, 1.0, accuracy: 1e-12, "headroom 1: white is the ceiling")
+        XCTAssertEqual(edr.red.clippedScreen, 1.0, accuracy: 1e-12, "4.0 > 1.2 too")
     }
 
     /// The same claim through the graph, on a real picture with a hot band: `headroom` changes nothing
-    /// but `clippedCeiling`, and the SDR measurement has a non-zero tail.
+    /// but `clippedScreen`, and the SDR measurement has a non-zero tail.
     func testAnSDRMeasurementSeesTheHighlightThatAnSDRScreenWouldLose() throws {
         let graph = try makeGraph(hotImage(width: 1200, height: 900))
         let sdr = try graph.measureHistogram(.neutral, headroom: 1)
@@ -619,12 +619,12 @@ final class HistogramTests: XCTestCase {
         // The tail's first 8 bins, printed: the acceptance number for C.
         let head = (0..<8).map { "\(sdr.luma.hdrBins[$0])" }.joined(separator: " / ")
         print("histogram tail, luma, bins 0…7 of 256: \(head) · hdrTotal \(sdr.luma.hdrTotal) of "
-              + "\(sdr.luma.total) samples · clippedHigh(R) \(String(format: "%.4f", sdr.red.clippedHigh))")
-        print("histogram ceiling, same picture: SDR clippedCeiling(R) "
-              + "\(String(format: "%.4f", sdr.red.clippedCeiling)) vs 1.2× "
-              + "\(String(format: "%.4f", edr.red.clippedCeiling)); bins identical")
+              + "\(sdr.luma.total) samples · clippedHDR(R) \(String(format: "%.4f", sdr.red.clippedHDR))")
+        print("histogram ceiling, same picture: SDR clippedScreen(R) "
+              + "\(String(format: "%.4f", sdr.red.clippedScreen)) vs 1.2× "
+              + "\(String(format: "%.4f", edr.red.clippedScreen)); bins identical")
         XCTAssertGreaterThan(sdr.red.hdrTotal, 0)
-        XCTAssertNotEqual(sdr.red.clippedCeiling, edr.red.clippedCeiling, accuracy: 0.0,
+        XCTAssertNotEqual(sdr.red.clippedScreen, edr.red.clippedScreen, accuracy: 0.0,
                           "1.2× keeps some of the light an SDR panel loses")
     }
 

@@ -211,7 +211,7 @@ final class HighlightOverlayView: NSView {
 /// Formatting and path maths for the histogram card.
 ///
 /// Pure on purpose: the percentages the card prints are the *Core* numbers
-/// (`HistogramChannel.clippedHigh` / `clippedLow`), and having the formatter be a function of those
+/// (`HistogramChannel.clippedHDR` / `clippedBlack`), and having the formatter be a function of those
 /// values is what lets `--ui-smoke` assert "the number on screen equals the number Core measured"
 /// without reading pixels back out of a label.
 public enum HistogramCardFormat {
@@ -234,12 +234,12 @@ public enum HistogramCardFormat {
 
     public static func clipHigh(_ histogram: Histogram?, _ channel: Histogram.Channel) -> String {
         guard let histogram else { return "—" }
-        return percent(histogram[channel].clippedHigh)
+        return percent(histogram[channel].clippedHDR)
     }
 
     public static func clipLow(_ histogram: Histogram?, _ channel: Histogram.Channel) -> String {
         guard let histogram else { return "—" }
-        return percent(histogram[channel].clippedLow)
+        return percent(histogram[channel].clippedBlack)
     }
 
 }

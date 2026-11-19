@@ -45,7 +45,7 @@ final class HistogramSampling413Tests: XCTestCase {
     private func channel(code: [Int: Int] = [:], tail: [Int: Int] = [:]) -> HistogramChannel {
         HistogramChannel(bins: (0..<binCount).map { code[$0] ?? 0 },
                          hdrBins: (0..<Histogram.hdrBinCount).map { tail[$0] ?? 0 },
-                         clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+                         clippedHDR: 0, clippedScreen: 0, clippedBlack: 0)
     }
 
     private func histogram(_ channel: HistogramChannel) -> Histogram {

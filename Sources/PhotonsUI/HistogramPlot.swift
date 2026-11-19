@@ -216,10 +216,10 @@ extension HistogramCardFormat {
 
 extension HistogramCardFormat {
 
-    /// The ceiling ratio for a channel (`HistogramChannel.clippedCeiling`), formatted like the rest.
+    /// The ceiling ratio for a channel (`HistogramChannel.clippedScreen`), formatted like the rest.
     public static func clipCeiling(_ histogram: Histogram?, _ channel: Histogram.Channel) -> String {
         guard let histogram else { return "—" }
-        return percent(histogram[channel].clippedCeiling)
+        return percent(histogram[channel].clippedScreen)
     }
 
     /// The vertical scale for both segments: the largest count *between* the drawn path's first and

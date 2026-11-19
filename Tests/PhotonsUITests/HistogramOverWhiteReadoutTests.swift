@@ -64,7 +64,7 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
         func channel(_ value: Int) -> HistogramChannel {
             HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
                              hdrBins: (0..<Histogram.hdrBinCount).map { $0 == 64 ? value : 0 },
-                             clippedHigh: 0.0123, clippedCeiling: 0.0456, clippedLow: 0)
+                             clippedHDR: 0.0123, clippedScreen: 0.0456, clippedBlack: 0)
         }
         let red = channel(1284)
         return Histogram(binCount: 256, sampleCount: 898_432,

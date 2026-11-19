@@ -168,7 +168,7 @@ final class HistogramAxisTests: XCTestCase {
     func testOnePathCoversBothSegments() {
         let channel = HistogramChannel(bins: [Int](repeating: 1, count: 256),
                                        hdrBins: [Int](repeating: 1, count: 256),
-                                       clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+                                       clippedHDR: 0, clippedScreen: 0, clippedBlack: 0)
         let axis = HistogramAxis(plot: plot)
         let points = HistogramCardFormat.points(channel, binCount: 256, axis: axis,
                                                 peak: HistogramCardFormat.scalePeak(channel))
@@ -193,8 +193,8 @@ final class HistogramAxisTests: XCTestCase {
         var hdr = [Int](repeating: 0, count: 96)
         hdr[0] = 5
         hdr[95] = 10_000
-        let channel = HistogramChannel(bins: sdr, hdrBins: hdr, clippedHigh: 1,
-                                       clippedCeiling: 1, clippedLow: 0)
+        let channel = HistogramChannel(bins: sdr, hdrBins: hdr, clippedHDR: 1,
+                                       clippedScreen: 1, clippedBlack: 0)
         XCTAssertEqual(HistogramCardFormat.scalePeak(channel), 40)
     }
 
@@ -301,8 +301,8 @@ final class HistogramAxisTests: XCTestCase {
         func zeroed(_ c: HistogramChannel) -> HistogramChannel {
             HistogramChannel(bins: [Int](repeating: 0, count: c.bins.count),
                              hdrBins: [Int](repeating: 0, count: c.hdrBins.count),
-                             clippedHigh: c.clippedHigh, clippedCeiling: c.clippedCeiling,
-                             clippedLow: c.clippedLow)
+                             clippedHDR: c.clippedHDR, clippedScreen: c.clippedScreen,
+                             clippedBlack: c.clippedBlack)
         }
         let blank = Histogram(binCount: picture.binCount, sampleCount: picture.sampleCount,
                               canvas: picture.canvas, roi: picture.roi,

@@ -53,7 +53,7 @@ import PhotonsCore
 // Decisions worth writing down:
 //
 //   · **The numbers come from `Histogram`, never from a second measurement.** The card formats
-//     `HistogramChannel.clippedHigh` / `clippedCeiling` / `clippedLow` — the same values the CLI
+//     `HistogramChannel.clippedHDR` / `clippedScreen` / `clippedBlack` — the same values the CLI
 //     prints and the tests assert — so "what the card says" and "what Core measured" cannot drift,
 //     and `--ui-smoke` checks the identity by reformatting the measurement.
 //   · **The histogram is of the picture, not of the frame** (005, 2026-10-26). `LoupeController`

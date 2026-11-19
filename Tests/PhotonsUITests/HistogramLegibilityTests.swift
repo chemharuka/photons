@@ -36,7 +36,7 @@ final class HistogramLegibilityTests: XCTestCase {
         func channel(_ h: Double) -> HistogramChannel {
             HistogramChannel(bins: [Int](repeating: 1, count: 256),
                              hdrBins: [Int](repeating: 0, count: 96),
-                             clippedHigh: h, clippedCeiling: h, clippedLow: 0)
+                             clippedHDR: h, clippedScreen: h, clippedBlack: 0)
         }
         return Histogram(binCount: 256, sampleCount: sampleCount,
                          canvas: ImageSize(width: 720, height: 420),

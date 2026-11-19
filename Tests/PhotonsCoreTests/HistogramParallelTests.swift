@@ -15,8 +15,8 @@ import XCTest
 ///   ① **one thread and N threads agree, bin for bin**, over a sample that exercises every branch —
 ///      black, the 0.0031308 knee, mid grey, white, three stops above white, negative (a curve can
 ///      undershoot), `+∞` and NaN;
-///   ② the merge is a sum of integers, so the *ratios* agree too (`clippedHigh`, `clippedCeiling`,
-///      `clippedLow`) and so does `sampleCount` — the four series and the twelve scalars travel
+///   ② the merge is a sum of integers, so the *ratios* agree too (`clippedHDR`, `clippedScreen`,
+///      `clippedBlack`) and so does `sampleCount` — the four series and the twelve scalars travel
 ///      together;
 ///   ③ a sample too small to pay for a dispatch stays on one thread (`countWorkers`), which is also
 ///      the arm ① compares against.
@@ -64,9 +64,9 @@ final class HistogramParallelTests: XCTestCase {
             XCTAssertEqual(parallel.red.hdrBins, serial.red.hdrBins)
             XCTAssertEqual(parallel.luma.bins, serial.luma.bins)
             XCTAssertEqual(parallel.luma.hdrBins, serial.luma.hdrBins)
-            XCTAssertEqual(parallel.red.clippedHigh, serial.red.clippedHigh, accuracy: 0)
-            XCTAssertEqual(parallel.red.clippedCeiling, serial.red.clippedCeiling, accuracy: 0)
-            XCTAssertEqual(parallel.red.clippedLow, serial.red.clippedLow, accuracy: 0)
+            XCTAssertEqual(parallel.red.clippedHDR, serial.red.clippedHDR, accuracy: 0)
+            XCTAssertEqual(parallel.red.clippedScreen, serial.red.clippedScreen, accuracy: 0)
+            XCTAssertEqual(parallel.red.clippedBlack, serial.red.clippedBlack, accuracy: 0)
         }
     }
 
@@ -102,7 +102,7 @@ final class HistogramParallelTests: XCTestCase {
     }
 
     /// The headroom argument is the third input that must not drift between arms: an SDR ceiling and a
-    /// +2 stop ceiling are different `clippedCeiling` numbers over the same bins.
+    /// +2 stop ceiling are different `clippedScreen` numbers over the same bins.
     func testHeadroomRatiosAgreeAcrossBlocks() {
         let sample = sample()
         for headroom in [1.0, 2.0, 4.0] {

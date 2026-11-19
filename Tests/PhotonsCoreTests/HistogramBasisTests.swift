@@ -120,7 +120,7 @@ final class HistogramBasisTests: XCTestCase {
             XCTAssertEqual(hist[channel].bins[255], n, "\(channel): 1.0 is white on either basis")
             XCTAssertEqual(hist[channel].bins[254], 0, "\(channel): nothing spilled below white")
             XCTAssertEqual(hist[channel].hdrTotal, 0, "\(channel): white is not in the tail")
-            XCTAssertEqual(hist[channel].clippedHigh, 1, "\(channel): 1.0 still counts as clipped high")
+            XCTAssertEqual(hist[channel].clippedHDR, 1, "\(channel): 1.0 still counts as clipped high")
         }
         XCTAssertEqual(hist.primaries, .rec2020)
     }
@@ -168,7 +168,7 @@ final class HistogramBasisTests: XCTestCase {
 
     /// A picture made only of wide-gamut colour has **nothing** in bin 0 on any channel, while staying
     /// a picture whose clipping ratios are ordinary — the two numbers that told the user something was
-    /// wrong were R bin 0 and R `clippedLow`, and both are quiet here.
+    /// wrong were R bin 0 and R `clippedBlack`, and both are quiet here.
     func testAWideGamutPictureHasNoNegativeComponentAtAll() {
         let w = 64, h = 4
         var rgba = [Float16](repeating: 1, count: w * h * 4)
@@ -184,7 +184,7 @@ final class HistogramBasisTests: XCTestCase {
         XCTAssertEqual(hist.sampleCount, w * h)
         for channel in Histogram.Channel.allCases {
             XCTAssertEqual(hist[channel].bins[0], 0, "\(channel): no pixel was made negative")
-            XCTAssertEqual(hist[channel].clippedLow, 0, "\(channel): nothing reads as clipped low")
+            XCTAssertEqual(hist[channel].clippedBlack, 0, "\(channel): nothing reads as clipped low")
         }
         XCTAssertEqual(hist.primaries, .rec2020)
     }

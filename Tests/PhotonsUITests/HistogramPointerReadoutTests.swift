@@ -115,8 +115,8 @@ final class HistogramPointerReadoutTests: XCTestCase {
     /// A histogram whose bins the test chose, so "R 1284" is a number this test put there.
     private func knownCounts(red: Int = 1284, green: Int = 1291, blue: Int = 1206) -> Histogram {
         func channel(_ bins: [Int], _ hdr: [Int]) -> HistogramChannel {
-            HistogramChannel(bins: bins, hdrBins: hdr, clippedHigh: 0.01, clippedCeiling: 0.01,
-                             clippedLow: 0)
+            HistogramChannel(bins: bins, hdrBins: hdr, clippedHDR: 0.01, clippedScreen: 0.01,
+                             clippedBlack: 0)
         }
         func bins(_ value: Int) -> [Int] {
             (0..<256).map { $0 == 128 ? value : 0 }
