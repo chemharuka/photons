@@ -505,6 +505,8 @@
 "未找到 ansel-denoise-swift" = "未找到 ansel-denoise-swift";
 "未找到 hdrmerge-swift" = "未找到 hdrmerge-swift";
 "未找到 hdrmerge-swift（应随 app 提供于 Contents/Resources/bin/）" = "未找到 hdrmerge-swift（应随 app 提供于 Contents/Resources/bin/）";
+"未找到 nonlocal 降噪模型：{0}" = "未找到 nonlocal 降噪模型：{0}";
+"未找到 nonlocal 降噪模型：{0}" = "未找到 nonlocal 降噪模型：{0}";
 "未找到 {0} 个" = "未找到 {0} 个";
 "未找到降噪模型：{0}" = "未找到降噪模型：{0}";
 "未搜索" = "未搜索";
@@ -541,8 +543,11 @@
 "框外" = "框外";
 "椭圆半径" = "椭圆半径";
 "椭圆角度" = "椭圆角度";
-"模型降噪…" = "模型降噪…";
 "模型降噪只处理单张照片" = "模型降噪只处理单张照片";
+"模型降噪（Ansel）…" = "模型降噪（Ansel）…";
+"模型降噪（Ansel）…" = "模型降噪（Ansel）…";
+"模型降噪（Nonlocal）…" = "模型降噪（Nonlocal）…";
+"模型降噪（Nonlocal）…" = "模型降噪（Nonlocal）…";
 "模型降噪：继承编辑" = "模型降噪：继承编辑";
 "模式" = "模式";
 "模拟预览" = "模拟预览";

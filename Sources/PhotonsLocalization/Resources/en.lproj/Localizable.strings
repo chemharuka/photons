@@ -505,6 +505,8 @@
 "未找到 ansel-denoise-swift" = "ansel-denoise-swift not found";
 "未找到 hdrmerge-swift" = "hdrmerge-swift was not found";
 "未找到 hdrmerge-swift（应随 app 提供于 Contents/Resources/bin/）" = "hdrmerge-swift not found (it should ship inside the app at Contents/Resources/bin/)";
+"未找到 nonlocal 降噪模型：{0}" = "";
+"未找到 nonlocal 降噪模型：{0}" = "Nonlocal denoise model not found: {0}";
 "未找到 {0} 个" = "Not found: {0}";
 "未找到降噪模型：{0}" = "Denoise model not found: {0}";
 "未搜索" = "Not searched";
@@ -541,8 +543,11 @@
 "框外" = "Outside frame";
 "椭圆半径" = "Ellipse radius";
 "椭圆角度" = "Ellipse angle";
-"模型降噪…" = "AI Denoise…";
 "模型降噪只处理单张照片" = "Model denoise handles a single photo only";
+"模型降噪（Ansel）…" = "";
+"模型降噪（Ansel）…" = "AI Denoise (Ansel)…";
+"模型降噪（Nonlocal）…" = "";
+"模型降噪（Nonlocal）…" = "AI Denoise (Nonlocal)…";
 "模型降噪：继承编辑" = "AI Denoise: Inherit edits";
 "模式" = "Mode";
 "模拟预览" = "Preview simulation";

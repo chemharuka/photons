@@ -212,8 +212,11 @@ final class DenoiseMenu386Tests: XCTestCase {
         return out
     }
 
-    private func denoiseRow(in menu: NSMenu) -> NSMenuItem? {
-        menu.items.first { $0.title == DenoiseMenuBuilder.title }
+    /// §432 — 现在每个浏览器里是**两行**：`模型降噪（Ansel）…` 与 `模型降噪（Nonlocal）…`。
+    /// 这个 helper 默认取 Ansel 那一行：386 的每一条断言讲的都是「既有那条路」，
+    /// 而 432 的新增部分在 `DenoiseTwoEntries432Tests` 里。
+    private func denoiseRow(in menu: NSMenu, engine: DenoiseEngine = .ansel) -> NSMenuItem? {
+        menu.items.first { $0.title == DenoiseMenuBuilder.title(for: engine) }
     }
 
     // MARK: - ① 三面各一行，可点
@@ -230,10 +233,10 @@ final class DenoiseMenu386Tests: XCTestCase {
         XCTAssertEqual(menus.count, 3)
         for name in ["grid", "filmstrip", "browser"] {
             let menu = try XCTUnwrap(menus[name])
-            let row = try XCTUnwrap(denoiseRow(in: menu), "① \(name) 的右键菜单里没有「模型降噪…」")
+            let row = try XCTUnwrap(denoiseRow(in: menu), "① \(name) 的右键菜单里没有「模型降噪（Ansel）…」")
             print("① \(name)：row=\"\(row.title)\" enabled=\(row.isEnabled) "
                   + "tooltip=\(row.toolTip ?? "nil") 并列项=\(menu.items.map(\.title))")
-            XCTAssertEqual(row.title, "模型降噪…")
+            XCTAssertEqual(row.title, "模型降噪（Ansel）…")
             XCTAssertTrue(row.isEnabled, "① \(name)：1 张 DNG 应该可点")
             XCTAssertEqual(row.toolTip?.isEmpty, false, "① 可点的那一行也带一句说明")
             XCTAssertTrue(row.toolTip?.contains("IMG_0000-denoised.dng") ?? false,

@@ -1603,14 +1603,23 @@ public enum HDRMenuBuilder {
 }
 
 
-/// 右键 ▸「模型降噪…」 — §386，与 「HDR 合成…」 同一个 builder 模式、同一排位置。
+/// 右键 ▸「模型降噪（Ansel）…」/「模型降噪（Nonlocal）…」 — §386 的一项，§432 拆成两项。
 ///
 /// 用户的契约（2026-11-11）：「选择单个照片，右键-"模型降噪"，会自动在原文件的同位置生成
 /// XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的放在顶部」，以及「不弹窗口」。
-/// 所以这一行只有一个动词和一个决定：*这一张能不能降噪*，不能的时候原因就写在行上。
+/// 所以每一项只有一个动词和一个决定：*这一张能不能降噪*，不能的时候原因就写在行上。
+///
+/// §432（用户口径 2026-11-19「模型降噪(AI denoise)要设置两个入口」）：两条网络并存 ——
+/// Ansel（GPL 权重，子进程）与非局部匹配滤波（MIT 权重，进程内）。**两个并列项**而不是子菜单：
+/// 只有两项，多一层点击只换来一次多余的展开。
 ///
 /// 和「HDR 合成…」一样**始终出现、不满足就灰**：消失的行什么都学不到，而「缺模型」这种
 /// 情况必须把**期望的完整路径**说出来（§2.3 第 4 级），用户才能把文件放对地方。
+///
+/// **可用性按网络分别判**，这是本单最容易做错的一条：缺 ansel 工具时 Nonlocal 仍可点，
+/// 缺 NLMF 模型时 Ansel 仍可点。两者都不可点只会在「两者都真的缺」时发生。
+/// 「正在跑」是另一件事，由 `session.isDenoiseRunning` 单独拦 —— 同时只跑一个，
+/// 但那是运行态，不是依赖缺失，所以它有自己的那句 notice。
 @MainActor
 public final class DenoiseMenuTarget: NSObject {
     public weak var session: CatalogSession?
@@ -1621,33 +1630,55 @@ public final class DenoiseMenuTarget: NSObject {
     }
 
     @objc func denoisePressed(_ sender: Any?) {
-        session?.denoiseSelection()
+        session?.denoiseSelection(engine: .ansel)
+    }
+
+    @objc func nonlocalPressed(_ sender: Any?) {
+        session?.denoiseSelection(engine: .nonlocal)
     }
 }
 
 @MainActor
 public enum DenoiseMenuBuilder {
 
-    public static let title = Loc.t("模型降噪…")
+    /// §432 — 两个并列项，顺序固定（Ansel 在前：它是既有入口，用户已经认这一行）。
+    public static let titles = DenoiseEngine.allCases.map { title(for: $0) }
+
+    public static func title(for engine: DenoiseEngine) -> String {
+        switch engine {
+        case .ansel: return Loc.t("模型降噪（Ansel）…")
+        case .nonlocal: return Loc.t("模型降噪（Nonlocal）…")
+        }
+    }
 
     /// 这一行为什么灰，或 nil（可点）。public 是因为它就是全部规则：菜单、tooltip 和动词
     /// 自己的复查必须说的是同一句话，测试也该能读到那句话而不必去走一棵 `NSMenu`。
     ///
-    /// 顺序是有意的：先说选择（0 张 / >1 张），再说格式，最后说工具与模型 —— 一次只抱怨
-    /// 用户此刻真正该改的那件事。工具/模型在 `session` 上读，所以测试注入一个不存在的路径
-    /// 就能复现对应的那一条。
-    public static func unavailableReason(session: CatalogSession?, selectedIDs: [String]) -> String? {
-        guard let session else { return AnselDenoiseNotices.noLibrary }
-        guard selectedIDs.count == 1 else { return AnselDenoiseNotices.singlePhotoOnly }
+    /// 顺序是有意的：先说选择（0 张 / >1 张），再说格式，最后说依赖 —— 一次只抱怨
+    /// 用户此刻真正该改的那件事。依赖那一段**按引擎分叉**：Ansel 要工具 + 模型，
+    /// Nonlocal 只要模型（进程内，没有可执行文件可缺）。
+    public static func unavailableReason(session: CatalogSession?, selectedIDs: [String],
+                                        engine: DenoiseEngine) -> String? {
+        guard let session else { return DenoiseNotices.noLibrary }
+        guard selectedIDs.count == 1 else { return DenoiseNotices.singlePhotoOnly }
         guard let asset = session.selectedAssets.first else {
-            return AnselDenoiseNotices.singlePhotoOnly
+            return DenoiseNotices.singlePhotoOnly
         }
         guard asset.ext.lowercased() == "dng" else {
-            return AnselDenoiseNotices.onlyDNG(asset.filename)
+            return DenoiseNotices.onlyDNG(asset.filename)
         }
-        guard session.isDenoiseToolAvailable else { return AnselDenoiseNotices.toolMissing }
-        guard session.isDenoiseModelAvailable else {
-            return AnselDenoiseNotices.modelMissing(session.denoiseModelPathHint)
+        // 「正在跑」在依赖之前：跑着的时候再说「缺模型」是假消息，而它其实什么都不缺。
+        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
+        switch engine {
+        case .ansel:
+            guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }
+            guard session.isDenoiseModelAvailable else {
+                return DenoiseNotices.anselModelMissing(session.denoiseModelPathHint)
+            }
+        case .nonlocal:
+            guard session.isNLMFDenoiseModelAvailable else {
+                return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
+            }
         }
         return nil
     }
@@ -1655,12 +1686,14 @@ public enum DenoiseMenuBuilder {
     /// 那一行。**永远返回**（这正是它能带原因灰掉的方式），只有 `unavailableReason` 为 nil
     /// 时才可点。
     public static func item(session: CatalogSession?, target: DenoiseMenuTarget,
-                            selectedIDs: [String]) -> NSMenuItem {
-        let entry = NSMenuItem(title: title,
-                               action: #selector(DenoiseMenuTarget.denoisePressed(_:)),
-                               keyEquivalent: "")
+                            selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
+        let action: Selector = engine == .ansel
+            ? #selector(DenoiseMenuTarget.denoisePressed(_:))
+            : #selector(DenoiseMenuTarget.nonlocalPressed(_:))
+        let entry = NSMenuItem(title: title(for: engine), action: action, keyEquivalent: "")
         entry.target = target
-        if let reason = unavailableReason(session: session, selectedIDs: selectedIDs) {
+        if let reason = unavailableReason(session: session, selectedIDs: selectedIDs,
+                                          engine: engine) {
             entry.isEnabled = false
             entry.toolTip = reason
         } else {
@@ -1671,6 +1704,7 @@ public enum DenoiseMenuBuilder {
     }
 
     /// 可点时的说明里那个文件名：`L1030552.dng` → `L1030552-denoised.dng`。
+    /// 两个引擎**同一个名字**（用户契约：产物与 Ansel 完全一致）。
     private static func denoisedFileNameHint(session: CatalogSession?) -> String {
         guard let name = session?.selectedAssets.first?.filename else { return Loc.t("<原名>-denoised.dng") }
         let stem = (name as NSString).deletingPathExtension
@@ -1678,10 +1712,10 @@ public enum DenoiseMenuBuilder {
     }
 
     /// 放在 「HDR 合成…」 **之后**（两者是一组库动词），所以三个浏览器的右键菜单读起来是
-    /// 同一段话。重复打开时先按标题清掉上一行，和 `HDRMenuBuilder.attach` 同一条规矩。
+    /// 同一段话。重复打开时先按标题清掉上一轮的两行，和 `HDRMenuBuilder.attach` 同一条规矩。
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
                               selectedIDs: [String]) {
-        for (index, existing) in menu.items.enumerated().reversed() where existing.title == title {
+        for (index, existing) in menu.items.enumerated().reversed() where titles.contains(existing.title) {
             menu.removeItem(at: index)
             // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
             // one after its own row, and the previous open may have put one after ours.
@@ -1699,10 +1733,15 @@ public enum DenoiseMenuBuilder {
             insertAt = stackIndex + 1
             if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
         }
-        menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs),
-                        at: insertAt)
-        let alreadySeparated = insertAt + 1 < menu.items.count && menu.items[insertAt + 1].isSeparatorItem
-        if !alreadySeparated { menu.insertItem(.separator(), at: insertAt + 1) }
+        // 两项挨着插：Ansel 在上，Nonlocal 在下，读完一行再读一行是同一个决定。
+        for (offset, engine) in DenoiseEngine.allCases.enumerated() {
+            menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
+                                 engine: engine),
+                            at: insertAt + offset)
+        }
+        let after = insertAt + DenoiseEngine.allCases.count
+        let alreadySeparated = after < menu.items.count && menu.items[after].isSeparatorItem
+        if !alreadySeparated { menu.insertItem(.separator(), at: after) }
     }
 }
 
