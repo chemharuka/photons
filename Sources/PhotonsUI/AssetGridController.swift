@@ -998,8 +998,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
     }
 
-    /// Visible items plus exactly one row either side (006 §5: prefetch is "visible + one row",
-    /// computed from the layout function, not guessed in pixels). Everything else is cancelled.
+    /// 429 — visible items plus **four rows** either side (computed from the layout function, not
+    /// guessed in pixels). Everything outside the band is cancelled.
     /// Re-apply the snapshot's thumbnails to whatever cells the diffable pass reused. Same key +
     /// same bitmap is a no-op inside the card, so this is cheap for an unchanged list.
     private func refreshVisibleThumbnails() {
@@ -1066,17 +1066,24 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                                                                  document: document(for: asset)),
                                      display: display) != nil { continue }
             if thumbRequests[index] != nil { continue }
-            // §4 ②③: what is on screen is on-screen work; the one-row slack is prefetch.
+            // §4 ②③: what is on screen is on-screen work; the four-row slack is prefetch.
             requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
                              priority: visible.contains(index) ? .onScreen : .prefetch)
         }
     }
 
-    private func wantedIndexes() -> Set<Int> {
+    /// 429 — visible + **four rows** of slack above and below (`rowHeight` already includes the
+    /// caption strip). The user's ask is "预加载缓存，这样滚动时不会出现占位纯色图": one screen of
+    /// slack (±1 row) meant the next screen still had to decode while the eye watched. Everything
+    /// outside the band is cancelled in `reconcileThumbnails`, so a fast drag does not accumulate
+    /// work; the wanted set is the only thing that got bigger.
+    ///
+    /// Internal, not private, so the 429 acceptance can read the band's size off the live view
+    /// (`wantedIndexes().count`) instead of recomputing the arithmetic in a test.
+    func wantedIndexes() -> Set<Int> {
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
-        // One row of slack on each side. `rowHeight` already includes the caption strip.
-        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight))
+        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight) * 4)
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
         return Set(attributes.compactMap { $0.indexPath?.item })

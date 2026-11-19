@@ -21,9 +21,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// Side of the square preview in a photo row, in points. It is the only input to the tier
     /// policy (`ThumbnailProvider.tier(cellEdgePoints:)` → `t256` at 1× and 2×).
     public static let thumbnailSide: CGFloat = 34
-    /// Rows of prefetch above and below the visible band (006 §5 "可见 + 上下各一行", applied to a
-    /// 46 pt row: one row of slack is cheaper than a scroll hitch).
-    private static let prefetchSlackRows = 5
+    /// 429 — rows of prefetch above and below the visible band: **ten** (was five, originally
+    /// 006 §5's "可见 + 上下各一行"). The user's ask is "侧栏也一样加入 10 个": with 46 pt rows a
+    /// screen is ~10 rows, so ten either side means the next screen is already decoded when the
+    /// list moves. Everything outside the band is cancelled, so the cost is bounded at 20 rows.
+    static let prefetchSlackRows = 10
 
     private let headerTitle = NSTextField(labelWithString: Loc.t("素材浏览"))
     private let headerCount = NSTextField(labelWithString: "")
@@ -937,7 +939,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
     }
 
-    /// Visible rows plus a few either side; everything else is cancelled (§5).
+    /// Visible rows plus ten either side; everything else is cancelled (§5). 429 raised the slack
+    /// from five rows to ten — the list is 46 pt rows, so ten is about one screen.
     private func reconcileThumbnails(force: Bool) {
         guard isViewLoaded, let session, !session.assets.isEmpty, let provider = provider() else { return }
         guard showsPhotoList else {
@@ -1005,7 +1008,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         range.length <= 0 ? 0..<0 : range.location..<(range.location + range.length)
     }
 
-    private func wantedRows() -> Set<Int> {
+    /// Visible rows plus ten either side; everything else is cancelled (§5). 429 raised the slack
+    /// from five rows to ten — the list is 46 pt rows, so ten is about one screen.
+    /// Internal, not private, so the 429 acceptance can read the band's size off the live pane.
+    func wantedRows() -> Set<Int> {
         let visible = photosTable.rows(in: photosScroll.contentView.bounds)
         guard visible.length > 0 else { return [] }
         let slack = BrowserPaneController.prefetchSlackRows

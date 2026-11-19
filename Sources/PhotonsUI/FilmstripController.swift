@@ -742,10 +742,15 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         Set(collectionView.indexPathsForVisibleItems().map { $0.item })
     }
 
-    private func wantedIndexes() -> Set<Int> {
+    /// 429 — visible + **ten cells** of slack on each side (was one). The user's ask is
+    /// "胶片条左右各 10 个": ten cells is a bit more than one screen of a 90 pt strip, so the row
+    /// that comes in after a flick is already in the memory LRU. Only the horizontal inset grows.
+    ///
+    /// Internal, not private, so the 429 acceptance can read the band's size off the live view.
+    func wantedIndexes() -> Set<Int> {
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
-        let slack = max(24, flow.itemSize.width)
+        let slack = max(24, flow.itemSize.width) * 10
         let expanded = bounds.insetBy(dx: -slack, dy: 0)
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
