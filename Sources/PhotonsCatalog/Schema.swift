@@ -12,6 +12,7 @@ import GRDB
 /// | v4 | `presets` — named partial documents for M5's preset panel |
 /// | v5 | `assets.missing` — the row whose original file moved away (reference roots only) |
 /// | v6 | `assets.stack_id` + `assets.stack_rank` — photo stacks (§378) |
+/// | v7 | backfill `assets.width/height` to display pixels for rows with orientation 5…8 (§436) |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -21,7 +22,7 @@ import GRDB
 /// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 6
+    public static let version = 7
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -47,6 +48,7 @@ public enum Schema {
         Step(name: "v4") { db in try db.execute(sql: v4) },
         Step(name: "v5") { db in try addMissingColumnIfAbsent(db) },
         Step(name: "v6") { db in try addStackColumnsIfAbsent(db) },
+        Step(name: "v7") { db in try uprightPixelDimensions(db) },
     ]
 
     static var migrator: DatabaseMigrator {
@@ -163,6 +165,32 @@ public enum Schema {
                    AND NOT EXISTS (SELECT 1 FROM assets
                                     WHERE stack_id = OLD.stack_id AND stack_rank = 0);
             END;
+            """)
+    }
+
+    // MARK: - v7
+
+    /// `assets.width/height` become **display pixels** (§436).
+    ///
+    /// Before v7 the import wrote `kCGImagePropertyPixelWidth/Height` — the *stored* size, which
+    /// ignores EXIF orientation. A portrait shot therefore sat in the library as `9520×6336` with
+    /// `orientation = 8`, the grid's `height > width` test never fired, and 431's portrait swatch
+    /// could not appear. The decoder already honours the tag (the bitmap is portrait), so the row
+    /// was the only thing lying.
+    ///
+    /// `width > height` is the **replay guard**, not a filter on "landscape photos": after a row is
+    /// swapped it is taller than wide, so a second run matches nothing and the migration is a no-op
+    /// (the `user_version` stamp can be lost; replaying must never swap the numbers back). A stored
+    /// pair that is already `w < h` while carrying orientation 5…8 is an anomalous file this step
+    /// deliberately leaves alone — swapping it would need a second source of truth for "was this
+    /// already upright?", which the schema does not have.
+    private static func uprightPixelDimensions(_ db: Database) throws {
+        try db.execute(sql: """
+            UPDATE assets SET width = height, height = width
+             WHERE width > height
+               AND EXISTS (SELECT 1 FROM asset_metadata m
+                            WHERE m.asset_id = assets.id
+                              AND m.orientation BETWEEN 5 AND 8)
             """)
     }
 
