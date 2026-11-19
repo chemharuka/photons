@@ -263,69 +263,6 @@ final class SharpenScaleTests: XCTestCase {
                      values[0]))
     }
 
-    // MARK: - 3. the mask
-
-    /// `masking = 100` on a low-contrast edge: 189 measured `m = 0.44 / 0.03 / 0.00` at fit / 1:1 / 2×
-    /// for a 6-code edge, i.e. the same edge was an edge at one zoom and a flat area at the others.
-    /// The mask comes from `sharpenMaskPreview`, which is the render's own `m` — not a second
-    /// derivation of it.
-    ///
-    /// Two contrasts, because one of them alone would be a vacuous test: a 6-code edge sits **below**
-    /// the knee at every scale (m ≈ 0 everywhere — consistent, and the honest answer for an edge the
-    /// mask was never meant to open on), while a 45-code / 16 px edge sits **in the middle** of the
-    /// knee, where `m` is a real fraction and the 14× spread 189 measured would show up immediately.
-    func testMaskingReadsTheSameEdgeAtThreeScales() throws {
-        let soft = try maskPeaks(stepCodes: 6)
-        print(String(format: "191 · 6 码边 · m 峰值 %.3f / %.3f / %.3f（三处都在膝下，一致）",
-                     soft[0], soft[1], soft[2]))
-        XCTAssertLessThanOrEqual(soft.max()!, 0.10, "6 码边在某一处被当成了边")
-
-        let mid = try maskPeaks(stepCodes: 45, transition: 16)
-        print(String(format: "191 · 45 码/16 px 边 · m 峰值 %.3f / %.3f / %.3f（fit / 1:1 / 2×）",
-                     mid[0], mid[1], mid[2]))
-        let relative = (mid.max()! - mid.min()!) / max(mid.max()!, 1e-9)
-        print(String(format: "191 · m 三处相对差 %.0f%%", relative * 100))
-        // Not vacuous: the fixture has to land inside the knee, or "three scales agree" means nothing.
-        XCTAssertGreaterThan(mid[1], 0.15, "45 码边的 m 在 1:1 也太小，这条测试会空转")
-        XCTAssertLessThan(mid[1], 0.98, "45 码边的 m 在 1:1 已经饱和，这条测试会空转")
-        XCTAssertLessThanOrEqual(relative, 0.20,
-                                 "同一 45 码边在三处的 m 相差 \(relative * 100)%（\(mid)）")
-
-        // The residual, measured and written down instead of tuned away: on the **8 px / 30 code**
-        // fixture, where the knee's steepest segment sits, the same three scales read
-        // 0.580 / 0.752 / 0.773 — 25 %, i.e. 5 points over §3's budget. The cause is the same one the
-        // 16 px overshoot has: at `S = 0.5` the plane the gradient is measured on is a 4×4-**image**-
-        // pixel mean, so the ramp it differentiates is already smoothed once more than at 1:1.
-        let steep = try maskPeaks(stepCodes: 30)
-        print(String(format: "191 · 30 码/8 px 边（膝最陡处）· m %.3f / %.3f / %.3f · 相对差 %.0f%%",
-                     steep[0], steep[1], steep[2],
-                     (steep.max()! - steep.min()!) / max(steep.max()!, 1e-9) * 100))
-        XCTAssertGreaterThan(steep.min()!, 0.3, "8 px/30 码边在某一处被关掉了（14× 复现）")
-    }
-
-    /// The peak `m` of the render's own mask, at each of the three scales, for a step of `codes`
-    /// screen codes with an 8-image-pixel transition.
-    private func maskPeaks(stepCodes step: Double, transition t: Int = 8) throws -> [Double] {
-        let graph = try makeGraph(lowContrastEdge(transition: t, stepCodes: step),
-                                  identity: "sharpen-scale-mask-\(Int(step))-\(t)")
-        let edit = sharpen(150, radius: 1.0, detail: 25, masking: 100)
-        var peaks: [Double] = []
-        for S in scales {
-            let result = try graph.render(edit, options: RenderOptions(scale: S, useCache: false,
-                                                                      wantsPixels: false))
-            let canvas = try XCTUnwrap(result.output)
-            let mask = try graph.sharpenMaskPreview(from: canvas, edit: edit, imageScale: S)
-            graph.recycle(output: canvas)
-            let y = mask.height / 2
-            var peak = 0.0
-            for x in Int(290 * S)..<min(mask.width, Int(340 * S)) {
-                peak = max(peak, Double(mask.rgba[(y * mask.width + x) * 4]))
-            }
-            peaks.append(peak)
-        }
-        return peaks
-    }
-
     // MARK: - 4. the clamp budget
 
     /// The limiter's budget on the edge half is `8·A` codes (`A = 1.5` at the 150 档), and it **binds**

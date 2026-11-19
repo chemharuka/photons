@@ -413,53 +413,6 @@ final class SharpenStageTests: XCTestCase {
         XCTAssertGreaterThan(overshoots[1], 1.0, "蒙版 100 把强边也挡住了")
     }
 
-    // MARK: - 6. the Alt preview
-
-    func testMaskPreviewChangesNeitherTheDocumentNorAKey() throws {
-        let g = try makeGraph(noiseAndEdge(width: 400, height: 300), identity: "sharpen-preview")
-        let edit = sharpen(100, radius: 1.0, detail: 25, masking: 100)
-
-        let result = try g.render(edit, options: RenderOptions(scale: 1, useCache: false,
-                                                              wantsPixels: false))
-        let canvas = try XCTUnwrap(result.output)
-        // `sortedKeys`: `EditModel.encode` writes through an `AnyCodingKey` container, whose iteration
-        // order is a dictionary's — without this the two encodings of one value differ by key order.
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let documentBefore = try encoder.encode(edit)
-        let size = ImageSize(width: 400, height: 300)
-        let keysBefore = RenderKeyChain.links(identity: "sharpen-preview", sourceSize: size,
-                                              canvas: size, content: size, edit: edit,
-                                              display: DisplayOptions(headroom: 1))
-
-        let mask = try g.sharpenMaskPreview(from: canvas, edit: edit)
-        g.recycle(output: canvas)
-
-        XCTAssertEqual(try encoder.encode(edit), documentBefore, "⌥ 预览改动了文档")
-        XCTAssertEqual(RenderKeyChain.links(identity: "sharpen-preview", sourceSize: size,
-                                            canvas: size, content: size, edit: edit,
-                                            display: DisplayOptions(headroom: 1)),
-                       keysBefore, "⌥ 预览改动了渲染键")
-        XCTAssertEqual(mask.width, canvas.width)
-        XCTAssertEqual(mask.height, canvas.height)
-
-        // The mask is a mask: 0 over the flat half (its noise is under the knee) and 1 on the edge.
-        var lo = 1.0, hi = 0.0
-        for y in stride(from: 40, to: mask.height - 40, by: 7) {
-            for x in stride(from: 40, to: mask.width - 40, by: 7) {
-                let v = Double(mask.rgba[(y * mask.width + x) * 4])
-                lo = min(lo, v); hi = max(hi, v)
-            }
-        }
-        print(String(format: "185 · ⌥ 掩膜范围 %.3f…%.3f", lo, hi))
-        XCTAssertLessThan(lo, 0.05, "掩膜在平坦区不为 0")
-        XCTAssertGreaterThan(hi, 0.9, "掩膜在强边上不为 1")
-
-        // The gesture itself is read from the modifier flags, and holding it writes no field.
-        XCTAssertTrue(SharpenMaskPreviewFacing.shouldShow(flags: [.option]))
-        XCTAssertFalse(SharpenMaskPreviewFacing.shouldShow(flags: []))
-    }
-
     // MARK: - 7. cost
 
     func testMarginalGPUCostAtFourMegapixels() throws {
@@ -522,10 +475,3 @@ final class SharpenStageTests: XCTestCase {
     }
 }
 
-/// The ⌥ predicate, reached through the UI target's own type so the test pins the rule and not a copy
-/// of it. `SharpenMaskPreview.shouldShow` lives in PhotonsUI, which this target does not link; the
-/// rule is one line and this shim keeps the two spellings from drifting (the UI file's doc comment
-/// names this test).
-enum SharpenMaskPreviewFacing {
-    static func shouldShow(flags: NSEvent.ModifierFlags) -> Bool { flags.contains(.option) }
-}

@@ -407,34 +407,3 @@ kernel void s3_10_sharpen_apply(texture2d<float, access::read> src [[texture(0)]
     float ceiling = p.f.z > 0.0 ? p.f.z : 4.0;
     dst.write(float4(clamp(rgb + delta, 0.0, ceiling), px.a), gid);
 }
-
-// MARK: - 4. the ⌥ preview
-
-/// The `masking` mask itself, 0…1, as grey — what ⌥ shows on the canvas.
-///
-/// It reads the same `wide` plane the apply pass masks with, so the preview **is** the mask the render
-/// uses, not a second derivation of it. Called by `RenderGraph.sharpenMaskPreview` outside the key
-/// chain: no key, no cache entry, no document field (§「Alt 预览」).
-kernel void s3_10_sharpen_mask(texture2d<float, access::sample> wide [[texture(0)]],
-                               texture2d<float, access::write> dst [[texture(1)]],
-                               constant SharpenParams &p [[buffer(0)]],
-                               uint2 gid [[thread_position_in_grid]]) {
-    int w = p.b.x, h = p.b.y;
-    if (int(gid.x) >= w || int(gid.y) >= h) { return; }
-    int x = int(gid.x), y = int(gid.y);
-    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);
-    float2 uv0 = float2((float(x) + 0.5) / float(p.b.x), (float(y) + 0.5) / float(p.b.y));
-    // One **half-res texel** (two frame pixels) each way: the plane is half resolution, and a gradient
-    // measured across half a texel of a blurred step is four times smaller than the step — enough to
-    // leave the mask half-closed on an edge it should be open on.
-    float2 du = float2(2.0 / float(p.b.x), 0.0);
-    float2 dv = float2(0.0, 2.0 / float(p.b.y));
-    // Forward differences from the centre sample already in hand: two fetches instead of four, and the
-    // magnitude of a 1 px step on the blurred plane is the same either way (a step is monotone there).
-    float centre = wide.sample(linearSampler, uv0).r;
-    float gx = wide.sample(linearSampler, uv0 + du).r - centre;
-    float gy = wide.sample(linearSampler, uv0 + dv).r - centre;
-    float g = max(abs(gx), abs(gy));
-    float m = smoothstep(max(p.e.w, 0.0), max(p.f.x, p.e.w + 1e-4), g);
-    dst.write(float4(m, m, m, 1.0), gid);
-}
