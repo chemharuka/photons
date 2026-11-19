@@ -1258,7 +1258,7 @@ private struct HistogramCoverage {
     }
 
     /// The readback still contains the excluded texels (written as `excludedSample`, which lands in
-    /// bin 0 of every series and in `clippedLow`). Remove exactly those samples from the measured
+    /// bin 0 of every series and in `clippedBlack`). Remove exactly those samples from the measured
     /// counts, so the plot is the photograph's distribution and `sampleCount` is the number of
     /// photograph samples — "not counted in any bin", not "counted as black".
     ///
@@ -1281,12 +1281,12 @@ private struct HistogramCoverage {
         func fixed(_ channel: HistogramChannel) -> HistogramChannel {
             var bins = channel.bins
             if !bins.isEmpty { bins[0] = max(0, bins[0] - excluded) }
-            let lowCount = (channel.clippedLow * rawCount).rounded() - Double(excluded)
+            let lowCount = (channel.clippedBlack * rawCount).rounded() - Double(excluded)
             return HistogramChannel(
                 bins: bins, hdrBins: channel.hdrBins,
-                clippedHigh: channel.clippedHigh * rawCount / realCount,
-                clippedCeiling: channel.clippedCeiling * rawCount / realCount,
-                clippedLow: max(0, lowCount) / realCount)
+                clippedHDR: channel.clippedHDR * rawCount / realCount,
+                clippedScreen: channel.clippedScreen * rawCount / realCount,
+                clippedBlack: max(0, lowCount) / realCount)
         }
         return Histogram(binCount: histogram.binCount,
                          sampleCount: histogram.sampleCount - excluded,
@@ -3237,7 +3237,7 @@ public final class RenderGraph {
     /// One thumbnail render (long edge ≤ `Histogram.maxLongEdge`) plus one readback of the texture S3
     /// produced, then the CPU counts ~0.58 Mpx. Nothing about it depends on a viewport, a window, a
     /// zoom or a display: the same photo and the same edit give the same bins at fit, at 1:1 and at
-    /// 400 %, and a `headroom` change moves `clippedCeiling` alone.
+    /// 400 %, and a `headroom` change moves `clippedScreen` alone.
     ///
     /// Deliberately its own render rather than a dispatch inside a frame's command buffer: a frame is
     /// the *window* the camera is showing, and one measurement per picture has to be of the picture.
@@ -3258,7 +3258,7 @@ public final class RenderGraph {
         let options = RenderOptions(
             scale: Histogram.sampleScale(for: cropPixels),
             // `headroom` reaches the counters, not the pixels: S4's ceiling cannot move a bin any
-            // more, it only decides what `clippedCeiling` reports for this screen. 320's `ceiling`
+            // more, it only decides what `clippedScreen` reports for this screen. 320's `ceiling`
             // is the opposite case — it *is* the pixels, so it arrives as the display option the
             // render clamps and measures with.
             display: DisplayOptions(primaries: .sRGB, bitDepth: 16, headroom: headroom,

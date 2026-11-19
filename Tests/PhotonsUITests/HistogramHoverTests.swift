@@ -58,7 +58,7 @@ final class HistogramHoverTests: XCTestCase {
             let hb = (0..<256).map { i in tail.first { $0.0 == i }?.3 ?? 0 }
             func channel(_ bins: [Int], _ hdr: [Int]) -> HistogramChannel {
                 HistogramChannel(bins: bins, hdrBins: hdr,
-                                 clippedHigh: 0.01, clippedCeiling: 0.01, clippedLow: 0)
+                                 clippedHDR: 0.01, clippedScreen: 0.01, clippedBlack: 0)
             }
             return (channel(r, hr), channel(g, hg), channel(b, hb))
         }

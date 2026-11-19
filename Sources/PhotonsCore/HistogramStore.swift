@@ -31,7 +31,7 @@ import CryptoKit
 //                               red.bins, red.hdrBins, green.bins, green.hdrBins,
 //                               blue.bins, blue.hdrBins, luma.bins, luma.hdrBins
 //
-// Four channels, not three: 403 stopped *drawing* the luma outline, and `luma.clippedHigh` is still
+// Four channels, not three: 403 stopped *drawing* the luma outline, and `luma.clippedHDR` is still
 // where the card's three clipping percentages come from (`UISmokeRunner` asserts on it), so its bins
 // travel with the numbers.
 //
@@ -143,9 +143,9 @@ public struct HistogramStore: Sendable {
                             sampleSize: histogram.sampleSize,
                             primaries: histogram.primaries,
                             headroom: histogram.headroom,
-                            clipHigh: histogram.channels.map(\.clippedHigh),
-                            clipCeiling: histogram.channels.map(\.clippedCeiling),
-                            clipLow: histogram.channels.map(\.clippedLow))
+                            clipHigh: histogram.channels.map(\.clippedHDR),
+                            clipCeiling: histogram.channels.map(\.clippedScreen),
+                            clipLow: histogram.channels.map(\.clippedBlack))
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         guard let metaData = try? encoder.encode(meta), !metaData.isEmpty,
@@ -198,9 +198,9 @@ public struct HistogramStore: Sendable {
             let tail = bins[(start + Self.binsPerSegment)..<(start + 2 * Self.binsPerSegment)]
                 .map(Int.init)
             return HistogramChannel(bins: sdr, hdrBins: tail,
-                                    clippedHigh: meta.clipHigh[index],
-                                    clippedCeiling: meta.clipCeiling[index],
-                                    clippedLow: meta.clipLow[index])
+                                    clippedHDR: meta.clipHigh[index],
+                                    clippedScreen: meta.clipCeiling[index],
+                                    clippedBlack: meta.clipLow[index])
         }
         return Histogram(binCount: meta.binCount, sampleCount: meta.sampleCount,
                          canvas: meta.canvas, roi: meta.roi, sampleSize: meta.sampleSize,

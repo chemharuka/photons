@@ -130,18 +130,18 @@ final class HistogramHeadroomTests: XCTestCase {
             XCTAssertEqual(c.bins.reduce(0, +) + c.hdrBins.reduce(0, +), grid,
                            "\(channel.rawValue): Σbins + ΣhdrBins 必须等于照片矩形内的像素数")
         }
-        // `clippedHigh` is a **code** threshold (0.999 of code), so the white block counts too: three of
+        // `clippedHDR` is a **code** threshold (0.999 of code), so the white block counts too: three of
         // the four blocks are 「过白」 = 75 %. That number is a fact about the photograph and would be the
-        // same on a 1.0× screen; what *does* move with the screen is `clippedCeiling`, and only the
+        // same on a 1.0× screen; what *does* move with the screen is `clippedScreen`, and only the
         // two blocks above 3.948× are in it (50 %).
-        XCTAssertEqual(h.red.clippedHigh, 0.75, accuracy: 1e-12, "白块 + 两块高光过白 = 75 %")
-        XCTAssertEqual(h.red.clippedCeiling, 0.5, accuracy: 1e-12,
+        XCTAssertEqual(h.red.clippedHDR, 0.75, accuracy: 1e-12, "白块 + 两块高光过白 = 75 %")
+        XCTAssertEqual(h.red.clippedScreen, 0.5, accuracy: 1e-12,
                        "headroom 3.948: +2 EV 与 +5 EV 两块在本机上被削掉")
         print("070 blocks: code128 → bins[128], white → bins[255], +2 EV → hdr[127]= "
               + "\(h.red.hdrBins[127]) / hdr[128]= \(h.red.hdrBins[128]), +5 EV → hdr[255] · "
-              + "\(h.sampleCount) samples · clippedHigh(R) "
-              + "\(String(format: "%.3f", h.red.clippedHigh)) · clippedCeiling(R) "
-              + "\(String(format: "%.3f", h.red.clippedCeiling))")
+              + "\(h.sampleCount) samples · clippedHDR(R) "
+              + "\(String(format: "%.3f", h.red.clippedHDR)) · clippedScreen(R) "
+              + "\(String(format: "%.3f", h.red.clippedScreen))")
     }
 
     // MARK: - 2. the counter-proof: the S4 frame cannot separate them

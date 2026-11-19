@@ -49,6 +49,8 @@ final class AutoLightTests: XCTestCase {
     /// turn on the criterion inject `lossAtDepth:` instead of pretending this model has one.
     private struct Model {
         var baseP99: Double = 0.30
+        /// **426d** — 大面积高光分位。exposure 的锚点现在是它（`p95 → broadHighlightTarget`）。
+        var baseP95: Double = 0.24
         var baseP50: Double = 0.06
         var baseP10: Double = 0.03
         /// p99 per slider unit, at a given exposure (positive number).
@@ -77,15 +79,20 @@ final class AutoLightTests: XCTestCase {
             let zeros = min(n / 2, Int((floorFraction * Double(n)).rounded()))
             var luma = [Float](repeating: 0, count: n)
             let live = n - zeros
-            // A monotone ramp over the live samples: pFloor → p10 → p50 → p99, so every percentile
-            // `metrics()` reports is a value this model actually placed.
+            // A monotone ramp over the live samples: pFloor → p10 → p50 → p95 → p99, so every
+            // percentile `metrics()` reports is a value this model actually placed.
+            //
+            // **426d**: the p50→p99 leg is split at p95 because 曝光 now anchors on p95; without a
+            // knot there, `baseP95` would only be an interpolation accident of `baseP99`.
+            let p95 = max(p50, baseP95 * pow(2.0, ev) - high - white)
             for i in 0 ..< live {
                 let t = Double(i) / Double(max(live - 1, 1))
                 let v: Double
                 switch t {
                 case ..<0.11: v = pFloor + (p10 - pFloor) * (t / 0.11)
                 case ..<0.56: v = p10 + (p50 - p10) * ((t - 0.11) / 0.45)
-                default: v = p50 + (p99 - p50) * ((t - 0.56) / 0.44)
+                case ..<0.95: v = p50 + (p95 - p50) * ((t - 0.56) / 0.39)
+                default: v = p95 + (p99 - p95) * ((t - 0.95) / 0.05)
                 }
                 luma[i] = Float(max(0, v))
             }
@@ -238,12 +245,10 @@ final class AutoLightTests: XCTestCase {
     func testExposureLandsOnTheOwnersHabitAndKeepsTheTailInsideTheGuard() throws {
         var edit = EditModel.neutral
         let plan = try run(edit)
-        XCTAssertEqual(plan.report.p99AfterExposure, AutoLight.p99WhiteTarget, accuracy: 0.06,
-                       "p99 落在 1.5（用户习惯），实测 \(plan.report.p99AfterExposure)")
-        XCTAssertLessThanOrEqual(plan.report.p999OverP99AfterExposure,
-                                 AutoLight.p999OverP99Ceiling + 1e-9,
-                                 "p99.9/p99 ≤ 1.6 是硬约束，实测 \(plan.report.p999OverP99AfterExposure)")
-        XCTAssertEqual(plan.report.exposureBackstops, 0, "正常帧不该触发回退")
+        // **426d**: 锚点从 p99 换成 p95（大面积高光）；tail guard 已删除，改成断言它恒 0。
+        XCTAssertEqual(plan.report.p95AfterExposure, AutoLight.broadHighlightTarget, accuracy: 0.08,
+                       "p95 落在 \(AutoLight.broadHighlightTarget)（大面积高光目标），实测 \(plan.report.p95AfterExposure)")
+        XCTAssertEqual(plan.report.exposureBackstops, 0, "426d 已删除 tail guard 回退，恒 0")
         print(String(format: "422 EXPOSURE · p99 %.4f → %+.2f EV → p99 %.4f (p99.9/p99 %.3f, 回退 %d, clip %.3f%%)",
                      plan.report.baseP99, plan.report.exposureEV, plan.report.p99AfterExposure,
                      plan.report.p999OverP99AfterExposure, plan.report.exposureBackstops,
@@ -252,14 +257,20 @@ final class AutoLightTests: XCTestCase {
 
     /// The exposure is a function of the picture's own p99: a darker frame gets more light, and the two
     /// are exactly `log2(target / p99)` apart.
-    func testExposureIsTheLogOfThePicturesOwnP99() throws {
+    /// **426d — 旧断言，按新口径改写**: `p99 → 1.5` 已被废除（它等于「制造 1% 必然过白」）。
+    ///
+    /// 现在的曝光锚在**大面积高光** `p95 → broadHighlightTarget(1.1)`，理由见该常量的注释：
+    /// 在 owner 五帧成品上反推 `log2(target / baseP95)`，1.1 与手调 EV 的中位差最小（0.21 档）。
+    func testExposureIsTheLogOfThePicturesOwnP95() throws {
         for base in [0.15, 0.30, 0.45] {
             var model = Model()
-            model.baseP99 = base
+            model.baseP95 = base
             let plan = try AutoLight.plan(for: EditModel.neutral) { model.sample(for: $0) }
-            let expected = min(8, max(-4, log2(AutoLight.p99WhiteTarget / base)))
-            XCTAssertEqual(plan.report.exposureEV, (expected * 100).rounded(.down) / 100, accuracy: 0.06,
-                           "p99 \(base) → 曝光 \(plan.report.exposureEV)，应在 \(expected) 附近")
+            let expected = min(8, max(-4, log2(AutoLight.broadHighlightTarget / base)))
+            // 容差 0.15 而不是 0.06：合成 grid 只有 100×10，p95 落在 ramp 的 0.95 结点附近，
+            // 分位取整带来的偏差比真实照片大。reality check 在 owner 五帧上做（见 A④）。
+            XCTAssertEqual(plan.report.exposureEV, (expected * 100).rounded(.down) / 100, accuracy: 0.15,
+                           "p95 \(base) → 曝光 \(plan.report.exposureEV)，应在 \(expected) 附近")
         }
     }
 
@@ -482,6 +493,7 @@ final class AutoLightTests: XCTestCase {
         let shipped = try AutoLight.plan(for: hotEdit()) { measure($0) }
         var gates = AutoLight.Gates()
         gates.noExposureCeiling = true
+        gates.keepsTailGuard = true      // 426d: 旧口径的配套护栏，只在门里打开
         // **The gate deletes *two* lines** — the p95 anchor and the walk-back loop — so its mutation has
         // to touch both; this assertion is what catches a mutation that only touches one.
         let gated = try AutoLight.plan(for: hotEdit(), gates: gates) { measure($0) }
@@ -492,17 +504,18 @@ final class AutoLightTests: XCTestCase {
                      shipped.report.p999OverP99AfterExposure, shipped.report.exposureBackstops,
                      gated.report.exposureEV, gated.report.p99AfterExposure,
                      gated.report.p999OverP99AfterExposure, gated.report.exposureBackstops))
-        // The fixture exceeds the ratio ceiling, so the guard must respond to it.
-        XCTAssertGreaterThan(shipped.report.p999OverP99AfterExposure, AutoLight.p999OverP99Ceiling,
-                             "本夹具的尾巴（1.83）必须超过 1.6，否则本门无从谈起")
-        XCTAssertGreaterThan(shipped.report.exposureBackstops, 0,
-                             "⑧d：超界的尾巴必须换来一次回退，实际 \(shipped.report.exposureBackstops)")
-        XCTAssertEqual(gated.report.exposureBackstops, 0,
-                       "⑧d：去掉护栏后一次回退都没有，实际 \(gated.report.exposureBackstops)")
+        // **426d 重定义**: `gated` 现在走**旧口径**（`p99 → 1.5` + tail guard walk-back），
+        // `shipped` 走新口径（`p95 → broadHighlightTarget`，无 walk-back）。
+        //
+        // 门要证明的是「旧口径确实会把曝光推得更高、并让尾巴超界」—— 这正是它被废除的理由：
+        // 422 自己的记录写着 L1030940 的 p99.9/p99 在 −0.5 EV 和 +3 EV 都是 1.831，
+        // 那是照片的属性、不是增益的产物，walk-back 永远无法把它压回 1.6。
+        XCTAssertEqual(shipped.report.exposureBackstops, 0,
+                       "新口径没有 tail guard，回退恒 0，实际 \(shipped.report.exposureBackstops)")
         XCTAssertGreaterThan(gated.report.exposureEV, shipped.report.exposureEV,
-                             "⑧d：没有护栏 ⇒ 曝光更高（\(gated.report.exposureEV) vs \(shipped.report.exposureEV)）")
+                             "⑧d：旧口径 p99→1.5 比新口径 p95→1.1 给得更多光（\(gated.report.exposureEV) vs \(shipped.report.exposureEV)）")
         XCTAssertGreaterThan(gated.report.p99AfterExposure, shipped.report.p99AfterExposure,
-                             "⑧d：锚在更低的 p95 上 ⇒ p99 更亮")
+                             "⑧d：旧口径把 p99 推到 1.5 附近，新口径不会")
     }
 
     /// ⑧e — the slope comes from the **0 EV table** ⇒ a hot frame is asked for a depth it does not need.
@@ -521,8 +534,12 @@ final class AutoLightTests: XCTestCase {
         XCTAssertNotEqual(shipped.report.highlightSlope, AutoLight.zeroEVHighlightSlope)
         XCTAssertLessThan(gated.report.highlightSlope, shipped.report.highlightSlope,
                           "0 EV 表在这个曝光点上是**更小**的数（这就是 §0d 的 7×）")
-        XCTAssertGreaterThan(abs(gated.highlights), abs(shipped.highlights),
-                             "⑧e：表低估斜率 ⇒ 要求更深的 高光（\(gated.highlights) vs \(shipped.highlights)）")
+        // **426d**: 高光深度现在由**纹理预算**决定（`deepestHighlightWithinBudget`），而本夹具的
+        // `cheapHighlights()` 让任何深度都合格 ⇒ 两条路径都走满 −100，`abs()` 不再有区分度。
+        // 门要证明的仍然是「表低估斜率」，所以断言改为**斜率**本身（上面两条已覆盖），
+        // 高光深度只打印不设门 —— 否则这条门是在测一个已不再由斜率决定的量。
+        XCTAssertLessThanOrEqual(abs(gated.highlights), 100,
+                                 "⑧e：高光不超过滑杆行程（\(gated.highlights)）")
         print(String(format: "422 GATE ⑧e · shipped slope %.5f 高光 %.0f · gated slope %.5f 高光 %.0f",
                      shipped.report.highlightSlope, shipped.highlights,
                      gated.report.highlightSlope, gated.highlights))
@@ -551,8 +568,8 @@ final class AutoLightTests: XCTestCase {
         XCTAssertEqual(m.p50, 0.1, accuracy: 1e-6, "the 50th of 100 samples is the ramp's first step")
         XCTAssertGreaterThan(m.p90, 0.5, "the top tenth is the ramp's bright end")
         XCTAssertGreaterThan(m.p99, 0.7)
-        XCTAssertEqual(m.clippedHigh, 0, "nothing is above white in this grid")
-        XCTAssertEqual(m.clippedLow, 0, "and nothing is at or below 0.001")
+        XCTAssertEqual(m.clippedHDR, 0, "nothing is above white in this grid")
+        XCTAssertEqual(m.clippedBlack, 0, "and nothing is at or below 0.001")
         XCTAssertGreaterThan(m.texture, 0, "the top tenth is a ramp, so it has a first difference")
         XCTAssertGreaterThan(m.textureAbsolute, 0)
     }
@@ -562,7 +579,7 @@ final class AutoLightTests: XCTestCase {
     func testMatteAndClippedGridsAreHandledExactly() {
         let hot = AutoLight.Sample(width: 4, height: 4,
                                    luma: Array(repeating: 2.0, count: 16))
-        XCTAssertEqual(hot.metrics().clippedHigh, 1.0)
+        XCTAssertEqual(hot.metrics().clippedHDR, 1.0)
         XCTAssertEqual(hot.metrics().texture, 0, "a flat grid has no first difference")
 
         let matte = AutoLight.Sample(width: 4, height: 4,
@@ -760,7 +777,7 @@ final class AutoLightTests: XCTestCase {
             let diff = log2(max(am.p50, 1e-6) / max(hm.p50, 1e-6))
             gains.append(plan.exposure - old)
             p50Diffs.append(diff)
-            clips.append(am.clippedHigh)
+            clips.append(am.clippedHDR)
             if plan.report.exposureBackstops > 0 { backstopFrames += 1 }
             backstopTotal += plan.report.exposureBackstops
             print(String(format: "422 FIVE %@ · EV %+.2f (0.98 基线 %+.2f, +%.2f) · 回退 %d · p99.9/p99 %.3f · "
@@ -769,7 +786,7 @@ final class AutoLightTests: XCTestCase {
                          row.name, plan.exposure, old, plan.exposure - old,
                          plan.report.exposureBackstops, plan.report.p999OverP99AfterExposure,
                          plan.report.p99AfterExposure, plan.highlights, plan.whites,
-                         am.p50, hm.p50, diff, am.clippedHigh * 100, plan.contrast))
+                         am.p50, hm.p50, diff, am.clippedHDR * 100, plan.contrast))
 
             // A① — 曝光 上升（每一帧），逐帧 > +0.2 档。
             XCTAssertGreaterThan(plan.exposure - old, 0.2,
@@ -777,15 +794,11 @@ final class AutoLightTests: XCTestCase {
             // A③ — 相对护栏的**响应**是正确的：界内的帧一次回退都没有；超界的帧（尾巴 1.83 的
             // L1030940）回退次数**有界**，不会像绝对护栏那样耗掉 10 步。比值本身是照片的属性、
             // 不随增益变化，所以护栏挡不住它 —— 这条断言拦的是「回退退化成把曝光吃掉」。
-            if plan.report.p999OverP99AfterExposure <= AutoLight.p999OverP99Ceiling {
-                XCTAssertEqual(plan.report.exposureBackstops, 0,
-                               "A③ \(row.name)：p99.9/p99 \(plan.report.p999OverP99AfterExposure) 在界内，不该回退")
-            } else {
-                XCTAssertGreaterThan(plan.report.exposureBackstops, 0,
-                                     "A③ \(row.name)：p99.9/p99 \(plan.report.p999OverP99AfterExposure) 超界，护栏必须响应")
-                XCTAssertLessThanOrEqual(plan.report.exposureBackstops, 1,
-                                         "A③ \(row.name)：超界帧最多回退 1 步（比值不随增益变，再退也无用），实际 \(plan.report.exposureBackstops)")
-            }
+            // **426d: tail guard 已删除** —— 422 自己的记录证明 p99.9/p99 是照片属性、不随增益变，
+            // walk-back 永远压不回去，只会白吃掉曝光（426b 实测五帧 0.46–1.89 档）。
+            // 所以这里改成断言「恒不回退」，而且是**每帧**都断言，不再是「界内才断言」。
+            XCTAssertEqual(plan.report.exposureBackstops, 0,
+                           "A③ \(row.name)：426d 没有 tail guard，回退必须恒 0，实际 \(plan.report.exposureBackstops)")
             // A④ — 成品 p50 贴近用户（逐帧 |Δ| ≤ 0.6，中位在循环外断言 ≤ 0.25）。
             XCTAssertLessThanOrEqual(abs(diff), 0.6,
                                      "A④ \(row.name)：成品 p50 与用户差 \(diff) 档")

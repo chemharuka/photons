@@ -408,7 +408,7 @@ final class HistogramLetterboxTests: XCTestCase {
             for channel in Histogram.Channel.allCases {
                 XCTAssertEqual(measured.histogram[channel].total, 0)
                 XCTAssertEqual(measured.histogram[channel].bins.count, 256)
-                XCTAssertEqual(measured.histogram[channel].clippedLow, 0, "no NaN ratios")
+                XCTAssertEqual(measured.histogram[channel].clippedBlack, 0, "no NaN ratios")
             }
             XCTAssertEqual(measured.cost.gpuMilliseconds, 0, "\(rect): no dispatch happened")
         }

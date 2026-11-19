@@ -69,7 +69,7 @@ final class HistogramChannelRowTests: XCTestCase {
         func channel(_ value: Int) -> HistogramChannel {
             HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
                              hdrBins: (0..<Histogram.hdrBinCount).map { $0 == 64 ? value : 0 },
-                             clippedHigh: 0.0123, clippedCeiling: 0.0456, clippedLow: 0)
+                             clippedHDR: 0.0123, clippedScreen: 0.0456, clippedBlack: 0)
         }
         let red = channel(1284)
         return Histogram(binCount: 256, sampleCount: 898_432,
@@ -349,7 +349,7 @@ final class HistogramChannelRowTests: XCTestCase {
             func channel(_ value: Int) -> HistogramChannel {
                 HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
                                  hdrBins: (0..<Histogram.hdrBinCount).map { _ in 0 },
-                                 clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+                                 clippedHDR: 0, clippedScreen: 0, clippedBlack: 0)
             }
             return Histogram(binCount: 256, sampleCount: 861,
                              canvas: ImageSize(width: 720, height: 420),
@@ -540,7 +540,7 @@ final class HistogramChannelRowTests: XCTestCase {
         func channel(_ value: Int) -> HistogramChannel {
             HistogramChannel(bins: (0..<256).map { $0 == 128 ? value : 0 },
                              hdrBins: (0..<Histogram.hdrBinCount).map { $0 == 64 ? value : 0 },
-                             clippedHigh: high, clippedCeiling: ceiling, clippedLow: low)
+                             clippedHDR: high, clippedScreen: ceiling, clippedBlack: low)
         }
         let red = channel(1284)
         return Histogram(binCount: 256, sampleCount: 898_432,

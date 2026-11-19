@@ -67,8 +67,8 @@ func cmdHistogram(_ a: Args) throws {
         var hdr64: [String: Any] = [:]
         for channel in Histogram.Channel.allCases {
             let c = histogram[channel]
-            clipping[channel.rawValue] = ["high": c.clippedHigh, "ceiling": c.clippedCeiling,
-                                          "low": c.clippedLow]
+            clipping[channel.rawValue] = ["high": c.clippedHDR, "ceiling": c.clippedScreen,
+                                          "low": c.clippedBlack]
             bins64[channel.rawValue] = base64HistogramBins(c.bins)
             hdr64[channel.rawValue] = base64HistogramBins(c.hdrBins)
         }
@@ -114,8 +114,8 @@ func cmdHistogram(_ a: Args) throws {
         for channel in Histogram.Channel.allCases {
             let c = histogram[channel]
             err("       \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
-                + "high \(percent(c.clippedHigh))  ceil \(percent(c.clippedCeiling))"
-                + "  low \(percent(c.clippedLow))")
+                + "high \(percent(c.clippedHDR))  ceil \(percent(c.clippedScreen))"
+                + "  low \(percent(c.clippedBlack))")
         }
         return
     }
@@ -135,8 +135,8 @@ func cmdHistogram(_ a: Args) throws {
     for channel in Histogram.Channel.allCases {
         let c = histogram[channel]
         note("clip \(channel.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0))"
-             + "high \(percent(c.clippedHigh))  ceil \(percent(c.clippedCeiling))"
-             + "  low \(percent(c.clippedLow))")
+             + "high \(percent(c.clippedHDR))  ceil \(percent(c.clippedScreen))"
+             + "  low \(percent(c.clippedBlack))")
     }
     for channel in Histogram.Channel.allCases {
         note("\(channel.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
@@ -257,8 +257,8 @@ func cmdHistogram(_ a: Args) throws {
                             name, d.within, d.bins, d.worstBin, d.worst * 100,
                             t.bins - t.within, t.bins))
             }
-            emit(String(format: "           clippedHigh Δ %.4f (luma), sampleFraction %.2f %% of the "
-                        + "picture", abs(live.luma.clippedHigh - histogram.luma.clippedHigh),
+            emit(String(format: "           clippedHDR Δ %.4f (luma), sampleFraction %.2f %% of the "
+                        + "picture", abs(live.luma.clippedHDR - histogram.luma.clippedHDR),
                         live.sampleFraction * 100))
         }
         return

@@ -120,7 +120,7 @@ final class HistogramSampleTests: XCTestCase {
             XCTAssertEqual(recount[name].bins, measured.histogram[name].bins,
                            "\(name): the frame's own bytes must bin identically on the CPU")
             XCTAssertEqual(recount[name].hdrBins, measured.histogram[name].hdrBins)
-            XCTAssertEqual(recount[name].clippedHigh, measured.histogram[name].clippedHigh,
+            XCTAssertEqual(recount[name].clippedHDR, measured.histogram[name].clippedHDR,
                            accuracy: 1e-12)
         }
         XCTAssertEqual(measured.histogram.channels.reduce(0) { $0 + $1.total },
@@ -279,8 +279,8 @@ final class HistogramSampleTests: XCTestCase {
                               "\(name): no bin may move more than 2 % of the sample between the two grids")
             print("  live vs shipped \(name.rawValue): \(d.withinHalfPercent)/\(d.bins) bins within "
                   + "0.5 % of the sample, worst bin \(d.worstBin) = "
-                  + "\(String(format: "%.3f", d.worst * 100)) %, clippedHigh Δ "
-                  + "\(String(format: "%.4f", abs(live.histogram[name].clippedHigh - shipped[name].clippedHigh)))")
+                  + "\(String(format: "%.3f", d.worst * 100)) %, clippedHDR Δ "
+                  + "\(String(format: "%.4f", abs(live.histogram[name].clippedHDR - shipped[name].clippedHDR)))")
         }
         XCTAssertEqual(live.histogram.canvas, shipped.canvas)
         XCTAssertEqual(live.histogram.roi, shipped.roi,
@@ -316,25 +316,25 @@ final class HistogramSampleTests: XCTestCase {
         XCTAssertEqual(sdrLast, shippedLast, accuracy: 0.01,
                        "the light an SDR frame clamps is what the shipped path reports clipped — "
                        + "\(String(format: "%.4f", sdrLast)) vs \(String(format: "%.4f", shippedLast))")
-        XCTAssertGreaterThan(sdr.histogram.red.clippedHigh, 0)
+        XCTAssertGreaterThan(sdr.histogram.red.clippedHDR, 0)
 
         // The same frame measured on a grid of one texel per texel: the domain question with the
         // sampling question removed. Red must agree to the pixel.
         let dense = try graph.measureFrameHistogram(fromFrame: sdrFrame.texture, edit: .neutral,
                                                     sampleLongEdge: 900, headroom: 1)
         XCTAssertEqual(dense.cost.sampleSize.keyString, "900x700", "stride 1: every pixel")
-        XCTAssertEqual(dense.histogram.red.clippedHigh, shipped.red.clippedHigh, accuracy: 0.002,
+        XCTAssertEqual(dense.histogram.red.clippedHDR, shipped.red.clippedHDR, accuracy: 0.002,
                        "same pixels, same answer for 削顶 on red: "
-                       + "\(String(format: "%.4f", dense.histogram.red.clippedHigh)) vs "
-                       + "\(String(format: "%.4f", shipped.red.clippedHigh))")
+                       + "\(String(format: "%.4f", dense.histogram.red.clippedHDR)) vs "
+                       + "\(String(format: "%.4f", shipped.red.clippedHDR))")
 
         // Luma is where the clamp *lowers* the measurement, and structurally so: S4 clamps each
         // channel at the ceiling before luma is formed, so a pixel whose red was 3× white has a luma
         // of at most 1 in the frame (0.21·1 + the others), while the picture's own luma is > 1. The
         // frame's 削顶 is therefore *smaller* — it is the luma of what is displayed, which is the
         // honest number for a plot that sits next to the displayed frame.
-        XCTAssertLessThanOrEqual(sdr.histogram.luma.clippedHigh, shipped.luma.clippedHigh)
-        XCTAssertGreaterThan(sdr.histogram.luma.clippedHigh, 0)
+        XCTAssertLessThanOrEqual(sdr.histogram.luma.clippedHDR, shipped.luma.clippedHDR)
+        XCTAssertGreaterThan(sdr.histogram.luma.clippedHDR, 0)
 
         // A 1.2× frame keeps a stop of it, and the tail reappears on the same axis.
         let edrFrame = try renderFrame(graph, scale: 1, headroom: 1.2)
@@ -346,15 +346,15 @@ final class HistogramSampleTests: XCTestCase {
                           "but only up to 1.2× — the rest was clamped")
         // The two ceilings differ, and the ceiling *ratio* is the only thing that moves: a 1.2× frame
         // keeps some of the light an SDR one throws away.
-        XCTAssertNotEqual(sdr.histogram.red.clippedCeiling, edr.histogram.red.clippedCeiling,
+        XCTAssertNotEqual(sdr.histogram.red.clippedScreen, edr.histogram.red.clippedScreen,
                           "the ceiling ratio is the one thing headroom moves")
         print("frame histogram tail: picture hdrTotal(red) \(shipped.red.hdrTotal), SDR frame 0 "
               + "(clamped at white, \(sdr.histogram.red.bins[255]) of \(sdr.histogram.red.total) in "
-              + "the last bin), 1.2× frame \(edr.histogram.red.hdrTotal); clippedHigh red "
-              + "\(String(format: "%.4f", sdr.histogram.red.clippedHigh)) on the frame vs "
-              + "\(String(format: "%.4f", shipped.red.clippedHigh)) on the picture, luma "
-              + "\(String(format: "%.4f", sdr.histogram.luma.clippedHigh)) vs "
-              + "\(String(format: "%.4f", shipped.luma.clippedHigh)) (the clamp lowers luma)")
+              + "the last bin), 1.2× frame \(edr.histogram.red.hdrTotal); clippedHDR red "
+              + "\(String(format: "%.4f", sdr.histogram.red.clippedHDR)) on the frame vs "
+              + "\(String(format: "%.4f", shipped.red.clippedHDR)) on the picture, luma "
+              + "\(String(format: "%.4f", sdr.histogram.luma.clippedHDR)) vs "
+              + "\(String(format: "%.4f", shipped.luma.clippedHDR)) (the clamp lowers luma)")
     }
 
     // MARK: - 7. the matte is not part of the picture
@@ -394,7 +394,7 @@ final class HistogramSampleTests: XCTestCase {
             XCTAssertLessThan(d.worst, 0.02,
                               "\(name): bin \(d.worstBin) differs by "
                               + "\(String(format: "%.3f", d.worst * 100)) % — matte in bin 0 would be ~30 %")
-            XCTAssertEqual(live.histogram[name].clippedLow, shipped[name].clippedLow, accuracy: 0.02,
+            XCTAssertEqual(live.histogram[name].clippedBlack, shipped[name].clippedBlack, accuracy: 0.02,
                            "\(name): counting the matte would read as 削底")
         }
         print("frame histogram matte: canvas \(canvas.keyString) → sample \(sample.keyString), "

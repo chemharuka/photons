@@ -2122,7 +2122,7 @@ public final class UISmokeRunner {
     ///      and `roi` is the picture's own pixel grid, so no viewport enters the numbers at all (the
     ///      acceptance "fit/100%/400% give the same numbers" is checked as "the measurement takes no
     ///      camera" — `measureHistogramNow` has no viewport parameter to get wrong);
-    ///   5. the 削顶 percentage is **Core's** `clippedCeiling` and 过白 its `clippedHigh`, checked
+    ///   5. the 削顶 percentage is **Core's** `clippedScreen` and 过白 its `clippedHDR`, checked
     ///      against `HistogramCardFormat`; the pixels themselves are cross-checked against a
     ///      full-resolution recount in `HistogramTests`, where the source is known;
     ///   6. measuring the same document twice returns the same bins — the key, not the camera, decides;
@@ -2213,9 +2213,9 @@ public final class UISmokeRunner {
         // cross-checked against a full-resolution recount in `HistogramTests`, where the source and the
         // expected distribution are known; here the claim is the card/Core identity.)
         let coreValues = [histogram.red, histogram.green, histogram.blue, histogram.luma]
-            .map(\.clippedHigh)
-        log("clipped ratios          card “\(card.clipHighText)” · Core luma \(String(format: "%.5f", histogram.luma.clippedHigh)) · 逐通道 \(coreValues.map { String(format: "%.5f", $0) }) · 过白合计 \(histogram.luma.hdrTotal) px")
-        check("削顶百分比与 Core 一致：R/G/B/L 的 clippedHigh 全部落在 [0,1] 且卡片 luma 与 Core 相同（\(String(format: "%.5f", coreValues[3]))）",
+            .map(\.clippedHDR)
+        log("clipped ratios          card “\(card.clipHighText)” · Core luma \(String(format: "%.5f", histogram.luma.clippedHDR)) · 逐通道 \(coreValues.map { String(format: "%.5f", $0) }) · 过白合计 \(histogram.luma.hdrTotal) px")
+        check("削顶百分比与 Core 一致：R/G/B/L 的 clippedHDR 全部落在 [0,1] 且卡片 luma 与 Core 相同（\(String(format: "%.5f", coreValues[3]))）",
               coreValues.allSatisfy { $0 >= 0 && $0 <= 1 }
               && card.clipHighText == HistogramCardFormat.clipHigh(histogram, .luma))
         let expectedText = [Histogram.Channel.red, .green, .blue, .luma]
@@ -2227,7 +2227,7 @@ public final class UISmokeRunner {
 
         // 削顶 is now the *ceiling* ratio (S4's own clamp); 过白 is still the 0.999 one the warning uses.
         let ceilingExpected = HistogramCardFormat.clipCeiling(histogram, .luma)
-        check("卡片上的削顶是 Core 的 clippedCeiling（\(card.clipCeilingText) == \(ceilingExpected)，headroom \(String(format: "%.3f", histogram.headroom))×；过白 \(card.clipHighText) 仍是 0.999 阈值）",
+        check("卡片上的削顶是 Core 的 clippedScreen（\(card.clipCeilingText) == \(ceilingExpected)，headroom \(String(format: "%.3f", histogram.headroom))×；过白 \(card.clipHighText) 仍是 0.999 阈值）",
               card.clipCeilingText == ceilingExpected
               && (histogram.headroom > 1.0005
                   || card.clipCeilingText == card.clipHighText))
@@ -2535,9 +2535,9 @@ public final class UISmokeRunner {
         }
         let whiteCells = whiteGrid?.clippedCellCount ?? -1
         let whiteGridFraction = whiteGrid?.clippedFraction ?? -1
-        let whiteHistogramFraction = whiteHistogram?.luma.clippedHigh ?? -1
+        let whiteHistogramFraction = whiteHistogram?.luma.clippedHDR ?? -1
         log("clip threshold probe    cells \(whiteCells)/\(HighlightWarning.columns * HighlightWarning.rows) · grid \(String(format: "%.3f", whiteGridFraction)) · histogram luma \(String(format: "%.3f", whiteHistogramFraction))")
-        check("高光警告与削顶百分比共用 0.999 阈值：纯白源（线性 8）整网格点亮 \(whiteCells)/\(HighlightWarning.columns * HighlightWarning.rows) 格，网格 \(String(format: "%.3f", whiteGridFraction)) == histogram.luma.clippedHigh \(String(format: "%.3f", whiteHistogramFraction))",
+        check("高光警告与削顶百分比共用 0.999 阈值：纯白源（线性 8）整网格点亮 \(whiteCells)/\(HighlightWarning.columns * HighlightWarning.rows) 格，网格 \(String(format: "%.3f", whiteGridFraction)) == histogram.luma.clippedHDR \(String(format: "%.3f", whiteHistogramFraction))",
               whiteCells == HighlightWarning.columns * HighlightWarning.rows
               && whiteGridFraction > 0.99 && whiteHistogramFraction > 0.99)
 

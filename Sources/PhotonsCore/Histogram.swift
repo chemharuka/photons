@@ -10,7 +10,7 @@ import CryptoKit
 // matrix, no transfer function, and — the point — no `min(v, headroom)` clamp. The measurement
 // therefore describes the *photograph* (what an export at any headroom would carry), and an SDR panel
 // can still show that a picture has 3 stops of highlight above white. `DisplayOptions.headroom` no
-// longer enters the geometry of the measurement at all; it only derives `clippedCeiling` (how much
+// longer enters the geometry of the measurement at all; it only derives `clippedScreen` (how much
 // *this* screen would throw away) and the card's 「本机能显示到哪」 tick.
 //
 // **2. The x axis is a Rec.2020 code axis, derived here.** Below white the bins are uniform in the
@@ -47,7 +47,7 @@ import CryptoKit
 // (`histogram_sample_linear`) and hands back the same `Histogram` this file builds from a
 // `LinearSample` — one extra dispatch, 0.29 MB read back, measured inside the frame's own command
 // buffer. `headroom` in that histogram still only labels the screen (the ceiling tick and
-// `clippedCeiling`); it cannot move a bin, which is the whole point.
+// `clippedScreen`); it cannot move a bin, which is the whole point.
 //
 // `RenderGraph.measureFrameHistogram(fromFrame:)` remains as the **display-referred** measurement of
 // an S4 texture — codes, clamped at the panel's headroom. It is what `HistogramLetterboxTests` and
@@ -80,7 +80,7 @@ import CryptoKit
 //
 //     **403 — luma is measured and read, but no longer painted.** The card draws R/G/B as an additive
 //     stack only (「直方图取消白色线，只绘制 RGB，RGB 重叠部分的颜色按光叠加展示」); `luma` keeps its
-//     bins, its `clippedHigh`/`clippedCeiling`/`clippedLow` (the 过白/削顶/削底 numbers) and its use in
+//     bins, its `clippedHDR`/`clippedScreen`/`clippedBlack` (the 过白/削顶/削底 numbers) and its use in
 //     the pointer readout, so nothing in this file's counting changed — only the card's fourth outline
 //     went away.
 
@@ -126,46 +126,46 @@ public struct HistogramChannel: Sendable, Equatable {
     public let hdrBins: [Int]
     /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999 of code), i.e.
     /// **above SDR white (> 1.0 in linear light)** — 过白. On an SDR screen this is *not* lost detail
-    /// any more — it is light the picture has and the panel does not — which is why `clippedCeiling`
+    /// any more — it is light the picture has and the panel does not — which is why `clippedScreen`
     /// sits next to it.
     ///
     /// ⚠ **This is NOT "above the HDR ceiling".** Nothing in this file counts pixels above
     /// `HighlightCeiling.current` (+2.3 EV = 4.9246 linear at the shipped setting): that value is a
     /// *render* clamp (`s2_tone_map.metal`), so a sample that reached it was already truncated before
-    /// this measurement. See `clippedCeiling` for the other threshold — and note that the two names
+    /// this measurement. See `clippedScreen` for the other threshold — and note that the two names
     /// read backwards from what they measure (`High` = SDR white, `Ceiling` = screen headroom), which
     /// has already caused one wrong criterion (2026-11-19: a dispatch counted at 1.0 and called it
-    /// `clippedCeiling`). Read the threshold, never the name.
+    /// `clippedScreen`). Read the threshold, never the name.
     ///
     /// A clipped sample is still counted in `bins` — its last bin — because "the distribution ends at
     /// white" and "white was hit" are different facts and a caller needs both.
-    public let clippedHigh: Double
+    public let clippedHDR: Double
     /// Fraction of sampled pixels **at or above the ceiling this measurement was taken for**
     /// (`Histogram.headroom`, in linear units where 1 is SDR white) — 削顶.
     ///
     /// The threshold is `max(headroom, 1)` (see `ceilingFloor` below), **not** `HighlightCeiling`:
     /// with the default `headroom = 1` this is therefore the fraction *at or above SDR white*, i.e.
-    /// all but identical to `clippedHigh` (measured on `L1030437` at +2 EV: 10.819 % vs 10.857 %).
-    /// It differs from `clippedHigh` only when a caller measures for a screen with real headroom
+    /// all but identical to `clippedHDR` (measured on `L1030437` at +2 EV: 10.819 % vs 10.857 %).
+    /// It differs from `clippedHDR` only when a caller measures for a screen with real headroom
     /// (`headroom > 1`), where the two thresholds separate.
     ///
     /// This is the derived quantity screen-independence bought: the bins cannot depend on a panel, so
     /// "how much would it lose *here*" is reported separately, as the fraction a screen with that
     /// headroom would clamp. With `headroom = 1` it is the fraction above white that an SDR panel
-    /// cannot show — the number the old `clippedCeiling` reported, now for a stated screen instead of
+    /// cannot show — the number the old `clippedScreen` reported, now for a stated screen instead of
     /// for whichever panel happened to render the frame.
-    public let clippedCeiling: Double
+    public let clippedScreen: Double
     /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001) — 削底（死黑）。
     /// Linear values are negative sometimes (a curve can undershoot); those count as below black.
-    public let clippedLow: Double
+    public let clippedBlack: Double
 
-    public init(bins: [Int], hdrBins: [Int] = [], clippedHigh: Double, clippedCeiling: Double = 0,
-                clippedLow: Double) {
+    public init(bins: [Int], hdrBins: [Int] = [], clippedHDR: Double, clippedScreen: Double = 0,
+                clippedBlack: Double) {
         self.bins = bins
         self.hdrBins = hdrBins
-        self.clippedHigh = clippedHigh
-        self.clippedCeiling = clippedCeiling
-        self.clippedLow = clippedLow
+        self.clippedHDR = clippedHDR
+        self.clippedScreen = clippedScreen
+        self.clippedBlack = clippedBlack
     }
 
     /// Every sample this channel counted: the SDR bins **and** the tail.
@@ -199,11 +199,11 @@ public struct Histogram: Sendable, Equatable {
     /// compared in *code* space, which is why `compute` encodes before it tests them — the same
     /// threshold every 8-bit tool uses, on a measurement that no longer arrives encoded.
     ///
-    /// ⚠ **`clipHighThreshold` gates `clippedHigh` = 过白 = "above SDR white (> 1.0 linear)".** It is
-    /// not the HDR ceiling; see `HistogramChannel.clippedHigh` and `HistogramChannel.clippedCeiling`
+    /// ⚠ **`clipHighThreshold` gates `clippedHDR` = 过白 = "above SDR white (> 1.0 linear)".** It is
+    /// not the HDR ceiling; see `HistogramChannel.clippedHDR` and `HistogramChannel.clippedScreen`
     /// for the two thresholds these three numbers actually use (their names read backwards).
     public static let clipHighThreshold: Double = 0.999
-    /// Gates `clippedLow` = 削底（死黑）: at or below 0.001 of code.
+    /// Gates `clippedBlack` = 削底（死黑）: at or below 0.001 of code.
     public static let clipLowThreshold: Double = 0.001
     /// **Rec.709** weights, applied to the components as they arrive (`measure`), which since 385 are
     /// the **working primaries'** (Rec.2020) components rather than sRGB's. Kept at 709 because the
@@ -233,7 +233,7 @@ public struct Histogram: Sendable, Equatable {
     /// reports whatever its own `DisplayImage` was tagged with (`measure(_ image:)`), because those
     /// codes were written by S4's matrix and the label has to follow the pixels.
     public let primaries: OutputPrimaries
-    /// The display ceiling this measurement's `clippedCeiling` was derived for, in **linear** units
+    /// The display ceiling this measurement's `clippedScreen` was derived for, in **linear** units
     /// where 1 is SDR white. It cannot move a bin any more; it travels with the measurement so the
     /// card's ceiling tick and the 削顶 number describe the same screen.
     public let headroom: Double
@@ -544,9 +544,9 @@ extension Histogram {
         let ceilingFloor = (encoded ? srgbEncode(Float(max(headroom, 1))) : Float(max(headroom, 1)))
             * (1 - 1.0 / 2048)
         // ⚠ 2026-11-19 — the threshold above is `max(headroom, 1)`, **not** `HighlightCeiling`.
-        // `clippedCeiling` therefore means "at or above this screen's headroom", and with the default
+        // `clippedScreen` therefore means "at or above this screen's headroom", and with the default
         // `headroom == 1` (`RenderGraph.measureHistogram`, `photonsctl histogram`) it collapses onto
-        // SDR white — i.e. all but the same measurement as `clippedHigh`. Nothing here counts pixels
+        // SDR white — i.e. all but the same measurement as `clippedHDR`. Nothing here counts pixels
         // above the *render* ceiling (`HighlightCeiling.current`, 4.9246 linear): those were already
         // clamped in S2 and cannot be seen from here. A caller that wants "how much did the tone map
         // truncate" must compare a pre-S2 peak against `HighlightCeiling.current` itself — different
@@ -640,9 +640,9 @@ extension Histogram {
                      _ loIndex: Int) -> HistogramChannel {
             HistogramChannel(bins: counts[offset..<(offset + binCount)].map(Int.init),
                              hdrBins: counts[(offset + binCount)..<(offset + stride)].map(Int.init),
-                             clippedHigh: Double(Int(counts[hiIndex])) / n,
-                             clippedCeiling: Double(Int(counts[ceilIndex])) / n,
-                             clippedLow: Double(Int(counts[loIndex])) / n)
+                             clippedHDR: Double(Int(counts[hiIndex])) / n,
+                             clippedScreen: Double(Int(counts[ceilIndex])) / n,
+                             clippedBlack: Double(Int(counts[loIndex])) / n)
         }
         return Histogram(binCount: binCount, sampleCount: counted, canvas: frame,
                          roi: rect, sampleSize: frame, primaries: .rec2020,
@@ -765,7 +765,7 @@ extension Histogram {
         let binCount = min(max(bins, 2), 1 << 16)
         let zero = HistogramChannel(bins: [Int](repeating: 0, count: binCount),
                                     hdrBins: [Int](repeating: 0, count: hdrBinCount),
-                                    clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+                                    clippedHDR: 0, clippedScreen: 0, clippedBlack: 0)
         return Histogram(binCount: binCount, sampleCount: 0, canvas: canvas, roi: roi,
                          sampleSize: ImageSize(width: 1, height: 1), primaries: primaries,
                          headroom: headroom,

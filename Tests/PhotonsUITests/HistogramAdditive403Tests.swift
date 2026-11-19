@@ -40,7 +40,7 @@ final class HistogramAdditive403Tests: XCTestCase {
         func channel(_ value: Int) -> HistogramChannel {
             HistogramChannel(bins: (0..<256).map { plateau.contains($0) ? value : 0 },
                              hdrBins: [Int](repeating: 0, count: Histogram.hdrBinCount),
-                             clippedHigh: 0, clippedCeiling: 0, clippedLow: 0)
+                             clippedHDR: 0, clippedScreen: 0, clippedBlack: 0)
         }
         return Histogram(binCount: 256, sampleCount: 898_432,
                          canvas: ImageSize(width: 720, height: 420),

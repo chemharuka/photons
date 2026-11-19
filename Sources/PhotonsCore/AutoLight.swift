@@ -86,9 +86,17 @@ public enum AutoLight {
         public var p999: Double
         public var peak: Double
         /// Fraction of picture samples above SDR white (1.0 linear).
-        public var clippedHigh: Double
+        public var clippedHDR: Double
         /// Fraction of picture samples at or below 0.001 linear.
-        public var clippedLow: Double
+        public var clippedBlack: Double
+        /// **426d — 撞到屏幕 HDR 上限的像素占比**（`v >= HighlightCeiling.defaultLinear × peakMargin`）。
+        ///
+        /// 与 `peak` 的关系：S2 会把超限像素钳到恰好 ceiling，所以 `peak` 饱和后恒为 4.92、斜率 0，
+        /// 无法判断「压下去了没有」；这个计数是单调的，用来求解与验收。
+        ///
+        /// 与 `clippedHDR` 的关系：`clippedHDR` 是「> SDR 白」，大面积天空/雪本来就该是白的
+        /// （owner 的 L1030940 成品 17.9 %），而这个是「撞到 HDR 上限、正在丢信息」。
+        public var clippedScreen: Double
         /// **§0c's texture, level-normalised** — see `texture(atOrAbove:absolute:)`.
         public var texture: Double
         /// The same first difference **without** the division: §0c's literal formula. Carried beside the
@@ -215,6 +223,8 @@ public enum AutoLight {
         public var baseP99: Double
         public var exposureEV: Double
         public var p99AfterExposure: Double
+        /// **426d** — step 1 之后的大面积高光分位；曝光的锚点就是它（`broadHighlightTarget`）。
+        public var p95AfterExposure: Double
         /// The overshoot guard's own number, measured at step 1's exposure: **`p99.9 / p99`**, i.e. the
         /// quantity `p999OverP99Ceiling` (1.6) governs. Reported as a ratio rather than an absolute p99.9
         /// because that is what the guard reads.
@@ -288,6 +298,64 @@ public enum AutoLight {
     /// now the `p999OverP99Ceiling` guard's job, which is why this constant could move at all.
     public static let p99WhiteTarget: Double = 1.5
 
+    /// Step 1's anchor: **the exposure that puts the picture's body where it belongs, not a fixed p99.**
+    ///
+    /// **426d 裁定 (2026-11-19) — 用户的算法，第一性原理.** The owner's words:
+    ///
+    /// > 「EV 的目标是把主体曝光放在合适的位置，如果高光太亮就 EV 少一些，通过中间调和阴影拉高主体。
+    /// >  高光部分可能是天空可能是窗户可能是灯光，这些部分如果是大面积的，那么就尽量控制在 +1 内。
+    /// >  然后要通过白色和高光将最高亮的像素压到 clippedScreen 以下」
+    ///
+    /// 所以 EV 有**两个约束，取小者**：
+    ///   ① 主体：p50 落到 `bodyTarget`（题材相关，不是固定值 —— 见 `bodyTarget` 的注释）
+    ///   ② 大面积高光：p95 落到 `broadHighlightTarget`（SDR 白附近 = 「控制在 +1 内」）
+    ///
+    /// **为什么锚 p95 而不是 p99（旧口径）**：在 owner 自己的五帧 boston 上实测反推，把 EV 除以
+    /// 2^EV 得到的「target」是 p95 最稳定 ——
+    ///
+    /// | 分位 | 反推 target 范围 | 跨度 |
+    /// |---|---|---|
+    /// | p50 | 0.083–0.644 | **7.8×** |
+    /// | **p95** | **0.800–1.416** | **1.77×** |
+    /// | p99 | 1.004–1.774 | 1.77× |
+    ///
+    /// p50 差 7.8 倍说明主体位置随题材变（夜景 vs 室内），p95 稳定说明**大面积高光**才是
+    /// 曝光上限的那个量。这也正是 owner 的原话「大面积的尽量控制在 +1 内」。
+    ///
+    /// ⚠ **旧口径 `p99 → 1.5` 的错误**：p99 = 1.5 意味着「99 分位放到 1.5」，而 SDR 白是 1.0 ⇒
+    /// **制造约 1% 的必然过白**。owner 的五帧成品里 p99 从 0.833 到 1.259 都有，从不是 1.5。
+    ///
+    /// **1.1 是标定出来的**：在 owner 的五帧 boston 成品上反推 `log2(target / baseP95)` 与手调 EV
+    /// 的差，逐 target 的中位 \|差\| 是 0.9→0.29 / 1.0→0.32 / **1.1→0.21** / 1.2→0.24 / 1.4→0.35 /
+    /// 1.6→0.54。1.1 也落在 owner 成品 p95（0.663–1.174）的中段。
+    public static let broadHighlightTarget: Double = 1.1
+
+    /// **426d — 大面积高光的许可上限**：`clippedHDR`（>SDR 白的像素占比）超过它就该降 EV。
+    ///
+    /// 用户原话：「高光部分可能是天空可能是窗户可能是灯光，这些部分如果是大面积的，那么就尽量
+    /// 控制在 +1 内」。5 % 来自 owner 五帧的实测分布：四帧 ≤ 2.7 %，只有 L1030940（整片天空）
+    /// 是 17.9 % —— 所以 5 % 是「普通画面该守住的线」，超过它说明 EV 给多了。
+    public static let clippedHighCeiling: Double = 0.05
+
+    /// **426d — 对比的行程下限**（只在极端情况下用到）。
+    ///
+    /// owner 口径：「最后极端情况下如果白色+高光+中间调+阴影都实现不了，还能减对比度来拉下」。
+    /// −30 是保守的：再深会把画面压平到没有层次，那时宁可让一点点撞上限留着。
+    public static let contrastFloor: Double = -30
+
+    /// Step 3's goal (426d): **the brightest pixel ends below `clippedScreen`**.
+    ///
+    /// > 「通过白色和高光将最高亮的像素压到 clippedScreen 以下」
+    ///
+    /// Measured on the owner's five finished frames: every one lands `peak ≤ ceiling` (5/5), and two of
+    /// them (L1030940, L1030942) sit **exactly on** 4.92 — i.e. the owner pushes 高光 until the peak
+    /// touches the ceiling and stops, while tolerating 17.9 % / 2.4 % of ordinary white clipping from
+    /// the *large* bright area. Those are two different quantities and this constant is the second one.
+    ///
+    /// ⚠ **Not `p99TopTarget`** (1.2): that was a p99 anchor, which is exactly the mistake — p99 says
+    /// nothing about the single brightest pixel.
+    public static let peakMargin: Double = 0.995
+
     /// Step 1's overshoot guard, as a **multiple of p99** rather than an absolute p99.9.
     ///
     /// **Why not an absolute ceiling.** The old guard read `p99.9 ≤ 2.0`. With the anchor at `p99 = 1.5`
@@ -311,9 +379,13 @@ public enum AutoLight {
     /// the envelope the owner actually uses (中间调 median +16.3, on the 33 % of the library that touches
     /// it at all).
     public static let midtoneTarget: Double = 0.04
-    public static let midtoneCap: Double = 40
+    /// **426d: 40 → 100.** owner 口径：「主体也能通过中间调 +100 …拉到合适水平」。
+    /// 旧的 40 是 422 从 owner 使用分布（中位 +16.3）推的上限，但那是**手调成品**的分布，
+    /// 不是自动算法的许可；自动算法需要它来补 EV 让路之后的亮度。
+    public static let midtoneCap: Double = 100
     public static let shadowTarget: Double = 0.005
-    public static let shadowCap: Double = 30
+    /// **426d: 30 → 50.** owner 口径：「阴影加到 40–50 拉到合适水平」。
+    public static let shadowCap: Double = 50
 
     /// Step 3's goal: where the highlight pull ends.
     ///
@@ -354,15 +426,29 @@ public enum AutoLight {
     /// roughly −25. See `texture(atOrAbove:absolute:)` for why the normalised form is the one shipped.
     public static let highlightLossThreshold: Double = 0.08
 
+    /// **426d: 高光的上限由 `highlightLossThreshold`（纹理预算）决定，不设数字上限。**
+    ///
+    /// owner 口径：「高光减多少上限其实取决于高光纹理，无纹理的比如天空 −100 都没关系，
+    /// 但有纹理就不能 −100 否则丢失高光对比度」。
+    ///
+    /// 所以「能推多深」是**测量出来的**：`loss(atDepth:)` 给出某深度的纹理损失，算法取
+    /// 仍在 `highlightLossThreshold`（8 %）以内的最深处。一片天空几乎没有一阶差分，loss 极低
+    /// ⇒ 允许到 −100；一片有云的天空纹理丰富，loss 很快超预算 ⇒ 停在 −40 附近。
+    ///
+    /// ⚠ 不要把这个换成固定数字（−80 / −100）。那会把「无纹理可以推到底」和
+    /// 「有纹理必须收手」这两种情况压成同一个答案。
+
     /// The most 白色 this algorithm will ask for, and the residual below which it does not engage at
     /// all. Both from the owner's own usage (白色 is 0 on all five boston frames; −31.6 median, −100
     /// min across the 19 % of the library that touches it) and from §1's 「要么不动、要么 ≥ −60」.
-    public static let whiteTravelEnd: Double = 60
+    /// **426d: 60 → 100.** owner 口径：「大面积高光也能通过白色 −100、高光减少 50–60 左右拉回很多」。
+    /// 60 会让「白色已经用到底但仍撞上限」的帧停在差一点点的地方，而 owner 明确允许 −100。
+    public static let whiteTravelEnd: Double = 100
     public static let whiteEngageDeadband: Double = 0.04
 
     /// Step 4: >0.1 % of the pixels clipping at the bottom.
     public static let clipFloorFraction: Double = 0.001
-    /// The black floor the crush aims at: 0.0016 is one hair below `clippedLow`'s own 0.001, so a solve
+    /// The black floor the crush aims at: 0.0016 is one hair below `clippedBlack`'s own 0.001, so a solve
     /// that lands on it clips.
     public static let blackFloorTarget: Double = 0.0016
     /// How many slider units of 黑色 one **milli-unit of `blackOffset`** is worth when cancelling it.
@@ -450,14 +536,33 @@ public enum AutoLight {
         // ⑧d: anchoring on p95 is "reach SDR white" *without* the p99 ceiling — the gate's mistake, and
         // it over-exposes every picture that has a tail.
         let anchor = gates.noExposureCeiling ? neutral.p95 : neutral.p99
-        var exposure = snapExposure(log2(p99WhiteTarget / max(anchor, 1e-5)))
+        // **426d — 曝光的唯一驱动量：大面积高光。**
+        //
+        // owner 的原话是「如果高光太亮就 EV 少一些，通过中间调和阴影拉高主体」——所以 EV 由**高光**
+        // 决定，主体不足由步骤 2 补，EV 不为主体让路。
+        //
+        // 标定：在 owner 自己的五帧 boston 成品上反推 `log2(target / baseP95)`，逐 target 比对手调 EV：
+        //   target 0.9 → 中位差 0.29 | 1.0 → 0.32 | **1.1 → 0.21** | 1.2 → 0.24 | 1.4 → 0.35 | 1.6 → 0.54
+        // 1.1 是最贴合的（逐帧 −0.36/+0.46/+0.11/−0.00/−0.21），也落在 owner 成品 p95 的中段。
+        var exposure = snapExposure(log2(broadHighlightTarget / max(neutral.p95, 1e-5)))
+        // ⚠ 旧的 `p99 → 1.5` 口径只在反向门 ⑧d 打开时复现，好让门能证明新规则确实换了驱动量。
+        if gates.noExposureCeiling {
+            exposure = snapExposure(log2(p99WhiteTarget / max(anchor, 1e-5)))
+        }
         document.light.exposure = exposure
         var afterExposure = try sample(document).metrics()
-        // **The tail guard is hard.** 422's verdict replaced `p99 ≤ 1.0` with a tail guard; the rework made
-        // it **relative** (`p99.9 / p99 ≤ 1.6`) because an absolute 2.0 contradicts `p99 = 1.5` on 4/5 of
-        // the owner's frames. The anchor (1.5) is deliberately above white, so what is guarded is how far
-        // the top 0.1 % runs past it *in proportion*, and a candidate that exceeds the ratio is walked back
-        // until it does not.
+        // **422's tail guard is retired by 426d.** It walked exposure *back* whenever `p99.9/p99`
+        // exceeded 1.6, and 422's own note records the outcome: on L1030940 the ratio is 1.831 at both
+        // −0.5 EV and +3 EV — it is a property of the picture, not of the gain — so the walk-back could
+        // never fix it and only cost the frame its exposure. Measured cost: 426b's variant spent it and
+        // landed 0.46–1.89 stops dark on five frames.
+        //
+        // 426d's exposure rule already bounds the top from the *large* highlight (p95 → 1.0), which is
+        // what the guard was trying to approximate from the other end. A thick tail beyond that is the
+        // picture's own business — the owner's L1030940 finished with 17.9 % of pixels above white and
+        // was accepted, because what they constrain is `peak ≤ clippedScreen` (step 3), not p99.9.
+        //
+        // `exposureBackstops` stays in the report as a constant 0 so 422's A③ still has something to read.
         var backstops = 0
         // ⑧d removes the constraint **and its enforcement**: gating only the anchor would still let the
         // walk-back hold the tail inside the ceiling, and the gate would prove nothing.
@@ -470,7 +575,9 @@ public enum AutoLight {
         // The loop now takes the first step back (a real exceedance gets a real response) and then stops as
         // soon as the ratio fails to fall — the measurement saying "this tail is not a gain artefact".
         // `exposureBackstops` therefore reads 1 on such a frame rather than 10.
-        while !gates.noExposureCeiling,
+        // **426d: 这条 walk-back 已删除。** 见上方注释。⑧d 仍需要它来证明旧行为，所以只在 gate
+        // 打开时执行，生产路径恒 0 次。
+        while gates.noExposureCeiling == false, gates.keepsTailGuard,
               afterExposure.p999 > afterExposure.p99 * p999OverP99Ceiling, backstops < 10, exposure > -4 {
             let ratioBefore = afterExposure.p999 / max(afterExposure.p99, 1e-9)
             exposure = snapExposure(exposure - 0.05)
@@ -500,10 +607,162 @@ public enum AutoLight {
         document.light.shadows = shadows
         var afterStep2 = try sample(document).metrics()
 
-        // ── 步骤 3 — 高光 / 白色（纹理损失判据）─────────────────────────────────────────────────
+        // ── 步骤 3 — 高光 / 白色 / 中间调 / 阴影 / 对比（426d：面多了加水 水多了加面）─────────
         //
-        // The slopes are re-measured **here**, at the exposure step 1 chose (§0d): one render per tool,
-        // both at −100, reduced to p99 per unit of travel.
+        // **用户的算法（原话）**：
+        //   「大面积高光也能通过白色 −100，高光减少 50–60 左右拉回很多，而主体也能通过中间调 +100，
+        //    阴影加到 40–50 拉到合适水平。很多时候 EV 稍微不对也没关系，面多了加水 水多了加面，
+        //    所以不要太纠结 EV 的值。我的目标是优先用白色+高光，如果白色高光要减得比较多，
+        //    就少一些 EV，加中间调和阴影。最后极端情况下如果白色+高光+中间调+阴影都实现不了，
+        //    还能减对比度来拉下」
+        //
+        // 求解目标只有一个：**`clippedScreen` 归零**（撞到屏幕 HDR 上限的像素占比）。
+        // 为什么不是 `peak`：S2 的 `min(v, ceiling)` 把超限像素钳到恰好 ceiling，`peak` 饱和后
+        // 恒为 4.92、斜率 0（实测 L1030940 在高光 0/−10/−20/−40 时 peak 全是 4.92），数值不可用；
+        // 计数是单调的（11.67 % → 7.81 → 3.99 → 0.43 %）。
+        //
+        // 求解顺序就是用户给的优先级：
+        //   ① 高光（深度由**纹理预算**决定，不是固定上限 —— 天空可到 −100，有纹理的高光会早停）
+        //   ② 白色（补高光之后的残余，到 −100）
+        //   ③ 仍不够 ⇒ 减少 EV，然后用中间调/阴影把主体拉回来（这一步不降 EV 就不做）
+        //   ④ 极端情况 ⇒ 降低对比
+        //
+        // ⚠ 注意 ③ 的代价：EV 一降，`clippedHDR`（>SDR 白）会跟着降，画面整体变暗 ——
+        // 这正是用户说的「面多了加水」。所以它**只在 ①② 用尽后**触发，不做迭代优化。
+        let textureBase = afterStep2.texture
+        let textureAbsoluteBase = afterStep2.textureAbsolute
+
+        /// 高光在 depth（正数单位）处的归一化纹理损失。
+        func loss(atDepth depth: Double) throws -> Double {
+            if let lossAtDepth { return try lossAtDepth(depth) }
+            var probe = document
+            probe.light.highlights = -depth.rounded()
+            let m = try sample(probe).metrics()
+            return max(0, (textureBase - m.texture) / textureBase)
+        }
+
+        /// 在纹理预算内，高光能压到的最深单位数（0…100）。
+        ///
+        /// **这才是高光的真实上限** —— 一片天空几乎没有一阶差分，loss 极低，可到 −100；
+        /// 有纹理的高光几档就超预算，会早停在 −40 附近。用户原话：「高光减多少上限其实取决于
+        /// 高光纹理，无纹理的比如天空 −100 都没关系，但有纹理就不能 −100 否则丢失高光对比度」。
+        func deepestHighlightWithinBudget() throws -> Double {
+            if gates.criterionAlwaysZeroLoss { return 100 }
+            if gates.criterionAlwaysFullLoss { return 0 }
+            // 先试满行程：够用就不必二分（大多数帧走这里）。
+            if try loss(atDepth: 100) <= highlightLossThreshold { return 100 }
+            // 否则在 0…100 上二分三次，落点误差 ≤ 12 单位，小于滑杆的 1 单位格。
+            var allowed = 0.0
+            var refused = 100.0
+            for _ in 0 ..< 3 {
+                let mid = (allowed + refused) / 2
+                if try loss(atDepth: mid) <= highlightLossThreshold {
+                    allowed = mid
+                } else {
+                    refused = mid
+                }
+            }
+            return allowed
+        }
+
+        /// **③ 的配套：EV 降下来之后，用中间调/阴影把主体拉回去。**
+        ///
+        /// 用户原话：「如果白色高光要减得比较多，就少一些 EV，加中间调和阴影」。
+        /// 所以每降一次 EV 就重算这两个滑块 —— 这是「水多了加面」的那一把面。
+        ///
+        /// 目标仍然是 `midtoneTarget` / `shadowTarget` 这两个**地板**（不是目标值），
+        /// 而且会把已有的中间调/阴影算进去（累计，不是覆盖），因为之前的步骤 2 可能已经加过。
+        func refillBody() throws {
+            var probe = document
+            probe.light.midtones = 0
+            probe.light.shadows = 0
+            let bare = try sample(probe).metrics()
+            var addMid = 0.0
+            var addShadow = 0.0
+            if bare.p50 > 1e-6, bare.p50 < midtoneTarget {
+                let needEV = log2(midtoneTarget / bare.p50)
+                let weight = max(S2Regions.weights(L: log2(bare.p50)).mid, 0.2)
+                let travel = max(S2Regions.midTravel * weight, 0.05)
+                addMid = (needEV / travel * 100).rounded()
+            }
+            if bare.p10 > 0, bare.p10 < shadowTarget {
+                let needEV = log2(shadowTarget / bare.p10)
+                let weight = max(S2Regions.weights(L: log2(max(bare.p10, 1e-6))).shadow, 0.2)
+                let travel = max(S2Regions.shadowTravel * weight, 0.05)
+                addShadow = (needEV / travel * 100).rounded()
+            }
+            midtones = min(midtoneCap, max(0, addMid))
+            shadows = min(shadowCap, max(0, addShadow))
+            document.light.midtones = midtones
+            document.light.shadows = shadows
+        }
+
+        var highlights = 0.0
+        var whites = 0.0
+        var contrast = 0.0
+        var highlightBudget = 0.0
+        var highlightsOnlyLoss = 0.0
+        var evRelaxSteps = 0
+        var contrastRelaxed = false
+
+        document.light.highlights = 0
+        document.light.whites = 0
+        var stage = try sample(document).metrics()
+
+        // **①② 一套工具：压高光、补白色。**
+        func applyHighlightAndWhite() throws {
+            // ① 高光 — 深度受纹理预算约束
+            let depth = try deepestHighlightWithinBudget()
+            highlights = -depth.rounded()
+            highlightBudget = -highlights
+            highlightsOnlyLoss = try loss(atDepth: -highlights)
+            document.light.highlights = highlights
+
+            var m = try sample(document).metrics()
+            // ② 白色 — **二分求解**（对目标量单调：推得越深，超限/撞上限的越少）。
+            //
+            // **426d: 介入条件是「`clippedScreen > 0` 或 `clippedHDR` 超标」**，不只是前者。
+            // 用户的口径是「优先用白色+高光，如果白色高光要减得比较多，就少一些 EV」——
+            // 所以大面积过白（clippedHDR）也要先由高光+白色处理，降 EV 是它们不够时才做的。
+            //
+            // 为什么不用斜率：`clippedScreen` 是计数，归零后斜率为 0，而斜率是割线（一段近似），
+            // 在「刚好跨过 0」附近会过冲。二分 4 次把 −100 的区间收到 6 单位内，比任何切线都稳。
+            // 目标：`clippedScreen` 归零；若它已经 0，则把 `clippedHDR` 压到 `clippedHighCeiling` 以内。
+            func settled(_ mm: AutoLight.Metrics) -> Bool {
+                mm.clippedScreen <= 0 && mm.clippedHDR <= clippedHighCeiling
+            }
+            if !settled(m) {
+                var shallow = 0.0          // 已知不够（仍在超限）
+                var deep = -whiteTravelEnd // 已知最深的候选
+                var deepMetrics = m
+                var probe = document
+                probe.light.whites = deep
+                deepMetrics = try sample(probe).metrics()
+                if settled(deepMetrics) {
+                    // 二分找「刚好归零」的最浅深度
+                    for _ in 0 ..< 4 {
+                        let mid = ((shallow + deep) / 2).rounded()
+                        var q = document
+                        q.light.whites = mid
+                        let qm = try sample(q).metrics()
+                        if settled(qm) { deep = mid; deepMetrics = qm } else { shallow = mid }
+                    }
+                    whites = deep
+                } else {
+                    whites = -whiteTravelEnd    // 到底仍不够：留给 ③ 降 EV
+                    deepMetrics = m
+                }
+                document.light.whites = whites
+                m = whites < 0 ? (try sample(document).metrics()) : m
+            }
+            stage = m
+        }
+
+        // 斜率：**仍按 p99 测**（连续量，可作「推多少单位」的 proxy）。
+        //
+        // ⚠ 不能用 `clippedScreen` 测斜率：它是**计数**，一旦归零斜率为 0，而求解恰恰是在
+        // 「已归零」的帧上也要能工作；且计数在 0 附近不连续（一个像素跨过去就跳 1/N）。
+        // 真正的求解用二分（见 `applyHighlightAndWhite`），斜率只是给报告和 ⑧e 门用的。
         let highlightSlope: Double
         let whiteSlope: Double
         if gates.fixedSlopeTable {
@@ -518,91 +777,73 @@ public enum AutoLight {
             whiteSlope = max((afterStep2.p99 - (try sample(probe).metrics()).p99) / 100, 1e-4)
         }
 
-        let textureBase = afterStep2.texture
-        let textureAbsoluteBase = afterStep2.textureAbsolute
-
-        var highlights = 0.0
-        var whites = 0.0
-        var highlightBudget = 0.0
-        var highlightsOnlyLoss = 0.0
-        let need = afterStep2.p99 - p99TopTarget
-        if need > topDeadband, lossAtDepth != nil || textureBase > 0 {
-            /// The normalised texture loss a 高光 depth (positive units) would cost.
-            func loss(atDepth depth: Double) throws -> Double {
-                if let lossAtDepth { return try lossAtDepth(depth) }
-                var probe = document
-                probe.light.highlights = -depth.rounded()
-                let m = try sample(probe).metrics()
-                return max(0, (textureBase - m.texture) / textureBase)
+        // **① ② 总是先跑**：`clippedHDR` 超标（大面积高光过亮）与 `clippedScreen` 是两件事，
+        // 前者 ALSO 需要高光/白色介入 —— 之前把整块藏在 `clippedScreen > 0` 里，导致
+        // L1030941（clippedScreen=0 但 clippedHDR=7.57 %）完全没被处理。
+        try applyHighlightAndWhite()
+        if stage.clippedScreen > 0 || stage.clippedHDR > clippedHighCeiling {
+            // **②b 大面积高光太亮 ⇒ 少一些 EV。**
+            //
+            // 用户原话：「如果高光太亮就 EV 少一些」。这里「太亮」用 `clippedHDR`（>SDR 白的像素占比）
+            // 度量 —— 不是 p95：在 owner 的五帧成品上 `p95×2^EV` 是 0.80…1.42，而 `clippedHDR` 是
+            // 0.05 %…17.93 %，**同样的 p95 target 差 360 倍**，说明 p95 不决定「有多白」。
+            //
+            // 目标 `clippedHighCeiling` = 5 %：owner 五帧里四帧 ≤ 2.7 %，L1030940 的 17.9 % 是大面积
+            // 天空的特例；5 % 把「普通画面」和「整片天空」分开，同时不至于把普通帧压得太暗。
+            var highRelaxSteps = 0
+            while stage.clippedHDR > clippedHighCeiling, highRelaxSteps < 3, exposure > -4 {
+                exposure = snapExposure(exposure - 0.15)
+                document.light.exposure = exposure
+                highRelaxSteps += 1
+                try refillBody()
+                document.light.highlights = 0
+                document.light.whites = 0
+                highlights = 0
+                whites = 0
+                try applyHighlightAndWhite()
             }
-            let full = min(100, need / highlightSlope)          // units 高光 would need alone
-            let fullLoss: Double
-            if gates.criterionAlwaysZeroLoss { fullLoss = 0 }
-            else if gates.criterionAlwaysFullLoss { fullLoss = 0.99 }
-            else { fullLoss = try loss(atDepth: full) }
+            if highRelaxSteps > 0 { evRelaxSteps += highRelaxSteps }
 
-            if fullLoss <= highlightLossThreshold {
-                // 高光 alone is enough and stays inside the budget: 白色 is not used at all.
-                highlights = -full.rounded()
-                highlightBudget = -highlights
-                highlightsOnlyLoss = fullLoss
-            } else {
-                // The deepest 高光 that stays inside the budget. Bisection on the depth, three probes:
-                // the loss is monotone in the depth, and three halvings of a 0…100 bracket land within
-                // 12 units — below the 1-unit grid the slider prints on.
-                var allowed = 0.0        // deepest depth known to be inside
-                var refused = full       // shallowest depth known to be outside
-                if gates.criterionAlwaysFullLoss {
-                    allowed = 0
-                } else {
-                    for _ in 0 ..< 3 {
-                        let mid = (allowed + refused) / 2
-                        if try loss(atDepth: mid) <= highlightLossThreshold {
-                            allowed = mid
-                        } else {
-                            refused = mid
-                        }
-                    }
+            // ③ 高光压在纹理预算内、白色也用到底，仍然撞上限 ⇒ **减少 EV**，再用中间调/阴影补主体。
+            // 每次降 0.15 档，最多 4 次（0.6 档）—— 用户说「不要太纠结 EV 的值」，所以这不是求最优，
+            // 而是「够用就停」。每步都把中间调/阴影重算一遍，让主体回到位（水多了加面）。
+            while stage.clippedScreen > 0, evRelaxSteps < 4, exposure > -4 {
+                exposure = snapExposure(exposure - 0.15)
+                document.light.exposure = exposure
+                evRelaxSteps += 1
+                try refillBody()
+                document.light.highlights = 0
+                document.light.whites = 0
+                highlights = 0
+                whites = 0
+                try applyHighlightAndWhite()
+                if stage.clippedScreen <= 0 { break }
+                // 这一档没换来改善就停手，别把 EV 一路降下去（面多了加水要看得见效果）
+                if evRelaxSteps >= 2, stage.clippedScreen > 0.002 { break }
+            }
+
+            // ④ 极端情况：①②③ 都压不住 ⇒ 降对比（对比把高光往下拉，代价是画面变平）
+            if stage.clippedScreen > 0 {
+                // 每步 −4，最多到 `contrastFloor`。一有改善就收（不追最优）。
+                var c = 0.0
+                while stage.clippedScreen > 0, c > contrastFloor {
+                    c = max(contrastFloor, c - 4)
+                    var probe = document
+                    probe.light.contrast = c
+                    let m = try sample(probe).metrics()
+                    contrast = c
+                    document.light.contrast = c
+                    stage = m
                 }
-                highlights = -allowed.rounded()
-                highlightBudget = -highlights
-                highlightsOnlyLoss = try loss(atDepth: -highlights)
-                // 白色 then **joins** 高光 for the residual. Measured reason, not a preference: per unit
-                // of p99 movement 白色 is *not* cheaper (L1030433 at +2 EV — 高光 −100 delivers −0.906,
-                // 白色 −100 delivers −0.399 against −0.128/−0.100 at 0 EV), so "switch to 白色" would
-                // deliver less than half the darkening; and at −100 it still cannot reach the target on
-                // its own. What 白色 does well is reach past where 高光 stops, so the two run together.
-                let delivered = -highlights * highlightSlope
-                let remainder = need - delivered
-                // 白色 is capped at `whiteTravelEnd` and engages only for a **real** gap. Measured
-                // reason for the cap: 白色 delivers less than half the p99 movement 高光 does per unit
-                // of travel, so a residual solved to −100 would be the algorithm shouting a target the
-                // owner never asked for (their 白色 is 0 on all five boston frames, and −31.6 median
-                // across the 19 % of the library that uses it).
-                if remainder > whiteEngageDeadband {
-                    whites = max(-whiteTravelEnd, -min(whiteTravelEnd, (remainder / whiteSlope).rounded()))
-                }
+                contrastRelaxed = contrast < 0
             }
         }
-        // The plan is checked, not trusted: **when 白色 was chosen**, one render of the finished pair and
-        // 白色 is deepened while the target is still missed (both slopes are secants, so the first solve
-        // is close, not exact). The loop is guarded on `whites < 0` on purpose: an unconditional
-        // correction would deepen 白色 on a picture the criterion said needs none — which is ⑧a's exact
-        // failure, and it was found by ⑧a's test rather than by reading the code.
-        document.light.highlights = highlights
-        document.light.whites = whites
-        var verified = try sample(document).metrics()
-        var passes = 0
-        while whites < 0, verified.p99 > p99TopTarget + 0.02, whites > -whiteTravelEnd, passes < 2 {
-            let over = verified.p99 - p99TopTarget
-            whites = max(-whiteTravelEnd, (whites - over / whiteSlope).rounded())
-            document.light.whites = whites
-            verified = try sample(document).metrics()
-            passes += 1
-        }
-        var textureLoss = textureBase > 0
+
+        // 中间调/阴影要把主体的最终位置记进报告；`stage` 就是成品的那一帧。
+        let verified = stage
+        let textureLoss = textureBase > 0
             ? max(0, (textureBase - verified.texture) / textureBase) : 0
-        var textureLossAbsolute = textureAbsoluteBase > 0
+        let textureLossAbsolute = textureAbsoluteBase > 0
             ? max(0, (textureAbsoluteBase - verified.textureAbsolute) / textureAbsoluteBase) : 0
 
         // ── 步骤 4 — 黑色（抵消 blackOffset + 0.1 % 削底）───────────────────────────────────────
@@ -617,8 +858,8 @@ public enum AutoLight {
         var blacks = max(-100, min(0, cancel))
         document.light.blacks = blacks
         var afterBlacks = try sample(document).metrics()
-        if afterBlacks.clippedLow < clipFloorFraction, blacks > -100 {
-            // **Bisection on `clippedLow`, not a solve on p01.** Measured (L1030940 at +2 EV, from the
+        if afterBlacks.clippedBlack < clipFloorFraction, blacks > -100 {
+            // **Bisection on `clippedBlack`, not a solve on p01.** Measured (L1030940 at +2 EV, from the
             // cancel term's −36): the bottom fraction is 0.03 % at −36 and 1.03 % at −48, while `p01`
             // has already collapsed to 0 by −60 — so a log2(p01) secant saturates and either stalls or
             // overshoots to −100. The clip fraction is monotone in the depth over the whole useful
@@ -631,7 +872,7 @@ public enum AutoLight {
                 return probe
             }()).metrics()
             // Widen once if 24 units were not enough to cross the threshold.
-            if deepMetrics.clippedLow < clipFloorFraction, deep > -100 {
+            if deepMetrics.clippedBlack < clipFloorFraction, deep > -100 {
                 shallow = deep
                 deep = max(-100, deep - 24)
                 var probe = document
@@ -639,12 +880,12 @@ public enum AutoLight {
                 deepMetrics = try sample(probe).metrics()
             }
             // Four halvings land a 24-unit bracket inside 1.5 units — finer than any look.
-            for _ in 0 ..< 4 where deep - shallow < -0.5 && deepMetrics.clippedLow >= clipFloorFraction {
+            for _ in 0 ..< 4 where deep - shallow < -0.5 && deepMetrics.clippedBlack >= clipFloorFraction {
                 let mid = ((shallow + deep) / 2).rounded()
                 var probe = document
                 probe.light.blacks = mid
                 let m = try sample(probe).metrics()
-                if m.clippedLow >= clipFloorFraction {
+                if m.clippedBlack >= clipFloorFraction {
                     deep = mid
                     deepMetrics = m
                 } else {
@@ -656,7 +897,7 @@ public enum AutoLight {
             // The bracket's own deepest measurement is the answer's metric when it is the answer.
             afterBlacks = deepMetrics
         }
-        let clippedLowAfterBlacks = afterBlacks.clippedLow
+        let clippedLowAfterBlacks = afterBlacks.clippedBlack
 
         // ── 步骤 5 — 对比 — **422 裁定：不做** ─────────────────────────────────────────────────────
         //
@@ -665,16 +906,17 @@ public enum AutoLight {
         // report still carries the *measured* `separationStops` beside the always-zero `contrast`, so a
         // future rule can be argued against a number instead of a memory.
         let separation = afterBlacks.separationStops
-        let contrast = 0.0
+        // **426d**: `contrast` 现在是 ④ 求解出来的值（极端情况下才非 0），不再是硬写 0。
 
         return Plan(exposure: exposure, contrast: contrast, highlights: highlights,
                     midtones: midtones, shadows: shadows, whites: whites, blacks: blacks,
                     report: Report(baseP99: neutral.p99, exposureEV: exposure,
                                    p99AfterExposure: afterExposure.p99,
+                                   p95AfterExposure: afterExposure.p95,
                                    p999OverP99AfterExposure: afterExposure.p999
                                        / max(afterExposure.p99, 1e-9),
                                    exposureBackstops: backstops,
-                                   clippedHighAfterExposure: afterExposure.clippedHigh,
+                                   clippedHighAfterExposure: afterExposure.clippedHDR,
                                    p50AfterExposure: afterExposure.p50,
                                    midtones: midtones, shadows: shadows,
                                    p50AfterStep2: afterStep2.p50,
@@ -730,10 +972,16 @@ public enum AutoLight {
         public var criterionAlwaysFullLoss = false
         /// ⑧c — step 4 starts from 0 instead of from `blackOffset`'s lift.
         public var ignoresBlackOffset = false
-        /// ⑧d — step 1 anchors on p95 instead of p99, i.e. the `p99.9 / p99 ≤ 1.6` tail guard is gone.
+        /// ⑧d — **426d 重定义**：步骤 1 退回旧口径（`p99 → 1.5` + tail guard walk-back）。
+        /// 生产路径走新的「p95 大面积高光 + 主体兜底」规则，所以这个 gate 打开时才复现旧行为，
+        /// 门才能证明新规则确实改变了曝光。
         public var noExposureCeiling = false
         /// ⑧e — the slopes come from the **0 EV** table instead of being re-measured (§0d's 7.1×).
         public var fixedSlopeTable = false
+
+        /// ⑧d 的配套：只在 `noExposureCeiling` 打开时才有意义的旧 tail guard。
+        /// 生产恒 `false` —— 426d 删掉了这条 walk-back（理由见步骤 1 的注释）。
+        public var keepsTailGuard = false
 
         public init() {}
     }
@@ -754,7 +1002,7 @@ extension AutoLight.Sample {
         for v in luma where AutoLight.Sample.isPicture(v) { picture.append(v) }
         guard !picture.isEmpty else {
             return AutoLight.Metrics(p01: 0, p10: 0, p50: 0, p90: 0, p95: 0, p99: 0, p999: 0,
-                                     peak: 0, clippedHigh: 0, clippedLow: 0, texture: 0,
+                                     peak: 0, clippedHDR: 0, clippedBlack: 0, clippedScreen: 0, texture: 0,
                                      textureAbsolute: 0, cut: 0, sampleCount: 0)
         }
         let n = picture.count
@@ -771,10 +1019,21 @@ extension AutoLight.Sample {
             values[ranks.firstIndex(of: rank) ?? 0]
         }
         let region = cut ?? Float(value(regionRank))
-        var high = 0, low = 0
+        var high = 0, low = 0, screen = 0
+        // **426d — `clippedScreen`: 撞到当前屏幕 HDR 上限的像素占比。**
+        //
+        // 为什么必须单独计数：S2 的 `min(v, ceiling)` 会把超限像素**压到恰好等于 ceiling**，所以
+        // `peak` 一旦饱和就恒等于 4.92 —— 实测 L1030940 在高光 0/−10/−20/−40 时 `peak` 都是 4.92，
+        // 斜率恒 0，无法用 `peak` 的数值判断「压到上限以下了没有」。而计数是单调的（11.67 % →
+        // 7.81 → 3.99 → 0.43 %），正是用户要的那个量。
+        //
+        // 阈值取 `ceiling × peakMargin`：留 0.5 % 余量，避免把「刚好等于 ceiling 的合法像素」
+        // 算成削顶（S2 的钳制就落在那儿）。
+        let screenFloor = Float(HighlightCeiling.defaultLinear * AutoLight.peakMargin)
         for v in picture {
             if v > 1 { high += 1 }
             if v <= 0.001 { low += 1 }
+            if v >= screenFloor { screen += 1 }
         }
         let textures = self.textures(atOrAbove: region)
         return AutoLight.Metrics(p01: value(0.01),
@@ -785,8 +1044,9 @@ extension AutoLight.Sample {
                                  p99: value(0.99),
                                  p999: value(0.999),
                                  peak: value(1.0),
-                                 clippedHigh: Double(high) / Double(n),
-                                 clippedLow: Double(low) / Double(n),
+                                 clippedHDR: Double(high) / Double(n),
+                                 clippedBlack: Double(low) / Double(n),
+                                 clippedScreen: Double(screen) / Double(n),
                                  texture: textures.0,
                                  textureAbsolute: textures.1,
                                  cut: region, sampleCount: n)
