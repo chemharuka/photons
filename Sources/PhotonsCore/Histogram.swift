@@ -124,15 +124,30 @@ public struct HistogramChannel: Sendable, Equatable {
     /// `hdrBins[k]` = samples 1/64 stop apart above white — see the file header. Empty when a caller
     /// built the value by hand; the measurement always fills it.
     public let hdrBins: [Int]
-    /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999 of code), i.e. above
-    /// SDR white. On an SDR screen this is *not* lost detail any more — it is light the picture has
-    /// and the panel does not — which is why `clippedCeiling` sits next to it.
+    /// Fraction of sampled pixels **above** `Histogram.clipHighThreshold` (0.999 of code), i.e.
+    /// **above SDR white (> 1.0 in linear light)** — 过白. On an SDR screen this is *not* lost detail
+    /// any more — it is light the picture has and the panel does not — which is why `clippedCeiling`
+    /// sits next to it.
+    ///
+    /// ⚠ **This is NOT "above the HDR ceiling".** Nothing in this file counts pixels above
+    /// `HighlightCeiling.current` (+2.3 EV = 4.9246 linear at the shipped setting): that value is a
+    /// *render* clamp (`s2_tone_map.metal`), so a sample that reached it was already truncated before
+    /// this measurement. See `clippedCeiling` for the other threshold — and note that the two names
+    /// read backwards from what they measure (`High` = SDR white, `Ceiling` = screen headroom), which
+    /// has already caused one wrong criterion (2026-11-19: a dispatch counted at 1.0 and called it
+    /// `clippedCeiling`). Read the threshold, never the name.
     ///
     /// A clipped sample is still counted in `bins` — its last bin — because "the distribution ends at
     /// white" and "white was hit" are different facts and a caller needs both.
     public let clippedHigh: Double
     /// Fraction of sampled pixels **at or above the ceiling this measurement was taken for**
-    /// (`Histogram.headroom`, in linear units where 1 is SDR white).
+    /// (`Histogram.headroom`, in linear units where 1 is SDR white) — 削顶.
+    ///
+    /// The threshold is `max(headroom, 1)` (see `ceilingFloor` below), **not** `HighlightCeiling`:
+    /// with the default `headroom = 1` this is therefore the fraction *at or above SDR white*, i.e.
+    /// all but identical to `clippedHigh` (measured on `L1030437` at +2 EV: 10.819 % vs 10.857 %).
+    /// It differs from `clippedHigh` only when a caller measures for a screen with real headroom
+    /// (`headroom > 1`), where the two thresholds separate.
     ///
     /// This is the derived quantity screen-independence bought: the bins cannot depend on a panel, so
     /// "how much would it lose *here*" is reported separately, as the fraction a screen with that
@@ -140,8 +155,8 @@ public struct HistogramChannel: Sendable, Equatable {
     /// cannot show — the number the old `clippedCeiling` reported, now for a stated screen instead of
     /// for whichever panel happened to render the frame.
     public let clippedCeiling: Double
-    /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001). Linear values are
-    /// negative sometimes (a curve can undershoot); those count as below black.
+    /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001) — 削底（死黑）。
+    /// Linear values are negative sometimes (a curve can undershoot); those count as below black.
     public let clippedLow: Double
 
     public init(bins: [Int], hdrBins: [Int] = [], clippedHigh: Double, clippedCeiling: Double = 0,
@@ -183,7 +198,12 @@ public struct Histogram: Sendable, Equatable {
     /// below it; the low side is symmetric (0.001 is the second code above black at 8 bits). Both are
     /// compared in *code* space, which is why `compute` encodes before it tests them — the same
     /// threshold every 8-bit tool uses, on a measurement that no longer arrives encoded.
+    ///
+    /// ⚠ **`clipHighThreshold` gates `clippedHigh` = 过白 = "above SDR white (> 1.0 linear)".** It is
+    /// not the HDR ceiling; see `HistogramChannel.clippedHigh` and `HistogramChannel.clippedCeiling`
+    /// for the two thresholds these three numbers actually use (their names read backwards).
     public static let clipHighThreshold: Double = 0.999
+    /// Gates `clippedLow` = 削底（死黑）: at or below 0.001 of code.
     public static let clipLowThreshold: Double = 0.001
     /// **Rec.709** weights, applied to the components as they arrive (`measure`), which since 385 are
     /// the **working primaries'** (Rec.2020) components rather than sRGB's. Kept at 709 because the
@@ -523,6 +543,14 @@ extension Histogram {
         // exactly the ceiling could land one ULP below and never be counted.
         let ceilingFloor = (encoded ? srgbEncode(Float(max(headroom, 1))) : Float(max(headroom, 1)))
             * (1 - 1.0 / 2048)
+        // ⚠ 2026-11-19 — the threshold above is `max(headroom, 1)`, **not** `HighlightCeiling`.
+        // `clippedCeiling` therefore means "at or above this screen's headroom", and with the default
+        // `headroom == 1` (`RenderGraph.measureHistogram`, `photonsctl histogram`) it collapses onto
+        // SDR white — i.e. all but the same measurement as `clippedHigh`. Nothing here counts pixels
+        // above the *render* ceiling (`HighlightCeiling.current`, 4.9246 linear): those were already
+        // clamped in S2 and cannot be seen from here. A caller that wants "how much did the tone map
+        // truncate" must compare a pre-S2 peak against `HighlightCeiling.current` itself — different
+        // quantity, different measurement.
 
         // One flat counter block indexed through a raw pointer: per channel
         // `SDR bins | HDR bins`, then 12 scalars `hiR hiG hiB hiL · ceilR ceilG ceilB ceilL ·
