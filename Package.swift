@@ -26,11 +26,20 @@ let package = Package(
         .executable(name: "photonsctl", targets: ["photonsctl"]),
         .executable(name: "Photons", targets: ["PhotonsApp"]),
     ],
-    // The single third-party dependency: GRDB (MIT), an SQLite toolkit. Pinned on purpose —
-    // the catalog needs WAL, a migration ladder and typed row decoding, and GRDB resolves to exactly
-    // one package (it vendors its own SQLite). See THIRD_PARTY_NOTICES.md.
+    // Two third-party dependencies, both MIT.
+    //
+    // GRDB (SQLite toolkit) is pinned on purpose — the catalog needs WAL, a migration
+    // ladder and typed row decoding, and GRDB resolves to exactly one package (it
+    // vendors its own SQLite). See THIRD_PARTY_NOTICES.md.
+    //
+    // NonlocalMatchFilter is our own Core ML port of the nonlocal match-filter RAW
+    // denoiser (arXiv:2604.17453). It is MIT, so unlike the GPL ansel tool it links
+    // **in-process** — no subprocess, no JSON envelope, no second DNG reader. The
+    // weights are ~63 MB and ship inside the app bundle.
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", .upToNextMajor(from: "7.11.1")),
+        .package(url: "https://github.com/chemharuka/nonlocal-matchfilter-swift.git",
+                 .upToNextMinor(from: "1.0.0")),
     ],
     targets: [
         // Kernels ship as *copied resources* and are compiled at runtime by Metal.framework.
@@ -39,7 +48,10 @@ let package = Package(
         .target(name: "PhotonsLocalization", resources: [.process("Resources")]),
         .target(name: "PhotonsCore", dependencies: ["PhotonsLocalization"], resources: [.copy("Kernels")]),
         .target(name: "PhotonsExport", dependencies: ["PhotonsCore", "PhotonsLocalization"]),
-        .target(name: "PhotonsExtensions", dependencies: ["PhotonsLocalization"]),
+        .target(name: "PhotonsExtensions", dependencies: ["PhotonsLocalization",
+                                                          .product(name: "NonlocalMatchFilter",
+                                                                   package: "nonlocal-matchfilter-swift")],
+                resources: [.copy("Denoise/Models")]),
         .target(name: "PhotonsCatalog", dependencies: [
             "PhotonsCore", "PhotonsLocalization",
             .product(name: "GRDB", package: "GRDB.swift"),

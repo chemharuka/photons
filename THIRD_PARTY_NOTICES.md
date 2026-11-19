@@ -1,7 +1,7 @@
 # Third-party notices
 
-Photons is MIT-licensed (see `LICENSE`). It links exactly **one** third-party package, and uses
-one third-party model (not vendored, not linked) in the optional `PhotonsExtensions` denoise plugin.
+Photons is MIT-licensed (see `LICENSE`). It links **two** third-party packages, both MIT, and
+vendors two GPL-3.0 executables as separate processes (never linked).
 
 ## GRDB.swift
 
@@ -49,19 +49,24 @@ no separate license obligations apply.
 ## nonlocal-matchfilter (AI denoise model)
 
 - Upstream: https://github.com/MIA-UIB/nonlocal-matchfilter (arXiv:2604.17453)
+- Our port: https://github.com/chemharuka/nonlocal-matchfilter-swift (MIT)
 - License: **MIT** — Copyright (c) 2026 Marco Sánchez Beeckman
-- Used by: `PhotonsExtensions` — the denoise *plugin* runs the released
-  `rawnoise_25_15_9nbr` network weights (RAW-to-RAW: 8 input channels = 4 CFA sites + 4 noise-σ
-  maps, 4 CFA channels out) and writes the result back as a DNG.
+- Used by: `PhotonsExtensions/Denoise/NLMFDenoiseJob.swift` — the network runs the released
+  `rawnoise_25_15_9nbr` weights (RAW-to-RAW: 8 input channels = 4 CFA sites + 4 noise-σ maps,
+  4 CFA channels out) through Core ML and writes the result back as a DNG.
 - What we ship vs. what we wrote:
-  - **Not vendored.** The model runs in the Python/PyTorch reference implementation outside this
-    repository; this target only consumes *samples* and writes the DNG. No line of their C++/CUDA
-    or Python is copied into Photons.
-  - The two operators the reference implementation ships as CUDA extensions are replaced with
-    Metal-backed equivalents in our port: `deform_neighbourhood` → `F.grid_sample`
-    (verified equivalent to 4.2 × 10⁻⁶ against a literal numpy transcription of their kernel), and
-    `patch_match` is unused (only the `Cherel*` ablation models call it; the released weights are
-    `SimpleBlockMatchingUNet`, deform only).
+  - **Linked in-process as a SwiftPM package.** The weights are MIT, so there is no licence
+    boundary to preserve and no subprocess: `NonlocalMatchFilter` converts the graph to Core ML
+    and `NLMFDenoiseJob` calls it directly. Compare `ansel-denoise-swift` below, which stays a
+    separate GPL executable.
+  - The model file (`v_matmul_256.mlpackage`, 63 MB, fp32) ships inside the app bundle under
+    `Resources/Models/`. It is generated from the upstream checkpoint by
+    `nonlocal-matchfilter-swift`'s `Scripts/convert.py`; the conversion needs PyTorch and
+    coremltools once, and nothing at runtime touches Python.
+  - The two operators the reference implementation ships as CUDA extensions are reimplemented in
+    Python for the conversion only: `deform_neighbourhood` → a `gather`-based sampler verified
+    against `F.unfold` at 0.0 error, and `patch_match` is unused (only the `Cherel*` ablation
+    models call it; the released weights are `SimpleBlockMatchingUNet`, deform only).
   - `RawLosslessJPEG` / `DNGRawWriter` / `SourceDNG` / `SourceDNGDecode` are our own
     implementation against the TIFF 6.0 / DNG 1.7 / JPEG (SOF3) specifications.
 - Attribution is kept anyway: the network architecture and the released weights are theirs, and the
@@ -94,11 +99,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 The same author's two helper packages are MIT as well: `deform-neighbourhood-sampling`
 (Copyright (c) 2024) and `patchmatch` (Copyright (c) 2025) — neither is linked by Photons; the first
-is replaced by `grid_sample` and the second is unused.
+is replaced by the gather sampler and the second is unused.
 
-The **training data** and the **weights' own terms** are a separate question from the code licence.
-Their README states the datasets are public; if this plugin is ever shipped commercially, confirm the
-weights' terms with the authors before bundling them rather than shipping the download.
+The **weights' own terms** are a separate question from the code licence. The weights ship as
+release assets of an MIT repository, and the checkpoint itself carries no licence field, so MIT is
+the reasonable reading — but the upstream project has **disabled its issue tracker**, so there is no
+public thread to point at if that reading is ever questioned. The training data is a separate
+question again: the upstream README states the datasets are public. Before a commercial release,
+confirm both with the authors (marco.sanchez@uib.es) rather than relying on the repository banner.
 
 ## Deliberately *not* linked
 

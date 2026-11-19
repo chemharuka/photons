@@ -8,6 +8,156 @@ import PhotonsExport
 // `hdrmerge-swift` binary as a child process — nothing of it is linked into this app.
 import PhotonsExtensions
 
+// MARK: - §432 两条降噪路（产物/堆叠共用一条路径）
+
+/// 哪一条模型降噪。
+///
+/// 两条路的**唯一**架构差别是许可边界：`ansel` 的权重是 GPL-3.0，必须走子进程；
+/// `nonlocal` 的代码与权重都是 MIT，所以是进程内的一次普通调用。产品行为（命名、落盘、
+/// 入库、继承编辑、堆叠、选中）完全相同，因此两者共用 `CatalogSession.denoiseSelection(engine:)`。
+public enum DenoiseEngine: String, Sendable, CaseIterable {
+    case ansel
+    case nonlocal
+
+    /// 菜单项里那个括号里的词，也用于日志。刻意不翻译：它是产品的专名。
+    public var displayName: String {
+        switch self {
+        case .ansel: return "Ansel"
+        case .nonlocal: return "Nonlocal"
+        }
+    }
+}
+
+/// 两条 notice 的**共同部分**与**各自部分**。
+///
+/// 「缺 ansel 工具」与「缺 NLMF 模型」必须是两句不同的话：前者是子进程那条路的问题，
+/// 后者是进程内那条路的问题，用户要改的东西不一样。共用一句会让「两条入口互相独立」
+/// 在文案层就失真。
+public enum DenoiseNotices {
+    public static let noLibrary = Loc.t("未打开库")
+    public static let singlePhotoOnly = Loc.t("模型降噪只处理单张照片")
+    public static let alreadyRunning = Loc.t("已有一次模型降噪在进行")
+    public static func onlyDNG(_ filename: String) -> String {
+        Loc.t("只支持 DNG：{0}", String(describing: (filename)))
+    }
+
+    // Ansel（子进程，GPL 权重）—— 与 §386 时一模一样的三句，只是搬到这里按引擎分组。
+    public static let anselToolMissing = AnselDenoiseNotices.toolMissing
+    public static func anselModelMissing(_ expectedPath: String) -> String {
+        AnselDenoiseNotices.modelMissing(expectedPath)
+    }
+
+    // Nonlocal（进程内，MIT 权重）—— **只需要模型**，而且期望位置与 Ansel 不同
+    // （随包在 target bundle 的 `Resources/Models`），所以文案必须自己一句。
+    public static func nlmfModelMissing(_ searchedPaths: String) -> String {
+        Loc.t("未找到 nonlocal 降噪模型：{0}", String(describing: (searchedPaths)))
+    }
+}
+
+/// 一次降噪的原始产物 —— 两个 job 的共同形状，之后的一切（命名/入库/堆叠）都只看它。
+struct DenoiseOutcome: Sendable {
+    let output: URL
+    let width: Int
+    let height: Int
+    let cfa: String
+    let tiles: Int
+    let seconds: Double
+    let byteCount: Int
+}
+
+/// 「调用哪一次 denoise」的那一层。存在的理由：让 `CatalogSession` 的产物/堆叠路径**只有一份**，
+/// 同时给测试一个不跑 90 s Core ML 推理的注入点。
+protocol DenoiseExecuting: Sendable {
+    func denoise(source: URL, progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome
+}
+
+struct AnselDenoiseExecutor: DenoiseExecuting {
+    let job: AnselDenoiseJob
+
+    func denoise(source: URL, progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
+        let outcome = try job.run(source: source, progress: progress)
+        return DenoiseOutcome(output: outcome.output, width: outcome.width, height: outcome.height,
+                              cfa: outcome.cfa, tiles: outcome.tiles, seconds: outcome.seconds,
+                              byteCount: outcome.byteCount)
+    }
+}
+
+/// 进程内那条路。产物命名与落盘规矩**复用 Ansel 的**（`AnselDenoiseJob.outputURL`：
+/// `<原名>-denoised.dng` / 重名递增；先写临时名再改名，失败不留半个文件），
+/// 因为用户契约是「两个入口产物一样」，不是「两条各自实现一遍」。
+///
+/// `body` 是那条唯一的接缝：默认就是真跑 Core ML（~90 s，因此测试不能走它），
+/// 测试传一个「照抄输入、返回数字」的替身时，**命名、临时名、改名**仍然是这里这份生产代码。
+struct NLMFDenoiseExecutor: DenoiseExecuting {
+
+    /// 一次推理能给出的那六个数。与 `NLMFDenoiseReport` 同形，但不把库的类型带进 PhotonsUI。
+    struct Report: Sendable {
+        var width: Int
+        var height: Int
+        var cfa: String
+        var tiles: Int
+        var seconds: Double
+        var byteCount: Int
+    }
+
+    typealias Body = @Sendable (URL, URL, @escaping @Sendable (String) -> Void) throws -> Report
+
+    let job: NLMFDenoiseJob
+    var body: Body?
+
+    init(job: NLMFDenoiseJob, body: Body? = nil) {
+        self.job = job
+        self.body = body
+    }
+
+    func denoise(source: URL, progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
+        let fm = FileManager.default
+        let finalURL = AnselDenoiseJob.outputURL(for: source, fileManager: fm)
+        let temp = finalURL.deletingLastPathComponent()
+            .appendingPathComponent(".nlmf-\(UUID().uuidString).dng")
+        defer { try? fm.removeItem(at: temp) }
+
+        let report: Report
+        if let body {
+            report = try body(source, temp, progress)
+        } else {
+            let real = try job.denoise(input: source, output: temp, progress: progress)
+            report = Report(width: real.width, height: real.height, cfa: real.cfa,
+                            tiles: real.tiles, seconds: real.seconds,
+                            byteCount: real.outputBytes)
+        }
+        do {
+            try? fm.removeItem(at: finalURL)
+            try fm.moveItem(at: temp, to: finalURL)
+        } catch {
+            throw AnselDenoiseJobError.move("\(error)")
+        }
+        return DenoiseOutcome(output: finalURL, width: report.width, height: report.height,
+                              cfa: report.cfa, tiles: report.tiles, seconds: report.seconds,
+                              byteCount: report.byteCount)
+    }
+}
+
+/// 一次运行要用的那个 job，按引擎选。
+struct DenoiseRunner: Sendable {
+    var engine: DenoiseEngine
+    var ansel: AnselDenoiseJob
+    var nonlocal: NLMFDenoiseJob
+    /// 只给测试：替换进程内那条路的**推理**，命名与临时名/改名仍是生产代码。
+    var nonlocalBody: NLMFDenoiseExecutor.Body?
+
+    func execute(source: URL,
+                 progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
+        switch engine {
+        case .ansel:
+            return try AnselDenoiseExecutor(job: ansel).denoise(source: source, progress: progress)
+        case .nonlocal:
+            return try NLMFDenoiseExecutor(job: nonlocal, body: nonlocalBody)
+                .denoise(source: source, progress: progress)
+        }
+    }
+}
+
 /// The one and only source of truth for the workspace.
 ///
 /// Research `ui-stack.md` F5: the projects that mixed AppKit + SwiftUI did **not** keep two state
@@ -1008,11 +1158,14 @@ public final class CatalogSession {
         lastHDRMergeProgress = Loc.t("合成完成：{0}×{1}，{2} 帧", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.frameCount)))
     }
 
-    // MARK: 模型降噪 (§386) — 右键菜单一个动词，不弹窗口
-    //
+    // MARK: 模型降噪 (§386) — 右键菜单两个动词，不弹窗口    //
     // 和 §384 的 HDR 合成同一套口径：入口在右键菜单、点下去不弹窗、选择本身就是「处理哪张」。
     // 不同的是**只处理单张**，而且产物是「原图的降噪版」，所以完成后原图不消失 ——
     // 它成为新堆叠的第二张，产物置顶。
+    //
+    // §432 — 两条路并存：`模型降噪（Ansel）…`（GPL 权重，子进程）与 `模型降噪（Nonlocal）…`
+    // （MIT 权重，进程内）。两者共用下面这一条产物/堆叠路径，只有 `DenoiseEngine` 决定的
+    // 「哪一次 denoise 调用」不同；依赖检查则按引擎各自判，所以缺 ansel 工具时 Nonlocal 仍可点。
     //
     // 线程：一张 60 MP 是 1426 个 tile（step 208），GPU 上也要几十秒；解码 / 归一化 /
     // 写 DNG 同样是几十秒级的同步工作。整个 body 因此在 `denoiseQueue` 上跑，主线程只收结果。
@@ -1060,6 +1213,9 @@ public final class CatalogSession {
 
     public private(set) var lastDenoiseReport: DenoiseReport?
 
+    /// §432 — 上一次跑的是哪条路，供 tooltip / 日志读。`nil` = 没跑过。
+    public private(set) var lastDenoiseEngine: DenoiseEngine?
+
     /// §395 — 继承编辑那一步自己的失败原因，中文一句。`nil` = 没跑过或成功了。
     ///
     /// **与 `lastDenoiseError` 刻意分开**：继承失败时降噪本身是成功的 —— 文件在磁盘、已在库里、
@@ -1071,6 +1227,62 @@ public final class CatalogSession {
     /// 工具与模型在哪儿。Injectable：测试把它指向一个不存在的可执行文件或模型路径，
     /// 就能复现「菜单灰掉的三种原因」，不需要真装东西。
     public var denoiseLocation = AnselDenoiseLocation()
+
+    /// NLMF 那条路的模型。Injectable，与 `denoiseLocation` 同一个用途：测试塞一条不存在的路径。
+    ///
+    /// 两条路**只有许可边界不同**：Ansel 的权重是 GPL-3.0，必须子进程；NLMF 的代码与权重都是
+    /// MIT，所以是进程内的一个普通方法。因此这里**没有可执行文件**要定位，只有模型。
+    public var nlmfModelURL: URL?
+
+    /// 非局部匹配滤波那条路的模型在哪：显式 → `$PHOTONS_NLMF_MODEL` → 随包 `Resources/Models`
+    /// → `~/Library/Application Support/Photons/models`（用户换变体，与 ansel 共用同一个目录）。
+    /// 与 `AnselDenoiseLocation` 的四级同一个形状，只是第一级是这里的注入点。
+    public var nlmfSearchedModelURLs: [URL] {
+        if let nlmfModelURL { return [nlmfModelURL] }
+        let variant = NLMFDenoiseJob.Variant.t256
+        var out: [URL] = []
+        if let env = ProcessInfo.processInfo.environment[NLMFDenoiseJob.environmentKey], !env.isEmpty {
+            out.append(URL(fileURLWithPath: (env as NSString).expandingTildeInPath))
+        }
+        if let bundled = NLMFDenoiseJob.expectedModelPath(variant: variant) {
+            out.append(bundled)
+        }
+        out.append(AnselDenoiseLocation.userModelDirectory()
+            .appendingPathComponent(variant.rawValue))
+        return out
+    }
+
+    /// 第一个真实存在的模型；`nil` = 这个入口今天不可用（菜单灰）。
+    public var nlmfResolvedModelURL: URL? {
+        nlmfSearchedModelURLs.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// 它**只需要模型**：进程内调用没有工具要定位，这正是 MIT 那条路的好处。
+    public var isNLMFDenoiseModelAvailable: Bool { nlmfResolvedModelURL != nil }
+
+    /// 缺 NLMF 模型时 tooltip 要写的**完整期望路径**：显式路径，否则三个候选按查找顺序全列出来，
+    /// 环境变量那一条在没设时也写出来（用户需要知道有这个旋钮才能用它）。
+    public var nlmfDenoiseModelPathHint: String {
+        if let nlmfModelURL { return nlmfModelURL.path }
+        var parts: [String] = []
+        if let env = ProcessInfo.processInfo.environment[NLMFDenoiseJob.environmentKey], !env.isEmpty {
+            parts.append(URL(fileURLWithPath: (env as NSString).expandingTildeInPath).path)
+        } else {
+            parts.append("$" + NLMFDenoiseJob.environmentKey)
+        }
+        let variant = NLMFDenoiseJob.Variant.t256
+        if let bundled = NLMFDenoiseJob.expectedModelPath(variant: variant) {
+            parts.append(bundled.path)
+        }
+        parts.append(AnselDenoiseLocation.userModelDirectory()
+            .appendingPathComponent(variant.rawValue).path)
+        return parts.joined(separator: " / ")
+    }
+
+    /// 真正跑的那个 job。模型路径显式传进去，这样解析顺序只有上面一份。
+    public var nlmfDenoiseJob: NLMFDenoiseJob {
+        NLMFDenoiseJob(modelURL: nlmfResolvedModelURL)
+    }
 
     /// 工具**真的在**：`AnselDenoiseClient` 会把一条不存在的显式路径原样收下，
     /// 所以这里问的是那个文件本身（与 `isHDRMergeAvailable` 同一条规矩）。
@@ -1090,59 +1302,96 @@ public final class CatalogSession {
     /// 阻塞的那一半跑在这个队列上。Injectable，测试因此能不抢全局池。
     public var denoiseQueue = DispatchQueue(label: "photons.denoise", qos: .userInitiated)
 
+    /// §432 — 进程内那条路的**推理**替身，`nil` = 真跑 Core ML。测试用它验证「产物/命名/堆叠」
+    /// 这一段而不用等 ~90 s 的推理；命名与临时名/改名仍然是生产的 `NLMFDenoiseExecutor`。
+    /// internal：它是模块内的接缝，不进公开 API。
+    var nlmfDenoiseBody: NLMFDenoiseExecutor.Body?
+
+    /// 对选中的**那一张**跑 Ansel 模型降噪（子进程，GPL 权重）。
+    @discardableResult
+    public func denoiseSelection() -> [String] {
+        denoiseSelection(engine: .ansel)
+    }
+
+    /// 对选中的**那一张**跑非局部匹配滤波降噪（进程内，MIT 权重）。
+    @discardableResult
+    public func denoiseSelectionNlmf() -> [String] {
+        denoiseSelection(engine: .nonlocal)
+    }
+
     /// 对选中的**那一张**跑模型降噪：产物落在原图同目录，然后原图 + 产物组成一个新堆叠、
     /// **产物置顶**、选中产物。
     ///
+    /// 两个入口共用这一条路径（§432）：选择检查、命名、落盘、入库、继承编辑、堆叠、选中，
+    /// 只有「哪一次 `denoise` 调用」不同。差别来自许可边界而不是产品行为 —— Ansel 的权重是
+    /// GPL-3.0 必须子进程，NLMF 的代码与权重都是 MIT 所以是进程内方法。
+    ///
+    /// **依赖检查按引擎分开**：Ansel 要工具 + 模型，NLMF 只要模型。这正是「两个入口的可用性
+    /// 互不影响」的实现点；而「正在跑」是另一件事，由下面的 `isDenoiseRunning` 单独拦。
+    ///
     /// 返回参与的原图 id（拒绝启动时为空数组），测试因此不用再读一遍选择。
     @discardableResult
-    public func denoiseSelection() -> [String] {
+    public func denoiseSelection(engine: DenoiseEngine) -> [String] {
         denoiseRunCount += 1
         lastDenoiseError = nil
         lastDenoiseProgress = nil
         denoiseRanOffMain = nil
 
         guard let catalog else {
-            lastDenoiseError = AnselDenoiseNotices.noLibrary
+            lastDenoiseError = DenoiseNotices.noLibrary
             return []
         }
         guard !isDenoiseRunning else {
-            lastDenoiseError = AnselDenoiseNotices.alreadyRunning
+            lastDenoiseError = DenoiseNotices.alreadyRunning
             return []
         }
-        guard isDenoiseToolAvailable else {
-            lastDenoiseError = AnselDenoiseNotices.toolMissing
-            return []
+        switch engine {
+        case .ansel:
+            guard isDenoiseToolAvailable else {
+                lastDenoiseError = DenoiseNotices.anselToolMissing
+                return []
+            }
+            guard isDenoiseModelAvailable else {
+                lastDenoiseError = DenoiseNotices.anselModelMissing(denoiseModelPathHint)
+                return []
+            }
+        case .nonlocal:
+            // 进程内调用：没有可执行文件要定位，模型在就够。
+            guard isNLMFDenoiseModelAvailable else {
+                lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
+                return []
+            }
         }
-        guard isDenoiseModelAvailable else {
-            lastDenoiseError = AnselDenoiseNotices.modelMissing(denoiseModelPathHint)
-            return []
-        }
-        // 菜单已经拦过这三条；这里是第二次，因为一个过期的菜单行或键盘路径不该让任务白跑。
+        // 菜单已经拦过这几条；这里是第二次，因为一个过期的菜单行或键盘路径不该让任务白跑。
         let chosen = selectedAssets
         guard chosen.count == 1 else {
-            lastDenoiseError = AnselDenoiseNotices.singlePhotoOnly
+            lastDenoiseError = DenoiseNotices.singlePhotoOnly
             return []
         }
         let asset = chosen[0]
         guard asset.ext.lowercased() == "dng" else {
-            lastDenoiseError = AnselDenoiseNotices.onlyDNG(asset.filename)
+            lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
         }
         guard let url = fileURL(for: asset) else {
-            lastDenoiseError = AnselDenoiseNotices.onlyDNG(asset.filename)
+            lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
         }
         guard let importService = makeImportService() else {
-            lastDenoiseError = AnselDenoiseNotices.noLibrary
+            lastDenoiseError = DenoiseNotices.noLibrary
             return []
         }
 
-        let job = AnselDenoiseJob(location: denoiseLocation)
+        let job = DenoiseRunner(engine: engine,
+                                ansel: AnselDenoiseJob(location: denoiseLocation),
+                                nonlocal: nlmfDenoiseJob,
+                                nonlocalBody: nlmfDenoiseBody)
         let queue = denoiseQueue
         let participantID = asset.id
         let rootID = asset.sourceRootId
         isDenoiseRunning = true
         denoiseAssetID = participantID
+        lastDenoiseEngine = engine
         lastDenoiseProgress = Loc.t("准备降噪…")
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in self?.lastDenoiseProgress = text }
@@ -1204,7 +1453,11 @@ public final class CatalogSession {
     ///
     /// 顺序就是契约：降噪 → 加进库 → 抽离旧堆叠 + 组新堆叠。产物写在源目录，
     /// 所以走 `mode: .reference` + 原图的 `sourceRootId`（与 §384 一致）。
-    private nonisolated static func runDenoise(job: AnselDenoiseJob,
+    ///
+    /// §432 — `job` 是一个 `DenoiseRunner`，两个引擎在这里**完全同形**：它只回答「调用哪一次
+    /// denoise」，返回同一个 `DenoiseOutcome`；下面每一行（命名已由 executor 决定、入库、
+    /// 继承编辑、`makeStack(产物, [原图])`、选中产物）都是共用的。
+    private nonisolated static func runDenoise(job: DenoiseRunner,
                                                importService: ImportService,
                                                catalog: Catalog,
                                                source: URL,
@@ -1214,12 +1467,11 @@ public final class CatalogSession {
         var run = DenoiseRun()
         run.ranOffMain = !Thread.isMainThread
         do {
-            let outcome = try job.run(source: source, progress: { progress($0) })
+            let outcome = try job.execute(source: source, progress: progress)
             run.output = outcome.output
             run.source = source
             run.width = outcome.width
             run.height = outcome.height
-            run.whiteLevel = outcome.whiteLevel
             run.cfa = outcome.cfa
             run.tiles = outcome.tiles
             run.seconds = outcome.seconds
@@ -1287,9 +1539,18 @@ public final class CatalogSession {
             run.stackCount = summary2?.count ?? 0
             return run
         } catch {
-            run.failure = (error as? AnselDenoiseJobError)?.description ?? error.localizedDescription
+            run.failure = Self.denoiseFailureMessage(error)
             return run
         }
+    }
+
+    /// 两条路的错误都翻成一句中文。进程内那条有两个来源：`NLMFDenoiseJobError`（我们自己抛的，
+    /// 已经是中文）与库的 `NLMFDenoiseFailure`（`code: message`，落到 `localizedDescription`，
+    /// 与 Ansel 的 `tool_failed` 之外的情形同一条兜底）。
+    nonisolated static func denoiseFailureMessage(_ error: Error) -> String {
+        if let ansel = error as? AnselDenoiseJobError { return ansel.description }
+        if let nlmf = error as? NLMFDenoiseJobError { return nlmf.description }
+        return error.localizedDescription
     }
 
     /// 回到主 actor：发布结果、推进投影、选中产物。
