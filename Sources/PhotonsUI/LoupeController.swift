@@ -247,6 +247,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// rest of the job so the render queue never touches `CatalogSession`.
         var editRevision: Int = 0
         var highlightWarning: Bool = false
+        /// 434 — may this frame be kept in the window canvas cache? A rung arrival is a settled frame
+        /// (the decode has landed, the camera is still); a pan is not. `.scheduled` / `.resize` are
+        /// settled by construction, `.edit` never is.
+        var cacheable: Bool = false
+        /// 434 — the job was made while a 细节 slider was moving, so its rung is a preview, not the
+        /// document's settled canvas.
+        var previewTarget: Bool = false
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -325,6 +332,32 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// queue. Nothing in the app reads it, and nothing here is a second render path: it is the same
     /// `RenderGraph.render`, at a smaller scale, once per dirty pointer entry.
     public let backdrop = BackdropCache()
+
+    /// 434 — the window canvas cache: up to ten settled canvas frames while browsing, three after
+    /// the first edit of this session. Public so the acceptance can read `count` / `bytes` /
+    /// `contains` / `isIdle`; the GPU blit lives in that type, and the single present path stays here.
+    public let canvasFrameCache = CanvasFrameCache()
+
+    /// The key `scheduleRender` last looked up. Exposed so a test can ask the same question the
+    /// controller asked (`canvasFrameCache.contains(controller.lastCanvasFrameCacheKey!)`).
+    public private(set) var lastCanvasFrameCacheKey: CanvasFrameCache.Key?
+
+    /// 434 — 「命中即上屏」 happens at most once per key here: the real frame that follows presents the
+    /// identical pixels, and re-presenting the cached copy on every scheduled request would only add
+    /// draws. A photo switch always changes the key.
+    private var lastCanvasCachePresentedKey: String?
+    /// Document digests last seen per photo, so a digest move is recognised as an edit landing even
+    /// on the harness' `frameSource` path (which has no `CatalogSession.editRevision`).
+    private var canvasCacheSeenDigest: [String: String] = [:]
+    /// The library whose cache table this is; opening another one releases it.
+    private var canvasCacheLibraryURL: URL?
+    /// 434 — cache frames that reached the layer (A②b's first half).
+    public private(set) var canvasCachePresents = 0
+    /// 434 — settled `.scheduled` / `.resize` / rung-arrival frames that were stored (A②b's second half).
+    public private(set) var settledFramePresents = 0
+    /// ⑧c reverse gate: with this off a cache hit skips the whole scheduled render. Shipped `true`
+    /// (命中只决定先看到什么，不决定做不做工作).
+    var rendersAfterCanvasCacheHit = true
 
     /// The decoded buffers of the photo on screen, keyed by rung (§11.10). A single `(key, buffer)`
     /// slot here is what made `fit → 1:1 → fit → 1:1` develop the same 60 MP file three times: the
@@ -1278,6 +1311,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // Pan/zoom single-flight: a drag emits 60–120 events/s, a window frame costs more than that.
     private var viewInFlight = false
     private var viewPending = false
+    /// 434 — a coalesced viewport request came from a decode arrival (a settled frame), so the frame
+    /// that replaces it may enter the canvas cache.
+    private var viewPendingCacheable = false
     /// True while a pan/zoom frame has been started and not yet reached the canvas.
     ///
     /// Read-only diagnostic, used by tests only: a frame that is *in flight* moves no paint counter,
@@ -1317,11 +1353,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///   · `previousPhoto` — the previous photo's frame was still on the layer;
     ///   · `displayThumbnail` — the grid/filmstrip thumbnail stood in;
     ///   · `lowResFullFrame` — a cached whole-picture backdrop was already available.
+    ///   · `canvasCache` — 434: a cached settled canvas frame was already available, so the switch
+    ///     never showed the 1920 px stand-in.
     public enum FirstFrameContent: String, Sendable {
         case blank
         case previousPhoto
         case displayThumbnail
         case lowResFullFrame
+        case canvasCache
     }
 
     /// What was on the canvas when the first frame for the current photo was actually presented.
@@ -1609,6 +1648,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = self.session?.editRevision
         }, { [weak self] in
             guard let self else { return }
+            // 434 — another library is another cache table.
+            let library = self.session?.libraryURL
+            if library != self.canvasCacheLibraryURL {
+                self.canvasCacheLibraryURL = library
+                self.canvasFrameCache.cleanup()
+                self.lastCanvasCachePresentedKey = nil
+                self.canvasCacheSeenDigest.removeAll()
+            }
             // 428: 打开另一个库 is another cache directory.
             self.refreshHistogramStore()
             // 065: the photo on screen first, because everything below assumes the work in flight
@@ -5713,7 +5760,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Nothing here waits for a development: the frame rides the rung the ladder has (the 0.5 preview
     /// while the full one is being made) and the full rung replaces it when it lands. That is the
     /// whole point of the split — a pan is a *frame*, not a decode.
-    public func requestViewportRender() {
+    public func requestViewportRender(cacheable: Bool = false) {
         guard autoRenderEnabled else { return }
         if frameSource == nil {
             guard let session, session.mode == .loupe, session.anchorAsset != nil else { return }
@@ -5721,10 +5768,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         viewRenderRequests += 1
         if viewInFlight {
             viewPending = true
+            viewPendingCacheable = viewPendingCacheable || cacheable
             viewRenderCoalesced += 1
             return
         }
-        startViewportRender()
+        startViewportRender(cacheable: cacheable)
     }
 
     // MARK: resize (066 / 067)
@@ -5840,8 +5888,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         startResizeRender()
     }
 
-    private func startViewportRender() {
-        guard let job = makeJob(kind: .view) else { return }
+    private func startViewportRender(cacheable: Bool = false) {
+        guard let job = makeJob(kind: .view, cacheable: cacheable || viewPendingCacheable) else { return }
+        viewPendingCacheable = false
         viewRenderStarts += 1
         viewInFlight = true
         queue.async { [weak self] in self?.renderFrame(job) }
@@ -5859,7 +5908,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Everything one request needs, snapshotted on the main thread — or `nil` when there is nothing
     /// to draw (no photo, no viewport yet).
     private func makeJob(kind: RenderJob.Kind,
-                         changedAt: CFAbsoluteTime = 0) -> RenderJob? {
+                         changedAt: CFAbsoluteTime = 0,
+                         cacheable: Bool = false) -> RenderJob? {
         let gen = generation
         // 派单 031: while a detail slider moves, ask the ladder for the preview rung only.
         let target = detailPreview ? DecodeLadder.previewScale : DecodeLadder.fullScale
@@ -5882,6 +5932,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             job.cropIsActive = cropActive
             job.editRevision = revision
             job.highlightWarning = warning
+            job.cacheable = cacheable
+            job.previewTarget = detailPreview
+            if kind != .view { noteCanvasCacheDocument(photo: job.baseIdentity, edit: job.edit) }
             return job
         }
         guard let session, session.mode == .loupe,
@@ -5910,6 +5963,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         job.cropIsActive = cropActive
         job.editRevision = revision
         job.highlightWarning = warning
+        job.cacheable = cacheable
+        job.previewTarget = detailPreview
+        if kind != .view { noteCanvasCacheDocument(photo: job.baseIdentity, edit: job.edit) }
         return job
     }
 
@@ -5944,7 +6000,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // the one this frame was rendered for. The single-flight flag is released either way.
             if self.generation == job.generation, let frame {
                 self.lastPresentedScale = frame.decodeScale
-                self.present(frame: frame, renderMilliseconds: ms, state: job.state)
+                // 434 — a settled frame for the whole document goes into the window canvas cache.
+                // A pan (`.view` without `cacheable`), a slider drag (`.edit`) and a preview rung
+                // (detail drag / a 0.5 rung on the way to the full one) do not.
+                let settledKind = job.kind == .scheduled || job.kind == .resize || job.cacheable
+                let atTarget = frame.decodeScale >= job.target - 1e-4
+                let storeKey: CanvasFrameCache.Key? = (settledKind && atTarget && !job.previewTarget)
+                    ? self.canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale),
+                                               headroom: frame.headroom, primaries: frame.primaries)
+                    : nil
+                self.present(frame: frame, renderMilliseconds: ms, state: job.state,
+                             storeKey: storeKey)
                 switch job.kind {
                 case .edit:
                     self.editRenderCount += 1
@@ -6077,11 +6143,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 // and paint it. Without this, a photo opened while the display was still settling (the
                 // headroom re-read bumps the generation twice on the way into the loupe) left the
                 // canvas black until the user touched the camera — the reported "得缩放一下才出来".
-                requestViewportRender()
+                requestViewportRender(cacheable: true)
                 return
             }
             // Exactly one replacement: this render finds the rung resident and asks for nothing.
-            requestViewportRender()
+            requestViewportRender(cacheable: true)
         }
     }
 
@@ -6172,6 +6238,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             firstFramePlaceholderToken?.cancel()
             firstFramePlaceholderToken = nil
             firstFramePlaceholderPhoto = nil
+            // 434 — leaving the loupe (the harness names its photo through `frameSource`, so this is
+            // the app's path) releases the window canvas cache: it belongs to the open loupe, and a
+            // return is a new session's first look.
+            if frameSource == nil {
+                canvasFrameCache.cleanup()
+                lastCanvasCachePresentedKey = nil
+            }
         }
     }
 
@@ -7239,6 +7312,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
         generation += 1
         job.generation = generation
         awaitingFirstFrame = true
+        // 434 — the canvas for this job may already exist. The key covers every input that reaches
+        // the pixels (photo, decode recipe, document digest/geometry, camera, canvas, mode, fit,
+        // role, crop, warning, headroom, rung, primaries), so a hit is the same canvas byte for byte.
+        if let predictedScale = predictedDecodeScale(for: job) {
+            let key = canvasFrameCacheKey(for: job, decodeScale: predictedScale)
+            lastCanvasFrameCacheKey = key
+            // One immediate present per key. The real frame that follows draws the same pixels; a
+            // second cached present would only add a draw.
+            if key.identity != lastCanvasCachePresentedKey,
+               let cached = canvasFrameCache.lookup(key) {
+                lastCanvasCachePresentedKey = key.identity
+                canvasCachePresents += 1
+                // 5.1 (口径修正 18:1x): the cached frame takes the place of the 1920 px stand-in
+                // *now*; the scheduled render below still develops and renders as usual.
+                present(frame: cached.frameResult(), renderMilliseconds: 0, state: job.state,
+                        fromCanvasCache: true, cachePhoto: key.photo)
+                if !rendersAfterCanvasCacheHit { return }
+            }
+        }
         // 323: single-flight. A request that arrives while a scheduled frame is rendering is the
         // **next** frame, not a second render of an older one — see `scheduledRenderInFlight`.
         if scheduledRenderInFlight {
@@ -7262,6 +7354,74 @@ public final class LoupeController: NSViewController, HeadroomSource {
         pendingScheduledJob = nil
         startScheduledRender(next)
     }
+
+    // MARK: 434 — the window canvas cache's wiring
+
+    /// The rung this job will render from *if it renders now*: the biggest resident rung at or below
+    /// the target. Before the first development of a photo it is the target itself — the value the
+    /// stored key will have once that development lands.
+    private func predictedDecodeScale(for job: RenderJob) -> Double? {
+        guard job.target > 0 else { return nil }
+        return Double(ladder.best(identity: job.identity, atOrBelow: job.target)?.scale ?? job.target)
+    }
+
+    /// Everything that reaches the canvas pixels, spelled. See `CanvasFrameCache.Key`.
+    private func canvasFrameCacheKey(for job: RenderJob, decodeScale: Double,
+                                     headroom: Double? = nil,
+                                     primaries: OutputPrimaries? = nil) -> CanvasFrameCache.Key {
+        let edit = job.edit
+        return CanvasFrameCache.Key(
+            photo: job.baseIdentity,
+            decodeInputs: edit.decodeInputs.key,
+            editDigest: Histogram.editDigest(edit),
+            geometry: edit.geometryFingerprint,
+            cameraState: Self.canvasCacheCameraToken(job.state),
+            viewport: job.viewport,
+            mode: Self.canvasCacheModeToken(job.mode),
+            fitScale: job.fitScale,
+            canvasRole: job.canvasRole.rawValue,
+            cropIsActive: job.cropIsActive,
+            highlightWarning: job.highlightWarning,
+            headroom: headroom ?? self.headroom,
+            decodeScale: decodeScale,
+            primaries: (primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3)).rawValue,
+            highlightCeiling: HighlightCeiling.current)
+    }
+
+    /// A document write landed for `photo` since the last job. That is the edit-landing hook (the
+    /// `frameSource` harness has no `session.editRevision`, so the digest is the one signal both
+    /// spellings share): delete the photo's old-digest entries and move to three-slot editing.
+    private func noteCanvasCacheDocument(photo: String, edit: EditModel) {
+        let digest = Histogram.editDigest(edit)
+        if let seen = canvasCacheSeenDigest[photo], seen != digest {
+            canvasFrameCache.noteEditLanded(photo: photo, digest: digest)
+        }
+        canvasCacheSeenDigest[photo] = digest
+    }
+
+    static func canvasCacheCameraToken(_ state: LoupeViewState) -> String {
+        "\(state.mode.rawValue)|z=\(String(format: "%.17g", state.zoom))"
+            + "|cx=\(String(format: "%.17g", state.centerX))"
+            + "|cy=\(String(format: "%.17g", state.centerY))"
+    }
+
+    static func canvasCacheModeToken(_ mode: LoupeFrameMode) -> String {
+        switch mode {
+        case .edited: return "edited"
+        case .original: return "original"
+        case .compare(let split):
+            return "compare(\(split.axis.rawValue),\(String(format: "%.17g", split.fraction)))"
+        }
+    }
+
+    /// 434 — the diagnostics the acceptance prints, plus the regime name (`browsing` / `editing`).
+    public var canvasFrameCacheDiagnostics: (capacity: Int, count: Int, bytes: Int,
+                                             hits: Int, misses: Int, stores: Int,
+                                             evictions: Int) {
+        canvasFrameCache.diagnostics
+    }
+
+    public var canvasCacheRegime: String { canvasFrameCache.regime.rawValue }
 
     /// Which rungs are in memory right now (diagnostics and the first-frame test).
     public var residentRungScales: [Float] { ladder.residentScales }
@@ -8220,7 +8380,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
-                         graph graphOverride: RenderGraph? = nil) {
+                         graph graphOverride: RenderGraph? = nil,
+                         storeKey: CanvasFrameCache.Key? = nil,
+                         fromCanvasCache: Bool = false,
+                         cachePhoto: String? = nil) {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
@@ -8389,9 +8552,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 235 — the real frame is on the layer. Record what the eye saw until this instant (the
         // acceptance's content enum) and then take the stand-in down. Both happen only on a
         // successful present: a refused drawable must keep the thumbnail, not uncover the matte.
-        let currentPhoto = presented.graphPhoto ?? backdropPhotoKey
+        // 434 — a cached canvas is the new photo's own pixels, even though `frameState`'s graph still
+        // belongs to the previous picture (no render has run yet). Naming the photo from the key keeps
+        // `presentedPhoto` from claiming the old one.
+        let currentPhoto = cachePhoto ?? presented.graphPhoto ?? backdropPhotoKey
         if awaitingFirstFrameContent {
-            if firstFramePlaceholderPhoto != nil, canvasView.isShowingFirstFramePlaceholder {
+            if fromCanvasCache {
+                // 5.1 — the cached canvas replaces the 1920 px stand-in, so it must not be recorded
+                // as what the eye saw.
+                firstFrameContent = .canvasCache
+            } else if firstFramePlaceholderPhoto != nil, canvasView.isShowingFirstFramePlaceholder {
                 firstFrameContent = .displayThumbnail
             } else if let presented = presentedPhoto, presented != currentPhoto {
                 firstFrameContent = .previousPhoto
@@ -8448,6 +8618,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // a still cursor. The (frame, texel) throttle makes this one read per frame.
         if pointerCanvasPoint != nil { refreshPointerReadout() }
         recordMeasurements(frame)
+        // 434 — the frame is on the layer and this is a settled canvas: keep a copy. A stale-canvas
+        // frozen present is a stretched redraw, not this canvas' pixels, so it is never stored.
+        if let storeKey, !staleCanvas, !fromCanvasCache,
+           canvasFrameCache.store(frame, key: storeKey) {
+            settledFramePresents += 1
+        }
         lastTimings = FrameTimings(decode: frame.decodeMilliseconds,
                                    render: frame.renderMilliseconds,
                                    present: presentMs,
