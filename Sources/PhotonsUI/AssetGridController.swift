@@ -1015,6 +1015,47 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    /// 430 — coming back from the loupe: AppKit rebuilt the visible items when the view re-entered
+    /// the hierarchy, so each one asks the provider again and flashes its placeholder first.
+    ///
+    /// The memory layer is synchronous (`serveFromMemory`), so this re-answers the cells that are on
+    /// screen **before the next frame is drawn**. It is called synchronously from
+    /// `WorkspaceRootView.showModule(for:)` right after `addSubview`; a `DispatchQueue.main.async`
+    /// here would let the placeholder paint one frame, which is exactly the flash the user reported.
+    ///
+    /// The first line is what makes the rest possible: while the view was out of the hierarchy the
+    /// collection view dropped its items, so a layout pass is what recreates them (and their
+    /// `configure`/`applyThumbnail` calls) synchronously. Only then can the loop see them.
+    ///
+    /// Whatever the memory layer cannot answer is reconciled after the turn — one request per cell,
+    /// cancelled the moment it scrolls away — never in the first-frame path.
+    public func thumbnailRematerializeOnAppear() {
+        guard isViewLoaded else { return }
+        collectionView.layoutSubtreeIfNeeded()
+        reconfigureVisibleItems()
+        refreshVisibleThumbnails()
+        DispatchQueue.main.async { [weak self] in
+            self?.reconcileThumbnails(force: true)
+        }
+    }
+
+    /// 430 — put the photo the loupe was showing in the **middle** of the grid, not merely inside it.
+    ///
+    /// `.nearest…` would leave it at the edge, so a one-row change would look like nothing happened.
+    /// Vertical only: with this window's nine columns, a horizontal centre would slide the grid by up
+    /// to four columns the user was not editing, trading "my photo is centred" for "the page jumped
+    /// sideways". The row is the axis the loupe transition actually changes.
+    ///
+    /// Called by `WorkspaceRootView` once per `loupe → grid` switch, never on a metadata refresh, so
+    /// a scroll the user made is not undone.
+    public func centerOnAnchorIfNeeded() {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let index = session.assets.firstIndex(where: { $0.id == id }),
+              collectionView.numberOfItems(inSection: 0) > index else { return }
+        collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)],
+                                     scrollPosition: .centeredVertically)
+    }
+
     /// 303 — after an edit, re-ask for the one photo that moved. Only a cell that is **on screen**
     /// is refreshed: an off-screen row will compute the new key when it is configured again, and
     /// walking the whole library here is exactly the 10k-row stall this feature must avoid.

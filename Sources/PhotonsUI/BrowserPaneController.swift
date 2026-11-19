@@ -410,9 +410,51 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             markAnchorSettled()
             return
         }
+        // 430 — a metadata write (a star, a flag, a colour label) must **not** rebuild the table:
+        // `reloadData()` recycles every visible row and each one re-asks for its thumbnail, which the
+        // user sees as the sidebar flashing after a single keystroke. Structure/edit changes still
+        // take the full path. This is the same split `AssetGridController.applyModelSnapshot`
+        // already makes.
+        //
+        // The three comparisons are the snapshot's other fields, spelled out: `ids` (the list and its
+        // order), `edit` (`persistCount` — a commit moves the HD key, so the pixels must be re-asked)
+        // and `structure` (roots/folders/albums/filter/stats — the tree and the row set). Only
+        // `metadata` is allowed to move without a `reloadData()`.
+        // (`lastSnapshot` is nil on the first pass — nothing is on screen yet, so there is no row to
+        // repaint and the full path is the correct one.)
+        let onlyMetadataMoved = lastSnapshot.map {
+            next.ids == $0.ids && next.edit == $0.edit && next.structure == $0.structure
+        } ?? false
         lastSnapshot = next
+        if onlyMetadataMoved {
+            repaintVisibleRows()
+            markAnchorSettled()
+            return
+        }
         refresh()
         markAnchorSettled()
+    }
+
+    /// 430 — repaint the rows that are **already on screen** with the model's current metadata
+    /// (stars / flag / colour / stack count / active label), matched by the photo each row is
+    /// showing rather than by index.
+    ///
+    /// Deliberately not a `reloadData()`: `configure` keeps the row's bitmap when the asset id is the
+    /// same, so a star repaints the badge without recycling the cell or re-asking the provider for a
+    /// thumbnail. Same rule as the grid's `reconfigureVisibleItems()`.
+    private func repaintVisibleRows() {
+        guard isViewLoaded, let session else { return }
+        for row in 0..<photosTable.numberOfRows {
+            guard let cell = photosTable.view(atColumn: 0, row: row,
+                                              makeIfNecessary: false) as? PhotoRowCell,
+                  let id = cell.assetID,
+                  let asset = session.assets.first(where: { $0.id == id }) else { continue }
+            cell.configure(asset: asset, isActive: session.anchorID == id,
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+        }
+        footer.stringValue = session.selection.isEmpty
+            ? Loc.t("未选择")
+            : Loc.t("已选 {0}", String(describing: (session.selection.count)))
     }
 
     /// Selection/anchor only: update the selected rows, the footer and the active label colour.
@@ -690,6 +732,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
+
+    /// 430 — how many times the photo list has been rebuilt (`reloadData`). The counter behind
+    /// 「加一颗星不该重载侧栏」: a metadata write must leave it where it was, a structure change
+    /// (another library / folder / filter) must move it by one.
+    public var listReloadCount: Int { photosTable.reloadCount }
 
     // MARK: 332 — keep the anchor photo in the middle of the photo list
 
@@ -2087,6 +2134,14 @@ final class StackBadgeView: NSView {
 /// double-click's target (`openTargetID`). 383: the hook no longer eats a press — nothing swallows.
 final class PhotoListTableView: NSTableView {
     var onMouseDown: ((NSEvent) -> Bool)?
+    /// 430 — how many times this table was rebuilt. The same number the grid exposes as
+    /// `reloadCount`: a metadata write (a star) must not move it, a structure change must.
+    private(set) var reloadCount = 0
+
+    override func reloadData() {
+        reloadCount += 1
+        super.reloadData()
+    }
 
     override func mouseDown(with event: NSEvent) {
         if onMouseDown?(event) == true { return }
