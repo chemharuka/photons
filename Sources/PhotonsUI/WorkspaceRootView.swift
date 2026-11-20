@@ -196,6 +196,8 @@ public final class TopBarView: NSView {
     public var onModeChange: ((CatalogSession.Mode) -> Void)?
     public var onToggleFilmstrip: (() -> Void)?
     public var onToggleBrowser: (() -> Void)?
+    /// 442 —— 胶片条 / 侧栏这一对的点击：两者互斥，点哪个就切到哪个（`BrowserMode.list` = 侧栏）。
+    public var onBrowserMode: ((BrowserMode) -> Void)?
     /// 排序按钮（`新→旧 / 旧→新`）。One click flips the order the grid, the browser and the strip read.
     public var onToggleSort: (() -> Void)?
 
@@ -205,9 +207,19 @@ public final class TopBarView: NSView {
     private let importButton = ToolButton(title: Loc.t("导入"), symbol: "square.and.arrow.down")
     /// 文件 ▸ 导出… 的顶栏入口，同上。
     private let exportButton = ToolButton(title: Loc.t("导出"), symbol: "square.and.arrow.up")
-    private let modeControl = NSSegmentedControl(labels: [Loc.t("网格"), Loc.t("单图")],
-                                                 trackingMode: .selectOne, target: nil, action: nil)
+    /// 442 —— 「网格 / 单图」从分段控件改成两个 `ToolButton`：与打开/导入/导出同一套样式，
+    /// 激活的那个用与胶片条相同的蓝色底。两者互斥，点哪个切哪个。
+    private let gridButton = ToolButton(title: Loc.t("网格"), symbol: "square.grid.2x2")
+    private let singleButton = ToolButton(title: Loc.t("单图"), symbol: "rectangle.portrait")
+    /// 「胶片条 / 侧栏」这一对同理，互斥。
     private let stripButton = ToolButton(title: Loc.t("胶片条"), symbol: "rectangle.split.1x2")
+    private let sidebarButton = ToolButton(title: Loc.t("侧栏"), symbol: "sidebar.left")
+
+    /// 442 —— 按钮之间的间距（原 10 pt，用户口径「减少为现在的一半」）。
+    static let itemGap: CGFloat = 5
+    /// 分隔线两侧：进来 5、出去 6（原来是 10 / 11，同样减半取整）。
+    static let separatorGapIn: CGFloat = 5
+    static let separatorGapOut: CGFloat = 6
     /// 胶片条按钮右边那一个：同款 `ToolButton`、同高、10 pt 间距。
     ///
     /// 文字是**当前顺序**（`新→旧` / `旧→新`），图标是通用的 `arrow.up.arrow.down` 且不随方向变——
@@ -255,16 +267,20 @@ public final class TopBarView: NSView {
         // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
         sortButton.image = PhotoSortOrder.icon()
 
-        modeControl.target = self
-        modeControl.action = #selector(modeChanged)
-        modeControl.segmentStyle = .rounded
-        modeControl.controlSize = .small
-        modeControl.selectedSegment = 0
+        gridButton.target = self
+        gridButton.action = #selector(modeTapped(_:))
+        singleButton.target = self
+        singleButton.action = #selector(modeTapped(_:))
+        stripButton.target = self
+        stripButton.action = #selector(browserTapped(_:))
+        sidebarButton.target = self
+        sidebarButton.action = #selector(browserTapped(_:))
 
-        for v: NSView in [openButton, importButton, exportButton, modeControl, stripButton, sortButton, statusCluster] {
+        for v: NSView in [openButton, importButton, exportButton, gridButton, singleButton,
+                          stripButton, sidebarButton, sortButton, statusCluster] {
             addSubview(v)
         }
-        addSeparator()
+        // 442 —— 顶栏只留**一条**分隔线（导出 | 网格/单图），其余按钮靠间距分组。
         addSeparator()
     }
 
@@ -296,8 +312,10 @@ public final class TopBarView: NSView {
 
     public func update(mode: CatalogSession.Mode, assetCount: Int, selectionCount: Int,
                        libraryName: String?, filmstrip: Bool) {
-        modeControl.selectedSegment = mode == .grid ? 0 : 1
+        gridButton.isActive = mode == .grid
+        singleButton.isActive = mode == .loupe
         stripButton.isActive = filmstrip
+        sidebarButton.isActive = !filmstrip
         // 047: the corner carries the **build** revision, so a glance answers "is this the build with
         // my merge?" without going back to a commit list. Since 2026-10-27 the four facts are one
         // block of one type (`TopBarStatusCluster`), left to right:
@@ -331,6 +349,10 @@ public final class TopBarView: NSView {
     public var sortButtonView: ToolButton { sortButton }
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
     public var filmstripButtonView: ToolButton { stripButton }
+    /// 442 —— 四个切换按钮的本体（测试量宽度/激活底色用）。
+    public var gridButtonView: ToolButton { gridButton }
+    public var singleButtonView: ToolButton { singleButton }
+    public var sidebarButtonView: ToolButton { sidebarButton }
     /// 「打开」按钮本体（A①/A⑥ 用它作为样式基准）。
     public var openButtonView: ToolButton { openButton }
     public var importButtonView: ToolButton { importButton }
@@ -347,25 +369,30 @@ public final class TopBarView: NSView {
         }
 
         place(openButton, width: openButton.intrinsicContentSize.width)
-        x += 10
-        // 435 — 用户口径「在顶栏"打开"的右边」：导入/导出紧贴打开按钮，节奏与其余控件一致
-        // （10 pt 间距），并且都在第一条分隔线之前。
+        x += Self.itemGap
+        // 435 — 用户口径「在顶栏"打开"的右边」：导入/导出紧贴打开按钮，节奏与其余控件一致。
         place(importButton, width: importButton.intrinsicContentSize.width)
-        x += 10
+        x += Self.itemGap
         place(exportButton, width: exportButton.intrinsicContentSize.width)
-        x += 10
+        x += Self.separatorGapIn
         separators[0].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
-        x += 11
-        place(modeControl, width: 112)
-        x += 10
-        separators[1].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
-                                     width: 1, height: WorkspaceLayout.toolSeparatorHeight)
-        x += 11
-        place(stripButton, width: stripButton.intrinsicContentSize.width)
-        // 排序按钮紧挨着胶片条按钮：同一行、同一 28 pt 命中高、10 pt 间距（和打开↔分段控件、
-        // 分段控件↔胶片条用的是同一个数），顶栏里排在最后，所以不压住右上角的状态簇。
-        x += 10
+        x += Self.separatorGapOut
+        // 442 —— 「网格 / 单图」一对：宽度取两者较宽的那个，切换时顶栏不抖。
+        let modeWidth = max(gridButton.intrinsicContentSize.width,
+                            singleButton.intrinsicContentSize.width)
+        // 442 —— 顺序：打开 导入 导出 | 网格 单图 胶片条 侧栏 排序，只有一条分隔线（在导出之后）。
+        place(gridButton, width: modeWidth)
+        x += Self.itemGap
+        place(singleButton, width: modeWidth)
+        x += Self.itemGap
+        // 「胶片条 / 侧栏」一对：同样按较宽的来。
+        let browserWidth = max(stripButton.intrinsicContentSize.width,
+                               sidebarButton.intrinsicContentSize.width)
+        place(stripButton, width: browserWidth)
+        x += Self.itemGap
+        place(sidebarButton, width: browserWidth)
+        x += Self.itemGap
         place(sortButton, width: sortButton.intrinsicContentSize.width)
 
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
@@ -394,7 +421,13 @@ public final class TopBarView: NSView {
     @objc private func openTapped() { onOpen?() }
     @objc private func stripTapped() { onToggleFilmstrip?() }
     @objc private func sortTapped() { onToggleSort?() }
-    @objc private func modeChanged() { onModeChange?(modeControl.selectedSegment == 0 ? .grid : .loupe) }
+    @objc private func modeTapped(_ sender: ToolButton) {
+        onModeChange?(sender === gridButton ? .grid : .loupe)
+    }
+
+    @objc private func browserTapped(_ sender: ToolButton) {
+        onBrowserMode?(sender === stripButton ? .filmstrip : .list)
+    }
 }
 
 // MARK: - draggable divider
@@ -645,6 +678,8 @@ public final class WorkspaceRootView: NSView {
         topBar.onOpen = { [weak self] in self?.openLibraryPanel() }
         topBar.onModeChange = { [weak self] mode in self?.session.mode = mode }
         topBar.onToggleFilmstrip = { [weak self] in self?.toggleFilmstrip() }
+        // 442 —— 顶栏「胶片条 / 侧栏」这一对：直接指定模式，不是「切换」。
+        topBar.onBrowserMode = { [weak self] mode in self?.setBrowserMode(mode) }
         // 排序：一个值写进会话，网格/左侧栏/胶片条各自观察它（三个 `observeModel` 都读
         // `session.sortOrder`），按钮文字在 `updateTopBar` 里跟着刷新。
         topBar.onToggleSort = { [weak self] in

@@ -128,8 +128,8 @@ final class TopBarImportExport435Tests: XCTestCase {
 
         XCTAssertLessThan(open.frame.maxX, imp.frame.minX, "顺序：打开 → 导入")
         XCTAssertLessThan(imp.frame.maxX, exp.frame.minX, "顺序：导入 → 导出")
-        XCTAssertEqual(imp.frame.minX - open.frame.maxX, 10, accuracy: 0.5, "打开↔导入不是 10 pt")
-        XCTAssertEqual(exp.frame.minX - imp.frame.maxX, 10, accuracy: 0.5, "导入↔导出不是 10 pt")
+        XCTAssertEqual(imp.frame.minX - open.frame.maxX, TopBarView.itemGap, accuracy: 0.5, "打开↔导入间距不是 5 pt")
+        XCTAssertEqual(exp.frame.minX - imp.frame.maxX, TopBarView.itemGap, accuracy: 0.5, "导入↔导出间距不是 5 pt")
 
         for (name, button) in [("打开", open), ("导入", imp), ("导出", exp)] {
             XCTAssertEqual(button.frame.height, WorkspaceLayout.toolButtonHit,

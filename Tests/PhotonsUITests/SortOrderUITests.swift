@@ -443,7 +443,9 @@ final class SortOrderUITests: XCTestCase {
         XCTAssertEqual(sort.frame.height, neighbour.frame.height, "与邻居不同高")
         XCTAssertEqual(sort.frame.midY, neighbour.frame.midY, accuracy: 0.001, "与邻居不在同一基线")
         XCTAssertEqual(sort.frame.minY, neighbour.frame.minY, accuracy: 0.001)
-        XCTAssertEqual(sort.frame.minX - neighbour.frame.maxX, 10, accuracy: 0.001, "与邻居的间距不是 10 pt")
+        // 442 —— 排序按钮左边现在是「侧栏」按钮（胶片条旁边多了一个），间距按 `TopBarView.itemGap`。
+        XCTAssertEqual(sort.frame.minX - bar.sidebarButtonView.frame.maxX, TopBarView.itemGap,
+                       accuracy: 0.001, "与左邻（侧栏）的间距不是 itemGap")
         XCTAssertLessThan(sort.frame.maxX, bar.statusCluster.frame.minX, "按钮压到了右上角状态文本")
 
         // 字体、颜色、边框、悬停态：同一个 `ToolButton`，逐项相同。
