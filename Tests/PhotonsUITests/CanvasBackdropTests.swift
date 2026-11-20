@@ -197,6 +197,19 @@ final class CanvasBackdropTests: XCTestCase {
 
     // MARK: - 5. no literal, every cached surface hears the change
 
+    /// 459 — **`& 0x0F` 是位掩码，不是那个画布底色。**
+    ///
+    /// `PhotonsExtensions/Denoise/SourceDNGDecode.swift` 用它取 DNG opcode 的低半字节
+    /// （`let id = Int(data[p]) & 0x0F`），与「哑光必须是 `CanvasBackdrop.current` 的唯一产物」毫无关系；
+    /// 而本节的扫描是**全 `Sources/`** 的，于是它被当成复活的哑光字面量，让整条用例长期红着
+    /// （2026-11-18 起，438 的提交信息里就记着它是既有红）。抹掉的只是「掩码操作数」这一种上下文，
+    /// 剩下的任何 `0x0F` / `15/255` 仍然是红的 —— 这条豁免靠下面那句反向门守着。
+    static func withoutBitMasks(_ code: String) -> String {
+        code.replacingOccurrences(of: "& 0x0F", with: "& mask")
+            .replacingOccurrences(of: "& 0x0F0F", with: "& mask")
+            .replacingOccurrences(of: "& 0x0F0F0F", with: "& mask")
+    }
+
     func testNoLiteralSurvivesAndEveryStoredColourObservesTheChange() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -210,7 +223,7 @@ final class CanvasBackdropTests: XCTestCase {
 
         var literalHits: [String] = []
         for file in files {
-            let code = Self.stripped(try String(contentsOf: file, encoding: .utf8))
+            let code = Self.withoutBitMasks(Self.stripped(try String(contentsOf: file, encoding: .utf8)))
             for needle in ["0x0F", "15/255"] {
                 if code.contains(needle) { literalHits.append("\(file.lastPathComponent): \(needle)") }
             }
