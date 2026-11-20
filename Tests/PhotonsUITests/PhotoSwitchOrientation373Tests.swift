@@ -211,6 +211,14 @@ final class PhotoSwitchOrientation373Tests: XCTestCase {
                     XCTAssertEqual(pixels, newAspect, accuracy: 0.02,
                                    "\(mode.name) r\(round) row \(index): stand-in bitmap is not B's: \(row.line)")
                 }
+                // 443 — the two halves of the same stand-in: the bitmap is B's (0.667) but the
+                // rectangle it is drawn into was A's (1.503). Pinning the pair here is what makes
+                // "the size was registered to the wrong photo" a test failure, not a log line.
+                if row.placeholderVisible, let rectAspect = row.placeholderAspect,
+                   let pixels = row.placeholderPixelsAspect {
+                    XCTAssertEqual(rectAspect, pixels, accuracy: 0.02,
+                                   "\(mode.name) r\(round) row \(index): stand-in rect and bitmap are different photos: \(row.line)")
+                }
                 // ③ never a bare backdrop-coloured canvas.
                 XCTAssertFalse(row.sampled == "nothing",
                                "\(mode.name) r\(round) row \(index): nothing covers the canvas: \(row.line)")
