@@ -6793,7 +6793,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // it. `EditModel.geometryFingerprint` is now the one function that names every dimension the
         // render consumes, and `requestLowResFullFrame` computes it from the very value it renders.
         return BackdropCache.Key(facts: LoupeFrameFacts(
-            photo: photo, edit: edit,
+            documentOnly: photo, edit: edit,
             digestSuffix: backdropPreviewTarget == nil ? "" : Self.backdropPreviewMarker))
     }
 
@@ -7382,7 +7382,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                      primaries: OutputPrimaries? = nil) -> CanvasFrameCache.Key {
         let edit = job.edit
         return CanvasFrameCache.Key(facts: LoupeFrameFacts(
-            photo: job.baseIdentity,
+            canvas: job.baseIdentity,
             edit: edit,
             camera: job.state,
             viewport: job.viewport,
@@ -7393,14 +7393,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
             highlightWarning: job.highlightWarning,
             headroom: headroom ?? self.headroom,
             decodeScale: decodeScale,
-            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3)))
+            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3),
+            ceiling: HighlightCeiling.current,
+            digestSuffix: ""))
     }
 
     /// A document write landed for `photo` since the last job. That is the edit-landing hook (the
     /// `frameSource` harness has no `session.editRevision`, so the digest is the one signal both
     /// spellings share): delete the photo's old-digest entries and move to three-slot editing.
     private func noteCanvasCacheDocument(photo: String, edit: EditModel) {
-        let digest = LoupeFrameFacts(photo: photo, edit: edit).editDigest
+        let digest = cachedEditFacts(photo: photo, edit: edit).editDigest
         if let seen = canvasCacheSeenDigest[photo], seen != digest {
             canvasFrameCache.noteEditLanded(photo: photo, digest: digest)
         }
@@ -8843,7 +8845,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
            cached.facts.ceiling == ceiling {
             return cached.facts
         }
-        let facts = LoupeFrameFacts(photo: photo, edit: edit, ceiling: ceiling)
+        let facts = LoupeFrameFacts(documentOnly: photo, edit: edit, ceiling: ceiling)
         lastEditFacts = (edit, facts)
         return facts
     }
@@ -9262,7 +9264,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The measurement is of the *picture*, so it names the buffer the same way a frame does:
         // `DecodeInputs` on top of the bare photo identity.
         let inputs = edit.decodeInputs
-        let facts = LoupeFrameFacts(photo: identity, edit: edit)
+        let facts = LoupeFrameFacts(documentOnly: identity, edit: edit)
         let identity = Self.rungIdentity(identity, inputs: inputs)
         let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
             try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)

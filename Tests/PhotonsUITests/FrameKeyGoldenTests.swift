@@ -19,6 +19,11 @@ final class FrameKeyGoldenTests: XCTestCase {
         let label: String
         let backdrop: String
         let canvas: String
+        /// 440 — the same two identities through `LoupeFrameFacts` (the production path). The golden
+        /// literals leave them empty; `matrix()` fills them in, and the test compares both paths
+        /// against the same recorded bytes.
+        var factsBackdrop: String = ""
+        var factsCanvas: String = ""
     }
 
     private static let photo = "golden-photo|asset-439"
@@ -84,6 +89,8 @@ final class FrameKeyGoldenTests: XCTestCase {
                                 digest: Histogram.editDigest(edit),
                                 ceiling: ceiling,
                                 geometry: edit.geometryFingerprint)
+                            let backdropFacts = BackdropCache.Key(facts: LoupeFrameFacts(
+                                documentOnly: photo, edit: edit, ceiling: ceiling))
                             let canvas = CanvasFrameCache.Key(
                                 photo: photo,
                                 decodeInputs: edit.decodeInputs.key,
@@ -100,11 +107,19 @@ final class FrameKeyGoldenTests: XCTestCase {
                                 decodeScale: decodeScale,
                                 primaries: primaries.rawValue,
                                 highlightCeiling: ceiling)
+                            let canvasFacts = CanvasFrameCache.Key(facts: LoupeFrameFacts(
+                                canvas: photo, edit: edit, camera: camera, viewport: viewport,
+                                mode: mode, fitScale: fitScale, canvasRole: role,
+                                cropIsActive: cropIsActive, highlightWarning: highlightWarning,
+                                headroom: headroom, decodeScale: decodeScale, primaries: primaries,
+                                ceiling: ceiling, digestSuffix: ""))
                             let label = "e\(variant)-c\(cameraVariant)-m\(modeLabel(mode))"
                                 + "-r\(role.rawValue)-h\(headroom)"
                             cases.append(Case(label: label,
                                               backdrop: backdrop.identity,
-                                              canvas: canvas.identity))
+                                              canvas: canvas.identity,
+                                              factsBackdrop: backdropFacts.identity,
+                                              factsCanvas: canvasFacts.identity))
                         }
                     }
                 }
@@ -126,7 +141,12 @@ final class FrameKeyGoldenTests: XCTestCase {
         XCTAssertEqual(cases.count, Self.golden.count)
         for (recorded, golden) in zip(cases, Self.golden) {
             XCTAssertEqual(recorded.label, golden.label)
+            // 440 — two paths per identity: the facts path (production) and the direct one (bytes).
+            XCTAssertEqual(recorded.factsBackdrop, golden.backdrop,
+                           "backdrop facts path moved: \(golden.label)")
             XCTAssertEqual(recorded.backdrop, golden.backdrop, "backdrop key moved: \(golden.label)")
+            XCTAssertEqual(recorded.factsCanvas, golden.canvas,
+                           "canvas facts path moved: \(golden.label)")
             XCTAssertEqual(recorded.canvas, golden.canvas, "canvas key moved: \(golden.label)")
         }
     }
