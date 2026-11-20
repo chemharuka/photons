@@ -811,9 +811,13 @@ public final class CropToolController {
         // overlay would draw a rectangle read from the wrong coordinates.
         if session.edit.geometry.perspective?.hasWarp == true {
             let effective = CropGeometry(geometry: session.edit.geometry, source: sourceSize)
-            // …and the rect itself is converted here (`canvasRect(fromSource:)` is the migration's own
-            // arithmetic), so the draft's numbers and its space agree from the first tick.
-            draft.crop = effective.canvasRect(fromSource: effective.crop)
+            // 450 — one expression with 330's migration, and it is space-aware: a `.canvas` document
+            // is already migrated, so re-walking `canvasRect(fromSource:)` here was a **double map**
+            // that moved the frame every time 裁切 reopened after 宽高比校正. `editingCropOnCanvas`
+            // returns the stored rect unchanged for `.canvas` and does the migration's arithmetic
+            // for `.source`, so the draft's numbers and its space agree from the first tick either
+            // way.
+            draft.crop = effective.editingCropOnCanvas(source: sourceSize)
             draft.cropSpace = .canvas
         }
         draftPhotoID = session.anchorID
@@ -974,6 +978,16 @@ public final class CropToolController {
         guard isActive, let session else { return false }
         endDrag()
         draft = Draft(geometry: session.edit.geometry)
+        // 450 — a photo switch seeds exactly like `begin()`: a keystoned document is edited on its
+        // canvas, and the rect is the **editing** crop (`editingCropOnCanvas`), not the bare stored
+        // one. Without this the `.source` + warp case kept the stored rect in `.source` while
+        // `liveCropSpace` answered `.canvas` — the mirror image of the double map this fixes at the
+        // door.
+        if session.edit.geometry.perspective?.hasWarp == true {
+            let effective = CropGeometry(geometry: session.edit.geometry, source: sourceSize)
+            draft.crop = effective.editingCropOnCanvas(source: sourceSize)
+            draft.cropSpace = .canvas
+        }
         draftPhotoID = session.anchorID
         lockReshapeSuspended = false       // 310 — another photo, another lock question
         entryGeometry = session.edit.geometry
