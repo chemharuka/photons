@@ -34,6 +34,13 @@ struct LaunchArguments {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [EditorWindowController] = []
 
+    /// 451 — a normal quit should not leave `ansel-denoise-swift` / `hdrmerge-swift` writing into the
+    /// photo folder after the app is gone. Best effort: a `SIGKILL` cannot be caught, which is what
+    /// the startup sweep (`InterruptedWorkSweep`) is for.
+    func applicationWillTerminate(_ notification: Notification) {
+        ChildProcessTermination.terminateAll()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
         let args = LaunchArguments(CommandLine.arguments)

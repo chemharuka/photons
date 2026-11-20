@@ -17,6 +17,65 @@
 
 import Foundation
 
+// MARK: - Child process lifetime (451)
+
+/// 451 — 「降噪到一半杀掉 app」 leaves the `ansel-denoise-swift` / `hdrmerge-swift` child running: a
+/// `SIGKILL`ed host cannot signal it, and the child then finishes writing its hidden temp file.
+/// This registry does the one thing a normal quit can do — terminate what we started.
+///
+/// It is **not** a process-group change and it does not try to survive `SIGKILL`; that is the
+/// startup sweep's job (`InterruptedWorkSweep`). The registry exists so
+/// `applicationWillTerminate` can ask the live `Process` objects to stop before the app goes away.
+public final class ChildProcessRegistry: @unchecked Sendable {
+    public static let shared = ChildProcessRegistry()
+
+    private let lock = NSLock()
+    private var handles: [ObjectIdentifier: ChildProcessHandle] = [:]
+
+    private init() {}
+
+    /// Start tracking a launched child. The returned handle is released with `release(_:)` when the
+    /// call that owns the process is done; until then it is retained here so a quit hook can find it.
+    func track(_ process: Process) -> ChildProcessHandle {
+        let handle = ChildProcessHandle(process)
+        lock.lock()
+        handles[ObjectIdentifier(handle)] = handle
+        lock.unlock()
+        return handle
+    }
+
+    func release(_ handle: ChildProcessHandle) {
+        lock.lock()
+        handles.removeValue(forKey: ObjectIdentifier(handle))
+        lock.unlock()
+    }
+
+    /// Best-effort `terminate()` for every child this process launched and has not finished waiting
+    /// for. Called from `applicationWillTerminate`; safe to call more than once.
+    public func terminateAll() {
+        lock.lock()
+        let live = Array(handles.values)
+        lock.unlock()
+        for handle in live { handle.terminateIfRunning() }
+    }
+}
+
+final class ChildProcessHandle: @unchecked Sendable {
+    let process: Process
+
+    init(_ process: Process) {
+        self.process = process
+    }
+
+    func terminateIfRunning() {
+        if process.isRunning { process.terminate() }
+    }
+
+    deinit {
+        terminateIfRunning()
+    }
+}
+
 // MARK: - Public model
 
 /// Which trained network to run.
@@ -370,6 +429,9 @@ public struct AnselDenoiseClient: Sendable {
                                       message: "cannot launch \(executableURL.path): \(error)",
                                       exitCode: nil)
         }
+        // 451 — registered only after a successful launch, released once this call stops waiting.
+        let tracked = ChildProcessRegistry.shared.track(process)
+        defer { ChildProcessRegistry.shared.release(tracked) }
 
         // Drain stderr concurrently: a full pipe would deadlock the child.
         var stderrData = Data()

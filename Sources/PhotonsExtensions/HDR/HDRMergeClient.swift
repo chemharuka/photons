@@ -281,6 +281,10 @@ public struct HDRMergeClient: Sendable {
                                  message: "cannot launch \(executableURL.path): \(error)",
                                  exitCode: nil)
         }
+        // 451 — a normal quit should stop this child too; a `SIGKILL`ed host cannot, which is what
+        // the startup sweep covers.
+        let tracked = ChildProcessRegistry.shared.track(process)
+        defer { ChildProcessRegistry.shared.release(tracked) }
 
         // Cancellation: poll cheaply, terminate the child if asked to.
         let cancelQueue = DispatchQueue(label: "hdrmerge.cancel")

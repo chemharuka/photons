@@ -8,6 +8,14 @@ import PhotonsExport
 // `hdrmerge-swift` binary as a child process — nothing of it is linked into this app.
 import PhotonsExtensions
 
+/// 451 — the quit hook. `PhotonsApp` does not link `PhotonsExtensions` directly, so this is the
+/// one-line door its `applicationWillTerminate` calls to terminate any running denoise/HDR child.
+public enum ChildProcessTermination {
+    public static func terminateAll() {
+        ChildProcessRegistry.shared.terminateAll()
+    }
+}
+
 // MARK: - §432 两条降噪路（产物/堆叠共用一条路径）
 
 /// 哪一条模型降噪。
@@ -532,6 +540,15 @@ public final class CatalogSession {
 
     private var catalog: Catalog?
 
+    /// 451 — test seam for the reload guard. When set, `reload()` reads the source roots through
+    /// this instead of the catalog, so a throwing loader can prove a failed load keeps the last
+    /// good tree. Production never sets it.
+    var reloadRootsLoader: (() throws -> [SourceRoot])?
+
+    /// 451 — what the last startup sweep did (nil before the first one finishes). Read by the
+    /// report/tests; no UI depends on it.
+    public private(set) var lastSweepReport: SweepReport?
+
     /// Where the filter bar's state is remembered (043). Injectable so a test runs against its own
     /// domain and can count writes; production gets `UserDefaults.standard`.
     public let filterPersistence: FilterPersistence.Writer
@@ -603,6 +620,30 @@ public final class CatalogSession {
         if remembersRecentLibrary {
             RecentLibrary.remember(url, in: recentLibraryStore)
         }
+        // 451 — 降噪/HDR 跑到一半被杀会留下隐藏临时文件与 `running` 的 import session。打开库时
+        // 扫一次（库包 + 各来源根，深度 2）；异步、不抛错，绝不让清扫拖住打开。
+        sweepInterruptedWork(c, library: libraryURL ?? url.standardizedFileURL, roots: roots)
+    }
+
+    /// 451 — startup self-healing. The file half is bounded (depth 2) and only matches the strict
+    /// temp names; the DB half books orphan `running` sessions as `interrupted`. A failure only
+    /// lands in `lastPersistError` — it must never keep the library from opening.
+    private func sweepInterruptedWork(_ catalog: Catalog, library: URL, roots: [SourceRoot]) {
+        let sourceRoots = roots.map { URL(fileURLWithPath: $0.pathHint) }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var report = InterruptedWorkSweep.sweep(libraryRoot: library, catalog: catalog)
+            for root in sourceRoots {
+                let extra = InterruptedWorkSweep.sweep(libraryRoot: root)
+                report.filesRemoved += extra.filesRemoved
+                report.bytes += extra.bytes
+                if report.error == nil { report.error = extra.error }
+            }
+            Task { @MainActor in
+                guard let self else { return }
+                self.lastSweepReport = report
+                if let error = report.error { self.lastPersistError = error }
+            }
+        }
     }
 
     /// Where this library's filter archive lives. The path is the library *directory*; the hash of it
@@ -614,7 +655,13 @@ public final class CatalogSession {
     public func reload() {
         guard let c = catalog else { return }
         do {
-            roots = try c.roots()
+            let loadedRoots: [SourceRoot]
+            if let loader = reloadRootsLoader {
+                loadedRoots = try loader()
+            } else {
+                loadedRoots = try c.roots()
+            }
+            roots = loadedRoots
             // One scan for the whole tree, before the rows: the source list and the photo list are
             // then guaranteed to describe the same library state, and a selected folder that lost
             // its last photo (a delete, a relink) stops filtering instead of filtering to nothing.
@@ -678,10 +725,12 @@ public final class CatalogSession {
                 allCameraLabels = labels
             }
         } catch {
+            // 451 — 一次失败的 reload **不能**清空文件夹树：`roots=[]` 会让左栏只剩「全部照片」，
+            // 用户就「无法筛选文件夹」，而且要等到下一次成功 reload（例如降噪收尾那次）才回来。
+            // 保留上一次成功的 roots / folderNodes / assets，只把错误记下来并打一行日志。
             loadError = error.localizedDescription
-            assets = []
-            roots = []
-            stacksByTopID = [:]
+            lastPersistError = "\(error)"
+            NSLog("photons: reload failed, keeping the last good tree: \(error)")
         }
         // Drop selections that no longer exist (a reload can follow an import).
         let ids = Set(assets.map(\.id))
@@ -1022,6 +1071,11 @@ public final class CatalogSession {
         else {
             lastHDRMergeError = Loc.t("未打开库")
             return []
+        }
+        // 451 — same per-operation cleanup as denoise: only this operation's prefix, only the
+        // directories the frames live in (a merge may span folders).
+        for directory in Set(frames.map { $0.deletingLastPathComponent() }) {
+            _ = InterruptedWorkSweep.removeLeftovers(in: directory, kinds: ["hdrmerge"])
         }
 
         let service = hdrMergeService
@@ -1377,6 +1431,9 @@ public final class CatalogSession {
             lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
         }
+        // 451 — 上一次被杀留下的 `.denoise-*.dng` 先清掉，同一个目录里的残留不会越积越多。
+        // 只碰这个操作自己的前缀：同目录里可能正有一次 HDR 在写 `.hdrmerge-*.dng`。
+        _ = InterruptedWorkSweep.removeLeftovers(in: url.deletingLastPathComponent(), kinds: ["denoise"])
         guard let importService = makeImportService() else {
             lastDenoiseError = DenoiseNotices.noLibrary
             return []
