@@ -22,7 +22,8 @@ final class NLMFDenoiseJobTests: XCTestCase {
     /// and say why — an accidental drift here reads to users as "the denoiser
     /// changed".
     ///
-    ///  - `strength 0.70`: at 1.0 the network plastifies fine texture.
+    ///  - `strength`: left nil — the library derives it from the measured noise
+    ///    (`NLMFStrength`); a fixed value cannot suit both ISO 800 and ISO 3200.
     ///  - `crop 4` (plane px = 8 mosaic px): a tile edge is a seam, and grids
     ///    anchored differently disagree there at 9x the interior rate at 0–1 px.
     ///  - checkerboard sampling: halves the noise-estimate cost for 3.6 % on `a`.
@@ -30,7 +31,7 @@ final class NLMFDenoiseJobTests: XCTestCase {
         let job = NLMFDenoiseJob()
         let options = job.options(modelURL: URL(fileURLWithPath: "/tmp/model.mlpackage"))
 
-        XCTAssertEqual(options.strength, 0.70, accuracy: 1e-9)
+        XCTAssertNil(options.strength, "strength must stay automatic")
         XCTAssertEqual(options.crop, 4, "crop is in plane pixels; 4 = 8 mosaic pixels")
         XCTAssertTrue(options.measureNoise, "the shipped defaults are wrong by ~1.8x at high ISO")
         XCTAssertTrue(options.checkerboardNoise, "halves the estimate cost; on by product decision")

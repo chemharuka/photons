@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SwiftPM
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj
+*.xcworkspace
+
+# Compiled Core ML artefacts — `Models/` holds the .mlpackage sources, and the
+# compiled copy is written beside them by MLModel.compileModel at load time.
+*.mlmodelc/
+.*.mlmodelc/
+
+# Upstream training checkpoint. 175 MB and over GitHub's 100 MB per-file limit.
+# `Models/rawnoise_25_15_9nbr_weights.pt` is the same weights with the Lightning
+# training state stripped; this raw file is only needed to redo the conversion.
+*.ckpt
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcscmblueprint
+*.xccheckout
+
+# Local scratch
+*.npy
+
+# Python bytecode from the conversion step
+__pycache__/
+*.pyc
+.venv/

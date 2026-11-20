@@ -38,8 +38,10 @@ let package = Package(
     // weights are ~63 MB and ship inside the app bundle.
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", .upToNextMajor(from: "7.11.1")),
-        .package(url: "https://github.com/chemharuka/nonlocal-matchfilter-swift.git",
-                 .upToNextMinor(from: "1.0.0")),
+        // Vendored copy of the MIT denoiser (see Vendor/nonlocal-matchfilter-swift/
+        // VENDORED.md). In-repo so a checkout builds without a sibling clone, and
+        // no version requirement: this library is not released yet.
+        .package(path: "Vendor/nonlocal-matchfilter-swift"),
     ],
     targets: [
         // Kernels ship as *copied resources* and are compiled at runtime by Metal.framework.
