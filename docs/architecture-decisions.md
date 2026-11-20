@@ -860,3 +860,66 @@ struct CanvasPresentation {
 > **2026-11-20 后续**：用户「呈现状态机也开始处理」= 点头。443（373 占位比例）已合 `dd3118d`，
 > P1 规格 `docs/tasks/444-canvas-presentation-p1.md` 已派（lane `canvas444`），内容按上文定义：
 > 只写不读、行为零变化，机械判据是「`LoupeController` 里读 `presentation` 的语句为 0」。
+
+## 21. 后台任务（导出 / 降噪 / HDR / 将来的全景）—— 2026-11-20 声明，P1 可派
+
+### 21.1 用户口径（2026-11-20 20:3x，原话摘）
+
+> 「新增后台任务功能，入口在顶栏排序的右侧，要加分隔符。即排序 | 后台。目前的后台任务包括：降噪，HDR合成，
+> 导出，以及将来的全景拼接等功能。开始导出后，导出界面不再展示，而是进入后台任务中，这样可以边导出边继续修图。
+> 降噪，HDR合成现有的，在对应图片上出现悬浮窗的功能保持不变。降噪现在加入批量降噪功能，即选择多张照片依次降噪。
+> 同一批次的任务在后台界面中会展示进度（例如已完成 8/40张），以及当前正在运行的照片的缩略图（可用侧栏同款的方形缩略图）」
+
+### 21.2 现状（已核实，带 file:line）
+
+| | 导出 | 降噪 | HDR 合成 |
+|---|---|---|---|
+| 异步形态 | `DispatchQueue.global(qos:.userInitiated).async` 里跑同步 `BatchExporter.run`（`ExportSheet.swift:856-863`），内部 `OperationQueue` 并发 2（`BatchExport.swift:185-203`） | session 自有**串行**队列 `photons.denoise`（`CatalogSession.swift:1303`/`:1399`），blocking；Ansel = 子进程，NLMF = 进程内 | 自有串行队列 `photons.hdr.merge`（`CatalogSession.swift:974`/`:1037-1043`），blocking 子进程 |
+| 进度 | 每张 `markRendered`（`:853`、`:872-879`），**无跨窗口出口** | 文本回调 → `lastDenoiseProgress`（`:1396-1398`），**只被测试读**；HUD 只显示像素 + 经过时间（`DenoiseProgressOverlay.swift:192-194`） | 文本回调（`:1034-1035`），HUD 显示张数 + 时间（`HDRMergeProgressOverlay.swift:33-35`） |
+| 取消 | **有** `CancellationToken`（`BatchExport.swift:128-145`，三处轮询 `:192/:250/:332`） | **无**（session 无 cancel API；`AnselDenoiseClient` 无 terminate） | 客户端支持（`HDRMergeClient.swift:285-306` 有 `isCancelled` + `terminate()`），**但没传**（`HDRMergeService.swift:176`） |
+| 关窗=结束？ | 跑的时候不建「关闭」按钮（`ExportSheet.swift:783-788`），但 `dismiss()` 不检查 phase（`:2266-2276`）；sheet 被 `EditorWindowController.exportSheet` 强持有（`EditorWindowController.swift:94-101`）⇒ 关得掉、照写、**结果无人显示** | 无窗口 | 无窗口 |
+| 浮窗 | 无 | `denoiseHUD`（`LoupeController.swift:310`），唯一写者 `refreshDenoiseHUD:5156`，0.5 s Timer | `hdrHUD`（`:317`），条件 `anchorID ∈ participants`（`:5236-5243`） |
+| 共同抽象 | **没有**。三套队列 + 三个 `Sendable` 结果盒（`DenoiseRun:1409`、`HDRMergeRun:1049`、`BatchExportReport`），唯一共用件是 HUD 卡的绘制基类 `ProgressCardOverlay`（`DenoiseProgressOverlay.swift:35`） | | |
+| 顶栏 | `TopBarView`（`WorkspaceRootView.swift:229` sortButton、`:232` statusCluster、`:233` separators）；布局 `:387-437`；**只有一条分隔线**（`:279-280` 只 `addSeparator()` 一次）；右边界预算 `controlsTrailingEdge = sortButton.frame.maxX`（`:245`）、`limit = (width-16) - (controlsTrailingEdge+16)`（`:424-426`） | | |
+
+### 21.3 决策
+
+1. **一个值类型 + 一个 store，任务不是窗口**。新增 `BackgroundTask`（`id / kind / title / total / completed /
+   currentAssetID / currentThumbKey / startedAt / state / cancelWindow / errorSummary`）与
+   `BackgroundTaskStore`（主线程独占、`Observable`、保留最近 20 条已完成）。**总数与进度由上报方填**，
+   store 只做排序与去重。
+2. **三种任务共用一个抽象，但不共用算法**。适配层（`ExportTaskAdapter` / `DenoiseTaskAdapter` / `HDRTaskAdapter`）
+   各自把现有路径的进度接进 store；现有算法、串行队列、子进程调用一行都不改。
+3. **调度规则（一条）**：会改目录库的任务（降噪、HDR、将来的全景）走**同一条串行**「目录任务队列」；
+   导出是只读的，可与它们并行。这条规则写进代码注释，并被测试钉住（同时跑导出 + 降噪不互相阻塞）。
+4. **面板形态**：顶栏 `排序 | 后台`（新分隔线 + 一个新按钮），点击弹 `NSPopover`；行内容 = 类型图标 +
+   `标题 · 已完成/总数` + 当前照片的**方形缩略图**（与侧栏同款：`ThumbKey` 的方形档）+ 进度条 +
+   可取消时的取消按钮。**不做独立窗口、不做 sheet**。
+5. **导出转后台**：`ExportSheet` 点「导出」后**立即 dismiss**，把 `CancellationToken` 与批次总数交给
+   `ExportTaskAdapter`；行内显示 `12/40`，完成时行尾给「成功 N / 失败 M」与「在访达中显示」。
+   失败明细**不进面板**（避免第二套 UI），沿用现有导出报告的结构另存；面板只显示计数。
+6. **浮窗保持不变**：`denoiseHUD` / `hdrHUD` 的显示条件改成读**同一条任务记录**（`currentAssetID == anchorID`），
+   不再是两套状态各自判断。这是本声明唯一要求改的「既有行为」。
+7. **批量降噪**：多选 → 依次跑（串行队列），store 里一条任务、`completed/total`（如 `8/40`）、
+   `currentThumbKey` 随每次开跑更新。**不做并行降噪**（内存：60 MP 峰值约 1 GB，见风险节）。
+8. **不做**：任务持久化（重启后列表为空；重启自愈由 451 负责）、通知中心、菜单栏额外图标、批量 HDR。
+
+### 21.4 分期（每期都能单独回退）
+
+| 期 | 内容 | 验收 |
+|---|---|---|
+| **P1** | `BackgroundTask` + `BackgroundTaskStore` + 顶栏「排序 \| 后台」+ 空面板（占位文案） | `controlsTrailingEdge` 指向新按钮；`⌘U` 无关；面板条目为 0 时显示「没有后台任务」；顶栏既有两条布局断言（`TopBarImportExport435Tests:243`、`TopBarStatusClusterTests:389/:407`）按新右边界更新后全绿 |
+| **P2** | 降噪 / HDR 接入 store（**行为不变**，只是把已有进度写进任务） + 两个 HUD 改读任务记录 | 一次降噪产生 1 条任务、进度数字与 HUD 一致；HUD 在切图后按 `currentAssetID` 隐藏/显示（既有 `DenoiseHUD387` 语义不变） |
+| **P3** | 导出转后台：sheet dismiss + 行内计数 + 取消 | 点导出后 sheet 消失、可继续编辑；`12/40` 递增；取消后任务行显示「已取消」；`BatchExportCancelTests` 全绿 |
+| **P4** | 批量降噪（多选依次、`8/40`、当前照片方形缩略图） | 20 张批次：completed 单调 +1、`currentThumbKey` 与正在跑的照片一致、只产生一条 history/任务；中途取消后已完成的照片可编辑 |
+
+**P1 之前不许动导出的 dismiss 路径与两个 HUD**：P1 只加「空面板 + 顶栏入口」，它让 P2–P4 每步都能单独回退。
+
+### 21.5 待用户确认（P1 派单前）
+
+1. 面板形态：`NSPopover`（推荐，点开即看）还是顶栏下方常驻一栏？
+2. 已完成任务保留几条（默认 20）与是否要「清除已完成」按钮？
+3. 导出失败是否需要在面板外再给一份可复制的失败清单（还是沿用现有导出报告）？
+
+**本声明本身不产生派单**（同 §17/§20）：P1 的规格另写，且开 P1 前需要用户点一次头。
+
