@@ -31,6 +31,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     public struct FrameResult {
         public let texture: MTLTexture
+        /// 440 — who owns `texture`. A rendered frame's texture came out of its graph's pool
+        /// (`.graph`); a canvas-cache hit's is 434's own blit copy (`.cacheCopy`). The present path
+        /// recycles through this field, never through a caller-side guess. Defaults to `.cacheCopy`
+        /// because that is the only construction site that does not pass one
+        /// (`CanvasFrameCache.CachedCanvas.frameResult()`), and the wrong direction there is a leak,
+        /// not a corrupted pool.
+        public private(set) var owner: CanvasTextureOwner = .cacheCopy
         public let canvas: ImageSize
         public let content: ImageSize
         /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.photoRect`,
@@ -413,6 +420,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // release was the `.ips`. Copying the struct under the lock is that retain, on the right side
         // of the lock.
         var graph: RenderGraph?
+        // 440 — **渲染本文档的 graph，不表示它拥有任何纹理。** 438 把它当成「拥有 `canvasTexture`
+        // 的 graph」用过：缓存命中时这个字段还是上一张照片的 graph，于是缓存自己的副本被还进了
+        // 渲染池。所有权只看 `FrameResult.owner` / `OwnedCanvasTexture.owner`。
         /// Which rung of which photo the graph was built for (`"<rung identity>-s<scale>"`). Read by
         /// `makeFrame` to decide whether the graph can be reused, and by `measureHistogramNow` to decide
         /// whether it can measure through it.
@@ -2304,7 +2314,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// A frame that arrived while the bridge was still moving: kept, and presented the moment the
     /// geometry is at the target. Not a dropped frame — the generation gate upstream has already
     /// decided it is the current one.
-    private var pendingFrame: (frame: FrameResult, graph: RenderGraph?, milliseconds: Double,
+    private var pendingFrame: (frame: FrameResult, canvas: OwnedCanvasTexture, milliseconds: Double,
                                state: LoupeViewState)?
     /// Which bridge the completion timer belongs to: a superseded one must present nothing.
     private var zoomBridgeSerial = 0
@@ -2319,7 +2329,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // for as long as it is on the layer, so ownership moved here: the frame that lands becomes
     // `canvasTexture`, and the one it replaced is recycled when the new drawable is committed
     // (instead of the landing frame being recycled the moment it is presented).
-    private var canvasTexture: (texture: MTLTexture, graph: RenderGraph?)?
+    private var canvasTexture: OwnedCanvasTexture?
 
     /// 054: where the photograph sat inside `canvasTexture`, in canvas pixels, and the canvas it was
     /// normalised against. `cancelZoomBridge` re-presents that same texture with `window: .whole`; without
@@ -2447,9 +2457,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // A held frame for a camera we are no longer going to belongs nowhere: recycle it and let the
         // render that this stop change asks for take its place.
         if let pending = pendingFrame, pending.state != new {
-            if let graph = pending.graph {
-                queue.async { graph.recycle(output: pending.frame.texture) }
-            }
+            pending.canvas.recycle(on: queue)
             pendingFrame = nil
             zoomBridgePendingDrops += 1
         }
@@ -2545,8 +2553,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if let pending = pendingFrame {
             pendingFrame = nil
-            present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state,
-                    graph: pending.graph)
+            present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state)
             return
         }
         // Nothing waiting: sit on the stop. (The ticker normally got there already; this covers Reduce
@@ -2699,8 +2706,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// fight over which canvas they were built for.
     public func cancelZoomBridge(rePresent: Bool = true) {
         guard zoomBridge != nil || pendingFrame != nil || zoomBridgeTicker != nil else { return }
-        if let pending = pendingFrame, let graph = pending.graph {
-            queue.async { graph.recycle(output: pending.frame.texture) }
+        if let pending = pendingFrame {
+            pending.canvas.recycle(on: queue)
             zoomBridgePendingDrops += 1
         }
         pendingFrame = nil
@@ -6793,7 +6800,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // it. `EditModel.geometryFingerprint` is now the one function that names every dimension the
         // render consumes, and `requestLowResFullFrame` computes it from the very value it renders.
         return BackdropCache.Key(facts: LoupeFrameFacts(
-            photo: photo, edit: edit,
+            documentOnly: photo, edit: edit,
             digestSuffix: backdropPreviewTarget == nil ? "" : Self.backdropPreviewMarker))
     }
 
@@ -7382,7 +7389,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                      primaries: OutputPrimaries? = nil) -> CanvasFrameCache.Key {
         let edit = job.edit
         return CanvasFrameCache.Key(facts: LoupeFrameFacts(
-            photo: job.baseIdentity,
+            canvas: job.baseIdentity,
             edit: edit,
             camera: job.state,
             viewport: job.viewport,
@@ -7393,14 +7400,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
             highlightWarning: job.highlightWarning,
             headroom: headroom ?? self.headroom,
             decodeScale: decodeScale,
-            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3)))
+            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3),
+            ceiling: HighlightCeiling.current,
+            digestSuffix: ""))
     }
 
     /// A document write landed for `photo` since the last job. That is the edit-landing hook (the
     /// `frameSource` harness has no `session.editRevision`, so the digest is the one signal both
     /// spellings share): delete the photo's old-digest entries and move to three-slot editing.
     private func noteCanvasCacheDocument(photo: String, edit: EditModel) {
-        let digest = LoupeFrameFacts(photo: photo, edit: edit).editDigest
+        // 440 复核修正：这里**不许**借 `cachedEditFacts`。`lastEditFacts` 是渲染队列独占的记忆
+        //（无锁），而本函数从 `makeJob` 走主线程调用 —— 借它会多出一个跨线程写者。digest 一行就够。
+        let digest = Histogram.editDigest(edit)
         if let seen = canvasCacheSeenDigest[photo], seen != digest {
             canvasFrameCache.noteEditLanded(photo: photo, digest: digest)
         }
@@ -7857,7 +7868,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return drawing.histogramSample
         }()
         let shotForFrame = mode == .original ? originalShot : editedShot
-        return FrameResult(texture: texture, canvas: drawing.canvas, content: drawing.content,
+        return FrameResult(texture: texture, owner: .graph(graph),
+                           canvas: drawing.canvas, content: drawing.content,
                            photoRect: photoRect, presentRect: presentRect,
                            outputWindow: drawing.outputWindow,
                            decodeScale: decodeScale, decodeMilliseconds: decodeMilliseconds,
@@ -8143,6 +8155,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// means `PresentWindow.stretched(to:from:)` can say "the same picture, on a different surface",
     /// and the quads come out of the same derivation as everything else.
     private struct FrozenFrame {
+        /// 借用：冻结期间由 `canvasTexture` 保活。**不要**套 `OwnedCanvasTexture` —— 冻结期间不能
+        /// 被回收，类型上带一个 `recycle()` 只会诱人误调。
         let texture: MTLTexture
         /// Where the photograph is inside `texture` (the picture, not the canvas).
         let photoRect: ImageRect
@@ -8383,7 +8397,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
-                         graph graphOverride: RenderGraph? = nil,
                          storeKey: CanvasFrameCache.Key? = nil,
                          fromCanvasCache: Bool = false,
                          cachePhoto: String? = nil) {
@@ -8391,6 +8404,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             lastPresentError = "no Metal presenter"
             return
         }
+        // 440 — the ownership travels **with** the texture. `makeFrame` stamped `.graph(the graph)`;
+        // a canvas-cache hit's `frameResult()` carries `.cacheCopy`. Nothing below decides it again.
+        let frameCanvas = OwnedCanvasTexture(texture: frame.texture, owner: frame.owner)
         // 340 — **one** snapshot for the whole present. The graph this frame's texture belongs to and
         // the photo it is of are two facts of the same frame: reading them separately let a frame land
         // in between and pair this texture with the next picture's graph.
@@ -8423,13 +8439,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 // Superseded either way: a frame for the same camera that arrived later is the
                 // better one, and a frame for a camera we are no longer going to is not ours.
                 if old.state != state { zoomBridgePendingDrops += 1 }
-                if let graph = old.graph { queue.async { graph.recycle(output: old.frame.texture) } }
+                old.canvas.recycle(on: queue)
             }
-            pendingFrame = (frame, graphOverride ?? presented.graph, renderMilliseconds, state)
+            pendingFrame = (frame, frameCanvas, renderMilliseconds, state)
             zoomBridgeCoveredPresents += 1
             return
         }
-        let graphAtFrame = graphOverride ?? presented.graph
+        // 340 — the graph the frame was rendered through. 440: this is **not** the owner; it is only
+        // what `publishIngestedSource` reads the source size from. A cached frame rendered through no
+        // graph falls back to the snapshot's graph exactly as before.
+        let graphAtFrame: RenderGraph?
+        if case .graph(let graph) = frame.owner {
+            graphAtFrame = graph
+        } else {
+            graphAtFrame = presented.graph
+        }
         // 438 — **a canvas-cache copy is not a render-graph texture.** On a cache hit there is no graph
         // that produced this frame; `presented.graph` is whatever picture was on the canvas before (the
         // previous photo's, mid-switch). Recording that pair as `canvasTexture` and recycling it when
@@ -8438,9 +8462,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // render wrote there. That is the black canvas with a 1 px ring of the previous occupant's
         // pixels, and why a re-decode (a new, empty pool) repaired it until the next edit render.
         //
-        // The pool now refuses foreign textures outright (`TexturePool.recycle`), and this is the
-        // caller that must stop asking: nothing about a cached frame belongs to `graphAtFrame`.
-        let ownedGraph = fromCanvasCache ? nil : graphAtFrame
+        // 440 — that rule is now a field: `frame.owner` is `.cacheCopy` on the cache path, so
+        // `frameCanvas.recycle()` is a no-op there. Nothing is left for a caller to decide.
         // 118: the new frame landed. If it carries the revision the release committed — or anything
         // newer — this is the real white balance, so the simulation is dropped **before** the draw:
         // one atomic switch from old-frame×gain to the new frame, never a flash of the old pair.
@@ -8499,7 +8522,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // arriving frame is the best picture there is.
         if !forceStaleCanvasPresent, isCanvasGeometryFrozen, frozenFrame != nil {
             framesHeldDuringGesture += 1
-            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
+            frameCanvas.recycle(on: queue)
             return
         }
         // 066's stale-canvas rule, kept (067 does not make it unnecessary): a frame rendered for another
@@ -8542,14 +8565,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                placement: settledPlacement, backdrop: drawn,
                                backdropWindow: settledBackdropWindow, canvas: canvas, serial: 0,
                                zoom: frame.zoom, frozen: staleCanvas) { [weak self] in            guard let self else { return }
-            guard let replaced, let oldGraph = replaced.graph else { return }
-            self.queue.async { oldGraph.recycle(output: replaced.texture) }
+            replaced?.recycle(on: queue)
         }
         let presentMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         // The layer refused the 16-bit drawable and fell back to 8-bit sRGB: re-render once with
         // sRGB primaries so the colours match the layer's colour space.
         if presenter.storage == .srgb8, frame.primaries != .sRGB {
-            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
+            frameCanvas.recycle(on: queue)
             lastPresentError = presenter.lastFailure
             // An 8-bit drawable cannot carry values above 1 either: drop the ceiling back to SDR
             // before the next render instead of presenting clipped highlights.
@@ -8559,7 +8581,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if !ok {
             lastPresentError = presenter.lastFailure
-            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
+            frameCanvas.recycle(on: queue)
             retryPresentLater()
             return
         }
@@ -8604,7 +8626,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
-        canvasTexture = (frame.texture, ownedGraph)
+        canvasTexture = frameCanvas
         // 067: kept — not for the matte (there is none any more) but because it is the **only** thing
         // that says where the photograph is inside the texture on the canvas. Every present that
         // re-draws this frame (a bridge, a teardown, a window drag) derives its quad from it.
@@ -8843,7 +8865,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
            cached.facts.ceiling == ceiling {
             return cached.facts
         }
-        let facts = LoupeFrameFacts(photo: photo, edit: edit, ceiling: ceiling)
+        let facts = LoupeFrameFacts(documentOnly: photo, edit: edit, ceiling: ceiling)
         lastEditFacts = (edit, facts)
         return facts
     }
@@ -9262,7 +9284,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The measurement is of the *picture*, so it names the buffer the same way a frame does:
         // `DecodeInputs` on top of the bare photo identity.
         let inputs = edit.decodeInputs
-        let facts = LoupeFrameFacts(photo: identity, edit: edit)
+        let facts = LoupeFrameFacts(documentOnly: identity, edit: edit)
         let identity = Self.rungIdentity(identity, inputs: inputs)
         let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
             try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)

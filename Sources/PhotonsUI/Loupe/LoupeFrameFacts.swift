@@ -45,26 +45,55 @@ public struct LoupeFrameFacts: Equatable, Sendable {
     /// `OutputPrimaries.rawValue` — the presenter's storage decides the S4 matrix.
     public let primaries: String
 
-    /// Compute the facts once. The five document fields (`decodeInputs`, `editDigest`, `geometry`,
-    /// `ceiling`) and the two camera spellings are read here and nowhere else.
+    /// The backdrop's facts: the five document fields and nothing else.
     ///
-    /// The canvas-side fields have defaults because the backdrop projection is keyed by the document
-    /// alone; its key reads only `photo`, `decodeInputs`, `editDigest`, `ceiling` and `geometry`.
-    /// `digestSuffix` is the one caller-side modifier (144's preview marker), applied after the
-    /// digest so the settled key keeps exactly `Histogram.editDigest(edit)`.
-    public init(photo: String, edit: EditModel,
+    /// 440 — the backdrop projection is keyed by the document alone; it reads only `photo`,
+    /// `decodeInputs`, `editDigest`, `ceiling` and `geometry`. The canvas-side fields are filled with
+    /// the neutral spellings so this value is still complete, but no caller can mistake them for a
+    /// camera it supplied. `digestSuffix` is the one caller-side modifier (144's preview marker),
+    /// applied after the digest so the settled key keeps exactly `Histogram.editDigest(edit)`.
+    public init(documentOnly photo: String, edit: EditModel,
                 ceiling: Double = HighlightCeiling.current,
-                camera: LoupeViewState = .fit,
-                viewport: ImageSize = ImageSize(width: 1, height: 1),
-                mode: LoupeFrameMode = .edited,
-                fitScale: Double = 0,
-                canvasRole: CanvasRole = .document,
-                cropIsActive: Bool = false,
-                highlightWarning: Bool = false,
-                headroom: Double = 0,
-                decodeScale: Double = 1,
-                primaries: OutputPrimaries = .displayP3,
                 digestSuffix: String = "") {
+        self.init(photo: photo, edit: edit, ceiling: ceiling,
+                  camera: .fit, viewport: ImageSize(width: 1, height: 1), mode: .edited,
+                  fitScale: 0, canvasRole: .document, cropIsActive: false,
+                  highlightWarning: false, headroom: 0, decodeScale: 1,
+                  primaries: .displayP3, digestSuffix: digestSuffix)
+    }
+
+    /// The canvas' facts: every field that reaches the canvas pixels, **no defaults**.
+    ///
+    /// 440 — a missing `highlightWarning` used to default to `false`, which is the one wrong direction:
+    /// the key would say "no warning" while the pixels carry the grid, i.e. a false hit. Every canvas
+    /// key must spell every field.
+    public init(canvas photo: String, edit: EditModel,
+                camera: LoupeViewState,
+                viewport: ImageSize,
+                mode: LoupeFrameMode,
+                fitScale: Double,
+                canvasRole: CanvasRole,
+                cropIsActive: Bool,
+                highlightWarning: Bool,
+                headroom: Double,
+                decodeScale: Double,
+                primaries: OutputPrimaries,
+                ceiling: Double,
+                digestSuffix: String) {
+        self.init(photo: photo, edit: edit, ceiling: ceiling,
+                  camera: camera, viewport: viewport, mode: mode, fitScale: fitScale,
+                  canvasRole: canvasRole, cropIsActive: cropIsActive,
+                  highlightWarning: highlightWarning, headroom: headroom,
+                  decodeScale: decodeScale, primaries: primaries, digestSuffix: digestSuffix)
+    }
+
+    /// The one designated initialiser: the five document fields (`decodeInputs`, `editDigest`,
+    /// `geometry`, `ceiling`) and the two camera spellings are read here and nowhere else.
+    private init(photo: String, edit: EditModel, ceiling: Double,
+                 camera: LoupeViewState, viewport: ImageSize, mode: LoupeFrameMode,
+                 fitScale: Double, canvasRole: CanvasRole, cropIsActive: Bool,
+                 highlightWarning: Bool, headroom: Double, decodeScale: Double,
+                 primaries: OutputPrimaries, digestSuffix: String) {
         self.photo = photo
         self.decodeInputs = edit.decodeInputs.key
         self.editDigest = Histogram.editDigest(edit) + digestSuffix
