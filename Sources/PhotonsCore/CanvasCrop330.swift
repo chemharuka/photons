@@ -110,6 +110,26 @@ public extension CropGeometry {
         return canvasRect(fromSource: crop)
     }
 
+    /// **450 — the crop the crop tool's draft must show**, in canvas-normalized coordinates.
+    ///
+    /// This is the **editing** spelling and `canvasCrop` is the **render/export** spelling. They differ
+    /// only for a `.source` rect: the exporter feeds the stored (bare) rect, while the tool shows the
+    /// rect the aspect lock actually produces (`renderCrop`). `CropGeometry.crop` already *is*
+    /// `renderCrop(source:)` for `.source` (see `init`), so this is literally
+    /// `canvasRect(fromSource: renderCrop(source: source))` there — and `source` is kept so the
+    /// signature states which frame the ratio was fitted against.
+    ///
+    /// **450 — why this one expression exists.** 330's migration converts a stored `.source` rect to
+    /// `.canvas` **once**, where the source size is known; the crop tool seeds again on **every**
+    /// entry. `begin()` used to call `canvasRect(fromSource: effective.crop)` unconditionally, so a
+    /// document that had already been migrated (`cropSpace == .canvas`) walked `P → R → /extent` a
+    /// **second time**: a double map. That is identity only for a pure scale (`v = h = k = 0`, θ = 0),
+    /// so reopening 裁切 after 宽高比校正 shifted and rescaled the frame — the reported bug. Every seed
+    /// (`begin`, `reseedForPhotoChange`) and the migration itself now read this single expression.
+    func editingCropOnCanvas(source: ImageSize) -> CropRect {
+        cropIsCanvasSpaced ? crop : canvasRect(fromSource: crop)
+    }
+
     /// `rect` (source-normalized) as the AABB of its image on the document canvas — canvas-normalized.
     ///
     /// The walk is `documentPointInCanvas` (P → R → −AABB origin), which is *unconditionally* the

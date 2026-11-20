@@ -1632,10 +1632,12 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         guard cropSpace == .source,
               let perspective, perspective.hasWarp else { return false }
         let geometry = CropGeometry(geometry: self, source: source)
-        // `renderCrop` (the aspect lock's own answer) is read off the **stored** group, and
-        // `canvasRect(fromSource:)` walks `documentPointInCanvas`, which never reads `cropSpace` — so the
-        // conversion cannot accidentally be an identity on an already-migrated view.
-        let converted = geometry.canvasRect(fromSource: renderCrop(source: source))
+        // 450 — the **one** expression for "the crop the tool shows on the canvas". The migration and
+        // `CropToolController.begin()` / `reseedForPhotoChange()` must never spell the conversion
+        // again: the tool used to call `canvasRect(fromSource:)` unconditionally, double-mapping an
+        // already-migrated `.canvas` rect. This arithmetic (`renderCrop` + `canvasRect`) is unchanged
+        // for a `.source` document, so the migration's output is byte for byte what it was.
+        let converted = geometry.editingCropOnCanvas(source: source)
         crop = converted.normalizedRect
         cropSpace = .canvas
         return true
