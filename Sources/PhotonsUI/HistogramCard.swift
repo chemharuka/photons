@@ -877,11 +877,15 @@ public final class HistogramCardView: NSView {
         lastDrawnHDRBins = 0
         if let histogram {
             let bins = histogram.binCount
+            // **One ceiling for all three colours (446).** Before this the three curves were each
+            // normalised by their own peak, so every colour touched the top of the card on its own and
+            // their heights could not be compared. Sharing the peak means 50 samples are at the same y
+            // on R, G and B, and only the channel holding the overall peak reaches 100 %.
+            let peak = HistogramCardFormat.scalePeak([histogram[.red], histogram[.green], histogram[.blue]])
             var envelopes: [[CGPoint]?] = [nil, nil, nil]   // R, G, B
             for (index, channel) in [Histogram.Channel.red, .green, .blue].enumerated() {
                 let c = histogram[channel]
-                let points = HistogramCardFormat.points(c, binCount: bins, axis: axis,
-                                                        peak: HistogramCardFormat.scalePeak(c))
+                let points = HistogramCardFormat.points(c, binCount: bins, axis: axis, peak: peak)
                 guard points.count > 2 else { continue }
                 envelopes[index] = points
                 lastDrawnSeries += 1
