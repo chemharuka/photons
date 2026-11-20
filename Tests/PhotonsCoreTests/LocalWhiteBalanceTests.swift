@@ -160,7 +160,10 @@ final class LocalWhiteBalanceTests: XCTestCase {
                        "the mask's document key must not gain a token for a derived gain")
         XCTAssertEqual(StageAlgorithmVersion.localApply, 6,
                        "S1.6's pixels changed for the same parameters (159: contrast left S1.6 for S2.5)")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 5)
+        // 与上一条是同一条事实的第二半：渲染路径实际读的是 `version(of:)`，它必须与常量一致。
+        // 保留这条是因为 `AlgorithmVersion.version(of:)` 是手写的 switch（源码注释：每个 case
+        // 都要显式回答），映射本身值得钉一次，而不是假定常量改了访问器就会跟着改。
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .localApply), 6)
         // And the gain is derived, not stored: decoding a document that carries only the WB pair
         // reproduces the same three numbers.
         let json = Data(#"{"amount":100,"temperature":30,"tint":12}"#.utf8)
