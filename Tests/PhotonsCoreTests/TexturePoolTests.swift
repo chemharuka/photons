@@ -237,4 +237,69 @@ final class TexturePoolTests: XCTestCase {
         XCTAssertEqual(graph.idleTextureBytes, 0)
         XCTAssertLessThanOrEqual(deviceMetalBytes, baseline + slack)
     }
+
+    // MARK: - ⑥ 438 — the pool circulates only what it issued
+
+    /// A texture made **outside** the pool is not the pool's to circulate.
+    ///
+    /// The call below is what the loupe did on a 434 canvas-cache hit (`present` recorded the drawn
+    /// texture with the graph in hand — the *previous* picture's — and recycled the pair when the next
+    /// frame landed). The pool took it, because the old guard only refused textures the graph
+    /// `own()`s, and then handed those bytes out as a **stage destination**. The cache entry kept
+    /// pointing at them, so the next hit presented whatever the last render had written: a black
+    /// rectangle with a 1 px ring of the previous occupant's pixels, and only a new decode (a new,
+    /// empty pool) repaired it until the next edit render broke it again.
+    ///
+    /// Reverse gate: delete the `issued` guard in `TexturePool.recycle` and this test's first
+    /// assertion turns red while the second one hands the foreign texture back out.
+    func testAForeignTextureIsRefusedAndNeverHandedOut() throws {
+        let graph = try makeGraph(.oneFrame)
+        let rendered = try graph.render(document(), options: options(cache: true))
+        guard let output = rendered.output else { return XCTFail("no output") }
+        graph.recycle(output: output)
+        XCTAssertEqual(graph.foreignTextureRecycles, 0, "the graph's own frames are its to recycle")
+
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: canvas.width, height: canvas.height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .shared
+        let foreign = try XCTUnwrap(device.makeTexture(descriptor: descriptor),
+                                    "a canvas-sized texture the pool never issued")
+
+        let idleCountBefore = graph.idleTextureCount
+        let idleBytesBefore = graph.idleTextureBytes
+        graph.recycle(output: foreign)
+        XCTAssertEqual(graph.foreignTextureRecycles, 1,
+                       "a foreign texture must be counted, not absorbed")
+        XCTAssertEqual(graph.idleTextureCount, idleCountBefore,
+                       "and it must not enter the idle list")
+        XCTAssertEqual(graph.idleTextureBytes, idleBytesBefore)
+
+        // The sharp half: the pool must never hand those bytes to a stage, so no `obtain` may return
+        // the foreign object — the object whose pixels the cache still owns.
+        for _ in 0..<2 {
+            let again = try graph.render(document(), options: options(cache: true))
+            guard let texture = again.output else { return XCTFail("no output") }
+            XCTAssertFalse(texture === foreign,
+                           "the pool handed out a texture another owner is still drawing from")
+            graph.recycle(output: texture)
+        }
+    }
+
+    /// The other direction of the same rule: `own`/`disown` keeps a graph-owned texture circulating
+    /// (it is the pool's), so the guard cannot be "refuse everything the graph has touched".
+    func testAnOwnedThenDisownedTextureStaysCirculating() throws {
+        let graph = try makeGraph(.oneFrame)
+        let rendered = try graph.render(document(), options: options(cache: true))
+        guard let output = rendered.output else { return XCTFail("no output") }
+        graph.recycle(output: output)
+        // One frame's worth of idle textures is enough to prove the pool still hands its own back.
+        let before = graph.idleTextureCount
+        XCTAssertGreaterThan(before, 0)
+        let again = try graph.render(document(), options: options(cache: true))
+        XCTAssertEqual(graph.foreignTextureRecycles, 0,
+                       "the normal path must never trip the foreign guard")
+        if let texture = again.output { graph.recycle(output: texture) }
+    }
 }

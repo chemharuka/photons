@@ -3618,6 +3618,13 @@ public final class RenderGraph {
     public var textureReuses: Int { pool.reuses }
     /// Bytes the pool has released instead of keeping (budget overflow, or `none` retention).
     public var textureBytesDropped: Int { pool.droppedBytes }
+    /// **438 — how many `recycle` calls the pool refused because the texture was not its own.**
+    ///
+    /// Zero is the invariant: the pool circulates what it issued (`obtain`) or adopted (`own`), and
+    /// nothing else. A non-zero value names a caller handing in somebody else's texture — before 438
+    /// such a call succeeded, and the pool then handed those bytes out as a stage destination while
+    /// the real owner was still drawing from them (the black canvas of 2026-11-20).
+    public var foreignTextureRecycles: Int { pool.foreignRecycles }
 
     /// Give the idle textures back to the device **now**, and report the bytes that released.
     ///
@@ -7005,6 +7012,27 @@ final class TexturePool {
     /// handed out no matter which call site returns it.
     private var owned: [ObjectIdentifier: MTLTexture] = [:]
 
+    /// Every identity this pool itself created (`obtain`'s `makeTexture`) or adopted (`own`).
+    ///
+    /// **438 — the second half of the ownership rule, and the one 434 broke.** `owned` says "these
+    /// bytes belong to the graph, do not hand them out". This set says the converse: *the pool only
+    /// circulates what it issued*. A texture made anywhere else — the window canvas cache's copy
+    /// (`CanvasFrameCache.copyTexture`), a low-res backdrop, a decode rung — is not the pool's to
+    /// recycle, and before this guard `recycle` accepted it, because the only check was "not owned".
+    ///
+    /// What that cost: `present` records the texture it drew as `canvasTexture` together with the
+    /// graph it came from, and recycles that pair when the next frame lands. A *cache hit* draws the
+    /// cache's own copy, so the cache's texture went into the render pool — and the pool hands its
+    /// idle textures out as **stage destinations**. From then on the cache entry's pixels were
+    /// whatever the last render wrote there, and the loupe presented them as "this photo's canvas":
+    /// a black rectangle with a 1 px ring of the previous occupant's pixels (2026-11-20). The pool a
+    /// new decode builds is empty, which is why re-decoding repaired the picture until the next edit
+    /// rendering from the same pool broke it again.
+    private var issued: Set<ObjectIdentifier> = []
+    /// How many `recycle` calls this pool refused because the texture was not its to take. Zero is
+    /// the invariant; anything above it says some caller is circulating a foreign texture.
+    private(set) var foreignRecycles = 0
+
     /// Bytes currently held idle. This is the number the budget is expressed against.
     private(set) var idleBytes = 0
     /// The largest canvas this pool has handed out — the unit `Retention.oneFrame` counts in.
@@ -7043,6 +7071,7 @@ final class TexturePool {
             idleBytes -= bytes
             idle.remove(ObjectIdentifier(t))
             assert(owned[ObjectIdentifier(t)] == nil, "the pool handed out a texture the graph owns")
+            assert(issued.contains(ObjectIdentifier(t)), "the pool handed out a texture it never issued")
             if let i = freeOrder.lastIndex(of: key) { freeOrder.remove(at: i) }
             reuses += 1
             return t
@@ -7056,6 +7085,7 @@ final class TexturePool {
         guard let t = device.makeTexture(descriptor: desc) else {
             throw RenderError.allocationFailed(key)
         }
+        issued.insert(ObjectIdentifier(t))
         allocations += 1
         return t
     }
@@ -7079,6 +7109,9 @@ final class TexturePool {
             idle.remove(id)
         }
         owned[id] = texture
+        // A texture the graph adopts is still one the pool may circulate again after `disown` — it is
+        // not a foreign texture, it is one of ours that happens to belong to the graph for now.
+        issued.insert(id)
     }
 
     /// Give an owned texture back to the pool's jurisdiction. Pooling it is then an ordinary
@@ -7091,6 +7124,16 @@ final class TexturePool {
     func recycle(_ texture: MTLTexture) {
         let key = "\(texture.width)x\(texture.height)"
         let id = ObjectIdentifier(texture)
+        // 438 — a texture this pool never issued is **not** the pool's to circulate. The window canvas
+        // cache owns its copies, the backdrop cache owns its low-resolution picture, the decoder owns
+        // its rungs; handing one of them in here used to succeed (the old guard only refused textures
+        // the *graph* owned) and put bytes up for grabs that something else was still drawing from.
+        // Refusing is not a fallback: a caller that reaches this line with a foreign texture is
+        // circulating the wrong object, so it is counted instead of absorbed.
+        guard issued.contains(id) else {
+            foreignRecycles += 1
+            return
+        }
         // A texture the graph owns is not the pool's to hand out (P1e), and one that is already idle
         // must not enter the list twice — both would end with two live stages sharing one texture.
         guard owned[id] == nil, !idle.contains(id) else { return }
@@ -7112,6 +7155,10 @@ final class TexturePool {
             if list.isEmpty { free[key] = nil } else { free[key] = list }
             let bytes = dropped.width * dropped.height * 8
             idle.remove(ObjectIdentifier(dropped))
+            // 438: the identity leaves the pool with the texture. A released `MTLTexture` can be
+            // deallocated and its address reused by the next `makeTexture`, so a stale entry here
+            // would let a *foreign* texture that landed on the same address through the guard.
+            issued.remove(ObjectIdentifier(dropped))
             idleBytes -= bytes
             droppedBytes += bytes
         }
@@ -7121,6 +7168,9 @@ final class TexturePool {
     @discardableResult
     func releaseIdle() -> Int {
         let bytes = idleBytes
+        for list in free.values {
+            for dropped in list { issued.remove(ObjectIdentifier(dropped)) }
+        }
         free.removeAll()
         freeOrder.removeAll()
         idle.removeAll()

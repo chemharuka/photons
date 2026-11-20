@@ -8441,6 +8441,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return
         }
         let graphAtFrame = graphOverride ?? presented.graph
+        // 438 — **a canvas-cache copy is not a render-graph texture.** On a cache hit there is no graph
+        // that produced this frame; `presented.graph` is whatever picture was on the canvas before (the
+        // previous photo's, mid-switch). Recording that pair as `canvasTexture` and recycling it when
+        // the next frame landed handed the cache's own copy to a pool — and a pool hands its idle
+        // textures out as stage destinations, so the cache entry's pixels became whatever the last
+        // render wrote there. That is the black canvas with a 1 px ring of the previous occupant's
+        // pixels, and why a re-decode (a new, empty pool) repaired it until the next edit render.
+        //
+        // The pool now refuses foreign textures outright (`TexturePool.recycle`), and this is the
+        // caller that must stop asking: nothing about a cached frame belongs to `graphAtFrame`.
+        let ownedGraph = fromCanvasCache ? nil : graphAtFrame
         // 118: the new frame landed. If it carries the revision the release committed — or anything
         // newer — this is the real white balance, so the simulation is dropped **before** the draw:
         // one atomic switch from old-frame×gain to the new frame, never a flash of the old pair.
@@ -8499,7 +8510,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // arriving frame is the best picture there is.
         if !forceStaleCanvasPresent, isCanvasGeometryFrozen, frozenFrame != nil {
             framesHeldDuringGesture += 1
-            if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
             return
         }
         // 066's stale-canvas rule, kept (067 does not make it unnecessary): a frame rendered for another
@@ -8549,7 +8560,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The layer refused the 16-bit drawable and fell back to 8-bit sRGB: re-render once with
         // sRGB primaries so the colours match the layer's colour space.
         if presenter.storage == .srgb8, frame.primaries != .sRGB {
-            if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
             lastPresentError = presenter.lastFailure
             // An 8-bit drawable cannot carry values above 1 either: drop the ceiling back to SDR
             // before the next render instead of presenting clipped highlights.
@@ -8559,7 +8570,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if !ok {
             lastPresentError = presenter.lastFailure
-            if let graphAtFrame { queue.async { graphAtFrame.recycle(output: frame.texture) } }
+            if let ownedGraph { queue.async { ownedGraph.recycle(output: frame.texture) } }
             retryPresentLater()
             return
         }
@@ -8604,7 +8615,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
-        canvasTexture = (frame.texture, graphAtFrame)
+        canvasTexture = (frame.texture, ownedGraph)
         // 067: kept — not for the matte (there is none any more) but because it is the **only** thing
         // that says where the photograph is inside the texture on the canvas. Every present that
         // re-draws this frame (a bridge, a teardown, a window drag) derives its quad from it.
@@ -8625,7 +8636,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             canvasContent = (mapping, frame.content, framing.framePlacement(of: mapping))
         }
         lastFrame = frame
-        logFrameDiagnostics437(frame)
         lastPresentError = nil
         // A new frame is a new answer for the pixel under the pointer, and since 2026-10-27 it is also
         // a new `sceneLinearSample`: the row must follow the picture without waiting for the next mouse
@@ -8654,46 +8664,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if let caps = frame.capabilities { session?.recordCapabilities(caps) }
         canvasView.metalLayer.setNeedsDisplay()
-    }
-
-    /// **437 diagnostics — temporary.** One `NSLog` per presented frame (rate-limited to one per
-    /// second) that names everything a wrong-looking canvas depends on: the photo, the canvas, the
-    /// texture, the picture's rect inside it, the window, the camera and the rung — plus, when the
-    /// frame carried a scene-linear grid, how many of its samples are non-finite or exactly zero.
-    ///
-    /// It exists because the shipped path renders these documents correctly headless (a full render at
-    /// the screenshot's slider values is a normal picture) while the loupe sometimes presents a frame
-    /// whose pixels are not that picture. Guessing which number went wrong has failed; this prints them.
-    nonisolated(unsafe) static var logsFrameDiagnostics = true
-    private static var lastFrameDiagnosticLog: CFAbsoluteTime = 0
-
-    private func logFrameDiagnostics437(_ frame: FrameResult) {
-        guard Self.logsFrameDiagnostics else { return }
-        let now = CFAbsoluteTimeGetCurrent()
-        guard now - Self.lastFrameDiagnosticLog >= 1 else { return }
-        Self.lastFrameDiagnosticLog = now
-        var nan = 0, zero = 0, total = 0
-        if let grid = frame.sceneLinearSample {
-            let stride = 8
-            for y in Swift.stride(from: 0, to: grid.height, by: stride) {
-                for x in Swift.stride(from: 0, to: grid.width, by: stride) {
-                    guard let t = grid.texel(x: x, y: y) else { continue }
-                    total += 1
-                    if t.red.isNaN || t.green.isNaN || t.blue.isNaN { nan += 1; continue }
-                    if t.red == 0 && t.green == 0 && t.blue == 0 { zero += 1 }
-                }
-            }
-        }
-        let photo = session?.anchorAsset.map { "\($0.filename)#\($0.id.prefix(8))" } ?? frameSource?.url.lastPathComponent ?? "-"
-        let window = frame.outputWindow.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "nil"
-        let zeroPct = total > 0 ? Double(zero) / Double(total) * 100 : -1
-        NSLog("[437] photo=%@ canvas=%dx%d tex=%dx%d photoRect=%d,%d %dx%d window=%@ "
-              + "zoom=%.3f zoomState=%@ decode=%.2f rev=%d mode=%@ samples=%d nan=%d zero=%.1f%%",
-              photo, frame.canvas.width, frame.canvas.height,
-              frame.texture.width, frame.texture.height,
-              frame.photoRect.x, frame.photoRect.y, frame.photoRect.width, frame.photoRect.height,
-              window, frame.zoom, viewState.mode.rawValue, Double(frame.decodeScale),
-              frame.editRevision, String(describing: frame.mode), total, nan, zeroPct)
     }
 
     /// 231 — the rung-free version of the size above: the buffer's pixels divided by
