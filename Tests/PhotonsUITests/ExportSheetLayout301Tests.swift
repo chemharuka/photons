@@ -60,6 +60,15 @@ final class ExportSheetLayout301Tests: XCTestCase {
         ])
     }
 
+    /// 438 —— 折叠段默认展开，所以「收起」这份 fixture 要显式写 false（空 seed 现在等于展开）。
+    private var allCollapsed: ExportSectionCollapseStore {
+        ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: false,
+            ExportSheetView.hdrSection: false,
+            ExportSheetView.afterSection: false
+        ])
+    }
+
     private struct Hosted {
         let host: NSHostingView<ExportSheetView>
         let window: NSWindow
@@ -69,7 +78,7 @@ final class ExportSheetLayout301Tests: XCTestCase {
         NSApplication.shared.setActivationPolicy(.accessory)
         let view = ExportSheetView(model: sheet,
                                    sectionStore: expanded ? allExpanded
-                                                          : ExportSectionCollapseStore.memory())
+                                                          : allCollapsed)
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0,
                             width: ExportRowGrid.panelWidth, height: ExportRowGrid.contentMaxHeight)

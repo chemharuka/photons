@@ -43,9 +43,10 @@ final class ExportSheetLayoutTests: XCTestCase {
         let window: NSWindow
     }
 
-    private func host(height: CGFloat, model sheet: ExportSheetModel) throws -> Hosted {
+    private func host(height: CGFloat, model sheet: ExportSheetModel,
+                      store: ExportSectionCollapseStore = .userDefaults) throws -> Hosted {
         _ = NSApplication.shared
-        let host = NSHostingView(rootView: ExportSheetView(model: sheet))
+        let host = NSHostingView(rootView: ExportSheetView(model: sheet, sectionStore: store))
         host.frame = NSRect(x: 0, y: 0, width: 620, height: height)
         let window = TestWindows.make(contentRect: host.frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
@@ -94,7 +95,14 @@ final class ExportSheetLayoutTests: XCTestCase {
     /// that predicate.
     func testToneMappingRowFollowsHDRKindInTheView() throws {
         let sheet = model()
-        let hosted = try host(height: 900, model: sheet)
+        // 438 —— 色调映射行已搬进「HDR 与色调映射」段：这一段必须展开才看得见，
+        // 而且折叠状态不许受其它用例写进 UserDefaults 的影响 ⇒ 注入内存 store。
+        let expanded = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: true,
+            ExportSheetView.hdrSection: true,
+            ExportSheetView.afterSection: true
+        ])
+        let hosted = try host(height: 900, model: sheet, store: expanded)
 
         // Default draft: HDR gain map — the gain-map row, no tone mapping.
         XCTAssertTrue(hasProbe(.hdrRow, in: hosted.host))

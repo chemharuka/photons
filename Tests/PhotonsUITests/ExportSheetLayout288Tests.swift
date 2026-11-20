@@ -56,6 +56,17 @@ final class ExportSheetLayout288Tests: XCTestCase {
         ])
     }
 
+    /// 438 —— 折叠段的默认值改成「展开」（用户口径：默认展开，除非用户自己折叠）。
+    /// 于是「收起的首屏」这份 fixture 必须**显式**写 false，不能再靠 `memory()` 的空 seed
+    /// （空 seed 现在等于展开）。
+    private var allCollapsed: ExportSectionCollapseStore {
+        ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: false,
+            ExportSheetView.hdrSection: false,
+            ExportSheetView.afterSection: false
+        ])
+    }
+
     private struct Hosted {
         let host: NSHostingView<ExportSheetView>
         let window: NSWindow
@@ -66,7 +77,7 @@ final class ExportSheetLayout288Tests: XCTestCase {
         NSApplication.shared.setActivationPolicy(.accessory)
         let view = ExportSheetView(model: sheet,
                                    sectionStore: expanded ? allExpanded
-                                                          : ExportSectionCollapseStore.memory())
+                                                          : allCollapsed)
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0,
                             width: ExportRowGrid.panelWidth, height: ExportRowGrid.contentMaxHeight)

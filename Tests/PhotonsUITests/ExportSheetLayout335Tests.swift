@@ -35,7 +35,9 @@ final class ExportSheetLayout335Tests: XCTestCase {
         windows = []
         for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
                       ExportSheetView.afterSection] {
-            UserDefaults.standard.removeObject(forKey: "photons.export.section.\(title)")
+            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
+            // （以前 removeObject 等于折叠，现在等于展开）。
+            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
         }
     }
 
@@ -453,7 +455,9 @@ final class ExportSheetLayout335Tests: XCTestCase {
         // 默认折叠：6 个常驻行 + 3 个折叠标题 = 9 band ≤ 10。
         for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
                       ExportSheetView.afterSection] {
-            UserDefaults.standard.removeObject(forKey: "photons.export.section.\(title)")
+            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
+            // （以前 removeObject 等于折叠，现在等于展开）。
+            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
         }
         NSApplication.shared.setActivationPolicy(.accessory)
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
