@@ -750,3 +750,90 @@ kernel）。一屏 24 格就是 24 次编译，9 个 worker 同时编译时还�
 
 24 格热首屏（全新 provider + 热目录）改后 **79/60/71 ms（best 60）**，308 的 34/27/28 是同一
 测量在更空机器上的读数；budget 断言写在 `ThumbnailPhaseBenchTests`（`PHOTONS_THUMB_PHASES=1`）。
+
+## 20. 呈现（画布上显示什么）重构声明 —— 2026-11-20，**P1 待派，抽象层不许动**
+
+用户口径（2026-11-20）：「373 那条占位比例 bug 继续处理，呈现状态机也开始处理」「我根本目的是为了
+让 AI 能更好维护」。判据据此从「文件行数」改成**一个事实有几处编码**。
+
+### 为什么（症状都落在同一层）
+
+| 单 | 症状 | 病根 |
+|---|---|---|
+| 437（两次崩） | 指针读数采样到 `.private` 纹理 / NaN | 「哪张纹理能读」由调用方自己记 |
+| 438 | 拉滑块后黑画布 + 1 px 上一任像素 | 「这张纹理归谁」靠 `(texture, graph?)` 猜（已由 440 收成 `OwnedCanvasTexture`） |
+| 373 | 横→竖换图，占位框按旧照片比例（rect 1.503 / px 0.667） | 「这个尺寸属于哪张照片」在发布前才读活状态（443 修） |
+| 434 / 311 / 037 / 039 | 缓存命中、占位、底图、低清全幅四套「先显示点什么」并存 | 各写一套「谁覆盖谁」 |
+
+四单不同症状，同一句缺失：**画布上此刻是什么**没有一个 owner。
+
+### 现状（实测，2026-11-20 main）
+
+- 描述「画布上是什么」的成员 **15 个**：`frameState`、`canvasTexture`、`canvasContent`、`canvasPicture`、
+  `pendingFrame`、`frozenFrame`、`presentedPhoto`、`firstFramePlaceholder*`（5 个）、
+  `backdropKey`/`backdropPhotoKey`/`backdropWanted`/`backdropWantedAt`、`canvasFrameCache*`（3 个）。
+- 机制 **5 套**：first-frame stand-in（311）、低清全幅 backdrop（037②/039）、窗口画布缓存（434）、
+  手势冻结（068）、桥接替（025）。每套都有自己的 key、自己的失效入口、自己对 `TexturePool` 的假设。
+- `present` **291 行**、`recycle(output:)` 调用 **14 处**（440 后 `present` 内已全部走 `recycle(on:)`）。
+- **已收的两项**（不要再重做）：439 把「帧身份事实」收进 `LoupeFrameFacts`（键 6 处 → 1 处构造）；
+  440 把「纹理归谁」收进 `OwnedCanvasTexture`（`recycle(on:)` 队列必填）。
+
+### 定案方向
+
+一个**状态机**替代 5 套机制，三个**来源**喂它：
+
+```swift
+enum CanvasContent {
+    case empty
+    case placeholder(ThumbFrame)      // 311 的 stand-in
+    case lowRes(BackdropFrame)        // 037② 的低清全幅
+    case frame(OwnedCanvasTexture, settled: Bool)   // 真帧；settled=false 是 434 的缓存副本
+}
+
+struct CanvasPresentation {
+    private(set) var content: CanvasContent
+    private(set) var held: OwnedCanvasTexture?     // 手势冻结期间保活的那一张
+    mutating func show(_ next: CanvasContent, reason: Reason) -> Decision
+    // 谁能替换谁、缓存命中的帧算不算 settled、冻结期间允许什么，全部只在这里回答一次
+}
+```
+
+规则从「每个入口各自记」变成「一张转移表」。437/438 那种「某处忘了检查纹理可用性」在状态机里
+**没有可忘的地方**：`Decision` 是唯一的出口。
+
+### 状态所有权表（15 → 3）
+
+| 现在 | 归谁 |
+|---|---|
+| `frameState`（含 `graph`/`graphPhoto`/`graphIdentity`） | 渲染侧的 `FrameSnapshot` 不动；**呈现只读 `CanvasContent.frame`** |
+| `canvasTexture` / `pendingFrame` / `frozenFrame` | `CanvasPresentation.content` / `.held` |
+| `firstFramePlaceholder*`（5 个） | `CanvasContent.placeholder` + `ThumbFrame` |
+| `backdrop*`（4 个） | `CanvasContent.lowRes` + `BackdropFrame` |
+| `canvasFrameCache*`（3 个） | 缓存本身不动（434 已独立成类型）；呈现只通过 `show(.frame(_, settled: false))` 认识它 |
+| `presentedPhoto` | `CanvasPresentation` 的 `photo` 字段（与 `content` 同一次写入） |
+
+### 约束（任何阶段都必须守住）
+
+1. **像素与金值不变**：本声明不改任何渲染参数；`L2/L3` golden 与 `identity` 字符串一个字节不动。
+2. **计数器不变**：`framesHeldDuringGesture`、`canvasCachePresents`、`zoomBridgeCoveredPresents`、
+   `staleFrameDrops`、`foreignTextureRecycles` 的既有断言一条都不许改弱（它们是这一层的唯一观测量）。
+3. **一次只迁一套机制**，每步一个 commit，迁移中允许两套并存（旧的那套先变成状态机的读者，再删）。
+4. **不许碰**：`RenderGraph`（stage 机与缓存）、`FrameTransform`/裁剪链（§17 硬边界）、
+   `LedgerPublish`/`ingestedSourceFrame` 的尺寸语义（443 刚定）。
+5. **与改 `LoupeController.swift` 的其他单不许并行**；`standin443` 在跑期间本声明只写文档。
+
+### 阶段
+
+| 阶段 | 内容 | 判据 |
+|---|---|---|
+| P0 | 本声明（已完成） | 用户点头 |
+| P1 | `CanvasPresentation` 骨架 + `CanvasContent`，**行为不变**：状态由现有变量在每次 present 时同步写入，尚无读者 | 全量测试与今天同红同绿；新增单测钉住三条转移（placeholder→frame、frame→frame(settled:false)、任一→held） |
+| P2a | 434 缓存命中改走 `show(.frame(_, settled: false))` | `canvasCachePresents` 不变；`CanvasFrameCache*` 单全绿 |
+| P2b | 311 stand-in 改走 `show(.placeholder)` | 373 两条用例仍绿（443 的守卫） |
+| P2c | 037② 低清全幅改走 `show(.lowRes)` | 344/366/370 单全绿 |
+| P2d | 068 冻结改走 `held` | `framesHeldDuringGesture` 不变 |
+| P3 | 删掉被替代的 15 个成员与 5 套机制里的重复路径 | `grep` 计数 + 全量绿 |
+
+**P1 之前不许动任何呈现行为**：P1 的唯一产出是「状态被写下来且没人读」，它让 P2 每一步都能单独回退。
+
+**本声明本身不产生派单**（同 §17）：P1 的规格在 443 合入后另写，且开 P1 前需要用户再点一次头。
