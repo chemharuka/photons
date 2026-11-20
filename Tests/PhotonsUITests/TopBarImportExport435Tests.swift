@@ -386,4 +386,24 @@ final class TopBarImportExport435Tests: XCTestCase {
         }
         print("442 · 标题 minY = \(reference.title.minY) · 行高 \(reference.title.height) · 五个按钮逐点相等")
     }
+
+    /// 442 —— 「网格 / 单图」是**一个**按钮：文字与图标写的是当前模式，点一下换到另一个，
+    /// 且宽度固定为两者较宽者（切换时顶栏不抖）。与「排序」那颗同一个行为。
+    func testModeButtonTogglesItsOwnLabelAndKeepsItsWidth() throws {
+        let bar = makeBar()
+        let button = bar.modeButtonView
+        bar.update(mode: .grid, assetCount: 45, selectionCount: 4,
+                   libraryName: "topbar-demo", filmstrip: false)
+        bar.layoutSubtreeIfNeeded()
+        let width = button.frame.width
+        XCTAssertEqual(button.title, Loc.t("网格"), "网格模式下按钮应写「网格」")
+        XCTAssertEqual(width, bar.modeButtonWidthForTesting, accuracy: 0.01, "宽度不是两者较宽者")
+
+        bar.update(mode: .loupe, assetCount: 45, selectionCount: 4,
+                   libraryName: "topbar-demo", filmstrip: false)
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertEqual(button.title, Loc.t("单图"), "单图模式下按钮应写「单图」")
+        XCTAssertEqual(button.frame.width, width, accuracy: 0.01, "切换模式后按钮宽度变了")
+        XCTAssertNotNil(button.image)
+    }
 }

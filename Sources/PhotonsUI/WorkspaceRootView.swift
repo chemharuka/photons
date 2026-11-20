@@ -207,10 +207,11 @@ public final class TopBarView: NSView {
     private let importButton = ToolButton(title: Loc.t("导入"), symbol: "square.and.arrow.down")
     /// 文件 ▸ 导出… 的顶栏入口，同上。
     private let exportButton = ToolButton(title: Loc.t("导出"), symbol: "square.and.arrow.up")
-    /// 442 —— 「网格 / 单图」从分段控件改成两个 `ToolButton`：与打开/导入/导出同一套样式，
-    /// 激活的那个用与胶片条相同的蓝色底。两者互斥，点哪个切哪个。
-    private let gridButton = ToolButton(title: Loc.t("网格"), symbol: "square.grid.2x2")
-    private let singleButton = ToolButton(title: Loc.t("单图"), symbol: "rectangle.portrait")
+    /// 442 —— 「网格 / 单图」是**一个**按钮，写的是**当前模式**，点一下换到另一个 ——
+    /// 与「排序」那颗（`新→旧` ⇄ `旧→新`）同一个行为。宽度按两者较宽的算，切换时顶栏不抖。
+    static let gridSymbol = "square.grid.2x2"
+    static let singleSymbol = "rectangle.portrait"
+    private let modeButton = ToolButton(title: Loc.t("网格"), symbol: TopBarView.gridSymbol)
     /// 「胶片条 / 侧栏」这一对同理，互斥。
     private let stripButton = ToolButton(title: Loc.t("胶片条"), symbol: "rectangle.split.1x2")
     private let sidebarButton = ToolButton(title: Loc.t("侧栏"), symbol: "sidebar.left")
@@ -267,16 +268,14 @@ public final class TopBarView: NSView {
         // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
         sortButton.image = PhotoSortOrder.icon()
 
-        gridButton.target = self
-        gridButton.action = #selector(modeTapped(_:))
-        singleButton.target = self
-        singleButton.action = #selector(modeTapped(_:))
+        modeButton.target = self
+        modeButton.action = #selector(modeTapped(_:))
         stripButton.target = self
         stripButton.action = #selector(browserTapped(_:))
         sidebarButton.target = self
         sidebarButton.action = #selector(browserTapped(_:))
 
-        for v: NSView in [openButton, importButton, exportButton, gridButton, singleButton,
+        for v: NSView in [openButton, importButton, exportButton, modeButton,
                           stripButton, sidebarButton, sortButton, statusCluster] {
             addSubview(v)
         }
@@ -312,8 +311,10 @@ public final class TopBarView: NSView {
 
     public func update(mode: CatalogSession.Mode, assetCount: Int, selectionCount: Int,
                        libraryName: String?, filmstrip: Bool) {
-        gridButton.isActive = mode == .grid
-        singleButton.isActive = mode == .loupe
+        // 442 —— 按钮文字/图标 = **当前模式**（和排序按钮一样：显示现状，点一下换到另一边）。
+        modeButton.title = mode == .grid ? Loc.t("网格") : Loc.t("单图")
+        modeButton.image = ToolButton.icon(mode == .grid ? Self.gridSymbol : Self.singleSymbol,
+                                           accessibility: modeButton.title)
         stripButton.isActive = filmstrip
         sidebarButton.isActive = !filmstrip
         // 047: the corner carries the **build** revision, so a glance answers "is this the build with
@@ -349,10 +350,16 @@ public final class TopBarView: NSView {
     public var sortButtonView: ToolButton { sortButton }
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
     public var filmstripButtonView: ToolButton { stripButton }
-    /// 442 —— 四个切换按钮的本体（测试量宽度/激活底色用）。
-    public var gridButtonView: ToolButton { gridButton }
-    public var singleButtonView: ToolButton { singleButton }
+    /// 442 —— 切换按钮的本体（测试量宽度/激活底色用）。
+    public var modeButtonView: ToolButton { modeButton }
     public var sidebarButtonView: ToolButton { sidebarButton }
+    /// 网格/单图那一个按钮的固定宽度（两者较宽者），测试据此断言「切换不抖」。
+    public var modeButtonWidthForTesting: CGFloat { Self.modeWidth() }
+    static func modeWidth() -> CGFloat {
+        let a = ToolButton(title: Loc.t("网格"), symbol: gridSymbol)
+        let b = ToolButton(title: Loc.t("单图"), symbol: singleSymbol)
+        return max(a.intrinsicContentSize.width, b.intrinsicContentSize.width)
+    }
     /// 「打开」按钮本体（A①/A⑥ 用它作为样式基准）。
     public var openButtonView: ToolButton { openButton }
     public var importButtonView: ToolButton { importButton }
@@ -378,13 +385,9 @@ public final class TopBarView: NSView {
         separators[0].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += Self.separatorGapOut
-        // 442 —— 「网格 / 单图」一对：宽度取两者较宽的那个，切换时顶栏不抖。
-        let modeWidth = max(gridButton.intrinsicContentSize.width,
-                            singleButton.intrinsicContentSize.width)
-        // 442 —— 顺序：打开 导入 导出 | 网格 单图 胶片条 侧栏 排序，只有一条分隔线（在导出之后）。
-        place(gridButton, width: modeWidth)
-        x += Self.itemGap
-        place(singleButton, width: modeWidth)
+        // 442 —— 顺序：打开 导入 导出 | 网格/单图 胶片条 侧栏 排序，只有一条分隔线（在导出之后）。
+        // 「网格/单图」是一个按钮，宽度固定为两者较宽者。
+        place(modeButton, width: Self.modeWidth())
         x += Self.itemGap
         // 「胶片条 / 侧栏」一对：同样按较宽的来。
         let browserWidth = max(stripButton.intrinsicContentSize.width,
@@ -422,7 +425,8 @@ public final class TopBarView: NSView {
     @objc private func stripTapped() { onToggleFilmstrip?() }
     @objc private func sortTapped() { onToggleSort?() }
     @objc private func modeTapped(_ sender: ToolButton) {
-        onModeChange?(sender === gridButton ? .grid : .loupe)
+        // 按钮写的是当前模式 ⇒ 点它换到另一个。
+        onModeChange?(sender.title == Loc.t("网格") ? .loupe : .grid)
     }
 
     @objc private func browserTapped(_ sender: ToolButton) {
