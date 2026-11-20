@@ -8463,15 +8463,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             zoomBridgeCoveredPresents += 1
             return
         }
-        // 340 — the graph the frame was rendered through. 440: this is **not** the owner; it is only
-        // what `publishIngestedSource` reads the source size from. A cached frame rendered through no
-        // graph falls back to the snapshot's graph exactly as before.
-        let graphAtFrame: RenderGraph?
-        if case .graph(let graph) = frame.owner {
-            graphAtFrame = graph
-        } else {
-            graphAtFrame = presented.graph
-        }
         // 438 — **a canvas-cache copy is not a render-graph texture.** On a cache hit there is no graph
         // that produced this frame; `presented.graph` is whatever picture was on the canvas before (the
         // previous photo's, mid-switch). Recording that pair as `canvasTexture` and recycling it when
@@ -8517,7 +8508,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // not the rung this frame was made from, and mixing the two made a serial portrait drag render
         // as a landscape-shaped ellipse.
         //
-        // 231 — **full-resolution source pixels, not the rung's.** `graphAtFrame.sourceSize` is the
+        // 231 — **full-resolution source pixels, not the rung's.** `frame.sourceSize` is the
         // size of the *buffer* this frame was made from (the 0.5 preview rung is half-size), while
         // `framing()` divides by `decodeScale` and describes the whole file. The crop tool takes its
         // frame from this publication (`maskSourceSize`) and its projection from `framing()`, so
@@ -8640,7 +8631,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // 298 — the new ingested source is published only now: the stand-in is down, so the
         // re-placement inside cannot paint a half-size rect between this present and the matte's
         // teardown. `presentCanvas` above still ran on the frame's own geometry (settledPlacement).
-        publishIngestedSource(graphAtFrame?.sourceSize, decodeScale: Double(frame.decodeScale))
+        //
+        // 443 — **only a frame the graph rendered has an ingest to publish.** A canvas-cache hit
+        // carries `.cacheCopy` and `sourceSize == nil`; registering the snapshot's graph (the
+        // previous picture's, mid-switch) as this photo's source was exactly the bug. The real frame
+        // that follows publishes normally. The photo travels on the frame, so a late frame of the
+        // previous picture is refused by `publishIngestedSource` even if it arrives after the switch.
+        if case .graph = frame.owner {
+            publishIngestedSource(frame.sourceSize, decodeScale: Double(frame.decodeScale),
+                                  photo: frame.photo)
+        }
         presentedPhoto = currentPhoto
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
@@ -8707,8 +8707,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The one writer of `session.ingestedSourceFrame`, so the rung → source division cannot be
     /// forgotten on one path and remembered on another.
-    private func publishIngestedSource(_ rung: ImageSize?, decodeScale: Double) {
-        guard let rung, let assetID = session?.anchorAsset?.id else { return }
+    ///
+    /// 443 — **the size is registered only for the photo it describes.** `photo` is the frame's own
+    /// identity, not the live anchor: a frame that was rendered for the previous picture can land
+    /// after the switch, and reading `anchorAsset` at publication time was what filed its size under
+    /// the new photo (a portrait stand-in placed through a landscape source rect). The guard drops
+    /// that late frame instead; the new photo's real frame publishes when it lands.
+    private func publishIngestedSource(_ rung: ImageSize?, decodeScale: Double, photo: String) {
+        guard let rung, let anchor = session?.anchorAsset,
+              photo == ladderIdentity(anchor) else { return }
+        let assetID = anchor.id
         let size = Self.fullSourceSize(rung: rung, decodeScale: decodeScale)
         session?.ingestedSourceFrame = (assetID, size)
         // 290 — a stand-in that is still up was placed from the fallback (stored dimensions after the
@@ -8728,8 +8736,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// 231 test seam — drive the **shipped** publication without a Metal present (the harness has no
     /// presenter), so a test can prove the crop entry sees the full frame on the 0.5 rung.
-    func publishIngestedSourceForTesting(rung: ImageSize, decodeScale: Double) {
-        publishIngestedSource(rung, decodeScale: decodeScale)
+    ///
+    /// 443 — `photo` defaults to the live anchor so the 231/290 callers keep describing the photo they
+    /// are on; a test passes a **different** identity to prove the publication refuses it.
+    func publishIngestedSourceForTesting(rung: ImageSize, decodeScale: Double,
+                                         photo: String? = nil) {
+        let name = photo ?? session?.anchorAsset.map(ladderIdentity) ?? ""
+        publishIngestedSource(rung, decodeScale: decodeScale, photo: name)
     }
 
     /// 231 test seam — install a decoded rung (and the identity it belongs to) the way `makeFrame`
