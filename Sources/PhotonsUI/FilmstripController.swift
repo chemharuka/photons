@@ -537,6 +537,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // §386 — 「模型降噪…」, same builder as the grid and the sidebar.
         DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session, target: denoiseMenuTarget,
                                   selectedIDs: session.selectedAssets.map(\.id))
+        // 442 —— 与网格/侧栏同一条「导出…」。
+        ExportMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                 selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 

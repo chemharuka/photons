@@ -842,6 +842,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         // §386 — 「模型降噪…」, the same row the grid and the strip carry.
         DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session, target: denoiseMenuTarget,
                                   selectedIDs: session.selectedAssets.map(\.id))
+        // 442 —— 与网格/胶片条同一条「导出…」。
+        ExportMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                 selectedIDs: session.selectedAssets.map(\.id))
     }
 
     /// 「移出照片库」: rows + history + thumbnails, no confirmation (the file stays).

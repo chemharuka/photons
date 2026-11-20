@@ -1559,6 +1559,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session,
                                   target: denoiseMenuTarget,
                                   selectedIDs: session.selectedAssets.map(\.id))
+        // 442 —— 选好照片右键就能导出（单选/多选都行），与「文件 ▸ 导出…」同一个 selector。
+        ExportMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                 selectedIDs: session.selectedAssets.map(\.id))
         return contextMenu.menu
     }
 
@@ -1853,6 +1856,36 @@ public enum StackMenuBuilder {
         let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         holder.submenu = stackMenu
         menu.insertItem(holder, at: 0)
+        menu.insertItem(.separator(), at: 1)
+    }
+}
+
+/// 右键 ▸「导出…」 — 与「文件 ▸ 导出…」**同一个 selector、同一个校验**。
+///
+/// 用户口径（2026-11-20）：「多选照片后，右键，增加导出按钮」+「单选也是，反正选择照片后右键可以导出」。
+///
+/// 为什么是 nil target + 菜单那个 selector：`EditorWindowController.validateMenuItem` 已经负责
+/// 「有没有可导出的照片」与「导出 N 张…」的标题（`exportAction` 那一条），所以右键这一行**不另写**
+/// 判据 —— 文件菜单灰掉时它一定灰，反之亦然。三面（网格 / 胶片条 / 侧栏）共用这一个 builder，
+/// 与 `StackMenuBuilder` / `HDRMenuBuilder` 同一条规矩。
+@MainActor
+public enum ExportMenuBuilder {
+
+    public static let title = Loc.t("导出…")
+
+    private static var action: Selector { #selector(EditorWindowController.exportAction(_:)) }
+
+    /// 把「导出…」插到菜单最上面（一条分隔线收尾）。重复打开时按 **action** 清掉上一轮那一行 ——
+    /// 标题会随张数变成「导出 3 张…」，所以不能按标题认。
+    public static func attach(to menu: NSMenu, session: CatalogSession?, selectedIDs: [String]) {
+        for item in menu.items.reversed() where item.action == action {
+            menu.removeItem(item)
+        }
+        guard let session, !selectedIDs.isEmpty else { return }
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        // nil target ⇒ 响应链到 `EditorWindowController.validateMenuItem`：可用性、标题（张数）都由它定。
+        item.target = nil
+        menu.insertItem(item, at: 0)
         menu.insertItem(.separator(), at: 1)
     }
 }
