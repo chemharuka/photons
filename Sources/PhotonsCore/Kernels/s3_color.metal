@@ -20,6 +20,20 @@ using namespace metal;
 
 #include "color_hsl.metal"
 
+// 452 — the natural-saturation (vibrance) strength. **Product default, not a test knob.**
+//
+// `s' = s + v/100 · kVibranceGain · (1 − s)`. The old literal was 0.5 and read as too strong
+// (owner, 2026-11-20: 「自然饱和度强度太大」); 0.28 is 56 % of it. The quantisation the owner
+// decided from, at s = 0.2:
+//
+//     v = +50  →  0.312   (old 0.40)
+//     v = +100 →  0.424   (old 0.60)
+//
+// The same number lives in Swift as `AutoColor.vibranceGain` (the auto-colour inverse solve),
+// and `AutoColor452Tests` reads this line to keep the two equal. Do not move this into
+// `color_hsl.metal`: the include is S3/S3.5's shared *saturation* maths, and vibrance is S3's own.
+constant float kVibranceGain = 0.28;
+
 struct ColorParams {
     float4 a;   // vibrance, saturation, identity(all-zero → this pass writes through), pad
     float4 b;   // contentOrigin.xy, contentSize.xy (canvas pixels) — the letterbox guard
@@ -68,10 +82,11 @@ kernel void s3_color(texture2d<float, access::read> src [[texture(0)]],
     float3 hsl = rgb_to_hsl(max(c.rgb, 0.0) / headroomScale);
 
     // Vibrance moves unsaturated pixels most: the gain scales with (1 - saturation), so skin tones
-    // and already-saturated reds stay put while muted colour wakes up.
+    // and already-saturated reds stay put while muted colour wakes up. 452 lowered the gain from
+    // 0.5 to `kVibranceGain` (0.28) — see the constant for the owner's quantisation table.
     float sat = hsl.y;
     if (abs(p.a.x) > 1e-6) {
-        sat = clamp(sat + p.a.x / 100.0 * 0.5 * (1.0 - sat), 0.0, 1.0);
+        sat = clamp(sat + p.a.x / 100.0 * kVibranceGain * (1.0 - sat), 0.0, 1.0);
     }
     if (abs(p.a.y) > 1e-6) {
         sat = clamp(sat * (1.0 + p.a.y / 100.0), 0.0, 1.0);
