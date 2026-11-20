@@ -152,6 +152,12 @@ public final class BackdropCache {
             self.geometry = geometry
         }
 
+        /// 439 — the same key, projected from the one place the identity facts are computed.
+        public init(facts: LoupeFrameFacts) {
+            self.init(photo: facts.photo, develop: facts.decodeInputs, digest: facts.editDigest,
+                      ceiling: facts.ceiling, geometry: facts.geometry)
+        }
+
         /// The whole document in one string; what "has it moved?" compares.
         public var identity: String {
             "\(photo)|\(develop)|\(digest)|\(String(format: "ceil=%.4f", ceiling))"

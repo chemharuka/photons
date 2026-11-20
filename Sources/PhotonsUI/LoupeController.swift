@@ -821,10 +821,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// write (0.35 ms measured) and a disk failure can never fail a render.
     private let histogramDiskQueue = DispatchQueue(label: "photons.loupe.histogram-disk",
                                                    qos: .utility)
-    /// The last document digested, and its digest. `histogramStep` runs on every frame, and a JSON
-    /// encode plus a SHA-256 per frame would be a real cost on a 4 ms pan; an `EditModel` comparison is
-    /// a field-by-field compare of a small struct. Render-queue only.
-    private var lastEditDigest: (edit: EditModel, digest: String)?
+    /// The last document's facts, and the edit they were computed from. `histogramStep` runs on every
+    /// frame, and a JSON encode plus a SHA-256 per frame would be a real cost on a 4 ms pan; an
+    /// `EditModel` comparison is a field-by-field compare of a small struct. Render-queue only.
+    private var lastEditFacts: (edit: EditModel, facts: LoupeFrameFacts)?
     /// The camera the *previous* frame was rendered at. `nil` after a new photo, so its first frame
     /// measures instead of being mistaken for a gesture.
     private var lastFrameState: LoupeViewState?
@@ -6778,7 +6778,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // look like a hit for the preview's texture). The settled digest stays exactly
         // `Histogram.editDigest(edit)` so every existing key — and the histogram's whole-picture
         // source — keeps its meaning.
-        let digest = Histogram.editDigest(edit)
         // 323: the ceiling is the third half. It is a preference (not in the digest) that S2 clamps
         // the pixels at, and this texture is a rendered picture — so a ceiling change must retire it
         // exactly like an edit does, or the letterbox backdrop and the histogram's whole-picture
@@ -6793,11 +6792,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // spelled half — the only half a human (or a cache directory) can read — said nothing about
         // it. `EditModel.geometryFingerprint` is now the one function that names every dimension the
         // render consumes, and `requestLowResFullFrame` computes it from the very value it renders.
-        return BackdropCache.Key(photo: photo, develop: edit.decodeInputs.key,
-                                 digest: backdropPreviewTarget == nil
-                                     ? digest : digest + Self.backdropPreviewMarker,
-                                 ceiling: HighlightCeiling.current,
-                                 geometry: edit.geometryFingerprint)
+        return BackdropCache.Key(facts: LoupeFrameFacts(
+            photo: photo, edit: edit,
+            digestSuffix: backdropPreviewTarget == nil ? "" : Self.backdropPreviewMarker))
     }
 
     /// The source half of a preview backdrop's digest (144). Internal so a test can say what it
@@ -7384,29 +7381,26 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                      headroom: Double? = nil,
                                      primaries: OutputPrimaries? = nil) -> CanvasFrameCache.Key {
         let edit = job.edit
-        return CanvasFrameCache.Key(
+        return CanvasFrameCache.Key(facts: LoupeFrameFacts(
             photo: job.baseIdentity,
-            decodeInputs: edit.decodeInputs.key,
-            editDigest: Histogram.editDigest(edit),
-            geometry: edit.geometryFingerprint,
-            cameraState: Self.canvasCacheCameraToken(job.state),
+            edit: edit,
+            camera: job.state,
             viewport: job.viewport,
-            mode: Self.canvasCacheModeToken(job.mode),
+            mode: job.mode,
             fitScale: job.fitScale,
-            canvasRole: job.canvasRole.rawValue,
+            canvasRole: job.canvasRole,
             cropIsActive: job.cropIsActive,
             highlightWarning: job.highlightWarning,
             headroom: headroom ?? self.headroom,
             decodeScale: decodeScale,
-            primaries: (primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3)).rawValue,
-            highlightCeiling: HighlightCeiling.current)
+            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3)))
     }
 
     /// A document write landed for `photo` since the last job. That is the edit-landing hook (the
     /// `frameSource` harness has no `session.editRevision`, so the digest is the one signal both
     /// spellings share): delete the photo's old-digest entries and move to three-slot editing.
     private func noteCanvasCacheDocument(photo: String, edit: EditModel) {
-        let digest = Histogram.editDigest(edit)
+        let digest = LoupeFrameFacts(photo: photo, edit: edit).editDigest
         if let seen = canvasCacheSeenDigest[photo], seen != digest {
             canvasFrameCache.noteEditLanded(photo: photo, digest: digest)
         }
@@ -7414,18 +7408,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     static func canvasCacheCameraToken(_ state: LoupeViewState) -> String {
-        "\(state.mode.rawValue)|z=\(String(format: "%.17g", state.zoom))"
-            + "|cx=\(String(format: "%.17g", state.centerX))"
-            + "|cy=\(String(format: "%.17g", state.centerY))"
+        LoupeFrameFacts.canvasCacheCameraToken(state)
     }
 
     static func canvasCacheModeToken(_ mode: LoupeFrameMode) -> String {
-        switch mode {
-        case .edited: return "edited"
-        case .original: return "original"
-        case .compare(let split):
-            return "compare(\(split.axis.rawValue),\(String(format: "%.17g", split.fraction)))"
-        }
+        LoupeFrameFacts.canvasCacheModeToken(mode)
     }
 
     /// 434 — the diagnostics the acceptance prints, plus the regime name (`browsing` / `editing`).
@@ -7721,7 +7708,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // settled frame instead of paying a readback+binned grid on every slider tick.
         let wantsPointerSample = measurement && pointerReadoutWanted
         let measureHistogram = measurement && mode != .original
-            && wantsHistogramMeasurement(edit: model, identity: cacheIdentity,
+            && wantsHistogramMeasurement(photo: baseIdentity, edit: model,
+                                         identity: cacheIdentity,
                                          fallbackScale: decodeScale, coverage: coverage)
 
         // One render over the resident rung. `useCache: true` in both sources: the edited pipeline's
@@ -7846,7 +7834,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // texture S4 read (not on S4's clamped output, which stops at the panel's headroom — 070), so
         // a picture with three stops of highlight above white plots three stops above white.
         if let e = editedShotResult {
-            deliver(histogramStep(for: model, measured: e.result.histogram,
+            deliver(histogramStep(for: model, photo: baseIdentity,
+                                  measured: e.result.histogram,
                                   milliseconds: e.result.histogramMilliseconds,
                                   identity: cacheIdentity,
                                   coverage: coverage, primaries: primaries, ceiling: ceiling,
@@ -8829,11 +8818,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// zoom changed. The ladder keeps one rung in practice (`RenderJob.target` is always full scale),
     /// so this is the same buffer at every zoom; `fallbackScale` is only used before the first rung
     /// lands, and the key changes (and re-measures once) when the real one does.
-    private func histogramKey(identity: String, digest: String, fallbackScale: Float) -> String {
+    private func histogramKey(identity: String, facts: LoupeFrameFacts,
+                              fallbackScale: Float) -> String {
         let rung = histogramRungScale(identity: identity, fallbackScale: fallbackScale)
         return Histogram.cacheKey(rungIdentity: "\(identity)-s\(rung)",
-                                  editDigest: digest, bins: 256,
-                                  ceiling: HighlightCeiling.current)
+                                  editDigest: facts.editDigest, bins: 256,
+                                  ceiling: facts.ceiling)
     }
 
     /// The rung a picture's histogram is measured from — the biggest one the ladder has, or the frame's
@@ -8844,12 +8834,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
         ladder.best(identity: identity, atOrBelow: DecodeLadder.fullScale)?.scale ?? fallbackScale
     }
 
-    /// The document's digest, memoised against the document itself (render queue only).
-    private func cachedEditDigest(_ edit: EditModel) -> String {
-        if let cached = lastEditDigest, cached.edit == edit { return cached.digest }
-        let digest = Histogram.editDigest(edit)
-        lastEditDigest = (edit, digest)
-        return digest
+    /// The document's facts, memoised against the document and the photo it belongs to (render queue
+    /// only). The digest and the ceiling are computed by `LoupeFrameFacts`; this only remembers them
+    /// so a pan's many frames do not each pay a JSON encode plus a SHA-256.
+    private func cachedEditFacts(photo: String, edit: EditModel) -> LoupeFrameFacts {
+        let ceiling = HighlightCeiling.current
+        if let cached = lastEditFacts, cached.edit == edit, cached.facts.photo == photo,
+           cached.facts.ceiling == ceiling {
+            return cached.facts
+        }
+        let facts = LoupeFrameFacts(photo: photo, edit: edit, ceiling: ceiling)
+        lastEditFacts = (edit, facts)
+        return facts
     }
 
     /// How much of the picture this camera actually holds — `1` at fit, ~0.16 at 1:1 on a 24 MP file,
@@ -8910,14 +8906,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 070: the numbers arrive **already measured** (`RenderResult.histogram`), taken on the
     /// scene-linear texture inside the frame's own command buffer. This function no longer takes a
     /// texture at all, and nothing here reads pixels.
-    private func histogramStep(for edit: EditModel, measured: Histogram?, milliseconds: Double,
+    private func histogramStep(for edit: EditModel, photo: String,
+                               measured: Histogram?, milliseconds: Double,
                                identity: String, coverage: Double,
                                primaries: OutputPrimaries, ceiling: Double,
                                fallbackScale: Float, sourceURL: URL,
                                startedAt: CFAbsoluteTime) -> HistogramStep {
         // The card is off: this frame is a non-measurement, like every other.
         guard collectsHistogram else { return HistogramStep(key: "") }
-        let key = histogramKey(identity: identity, digest: cachedEditDigest(edit),
+        let key = histogramKey(identity: identity, facts: cachedEditFacts(photo: photo, edit: edit),
                                fallbackScale: fallbackScale)
         let latency = { (CFAbsoluteTimeGetCurrent() - startedAt) * 1000 }
         // The picture's key has not moved: a pan, a zoom, a mask-visibility toggle. Nothing to measure
@@ -8979,11 +8976,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///   · the frame is a window into the picture → no measurement (a crop's numbers are the crop's);
     ///   · this key was already measured, or its numbers are in the cache → no measurement (A → B → A
     ///     publishes the cache and nothing needs re-counting).
-    private func wantsHistogramMeasurement(edit: EditModel, identity: String,
+    private func wantsHistogramMeasurement(photo: String, edit: EditModel, identity: String,
                                            fallbackScale: Float, coverage: Double) -> Bool {
         guard collectsHistogram else { return false }
         guard coverage >= Self.histogramWholePictureCoverage else { return false }
-        let key = histogramKey(identity: identity, digest: cachedEditDigest(edit),
+        let key = histogramKey(identity: identity, facts: cachedEditFacts(photo: photo, edit: edit),
                                fallbackScale: fallbackScale)
         guard !frameAlreadyMeasured(key) else { return false }
         return cachedHistogram(for: key) == nil
@@ -9265,6 +9262,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The measurement is of the *picture*, so it names the buffer the same way a frame does:
         // `DecodeInputs` on top of the bare photo identity.
         let inputs = edit.decodeInputs
+        let facts = LoupeFrameFacts(photo: identity, edit: edit)
         let identity = Self.rungIdentity(identity, inputs: inputs)
         let outcome = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
             try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)
@@ -9285,7 +9283,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let histogram = try measurer.measureHistogram(edit, bins: bins,
                                                      headroom: displayHeadroom.headroom,
                                                      ceiling: HighlightCeiling.current)
-        let key = histogramKey(identity: identity, digest: Histogram.editDigest(edit),
+        let key = histogramKey(identity: identity, facts: facts,
                                fallbackScale: outcome.rung.scale)
         store(histogram: histogram, for: key)
         publish(histogram: histogram, key: key)
