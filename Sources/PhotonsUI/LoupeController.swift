@@ -2943,6 +2943,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// clamped it, which is why the frame path also carries the scene-linear grid.
     public static func sample(_ texture: MTLTexture, x: Int, y: Int,
                               histogram: Histogram?) -> PointerPixel? {
+        // A **private** texture has no CPU-readable backing, and `getBytes` on one is not a failed read
+        // — it is unmapped memory: the 437 crash was `EXC_BAD_ACCESS` inside
+        // `-[AGXG13XFamilyTexture getBytes:…]`, reached from this line for a frame the canvas cache had
+        // copied (its copies were `.private`). Degrading to "no reading" is the honest answer for a
+        // texture the CPU cannot see; the cache now copies into `.shared`, so a cached canvas still
+        // reads. This guard is the invariant, so a future private surface cannot turn the row into a
+        // segfault again.
+        guard texture.storageMode != .private else { return nil }
         guard texture.pixelFormat == .rgba16Float,
               x >= 0, y >= 0, x < texture.width, y < texture.height else { return nil }
         var raw = [UInt16](repeating: 0, count: 4)
@@ -8617,6 +8625,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             canvasContent = (mapping, frame.content, framing.framePlacement(of: mapping))
         }
         lastFrame = frame
+        logFrameDiagnostics437(frame)
         lastPresentError = nil
         // A new frame is a new answer for the pixel under the pointer, and since 2026-10-27 it is also
         // a new `sceneLinearSample`: the row must follow the picture without waiting for the next mouse
@@ -8645,6 +8654,46 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if let caps = frame.capabilities { session?.recordCapabilities(caps) }
         canvasView.metalLayer.setNeedsDisplay()
+    }
+
+    /// **437 diagnostics — temporary.** One `NSLog` per presented frame (rate-limited to one per
+    /// second) that names everything a wrong-looking canvas depends on: the photo, the canvas, the
+    /// texture, the picture's rect inside it, the window, the camera and the rung — plus, when the
+    /// frame carried a scene-linear grid, how many of its samples are non-finite or exactly zero.
+    ///
+    /// It exists because the shipped path renders these documents correctly headless (a full render at
+    /// the screenshot's slider values is a normal picture) while the loupe sometimes presents a frame
+    /// whose pixels are not that picture. Guessing which number went wrong has failed; this prints them.
+    nonisolated(unsafe) static var logsFrameDiagnostics = true
+    private static var lastFrameDiagnosticLog: CFAbsoluteTime = 0
+
+    private func logFrameDiagnostics437(_ frame: FrameResult) {
+        guard Self.logsFrameDiagnostics else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - Self.lastFrameDiagnosticLog >= 1 else { return }
+        Self.lastFrameDiagnosticLog = now
+        var nan = 0, zero = 0, total = 0
+        if let grid = frame.sceneLinearSample {
+            let stride = 8
+            for y in Swift.stride(from: 0, to: grid.height, by: stride) {
+                for x in Swift.stride(from: 0, to: grid.width, by: stride) {
+                    guard let t = grid.texel(x: x, y: y) else { continue }
+                    total += 1
+                    if t.red.isNaN || t.green.isNaN || t.blue.isNaN { nan += 1; continue }
+                    if t.red == 0 && t.green == 0 && t.blue == 0 { zero += 1 }
+                }
+            }
+        }
+        let photo = session?.anchorAsset.map { "\($0.filename)#\($0.id.prefix(8))" } ?? frameSource?.url.lastPathComponent ?? "-"
+        let window = frame.outputWindow.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "nil"
+        let zeroPct = total > 0 ? Double(zero) / Double(total) * 100 : -1
+        NSLog("[437] photo=%@ canvas=%dx%d tex=%dx%d photoRect=%d,%d %dx%d window=%@ "
+              + "zoom=%.3f zoomState=%@ decode=%.2f rev=%d mode=%@ samples=%d nan=%d zero=%.1f%%",
+              photo, frame.canvas.width, frame.canvas.height,
+              frame.texture.width, frame.texture.height,
+              frame.photoRect.x, frame.photoRect.y, frame.photoRect.width, frame.photoRect.height,
+              window, frame.zoom, viewState.mode.rawValue, Double(frame.decodeScale),
+              frame.editRevision, String(describing: frame.mode), total, nan, zeroPct)
     }
 
     /// 231 — the rung-free version of the size above: the buffer's pixels divided by

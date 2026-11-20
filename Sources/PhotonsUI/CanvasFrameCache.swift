@@ -295,7 +295,13 @@ public final class CanvasFrameCache {
             pixelFormat: source.pixelFormat, width: source.width, height: source.height,
             mipmapped: false)
         descriptor.usage = [.shaderRead]
-        descriptor.storageMode = .private
+        // **`.shared`, not `.private`** (437). The cache exists to put a frame on screen *early*, and
+        // the pointer's readout reads whatever frame is presented — `LoupeController.sample(texture:)`
+        // does one `getBytes` of a texel, and that is a CPU read a **private** texture does not have:
+        // AGX dereferenced unmapped memory inside `-[AGXG13XFamilyTexture getBytes:…]` and the process
+        // died with SIGSEGV on the first mouse move after a cache hit. Apple silicon's memory is
+        // unified, so shared costs nothing but the flag here, and the blit below is still the copy.
+        descriptor.storageMode = .shared
         guard let destination = device.makeTexture(descriptor: descriptor),
               let commandBuffer = queue.makeCommandBuffer(),
               let blit = commandBuffer.makeBlitCommandEncoder() else { return nil }

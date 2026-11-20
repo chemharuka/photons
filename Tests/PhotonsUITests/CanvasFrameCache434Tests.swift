@@ -522,9 +522,12 @@ final class CanvasFrameCache434Tests: XCTestCase {
             neverUpscalesContent: false)
     }
 
-    /// A⑥ — read one texel without `getBytes` on a private texture (the driver's CPU path for a
-    /// private `rgba16Float` texture crashed in this suite): one blit into a shared buffer, then the
-    /// centre pixel. The readback would fail if the cache had kept a recycled graph texture.
+    /// A⑥ — read one texel through a **blit into a shared buffer**, then the centre pixel: this helper
+    /// was written because the driver's CPU path (`getBytes`) on a *private* `rgba16Float` texture
+    /// crashed in this very suite. Since 437 the cache copies into `.shared` and the pointer's readout
+    /// reads that copy directly (`testACachedCanvasIsReadableTheWayThePointerReadsIt`), so the blit here
+    /// is now only the independent second opinion — the readback would still fail if the cache had kept
+    /// a recycled graph texture.
     private func readCentrePixel(_ texture: MTLTexture) -> [UInt16]? {
         let device = texture.device
         guard let queue = device.makeCommandQueue() else { return nil }
@@ -545,5 +548,48 @@ final class CanvasFrameCache434Tests: XCTestCase {
         let pixels = buffer.contents().bindMemory(to: UInt16.self, capacity: byteCount / 2)
         let offset = ((texture.height / 2) * texture.width + texture.width / 2) * 4
         return [pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]]
+    }
+
+    // MARK: - 437: the cached canvas is CPU-readable
+
+    /// **437 — the pointer reads the presented frame, and a cached frame is a copy the cache owns.**
+    ///
+    /// The crash report: `EXC_BAD_ACCESS` (KERN_INVALID_ADDRESS) inside
+    /// `-[AGXG13XFamilyTexture getBytes:bytesPerRow:fromRegion:mipmapLevel:]`, on the main thread, from
+    /// `LoupeController.sample(texture:)` — i.e. a mouse move over a frame the canvas cache had put on
+    /// screen. `getBytes` on a **private** texture is not a failed read, it is unmapped memory, and the
+    /// cache copied into `.private` (this suite's own `readCentrePixel` had already worked around the
+    /// same driver behaviour). The copy is `.shared` now and this test is the contract: the cached
+    /// canvas must be readable exactly the way the readout reads it, through `frameResult()`.
+    func testACachedCanvasIsReadableTheWayThePointerReadsIt() throws {
+        let url = try rawFixture()
+        let controller = makeController()
+        let key = try visit(controller, url, "cache-readback")
+        let cached = try XCTUnwrap(controller.canvasFrameCache.cachedCanvas(for: key))
+
+        XCTAssertNotEqual(cached.texture.storageMode, .private,
+                          "缓存副本是 .private：指针读它的 texel 会崩在 AGX 的 getBytes 里")
+
+        let frame = cached.frameResult()
+        let x = cached.texture.width / 2, y = cached.texture.height / 2
+        let pixel = LoupeController.sample(frame, x: x, y: y, histogram: nil)
+        print("437 cached canvas \(cached.texture.storageMode.rawValue) "
+              + "\(cached.texture.width)×\(cached.texture.height) centre texel → "
+              + "\(pixel.map { $0.channelRowText } ?? "nil")")
+        XCTAssertNotNil(pixel, "缓存画布的 texel 必须读得出来（读不出来就是又一次 getBytes 崩溃）")
+        XCTAssertEqual(pixel?.source, .presented, "缓存画布没有采样网格，读数来自呈现像素")
+    }
+
+    /// The invariant behind it: a texture the CPU cannot see is **refused**, not dereferenced. A future
+    /// private surface (a drawable, a compressed target) must degrade the row to idle, never segfault.
+    func testAPrivateTextureIsRefusedInsteadOfRead() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: 8, height: 8, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .private
+        let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+        XCTAssertNil(LoupeController.sample(texture, x: 4, y: 4, histogram: nil),
+                     "私有纹理必须被拒绝读取，而不是 getBytes 崩在 AGX 里")
     }
 }
