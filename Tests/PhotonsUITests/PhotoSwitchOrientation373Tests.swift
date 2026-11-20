@@ -211,6 +211,14 @@ final class PhotoSwitchOrientation373Tests: XCTestCase {
                     XCTAssertEqual(pixels, newAspect, accuracy: 0.02,
                                    "\(mode.name) r\(round) row \(index): stand-in bitmap is not B's: \(row.line)")
                 }
+                // 443 — the two halves of the same stand-in: the bitmap is B's (0.667) but the
+                // rectangle it is drawn into was A's (1.503). Pinning the pair here is what makes
+                // "the size was registered to the wrong photo" a test failure, not a log line.
+                if row.placeholderVisible, let rectAspect = row.placeholderAspect,
+                   let pixels = row.placeholderPixelsAspect {
+                    XCTAssertEqual(rectAspect, pixels, accuracy: 0.02,
+                                   "\(mode.name) r\(round) row \(index): stand-in rect and bitmap are different photos: \(row.line)")
+                }
                 // ③ never a bare backdrop-coloured canvas.
                 XCTAssertFalse(row.sampled == "nothing",
                                "\(mode.name) r\(round) row \(index): nothing covers the canvas: \(row.line)")
@@ -372,10 +380,9 @@ final class PhotoSwitchOrientation373Tests: XCTestCase {
         try editor.openLibrary(at: library.package)
         let cache = try XCTUnwrap(editor.session.thumbnailCache)
         for asset in editor.session.assets {
-            let stored = ImageSize(width: asset.width ?? 3, height: asset.height ?? 2)
-            let upright = editor.session.sourceOrientation(of: asset.id)
-                .map { $0.uprightSize(width: stored.width, height: stored.height) }
-            let size = upright.map { ImageSize(width: $0.0, height: $0.1) } ?? stored
+            // 436 — the catalog row is **display pixels** (import applies the EXIF turn), so the
+            // seeded preview must not run `uprightSize` over it a second time (437).
+            let size = ImageSize(width: asset.width ?? 3, height: asset.height ?? 2)
             try seedPreview(asset, upright: size, cache: cache)
         }
         TestWindows.show(editor.window)
@@ -399,8 +406,12 @@ final class PhotoSwitchOrientation373Tests: XCTestCase {
             let destination = source.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: file)
-            let size = try pixelSize(of: file)
+            let stored = try pixelSize(of: file)
             let orientation = try orientation(of: file)
+            // 436 — the row import writes is display-oriented; this synthetic library has to say the
+            // same thing or the 290 fallback legitimately reads a stored frame as the upright one.
+            let size = (5...8).contains(orientation)
+                ? ImageSize(width: stored.height, height: stored.width) : stored
             let id = UUID().uuidString
             ids.append(id)
             try catalog.dbQueue.write { db in
