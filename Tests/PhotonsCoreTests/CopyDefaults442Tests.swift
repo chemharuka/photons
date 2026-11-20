@@ -269,7 +269,10 @@ final class CopyDefaults442Tests: XCTestCase {
 
     // MARK: - A① the user's headline case
 
-    func testLightDefaultsClearTheDestinationKeysFromTheBlob() throws {
+    /// 442 主线改名：原名 `…ClearTheDestinationKeysFromTheBlob` 说「键消失」，而本仓库的
+    /// `LightGroup.encode` 无条件写 7 个数字（`EditModel.swift:1870`）⇒ 可达的是「值回到默认」，
+    /// 不是「键不存在」。名字照断言改，免得后人以为它在验键缺失。
+    func testLightDefaultsAreCopiedAndPasteResetsEveryLightValue() throws {
         var target = EditModel.neutral
         target.light.exposure = 1.5
         target.light.contrast = -20
