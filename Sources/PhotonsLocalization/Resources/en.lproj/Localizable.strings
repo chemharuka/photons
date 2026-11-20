@@ -924,7 +924,7 @@
 "黑电平 · 自动" = "Black Level · Auto";
 "黑电平微调" = "Black level fine adjustment";
 "黑白" = "Black & White";
-"B&W" = "B&W";
+"单色" = "B&W";
 "黑白卡" = "Black & White panel";
 "黑白混合[{0}]" = "B&W Mix [{0}]";
 "黑白：S3.4 把彩色转成单色。关掉只是停用下面的混合——八个值都留着，重新打开就回来" = "Black & White converts color to monochrome at S3.4. Turning it off disables the mix but preserves all eight values for next time.";

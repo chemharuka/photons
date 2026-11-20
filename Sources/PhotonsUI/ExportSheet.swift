@@ -221,8 +221,10 @@ public enum GainMapColorModel: String, Sendable, CaseIterable {
         switch self {
         case .rgb: return "RGB"
         // 438 —— 用户口径：英文要「B&W」，和旁边 RGB 同样宽才协调（`Black & White` 会把分段控件
-        // 拉到「ISO / Apple」那一栏，两个控件一起占满整行）。中文仍是「黑白」。
-        case .mono: return Loc.t("B&W")
+        // 拉到「ISO / Apple」那一栏，两个控件一起占满整行）。
+        // 键必须是中文原文（`LocalizationTableTests.testEveryChineseEntryIsItsOwnKey` 的硬约束），
+        // 所以用一个新键「单色」而不是复用「黑白」（那是黑白面板的名字，改它会连带 6 处文案）。
+        case .mono: return Loc.t("单色")
         }
     }
 }
