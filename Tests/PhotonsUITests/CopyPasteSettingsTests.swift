@@ -11,9 +11,9 @@ import PhotonsCatalog
 ///
 /// What is pinned, and why each assertion is the one that matters:
 ///
-///   ① **只带非默认字段**: A (exposure + contrast, balance left at as-shot) → B (its own 4800 K
-///      balance, its own −0.4 EV, its own saturation, its own mask). B's balance, saturation, crop
-///      and mask are printed and asserted field by field; only A's two tone leaves move.
+///   ① **全部可复制叶子，默认值也复制 (442)**: A (exposure + contrast, balance left at as-shot) → B
+///      (its own 4800 K balance, its own −0.4 EV, its own saturation, its own mask). B's balance,
+///      saturation and crop are reset to A's defaults; the mask list is appended.
 ///   ② **选组**: pasting `[.light, .curve]` from a source that *does* pin a balance leaves that
 ///      balance — and colour, crop, masks — untouched: the narrowing is field-level, because
 ///      `.whiteBalance` and `.light` share one `LightPatch`.
@@ -131,9 +131,9 @@ final class CopyPasteSettingsTests: XCTestCase {
         return out
     }
 
-    // MARK: - ① 只带非默认字段 (A → B)
+    // MARK: - ① 全部可复制叶子 (A → B)
 
-    func testCopyFromAAndPasteToBChangesOnlyAsNonDefaultLeaves() throws {
+    func testCopyFromAAndPasteToBResetsTheDestinationToTheSourcesValues() throws {
         let (session, catalog, ids) = try makeSession()
         let (a, b) = (ids[0], ids[1])
         let before = try stored(catalog, b)
@@ -144,7 +144,8 @@ final class CopyPasteSettingsTests: XCTestCase {
         print("COPY  A → payload: \(payload.fieldCount) fields sections="
               + "\(EditSnapshotSection.panelOrder.filter { payload.sections.contains($0) }.map(\.title))"
               + " decode=\(payload.requiresDecode)")
-        XCTAssertEqual(payload.fieldCount, 2, "A moved two leaves: exposure and contrast")
+        XCTAssertEqual(payload.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "442: A's payload is the whole copyable leaf table, defaults included")
 
         session.selectOnly(b)
         let historyBefore = session.history.count
@@ -171,14 +172,18 @@ final class CopyPasteSettingsTests: XCTestCase {
 
         XCTAssertEqual(after.light.exposure, 1.2)
         XCTAssertEqual(after.light.contrast, 15)
-        // B's own values, unchanged: the source never carried them.
-        XCTAssertEqual(after.light.temperature, 4800)
-        XCTAssertEqual(after.light.tint, 5)
-        XCTAssertEqual(after.color.saturation, 30)
-        XCTAssertEqual(after.geometry.crop, before.geometry.crop)
-        XCTAssertEqual(after.masks.map(\.id), ["B-mask"])
-        XCTAssertEqual(changedKeys(before, after), ["light.exposure", "light.contrast"])
-        XCTAssertFalse(report.requiresDecode, "tone only: no development")
+        // 442: B's values in the copied cards are reset to A's defaults.
+        XCTAssertNil(after.light.temperature, "A was as-shot ⇒ B's 4800 K is cleared")
+        XCTAssertNil(after.light.tint)
+        XCTAssertEqual(after.color.saturation, 0, "A carried the default 0")
+        XCTAssertEqual(after.geometry.crop, NormalizedRect.full, "A carried the full-frame crop")
+        XCTAssertEqual(after.masks.map(\.id), ["B-mask"],
+                       "A has no masks, so the list is untouched (append of nothing)")
+        let keys = changedKeys(before, after)
+        XCTAssertEqual(keys.intersection(["light.exposure", "light.contrast"]),
+                       ["light.exposure", "light.contrast"])
+        XCTAssertTrue(keys.contains("light.temperature"))
+        XCTAssertTrue(report.requiresDecode, "自动 is carried, so a pinned destination re-develops")
 
         // ③ one paste = one row.
         XCTAssertEqual(try catalog.editHistory(forAsset: b).count, rowsBefore + 1,
@@ -268,8 +273,8 @@ final class CopyPasteSettingsTests: XCTestCase {
             XCTAssertEqual(rowsAfter[i + 1], rowsBefore[i + 1] + 1,
                            "photo \(id.prefix(4)): one paste = one row in its own stack")
             XCTAssertEqual(try stored(catalog, id).light.exposure, 1.2)
-            XCTAssertEqual(try stored(catalog, id).light.temperature, 4800,
-                           "each target kept its own pinned balance")
+            XCTAssertNil(try stored(catalog, id).light.temperature,
+                         "442: the as-shot source clears each target's pinned balance")
         }
         // ⌘Z on the anchor takes back the anchor's paste only — one row, not the batch.
         XCTAssertTrue(session.undo())
@@ -391,11 +396,12 @@ final class CopyPasteSettingsTests: XCTestCase {
         controller.copySettingsAction(nil)
         XCTAssertEqual(asked.count, 1, "⌘C opened the card sheet exactly once")
         XCTAssertEqual(asked.first?.0, .copy)
-        XCTAssertEqual(session.copiedSettings?.fieldCount, 2)
+        XCTAssertEqual(session.copiedSettings?.fieldCount, EditSnapshot.fullDocumentFieldCount)
         // Cancelling the sheet copies nothing (the 反证 of 「⌘C 直接复制」: it now depends on the answer).
         controller.presentCopySheet = { _, _ in nil }
         controller.copySettingsAction(nil)
-        XCTAssertEqual(session.copiedSettings?.fieldCount, 2, "a cancelled sheet leaves the clipboard as it was")
+        XCTAssertEqual(session.copiedSettings?.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "a cancelled sheet leaves the clipboard as it was")
     }
 
     // MARK: - 选组对话框的三个答案

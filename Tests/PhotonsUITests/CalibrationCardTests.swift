@@ -134,11 +134,13 @@ final class CalibrationCardTests: XCTestCase {
         source.colorGrading.shadows.hue = 12
 
         let snapshot = EditSnapshot.capture(source)
-        XCTAssertEqual(snapshot.sections, [.calibration, .colorGrading])
-        XCTAssertEqual(snapshot.calibration?.fieldCount, 3, "只有非 0 的三个数走")
+        // 442: capture is complete; the checklist (the `filtered` call below) is the narrowing step.
+        XCTAssertEqual(snapshot.sections,
+                       Set(EditSnapshotSection.copyable).subtracting([.masks]))
+        XCTAssertEqual(snapshot.calibration?.fieldCount, CalibrationPatch.fullFieldCount)
 
         let narrow = snapshot.filtered(to: [.calibration])
-        XCTAssertEqual(narrow.calibration?.fieldCount, 3)
+        XCTAssertEqual(narrow.calibration?.fieldCount, CalibrationPatch.fullFieldCount)
         XCTAssertNil(narrow.colorGrading, "只勾校准：色彩分级不许跟")
 
         let pasted = narrow.applied(to: .neutral)

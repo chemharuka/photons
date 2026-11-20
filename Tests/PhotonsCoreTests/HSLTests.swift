@@ -755,12 +755,12 @@ final class HSLTests: XCTestCase {
     }
 
     /// 101 — the snapshot carries the global triplet, applies it back, and a commit that moves only
-    /// 全局 is one history row.
+    /// 全局 is one history row. 442: the eight bands are carried too, so the payload is complete.
     func testGlobalRoundTripsThroughASnapshotAndTheHistory() {
         var edit = EditModel.neutral
         edit.color.global = HSLBand(hue: 12, saturation: -7, luminance: 3)
         let snapshot = EditSnapshot.capture(edit)
-        XCTAssertNil(snapshot.color?.bands)
+        XCTAssertEqual(snapshot.color?.bands?.count, 8)
         XCTAssertEqual(snapshot.color?.global?.hue, 12)
         XCTAssertEqual(snapshot.color?.global?.saturation, -7)
         XCTAssertEqual(snapshot.color?.global?.luminance, 3)

@@ -87,15 +87,14 @@ final class SharpenDefaultTests: XCTestCase {
         let json = try object(EditModel())
         XCTAssertNil(json["sharpen"], "the resting 50/2.0/25/0 must not be written")
 
-        // The copy payload compares every leaf against its resting value too — a default document
-        // carries no sharpen leaf at all (`EditSnapshot.capture`).
+        // 442: the clipboard payload carries the resting values explicitly (they are what resets a
+        // destination); the *document* still omits them, which is the assertion above.
         let payload = EditSnapshot.capture(EditModel())
-        if let effects = payload.effects {
-            XCTAssertNil(effects.sharpenAmount)
-            XCTAssertNil(effects.sharpenRadius)
-            XCTAssertNil(effects.sharpenDetail)
-            XCTAssertNil(effects.sharpenMasking)
-        }
+        let effects = try XCTUnwrap(payload.effects)
+        XCTAssertEqual(effects.sharpenAmount, 50)
+        XCTAssertEqual(effects.sharpenRadius, 2.0)
+        XCTAssertEqual(effects.sharpenDetail, 25)
+        XCTAssertEqual(effects.sharpenMasking, 0)
 
         let jsonText = try text(EditModel())
         for key in ["sharpenAmount", "sharpenRadius", "sharpenDetail", "sharpenMasking"] {
@@ -105,17 +104,17 @@ final class SharpenDefaultTests: XCTestCase {
               + "\(jsonText.contains("\"sharpen\""))")
     }
 
-    // MARK: - 2. a moved amount is written, an untouched radius is not
+    // MARK: - 2. a moved amount is written; the other leaves travel at their resting values
 
-    func testMovedAmountIsWrittenAndUntouchedRadiusIsOmitted() throws {
+    func testMovedAmountIsWrittenAndTheRestTravelAtTheirDefaults() throws {
         var edit = EditModel()
         edit.sharpen.amount = 60
 
         let payload = try XCTUnwrap(EditSnapshot.capture(edit).effects)
         XCTAssertEqual(payload.sharpenAmount, 60)
-        XCTAssertNil(payload.sharpenRadius, "radius 2.0 was never touched and must stay out")
-        XCTAssertNil(payload.sharpenDetail)
-        XCTAssertNil(payload.sharpenMasking)
+        XCTAssertEqual(payload.sharpenRadius, 2.0, "442: the default is carried, so a paste resets it")
+        XCTAssertEqual(payload.sharpenDetail, 25)
+        XCTAssertEqual(payload.sharpenMasking, 0)
 
         // The document writes the whole group when it is off-resting (the group is the unit of
         // presence there), so the same edit's file carries amount 60 **and** the radius it inherits.

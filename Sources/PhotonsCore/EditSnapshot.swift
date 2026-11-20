@@ -3,19 +3,27 @@ import Foundation
 
 // MARK: - Copy/paste settings (M5)
 //
-// "Copy settings" is not "copy the document". Pasting a whole `EditModel` would drag along every
-// field the user never touched — 57 leaves of defaults for a one-slider edit — and, worse, would
-// overwrite the destination's own values with those defaults. Lightroom's copy/paste copies
-// *settings*, and the UI shows a checklist of exactly which ones are non-default.
+// "Copy settings" is not "copy the document". Its payload is an `EditSnapshot`: one optional per
+// leaf parameter, narrowed by the copy checklist. **442** changed what "present" means — a capture
+// now carries *every copyable leaf*, including the ones sitting at their default. A leaf's optional
+// is nil only when the payload genuinely has no such leaf (its card was unchecked), never just
+// because the source had not moved it.
 //
-// So the clipboard payload is **sparse**: one optional per leaf parameter, present only when it
-// differs from `EditModel`'s default value (the same defaults the document decoder falls back to,
-// D9). Three consequences, each tested:
+// That is the user's rule (2026-11-20): 「复制参数时，默认值为 nil 的，要被复制过去，并在粘贴时将
+// 对应的 key 也修改为 nil（默认值）」. Three consequences, each tested:
 //
-//  1. Copying a document that changed one slider carries exactly one field.
-//  2. Pasting onto a document that already has an edit changes only those fields — the
-//     destination's other values survive, which is the whole point of "paste settings".
-//  3. Copying a *neutral* document carries nothing, and pasting nothing is a no-op.
+//  1. Copying a neutral document carries the leaves; pasting it onto an edited document resets the
+//     destination to defaults rather than leaving its values alone.
+//  2. Pasting writes every leaf the payload carries, including defaults. Whether a photo actually
+//     changes is decided afterwards by `SettingsPasteReport.changed`, not by withholding writes.
+//  3. The document is written through `EditModel.encode`, so "write 0" is a document value, not a
+//     second storage format. Some groups are omitted when identity; the unconditional ones (notably
+//     `LightGroup`) still write their numbers, so there the observable fact is the value `0`.
+//
+// A handful of leaves have **nil itself** as their default (`decoderVersion` = 自动, the Kelvin/tint
+// pair = as-shot). Those cannot use "nil = not in the payload", so they get an explicit companion
+// flag (`decoderVersionAuto`, `temperatureAuto` / `tintAuto`) and paste it back to nil. 442's audit
+// table in `local/REPORT.md` lists every leaf and which of the two spellings it uses.
 //
 // Masks are in this type as of P1-5 (2026-10-28), and only as a **list plus the aspect ratio of the
 // frame they were measured in**. They used to be structurally absent, because a mask's geometry is
@@ -42,6 +50,8 @@ import Foundation
 //    a field of the snapshot itself (`decoderVersion: String?`) rather than of a patch, and a paste
 //    carrying it re-decodes — the card's other five leaves stay render-only. `Int?` would have been
 //    wrong on the wire: the document stores Apple's own spelling (`"8"`, `"9"`, `"9.dng"`).
+//    442 adds `decoderVersionAuto`: the source document's `nil` (跟随 Apple) is now a *copied value*
+//    too, so a payload can say "put this photo back to 自动" instead of "leave its decoder alone".
 
 /// Which fields belong to which group. Used for reporting what a clipboard payload carries.
 public enum EditSnapshotGroup: String, CaseIterable, Sendable, Hashable {
@@ -535,10 +545,10 @@ public struct GeometryPatch: Sendable, Equatable, Codable {
     public var isEmpty: Bool { fieldCount == 0 }
 
     /// Leaf count of the whole group in a full document (see `EditSnapshot.fullDocumentFieldCount`).
-    /// 183's two perspective leaves are optional extras: they stay outside this historical
-    /// denominator (and its `84` assertion) but do count in `fieldCount` when carried. 407's `shear`
-    /// follows the same rule for the same reason — it is one more optional leaf, not a new section.
-    public static let fullFieldCount = 9
+    /// 442: a capture now carries every copyable leaf, so 183's two perspective leaves, 407's shear
+    /// and 408's aspect are part of the denominator too, and so is the crop's coordinate space
+    /// (9 + 4 + 1) — `fieldCount` counts every present field, so the denominator has to agree.
+    public static let fullFieldCount = 14
 }
 
 public struct LightPatch: Sendable, Equatable, Codable {
@@ -551,6 +561,12 @@ public struct LightPatch: Sendable, Equatable, Codable {
     public var shadows: Double?
     public var whites: Double?
     public var blacks: Double?
+    /// 442 — the Kelvin/tint pair's default is **nil** (as shot), which "nil = absent" cannot spell.
+    /// `temperatureAuto`/`tintAuto` carry the state explicitly: `true` = the source follows the file
+    /// and a paste writes `nil` back; `false` = `temperature`/`tint` hold the pinned value; `nil` =
+    /// a legacy payload, whose only meaning is "the destination keeps its own balance".
+    public var temperatureAuto: Bool?
+    public var tintAuto: Bool?
     public var temperature: Double?
     public var tint: Double?
     /// 325 — **no child copies this leaf any more**: the panel's Light card has no 高光恢复 row (only
@@ -569,14 +585,18 @@ public struct LightPatch: Sendable, Equatable, Codable {
 
     public var fieldCount: Int {
         [exposure != nil, contrast != nil, highlights != nil, midtones != nil, shadows != nil,
-         whites != nil, blacks != nil, temperature != nil, tint != nil, highlightRecovery != nil,
-         blackOffset != nil]
+         whites != nil, blacks != nil,
+         temperature != nil || temperatureAuto == true,
+         tint != nil || tintAuto == true,
+         highlightRecovery != nil, blackOffset != nil]
             .filter { $0 }.count
     }
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 11
+    /// 442: 10 copyable leaves — 7 tone + 2 balance + 黑电平. 高光恢复 is a wire key only (325 removed
+    /// its child row), so a new capture does not carry it and the denominator does not count it.
+    public static let fullFieldCount = 10
 
     /// The tone leaves — everything the `light` section owns (black offset excluded).
     public var hasToneLeaves: Bool {
@@ -584,8 +604,11 @@ public struct LightPatch: Sendable, Equatable, Codable {
             || shadows != nil || whites != nil || blacks != nil || highlightRecovery != nil
     }
 
-    /// The balance pair — everything the `whiteBalance` section owns.
-    public var hasWhiteBalance: Bool { temperature != nil || tint != nil }
+    /// The balance pair — everything the `whiteBalance` section owns. 442: an explicit "自动" is a
+    /// carried value too, so the card reports even when both numbers are nil.
+    public var hasWhiteBalance: Bool {
+        temperature != nil || tint != nil || temperatureAuto == true || tintAuto == true
+    }
 }
 
 /// Tone curves: four LUTs, each stored only when it is not the identity ramp. A curve is one field
@@ -655,7 +678,9 @@ public struct ColorPatch: Sendable, Equatable, Codable {
 
     public var isEmpty: Bool { fieldCount == 0 }
 
-    public static let fullFieldCount = 3 + ColorGroup.bandCount * 4
+    /// 442: the ninth selector's three numbers are copied leaves now too, so they count in the
+    /// denominator (`3 + 8 × 4 + 3`).
+    public static let fullFieldCount = 3 + ColorGroup.bandCount * 4 + 3
 
     // MARK: 081 — the three cards this one patch serves
 
@@ -828,7 +853,9 @@ public struct MasksPatch: Sendable, Equatable, Codable {
     public var fieldCount: Int { masks.count }
 }
 
-/// A sparse, transferable set of develop settings: the clipboard payload of "copy settings".
+/// A transferable set of develop settings: the clipboard payload of "copy settings". The patch
+/// fields stay optional so a checklist can narrow the payload; `capture` fills every copyable leaf
+/// (442), defaults included.
 public struct EditSnapshot: Sendable, Equatable, Codable {
     /// Bumped when the sparse shape changes. Independent of `EditModel.currentSchemaVersion`; a
     /// snapshot is a message, not a document.
@@ -869,14 +896,19 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// 319 — 解码器版本 (`EditModel.decoderVersion`, Apple's own spelling: `"8"` / `"9"` / `"9.dng"`).
     ///
     /// Not a field of any patch, because no patch owns it: it is a **decoder** fact. It is also the
-    /// only leaf in this type that forces a development on paste — see `requiresDecode`. `nil` means
-    /// "the destination keeps its own decoder", which is what every pre-319 payload means.
+    /// only leaf in this type that forces a development on paste — see `requiresDecode`. Since 442 a
+    /// new capture always writes this pair (`decoderVersion` + `decoderVersionAuto`); `nil` here with
+    /// `decoderVersionAuto == nil` is a legacy payload, meaning "the destination keeps its own decoder".
     ///
     /// `String?` and not `Int?`: the panel's popup and the decoder's read-back both speak the spelling
     /// Apple offers (`InspectorView.decoderVersionLabel` strips the `.dng` for display), and two
     /// spellings can name one model. Normalising to an `Int` here would silently turn `"9.dng"` into
     /// `"9"` and lose the round trip.
     public var decoderVersion: String?
+    /// 442 — `decoderVersion`'s default is `nil` (跟随 Apple), so the state needs its own field.
+    /// `true` = the source was 自动 and a paste writes `nil` back; `false` = `decoderVersion` holds
+    /// the model; `nil` = a legacy payload, which keeps the destination's decoder.
+    public var decoderVersionAuto: Bool?
 
     public init() {
         self.schemaVersion = EditSnapshot.currentSchemaVersion
@@ -884,7 +916,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
 
     // MARK: capture
 
-    /// Everything in `edit` that differs from the neutral document.
+    /// **Every copyable leaf** of `edit`, defaults included (442).
+    ///
+    /// A leaf is absent (`nil`) only when the payload really does not have it — masks when the list is
+    /// empty, or whatever a later `filtered(to:)` narrows away. The old `differs(…)` gates are gone:
+    /// a source at `exposure = 0` used to carry nothing, so pasting onto `+1.5` could not clear it.
     ///
     /// `frameAspect` is passed through into `masks`: the document knows its masks but not the size of
     /// the picture they were drawn on, so only the caller (the loupe's ingested frame, or a catalog
@@ -893,6 +929,144 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     public static func capture(_ edit: EditModel, frameAspect: Double? = nil) -> EditSnapshot {
         var s = EditSnapshot()
 
+        var geometry = GeometryPatch()
+        geometry.cropX = edit.geometry.crop.x
+        geometry.cropY = edit.geometry.crop.y
+        geometry.cropWidth = edit.geometry.crop.width
+        geometry.cropHeight = edit.geometry.crop.height
+        geometry.quarterTurns = edit.geometry.quarterTurns
+        geometry.rotationDegrees = edit.geometry.rotationDegrees
+        geometry.flipHorizontal = edit.geometry.flipHorizontal
+        geometry.flipVertical = edit.geometry.flipVertical
+        geometry.perspectiveVertical = edit.geometry.perspectiveVertical
+        geometry.perspectiveHorizontal = edit.geometry.perspectiveHorizontal
+        geometry.perspectiveShear = edit.geometry.perspectiveShear
+        geometry.perspectiveAspect = edit.geometry.perspectiveAspect
+        geometry.aspectLock = edit.geometry.aspectLock
+        // 330 — the crop's space travels with the edges. Not a slider, so not counted by `fieldCount`.
+        geometry.cropSpace = edit.geometry.cropSpace
+        s.geometry = geometry
+
+        var light = LightPatch()
+        light.exposure = edit.light.exposure
+        light.contrast = edit.light.contrast
+        light.highlights = edit.light.highlights
+        light.midtones = edit.light.midtones
+        light.shadows = edit.light.shadows
+        light.whites = edit.light.whites
+        light.blacks = edit.light.blacks
+        // 派单 006 + 442: white balance's default is nil (as shot), so the state travels beside the
+        // number. `temperatureAuto == false` means the pin below is the source's real value.
+        light.temperature = edit.light.temperature
+        light.temperatureAuto = edit.light.temperature == nil
+        light.tint = edit.light.tint
+        light.tintAuto = edit.light.tint == nil
+        // 325 — 高光恢复 has no child row any more, so it is not a *copyable* leaf: capture leaves it
+        // nil and a new copy never writes it. (An old payload that carries the key still pastes it;
+        // the field is wire history, not a 442 leaf.)
+        light.blackOffset = edit.light.blackOffset
+        s.light = light
+
+        var curve = CurvePatch()
+        // `CurvePatch.rgb` keeps its (pre-030) name because it is the shape of the preset/snapshot
+        // JSON, not of the document: the field still carries the luminance curve, now `white`.
+        curve.rgb = edit.curve.white
+        curve.red = edit.curve.red
+        curve.green = edit.curve.green
+        curve.blue = edit.curve.blue
+        s.curve = curve
+
+        var color = ColorPatch()
+        color.vibrance = edit.color.vibrance
+        color.saturation = edit.color.saturation
+        color.blackAndWhite = edit.color.blackAndWhite
+        // All eight bands, all four leaves each: an identity band is a value too (442). A paste then
+        // resets every band leaf, which is what "copy the HSL card" now means.
+        color.bands = ColorGroup.normalize(edit.color.bands).enumerated().map { i, band in
+            HSLBandPatch(index: i, hue: band.hue, saturation: band.saturation,
+                         luminance: band.luminance, mix: band.mix)
+        }
+        // 101 — the ninth selector, complete like a band.
+        color.global = HSLBandPatch(index: ColorGroup.bandCount,
+                                    hue: edit.color.global.hue,
+                                    saturation: edit.color.global.saturation,
+                                    luminance: edit.color.global.luminance)
+        s.color = color
+
+        // 081: 色彩分级 — nine numbers, one wheel per luminance region. Identity wheels are carried
+        // too (442), so pasting the card clears a destination's grade instead of leaving it behind.
+        var grading = ColorGradingPatch()
+        grading.shadows = edit.colorGrading.shadows
+        grading.midtones = edit.colorGrading.midtones
+        grading.highlights = edit.colorGrading.highlights
+        s.colorGrading = grading
+
+        var detail = DetailPatch()
+        detail.sharpening = edit.detail.sharpening
+        detail.sharpeningRadius = edit.detail.sharpeningRadius
+        detail.noiseLuminance = edit.detail.noiseLuminance
+        detail.noiseColor = edit.detail.noiseColor
+        detail.lensCorrections = edit.detail.lensCorrections
+        s.detail = detail
+        // 319 + 442 — 解码器版本. `nil` is the document's default (「跟随 Apple」), and now it is a
+        // copied state of its own: `decoderVersionAuto == true` means "paste this photo back to 自动".
+        s.decoderVersion = edit.decoderVersion
+        s.decoderVersionAuto = edit.decoderVersion == nil
+
+        // 156: 校正 — the two lateral-CA ratios, both carried (0 included). The document stores α,
+        // not the panel's −100…+100 position.
+        var optics = OpticsPatch()
+        optics.caRed = edit.optics.caRed
+        optics.caBlue = edit.optics.caBlue
+        s.optics = optics
+
+        // 179: 校准. Seven slider numbers, 0 included. The document stores the panel's own
+        // −100…+100, so no unit conversion here.
+        var calibration = CalibrationPatch()
+        calibration.shadowTint = edit.calibration.shadowTint
+        calibration.redHue = edit.calibration.redHue
+        calibration.redSat = edit.calibration.redSat
+        calibration.greenHue = edit.calibration.greenHue
+        calibration.greenSat = edit.calibration.greenSat
+        calibration.blueHue = edit.calibration.blueHue
+        calibration.blueSat = edit.calibration.blueSat
+        s.calibration = calibration
+
+        var effects = EffectsPatch()
+        effects.vignetteAmount = edit.effects.vignetteAmount
+        effects.vignetteMidpoint = edit.effects.vignetteMidpoint
+        effects.vignetteFeather = edit.effects.vignetteFeather
+        effects.grain = edit.effects.grain
+        effects.texture = edit.effects.texture
+        effects.clarity = edit.effects.clarity
+        effects.nonBayerLuminanceNR = edit.effects.nonBayerLuminanceNR
+        effects.nonBayerColorNR = edit.effects.nonBayerColorNR
+        effects.dehaze = edit.effects.dehaze
+        // 185 — S3.10's four leaves, defaults (50 / 2 / 25 / 0) included.
+        effects.sharpenAmount = edit.sharpen.amount
+        effects.sharpenRadius = edit.sharpen.radius
+        effects.sharpenDetail = edit.sharpen.detail
+        effects.sharpenMasking = edit.sharpen.masking
+        s.effects = effects
+
+        // Masks: present when the document has any. `showMaskID` is view state and stays out (see
+        // `MaskViewState`), and an empty list is "nothing to copy", not "paste an empty list".
+        if !edit.masks.isEmpty {
+            s.masks = MasksPatch(frameAspect: frameAspect, masks: edit.masks)
+        }
+
+        return s
+    }
+
+    /// The pre-442 capture: only leaves that differ from their default.
+    ///
+    /// **Preset application needs this, not the clipboard contract.** A section-scoped `Preset` is a
+    /// fragment whose untouched leaves are default; re-capturing it with `capture` would turn those
+    /// defaults into "write 0", and applying a 白平衡-only preset would silently clear a destination's
+    /// tint. Keeping the old explicit-only reading is what makes 442 a clipboard change and not a
+    /// preset-behaviour change (A④). Preset *creation* still goes through `capture`.
+    static func captureExplicit(_ edit: EditModel, frameAspect: Double? = nil) -> EditSnapshot {
+        var s = EditSnapshot()
 
         var geometry = GeometryPatch()
         if differs(edit.geometry.crop.x, NormalizedRect.full.x) { geometry.cropX = edit.geometry.crop.x }
@@ -903,24 +1077,19 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.geometry.rotationDegrees, 0) { geometry.rotationDegrees = edit.geometry.rotationDegrees }
         if edit.geometry.flipHorizontal { geometry.flipHorizontal = true }
         if edit.geometry.flipVertical { geometry.flipVertical = true }
-        // 183: 0 is identity, so an untouched pair is not carried (and adds no history row).
         if differs(edit.geometry.perspectiveVertical, 0) {
             geometry.perspectiveVertical = edit.geometry.perspectiveVertical
         }
         if differs(edit.geometry.perspectiveHorizontal, 0) {
             geometry.perspectiveHorizontal = edit.geometry.perspectiveHorizontal
         }
-        // 407: 0 is identity, so an untouched shear is not carried (and adds no history row).
         if differs(edit.geometry.perspectiveShear, 0) {
             geometry.perspectiveShear = edit.geometry.perspectiveShear
         }
-        // 408: 1.0 is identity, so an untouched 宽高比 is not carried (and adds no history row).
         if differs(edit.geometry.perspectiveAspect, 1) {
             geometry.perspectiveAspect = edit.geometry.perspectiveAspect
         }
         if edit.geometry.aspectLock != .original { geometry.aspectLock = edit.geometry.aspectLock }
-        // 330 — the crop's space travels with the crop. Carried only for `.canvas`, so a keystone-free
-        // clipboard keeps its pre-330 bytes (`nil` = `.source`).
         if edit.geometry.cropSpace != .source { geometry.cropSpace = edit.geometry.cropSpace }
         s.geometry = geometry.isEmpty ? nil : geometry
 
@@ -932,20 +1101,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.light.shadows, 0) { light.shadows = edit.light.shadows }
         if differs(edit.light.whites, 0) { light.whites = edit.light.whites }
         if differs(edit.light.blacks, 0) { light.blacks = edit.light.blacks }
-        // 派单 006: white balance has no neutral *number* to compare against any more — either the
-        // document follows the file (`nil`, nothing to copy) or it pins a value (always copied, even
-        // 6500 K, because pinning 6500 K on a 4803 K shot is a real setting).
         if let t = edit.light.temperature { light.temperature = t }
         if let i = edit.light.tint { light.tint = i }
         if differs(edit.light.highlightRecovery, 0) { light.highlightRecovery = edit.light.highlightRecovery }
-        // 081: 黑电平 is a leaf of `LightGroup` but a card of its own; 0 is the neutral trim, so only
-        // a real offset travels.
         if differs(edit.light.blackOffset, 0) { light.blackOffset = edit.light.blackOffset }
         s.light = light.isEmpty ? nil : light
 
         var curve = CurvePatch()
-        // `CurvePatch.rgb` keeps its (pre-030) name because it is the shape of the preset/snapshot
-        // JSON, not of the document: the field still carries the luminance curve, now `white`.
         if !same(edit.curve.white, CurvePoint.linear) { curve.rgb = edit.curve.white }
         if !same(edit.curve.red, CurvePoint.linear) { curve.red = edit.curve.red }
         if !same(edit.curve.green, CurvePoint.linear) { curve.green = edit.curve.green }
@@ -955,8 +1117,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         var color = ColorPatch()
         if differs(edit.color.vibrance, 0) { color.vibrance = edit.color.vibrance }
         if differs(edit.color.saturation, 0) { color.saturation = edit.color.saturation }
-        // 2026-10-28 (P0-4): the switch is a value like any other, and `false` is the destination's
-        // default — so only "on" travels (「只带非默认字段」).
         if edit.color.blackAndWhite { color.blackAndWhite = true }
         var bands: [HSLBandPatch] = []
         for (i, band) in ColorGroup.normalize(edit.color.bands).enumerated() {
@@ -968,8 +1128,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if !patch.isEmpty { bands.append(patch) }
         }
         if !bands.isEmpty { color.bands = bands }
-        // 101 — the ninth selector. Sparse like a band: only the non-zero axes travel, so pasting a
-        // global 色相 leaves the destination's global 明度 alone (「只带非默认字段」).
         if edit.color.hasGlobal {
             var patch = HSLBandPatch(index: ColorGroup.bandCount)
             if differs(edit.color.global.hue, 0) { patch.hue = edit.color.global.hue }
@@ -983,9 +1141,6 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         s.color = color.isEmpty ? nil : color
 
-        // 081: 色彩分级 — nine numbers, one wheel per luminance region. A region whose three numbers
-        // are all 0 is absent (the card's own "nothing here"), so a shadows-only grade carries one
-        // wheel and pasting it leaves the destination's midtones and highlights alone.
         var grading = ColorGradingPatch()
         if !edit.colorGrading.shadows.isIdentity { grading.shadows = edit.colorGrading.shadows }
         if !edit.colorGrading.midtones.isIdentity { grading.midtones = edit.colorGrading.midtones }
@@ -999,20 +1154,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if differs(edit.detail.noiseColor, 0) { detail.noiseColor = edit.detail.noiseColor }
         if edit.detail.lensCorrections { detail.lensCorrections = true }
         s.detail = detail.isEmpty ? nil : detail
-        // 319 — 解码器版本. `nil` is the document's default (「跟随 Apple」), so only an explicit model
-        // travels; and this is the one line in `capture` that makes 开发's copy able to move a decoder
-        // at all. Before it, 「复制开发卡」 was five render-side leaves and a v9 request stayed behind.
         if let version = edit.decoderVersion { s.decoderVersion = version }
 
-        // 156: 校正 — the two lateral-CA ratios. 0 is the neutral ratio, so only a real correction
-        // travels (「只带非默认字段」); the document stores α, not the panel's −100…+100 position.
         var optics = OpticsPatch()
         if differs(edit.optics.caRed, 0) { optics.caRed = edit.optics.caRed }
         if differs(edit.optics.caBlue, 0) { optics.caBlue = edit.optics.caBlue }
         s.optics = optics.isEmpty ? nil : optics
 
-        // 179: 校准. Seven slider numbers, 0 is neutral, so only a moved one travels (「只带非默认
-        // 字段」). The document stores the panel's own −100…+100, so no unit conversion here.
         var calibration = CalibrationPatch()
         if differs(edit.calibration.shadowTint, 0) { calibration.shadowTint = edit.calibration.shadowTint }
         if differs(edit.calibration.redHue, 0) { calibration.redHue = edit.calibration.redHue }
@@ -1037,30 +1185,24 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             effects.nonBayerColorNR = edit.effects.nonBayerColorNR
         }
         if differs(edit.effects.dehaze, 0) { effects.dehaze = edit.effects.dehaze }
-        // 185 — S3.10. `detail` and `masking` are compared against the group's own resting values, so
-        // a document that only touched 蒙版 still carries that leaf (and 数量 = 50 — the 314 resting
-        // value — carries nothing, while an explicit 0 is off-resting and *is* written).
         if differs(edit.sharpen.amount, 50) { effects.sharpenAmount = edit.sharpen.amount }
         if differs(edit.sharpen.radius, 2.0) { effects.sharpenRadius = edit.sharpen.radius }
         if differs(edit.sharpen.detail, 25) { effects.sharpenDetail = edit.sharpen.detail }
         if differs(edit.sharpen.masking, 0) { effects.sharpenMasking = edit.sharpen.masking }
         s.effects = effects.isEmpty ? nil : effects
 
-        // Masks: present when the document has any. `showMaskID` is view state and stays out (see
-        // `MaskViewState`), and an empty list is "nothing to copy", not "paste an empty list".
         if !edit.masks.isEmpty {
             s.masks = MasksPatch(frameAspect: frameAspect, masks: edit.masks)
         }
-
         return s
     }
 
     // MARK: reading the payload
 
-    /// Number of stored leaves. The point of the type: a one-slider copy is 1, the document it came
-    /// from is `fullDocumentFieldCount` (80). Masks are counted separately (`maskCount`): a mask is a
-    /// nested document, and folding it into this arithmetic would make "1 slider + 1 mask" read as
-    /// 2 leaves of 80 — a fraction that means nothing.
+    /// Number of stored leaves. 442: a full copy is `fullDocumentFieldCount` (103), defaults
+    /// included; a section-narrowed copy is however many leaves those cards own. Masks are counted
+    /// separately (`maskCount`): a mask is a nested document, and folding it into this arithmetic
+    /// would make "1 slider + 1 mask" read as 2 leaves — a fraction that means nothing.
     public var fieldCount: Int {
         (geometry?.fieldCount ?? 0) + (light?.fieldCount ?? 0) + (curve?.fieldCount ?? 0)
             + (color?.fieldCount ?? 0) + (colorGrading?.fieldCount ?? 0)
@@ -1072,21 +1214,27 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// How many masks the payload carries. 0 = a paste leaves the destination's list alone.
     public var maskCount: Int { masks?.masks.count ?? 0 }
 
-    /// Does the payload name a decoder model? Split out because it is the one leaf that is not a
+    /// Does the payload name a decoder state? Split out because it is the one leaf that is not a
     /// slider: `fieldCount` (the "1 slider = 1 field" arithmetic) does not count it, exactly as it
-    /// does not count masks, so the 95-leaf full-document denominator keeps its meaning.
-    public var carriesDecoderVersion: Bool { decoderVersion != nil }
+    /// does not count masks, so the 102-leaf full-document denominator keeps its meaning.
+    ///
+    /// 442: an explicit 「自动」 (`decoderVersionAuto == true`) counts as naming the decoder too — a
+    /// paste onto a pinned target has to re-develop to put it back, so `requiresDecode` must say so.
+    public var carriesDecoderVersion: Bool { decoderVersion != nil || decoderVersionAuto == true }
 
     /// Empty means "a paste changes nothing". A copy of 开发 narrowed to 解码器版本 alone is **not**
     /// empty: it moves the one thing that decides which buffer everything else is read through.
-    public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 && decoderVersion == nil }
+    /// 442: with all leaves carried, this is now "no copyable leaf at all" (an empty checklist, or a
+    /// masks-only selection on a photo with no masks), not "the source happened to be neutral".
+    public var isEmpty: Bool { fieldCount == 0 && maskCount == 0 && !carriesDecoderVersion }
 
 
     /// Leaves a full `EditModel` carries — the denominator `fieldCount` is compared against.
-    /// geometry 9 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns`) + light 11
-    /// (7 tone + 2 balance + 高光恢复 + 黑电平) + curve 4 + color 26 (2 + 8 bands × 3) + 色彩分级 9
-    /// + detail 5 + 校正 5 (色差 R/B + 暗角 3) + 细节 4 (纹理/清晰度 + 去噪/去彩噪 ×2) + 效果 5
-    /// (颗粒 1 + 去雾 + …) — 164's split changed the reading, not the storage.
+    /// geometry 14 (4 crop edges + straighten + 2 flips + aspect lock + `quarterTurns` + 4 perspective
+    /// numbers + `cropSpace`) + light 10 (7 tone + 2 balance + 黑电平; 高光恢复 is wire-only) + curve 4
+    /// + color 38 (2 + switch + 8 bands × 4 + the ninth selector's 3) + 色彩分级 9 + detail 5 + 校正 2
+    /// (色差 R/B) + 校准 7 + effects 13 (暗角 3 + 颗粒 + 纹理/清晰度/去雾 3 + 去噪/去彩噪 2 + 锐化 4).
+    /// 442: every one of these is carried by capture now, defaults included.
     public static let fullDocumentFieldCount =
         GeometryPatch.fullFieldCount + LightPatch.fullFieldCount + CurvePatch.fullFieldCount
         + ColorPatch.fullFieldCount + ColorGradingPatch.fullFieldCount
@@ -1104,7 +1252,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if curve != nil { out.insert(.curve) }
         if color != nil { out.insert(.color) }
         if colorGrading != nil { out.insert(.colorGrading) }
-        if detail != nil { out.insert(.detail) }
+        if detail != nil || carriesDecoderVersion { out.insert(.detail) }
         // 179: the calibration rides in S1 (`.light` is the group whose `stages` contain
         // `.sceneLinear`), so a copy line says 「Light」 — the card is a view of that stage.
         if calibration != nil { out.insert(.light) }
@@ -1138,9 +1286,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         }
         if colorGrading != nil { out.insert(.colorGrading) }
         if detail != nil { out.insert(.detail) }
-        // 319: the decoder model IS 开发's card — a payload carrying only the version must report
-        // 开发, or the sheet would show a copy that names no card at all.
-        if decoderVersion != nil { out.insert(.detail) }
+        // 319/442: the decoder state IS 开发's card — a payload carrying only the version (or only
+        // 「自动」) must report 开发, or the sheet would show a copy that names no card at all.
+        if carriesDecoderVersion { out.insert(.detail) }
         if calibration != nil { out.insert(.calibration) }
         if optics != nil { out.insert(.correction) }
         if let e = effects {
@@ -1203,6 +1351,8 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
                 p.cropY = g.cropY
                 p.cropWidth = g.cropWidth
                 p.cropHeight = g.cropHeight
+                // 330/442: the edges' space belongs to the edges, not to a card of its own.
+                p.cropSpace = g.cropSpace
             }
             if on(.straighten) {
                 p.rotationDegrees = g.rotationDegrees
@@ -1227,8 +1377,14 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if let l = light {
             var p = LightPatch()
             if sections.contains(.whiteBalance) {
-                if on(.temperature) { p.temperature = l.temperature }
-                if on(.tint) { p.tint = l.tint }
+                if on(.temperature) {
+                    p.temperature = l.temperature
+                    p.temperatureAuto = l.temperatureAuto
+                }
+                if on(.tint) {
+                    p.tint = l.tint
+                    p.tintAuto = l.tintAuto
+                }
             }
             if sections.contains(.blackLevel), on(.blackOffset) { p.blackOffset = l.blackOffset }
             if sections.contains(.light) {
@@ -1304,9 +1460,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if on(.lensCorrections) { p.lensCorrections = d.lensCorrections }
             out.detail = p.isEmpty ? nil : p
         }
-        // 319: the decoder model is a leaf of 开发 like any other, so a copy of 开发 narrowed to
+        // 319/442: the decoder state is a leaf of 开发 like any other, so a copy of 开发 narrowed to
         // 锐化 alone carries no version — and a copy narrowed to 解码器版本 alone carries nothing else.
-        if sections.contains(.detail), on(.decoderVersion) { out.decoderVersion = decoderVersion }
+        // Its 「自动」 companion travels with it; one without the other cannot round-trip.
+        if sections.contains(.detail), on(.decoderVersion) {
+            out.decoderVersion = decoderVersion
+            out.decoderVersionAuto = decoderVersionAuto
+        }
 
         // 179: 校准 is one card and seven numbers, so checking it copies all seven — there is no
         // child row to narrow (a hue without its saturation is a different look, not a finer copy).
@@ -1431,8 +1591,12 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.shadows { out.light.shadows = v }
             if let v = p.whites { out.light.whites = v }
             if let v = p.blacks { out.light.blacks = v }
-            if let v = p.temperature { out.light.temperature = v }
-            if let v = p.tint { out.light.tint = v }
+            // 442 — an explicit 「自动」 writes nil; otherwise a pinned number writes through. A
+            // legacy payload has neither flag and behaves exactly as before (writes only when set).
+            if p.temperatureAuto == true { out.light.temperature = nil }
+            else if let v = p.temperature { out.light.temperature = v }
+            if p.tintAuto == true { out.light.tint = nil }
+            else if let v = p.tint { out.light.tint = v }
             if let v = p.highlightRecovery { out.light.highlightRecovery = v }
             if let v = p.blackOffset { out.light.blackOffset = v }
         }
@@ -1481,9 +1645,11 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
             if let v = p.lensCorrections { out.detail.lensCorrections = v }
         }
 
-        // 319 — the decoder model. Written last of the document-shaping fields because it is the one
-        // that changes *which buffer* every other leaf is read through.
-        if let v = decoderVersion { out.decoderVersion = v }
+        // 319/442 — the decoder state. Written last of the document-shaping fields because it is the
+        // one that changes *which buffer* every other leaf is read through. An explicit 「自动」 is a
+        // written value too: it clears a destination's pinned model.
+        if decoderVersionAuto == true { out.decoderVersion = nil }
+        else if let v = decoderVersion { out.decoderVersion = v }
 
         if let p = optics {
             if let v = p.caRed { out.optics.caRed = v }
@@ -1560,6 +1726,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // 319: absent in every payload written before 开发 could carry the decoder model — absent
         // means "keep the destination's decoder", which is exactly what those copies did.
         self.decoderVersion = c.val("decoderVersion", String?.none)
+        // 442: absent in every pre-442 payload; its absence keeps the old "don't touch the decoder"
+        // meaning. No schema bump — the key is additive and optional.
+        self.decoderVersionAuto = c.val("decoderVersionAuto", Bool?.none)
 
     }
 

@@ -4,10 +4,10 @@ import Foundation
 
 /// M5: copy/paste carries **settings**, not documents.
 ///
-/// `EditSnapshot` is the clipboard payload: one optional per leaf parameter, present only when it
-/// differs from the neutral default. These tests pin the three consequences that make it useful —
-/// a one-slider copy is one field, a paste leaves everything it did not carry alone, and masks are
-/// structurally absent (so a paste can never move a local adjustment onto another photo).
+/// 442 changed the contract: `EditSnapshot.capture` carries **every copyable leaf**, defaults
+/// included, so pasting a default clears the destination's value. These tests pin that plus the two
+/// properties that remain — a narrowed payload leaves everything it does not carry alone, and masks
+/// are appended rather than substituted.
 ///
 /// Filter with `--filter Preset`.
 final class PresetSnapshotTests: XCTestCase {
@@ -19,9 +19,10 @@ final class PresetSnapshotTests: XCTestCase {
         m.geometry.crop = NormalizedRect(x: 0.1, y: 0.05, width: 0.8, height: 0.7)
         m.geometry.rotationDegrees = -3.25
         m.geometry.aspectLock = .threeTwo
+        // 442: 高光恢复 is not a copyable leaf (325 removed its child row), so the fixture leaves it
+        // at 0 — a full capture is expected to reproduce every *copyable* leaf.
         m.light = LightGroup(exposure: 0.75, contrast: 12, highlights: -30, shadows: 18,
-                             whites: 5, blacks: -8, temperature: 5400, tint: 7,
-                             highlightRecovery: 0.25)
+                             whites: 5, blacks: -8, temperature: 5400, tint: 7)
         m.curve.white = [CurvePoint(u: 0, v: 0), CurvePoint(u: 0.5, v: 0.62), CurvePoint(u: 1, v: 1)]
         m.color.saturation = -12
         m.color.bands[3] = HSLBand(hue: 10, saturation: -20, luminance: 5)
@@ -36,73 +37,72 @@ final class PresetSnapshotTests: XCTestCase {
         return String(data: try encoder.encode(snapshot), encoding: .utf8) ?? ""
     }
 
-    // MARK: - 1. sparsity
+    // MARK: - 1. every leaf, defaults included (442)
 
-    func testSnapshotOfNeutralDocumentIsEmpty() {
+    func testSnapshotOfNeutralDocumentCarriesEveryLeaf() {
         let snapshot = EditSnapshot.capture(.neutral)
-        XCTAssertTrue(snapshot.isEmpty)
-        XCTAssertEqual(snapshot.fieldCount, 0)
-        XCTAssertEqual(snapshot.groups, [], "a neutral document has nothing to copy")
-        XCTAssertNil(snapshot.light)
-        XCTAssertNil(snapshot.geometry)
+        XCTAssertFalse(snapshot.isEmpty)
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount)
+        XCTAssertEqual(snapshot.groups,
+                       [.geometry, .light, .curve, .color, .colorGrading, .detail, .effects],
+                       "a neutral document is a complete payload now: every card is carried")
+        XCTAssertEqual(snapshot.light?.exposure, 0)
+        XCTAssertEqual(snapshot.geometry?.cropWidth, 1)
+        XCTAssertEqual(snapshot.light?.temperatureAuto, true, "as shot is an explicit copied state")
+        XCTAssertEqual(snapshot.decoderVersionAuto, true, "自动 is an explicit copied state")
     }
 
-    func testSnapshotCarriesOnlyNonDefaultFields() {
+    func testSnapshotCarriesDefaultsBesideChangedFields() {
         var document = EditModel.neutral
         document.light.exposure = 0.75
         document.light.contrast = 12
         document.color.saturation = -12
 
         let snapshot = EditSnapshot.capture(document)
-        XCTAssertEqual(snapshot.fieldCount, 3, "three changed leaves, three stored fields")
-        XCTAssertEqual(snapshot.light?.fieldCount, 2)
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "the payload is no longer sparse: every copyable leaf is there")
+        XCTAssertEqual(snapshot.light?.fieldCount, LightPatch.fullFieldCount)
         XCTAssertEqual(snapshot.light?.exposure, 0.75)
         XCTAssertEqual(snapshot.light?.contrast, 12)
-        XCTAssertNil(snapshot.light?.temperature, "an untouched default is not carried")
-        XCTAssertNil(snapshot.light?.highlights)
+        XCTAssertEqual(snapshot.light?.highlights, 0, "a default is carried as a value")
         XCTAssertEqual(snapshot.color?.saturation, -12)
-        XCTAssertNil(snapshot.curve, "an identity curve is not carried at all")
-        XCTAssertNil(snapshot.detail)
-        XCTAssertNil(snapshot.effects)
-        XCTAssertNil(snapshot.geometry, "a full-frame crop is not carried at all")
+        XCTAssertNotNil(snapshot.curve, "an identity curve is carried")
+        XCTAssertNotNil(snapshot.detail)
+        XCTAssertNotNil(snapshot.effects)
+        XCTAssertNotNil(snapshot.geometry, "a full-frame crop is carried")
     }
 
-    func testSnapshotIsSparseComparedWithTheFullDocument() {
+    func testSnapshotCarriesTheFullDocument() {
         let document = richEdit()
         let snapshot = EditSnapshot.capture(document)
-        // crop 4 edges + straighten 1 + aspect lock 1 + light 9 + rgb curve 1 + saturation 1
-        // + one HSL band (3) + sharpening 1 + vignette 1 = 22 of the document's 84 leaves.
-        print("sparse snapshot: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
+        print("full snapshot: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
               + "  groups \(snapshot.groups.map(\.rawValue).sorted())")
-        // 081: light gained 黑电平 (`blackOffset`) and 色彩分级 joined as nine leaves;
-        // 090 adds 中间调 to the tone leaves; 134 removes 圆度; 156 adds 校正 (色差 R/B) → 82;
-        // 164 adds the two denoises to the effects patch → 84; 185 adds the four sharpen leaves → 88;
-        // 179 adds 校准's seven → 95.
-        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 95,
-                       "9 geometry (4 crop edges + angle + 2 flips + lock + quarterTurns)"
-                       + " + 11 light (7 tone + 2 balance + 高光恢复 + 黑电平) + 4 curve"
-                       + " + 35 color (2 + switch + 8 bands × 4) + 9 色彩分级"
+        // 442: geometry now includes the four perspective leaves and cropSpace; color includes the
+        // ninth selector's three numbers.
+        XCTAssertEqual(EditSnapshot.fullDocumentFieldCount, 102,
+                       "14 geometry (4 crop edges + angle + 2 flips + lock + quarterTurns"
+                       + " + 4 perspective + cropSpace)"
+                       + " + 10 light (7 tone + 2 balance + 黑电平; 高光恢复 is wire-only) + 4 curve"
+                       + " + 38 color (2 + switch + 8 bands × 4 + global 3) + 9 色彩分级"
                        + " + 5 detail + 2 校正 (色差 R/B) + 7 校准"
-                       + " + 9 effects (暗角 3 + 颗粒 1 + 纹理/清晰度/去雾 3 + 去噪/去彩噪 2)"
-                       + " + 4 sharpen (S3.10 四参)")
-        XCTAssertEqual(snapshot.fieldCount, 22,
-                       "crop 4 + straighten 1 + aspect 1 + light 9 + rgb curve 1 + saturation 1"
-                       + " + one band 3 + sharpening 1 + vignette 1")
-        XCTAssertLessThan(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount / 2)
+                       + " + 13 effects (暗角 3 + 颗粒 + 纹理/清晰度/去雾 3 + 去噪/去彩噪 2"
+                       + " + 锐化 4)")
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount)
     }
 
-    func testSnapshotStoresOnlyTheChangedHSLBand() {
+    func testSnapshotCarriesAllEightBandsAndEveryLeafInsideThem() {
         var document = EditModel.neutral
         document.color.bands[6] = HSLBand(hue: 5, saturation: 0, luminance: -30)
         let snapshot = EditSnapshot.capture(document)
 
         let bands = snapshot.color?.bands ?? []
-        XCTAssertEqual(bands.count, 1, "seven identity bands are not stored")
-        XCTAssertEqual(bands[0].index, 6)
-        XCTAssertEqual(bands[0].hue, 5)
-        XCTAssertNil(bands[0].saturation, "a zero inside a changed band is still not carried")
-        XCTAssertEqual(bands[0].luminance, -30)
-        XCTAssertEqual(snapshot.fieldCount, 2)
+        XCTAssertEqual(bands.count, 8, "all eight bands travel, identity included")
+        XCTAssertEqual(bands[6].index, 6)
+        XCTAssertEqual(bands[6].hue, 5)
+        XCTAssertEqual(bands[6].saturation, 0, "a zero inside a band is carried too")
+        XCTAssertEqual(bands[6].luminance, -30)
+        XCTAssertEqual(bands.filter { $0.index != 6 }.count, 7)
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount)
     }
 
     func testSnapshotRoundTripsThroughJSON() throws {
@@ -140,7 +140,7 @@ final class PresetSnapshotTests: XCTestCase {
         XCTAssertEqual(pasted.color.bands[3], source.color.bands[3])
     }
 
-    func testPasteOntoAnEditedDocumentKeepsWhatItDoesNotCarry() {
+    func testNarrowedPasteKeepsWhatItDoesNotCarry() {
         var target = richEdit()
         target.geometry.crop = NormalizedRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
         target.detail.sharpening = 90
@@ -148,15 +148,31 @@ final class PresetSnapshotTests: XCTestCase {
 
         var source = EditModel.neutral
         source.light.exposure = -2
-        let pasted = EditSnapshot.capture(source).applied(to: target)
+        let pasted = EditSnapshot.capture(source).filtered(to: [.light]).applied(to: target)
 
         XCTAssertEqual(pasted.light.exposure, -2, "the payload wins where it has a field")
         XCTAssertEqual(pasted.light.temperature, 5400,
-                       "a default in the source is not carried, so the target's value survives")
-        XCTAssertEqual(pasted.geometry, target.geometry, "geometry was not copied")
-        XCTAssertEqual(pasted.detail.sharpening, 90, "detail was not copied")
-        XCTAssertEqual(pasted.effects.vignetteAmount, 55, "effects were not copied")
+                       "白平衡 was not in the checklist, so the destination's pin survives")
+        XCTAssertEqual(pasted.geometry, target.geometry, "geometry was not in the checklist")
+        XCTAssertEqual(pasted.detail.sharpening, 90, "detail was not in the checklist")
+        XCTAssertEqual(pasted.effects.vignetteAmount, 55, "effects were not in the checklist")
         XCTAssertEqual(pasted.color, target.color)
+    }
+
+    func testFullPasteOfANeutralSourceResetsTheDestinationToDefaults() {
+        var target = richEdit()
+        target.light.exposure = 1.5
+        target.light.temperature = 4800
+        target.light.tint = 12
+        target.decoderVersion = "9.dng"
+
+        let pasted = EditSnapshot.capture(.neutral).applied(to: target)
+        XCTAssertEqual(pasted.light.exposure, 0)
+        XCTAssertNil(pasted.light.temperature, "源是 as shot，粘贴把目标的白平衡也写回自动")
+        XCTAssertNil(pasted.light.tint)
+        XCTAssertNil(pasted.decoderVersion, "源是自动，粘贴把目标的解码器写回自动")
+        XCTAssertEqual(pasted.geometry.crop, .full)
+        XCTAssertEqual(pasted.effects.vignetteAmount, 0)
     }
 
     /// P1-5 replaced this test's original claim ("paste never writes masks"). The list is carried now
@@ -206,26 +222,27 @@ final class PresetSnapshotTests: XCTestCase {
                        "copying and pasting the same photo changes nothing")
     }
 
-    func testToleranceIgnoresReencodedNoise() {
+    func testToleranceIgnoresReencodedNoiseInTheExplicitReading() {
         // A value that has been through JSON is the same value: a difference below
-        // `EditHistory.dirtyTolerance` must not become a "copied field".
+        // `EditHistory.dirtyTolerance` must not become an explicit leaf. (Capture is complete
+        // since 442; `captureExplicit` is the old reading, still used to apply preset fragments.)
         var document = EditModel.neutral
         document.light.exposure = 5e-7          // just under 1e-6
         document.light.contrast = -5e-7
-        XCTAssertTrue(EditSnapshot.capture(document).isEmpty,
+        XCTAssertTrue(EditSnapshot.captureExplicit(document).isEmpty,
                       "sub-tolerance differences are not edits")
 
         document.light.exposure = 2e-6          // just over
-        XCTAssertEqual(EditSnapshot.capture(document).fieldCount, 1,
+        XCTAssertEqual(EditSnapshot.captureExplicit(document).fieldCount, 1,
                        "a difference above the tolerance is a real field")
 
         // 派单 006: white balance is a *state* (`nil` = follow the file) plus an absolute value, so
         // there is no neutral number to be within tolerance of — any pinned value travels.
         document.light.temperature = 6500
-        XCTAssertNotNil(EditSnapshot.capture(document).light?.temperature,
+        XCTAssertNotNil(EditSnapshot.captureExplicit(document).light?.temperature,
                         "a pinned 6500 K must survive \"copy settings\"")
         document.light.temperature = nil
-        XCTAssertNil(EditSnapshot.capture(document).light?.temperature,
-                     "as shot has nothing to copy")
+        XCTAssertNil(EditSnapshot.captureExplicit(document).light?.temperature,
+                     "as shot has nothing explicit to copy")
     }
 }

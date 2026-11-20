@@ -2701,10 +2701,10 @@ public final class CatalogSession {
     //
     // ⌘C/⌘V for *settings*, which is a different verb from copying the document:
     //
-    //   · the payload is `EditSnapshot` — **sparse** (non-default leaves only, Q18) and narrowed by
-    //     the checklist (`CopySettingsSelection`). A paste therefore writes only what the user
-    //     checked *and* only what the source actually changed; the destination's own white balance,
-    //     crop, colour and masks survive a paste that does not name them.
+    //   · the payload is `EditSnapshot` — **all copyable leaves**, defaults included (442), narrowed
+    //     by the checklist (`CopySettingsSelection`). A paste writes every leaf the user checked, so
+    //     a source at its default resets the destination to that default; fields outside the
+    //     checklist still survive untouched.
     //   · it lives in this object, **not** on `NSPasteboard`. Develop settings are not text: putting
     //     them on the system pasteboard would make ⌘V into an image editor a `photons.*` blob, and
     //     would let a copied screenshot be "pasted" as settings. The menu item is ⌘C/⌘V and the
@@ -2757,13 +2757,15 @@ public final class CatalogSession {
 
     public var canCopySettings: Bool { anchorAsset != nil }
 
+    /// 442: `isEmpty` now means **no copyable leaf at all** (an empty checklist, or 蒙版 on a photo
+    /// with no masks) — not "the source happened to be at defaults", which is a copyable state now.
     public var canPasteSettings: Bool {
         guard let payload = copiedSettings, !payload.isEmpty else { return false }
         return !metadataTargetIDs.isEmpty
     }
 
-    /// ⌘C — capture the anchor's non-default leaves, narrowed by `selection` (default: the sticky
-    /// checklist).
+    /// ⌘C — capture the anchor's **every copyable leaf**, defaults included (442), narrowed by
+    /// `selection` (default: the sticky checklist).
     @discardableResult
     public func copySettingsFromAnchor(selection: CopySettingsSelection? = nil) -> EditSnapshot? {
         guard let asset = anchorAsset else {
@@ -2786,8 +2788,12 @@ public final class CatalogSession {
         // is silent on purpose — a read-only library must still be able to copy settings, and the
         // selection then simply comes back as 全部 next time.
         if let catalog { try? catalog.storeCopySelection(choice) }
+        // 442: defaults are copied now, so "empty" no longer means "the photo is neutral"; it means
+        // the checklist selected no leaf the payload can carry. Describe that, not the old rule.
         lastSettingsError = payload.isEmpty
-            ? Loc.t("这张照片在所选组里没有非默认设置：粘贴不会改动任何字段")
+            ? (choice.isEmpty
+                ? Loc.t("未选任何组：粘贴什么也不会发生")
+                : Loc.t("所选组里没有可粘贴的设置"))
             : nil
         settingsRevision &+= 1
         return payload

@@ -148,7 +148,8 @@ final class CopySheetCardTests: XCTestCase {
         XCTAssertEqual(asked.count, 1, "⌘C opened the sheet")
         XCTAssertEqual(asked.first?.0, .copy)
         XCTAssertNotNil(target.copiedSettings, "and only the answer produced a payload")
-        XCTAssertEqual(target.copiedSettings?.fieldCount, 19, "A's non-default leaves")
+        XCTAssertEqual(target.copiedSettings?.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "442: A's every copyable leaf, defaults included")
 
         // 反证: cancelled → nothing copied, still nil.
         var fresh = CatalogSession()
@@ -214,7 +215,8 @@ final class CopySheetCardTests: XCTestCase {
 
         let payload = try XCTUnwrap(session.copySettingsFromAnchor(selection: choice))
         XCTAssertEqual(payload.sections, [.whiteBalance, .blackLevel, .light])
-        XCTAssertEqual(payload.fieldCount, 5, "色温 + 色调 + 黑电平 + 曝光 + 对比")
+        XCTAssertEqual(payload.fieldCount, 10,
+                       "色温 + 色调 + 黑电平 + 曝光/对比/高光/中间调/阴影/白色/黑色")
 
         // ⑧ 复制不写历史、不改文档.
         XCTAssertEqual(try catalog.editHistory(forAsset: b).count, 1, "复制没有给 B 加历史")
