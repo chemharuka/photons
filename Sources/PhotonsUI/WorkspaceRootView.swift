@@ -29,13 +29,41 @@ public enum ForwardCompatNotice {
 // MARK: - tool button (§2b: 28 pt hit box, 26 pt paint, radius 7 continuous, 9 pt side padding)
 
 public final class ToolButton: NSButton {
+    /// 438 / 442 —— 顶栏所有按钮的图标用**同一个** symbol 配置：SF Symbols 的自然尺寸随字形变
+    /// （folder 18×14、square.and.arrow.down 15×17、square.and.arrow.up 15×18），不统一就会出现
+    /// 「按钮一样高、图标看着不一样大」。12.25 / .regular 是唯一能让排序那个双向箭头正好落在
+    /// 18×14 的档位（见 `PhotoSortOrder.symbolConfiguration` 的注释），其余字形套同一档就一致了。
+    public static let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12.25, weight: .regular)
+
+    /// 442 —— 图标的高度基准。同一个 pointSize 不等于同一个像素框：`folder` 是 17×13、
+    /// `square.and.arrow.down` 是 14×16 —— 字形本身宽高比就不同。所以统一「**高度** = 14 pt，
+    /// 宽度按比例」，这样一排按钮的图标看起来一样大（这是人眼判等高的实际依据）。
+    public static let symbolBoxHeight: CGFloat = 14
+
+    /// 顶栏图标的唯一入口：配置 + 归一化到 `symbolBoxHeight`，模板化（跟随 labelColor）。
+    public static func icon(_ symbol: String, accessibility: String) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility) else {
+            return nil
+        }
+        let configured = base.withSymbolConfiguration(symbolConfiguration) ?? base
+        let natural = configured.size
+        if natural.height > 0 {
+            let scale = symbolBoxHeight / natural.height
+            configured.size = NSSize(width: max(1, (natural.width * scale).rounded()),
+                                     height: symbolBoxHeight)
+        }
+        configured.isTemplate = true
+        return configured
+    }
+
     public var isActive = false { didSet { needsDisplay = true } }
     private var hovering = false
 
     public init(title: String, symbol: String) {
         super.init(frame: .zero)
         self.title = title
-        self.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        self.image = Self.icon(symbol, accessibility: title)
+        self.imageScaling = .scaleProportionallyDown
         imagePosition = .imageLeading
         imageHugsTitle = true
         font = .systemFont(ofSize: 10.5, weight: .semibold)

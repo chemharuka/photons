@@ -41,17 +41,16 @@ public enum PhotoSortOrder: String, CaseIterable, Sendable {
     /// `arrow.up.arrow.down` is **18 × 15** unscaled — 1 pt taller than the family it has to sit in.
     /// `pointSize 12.25 / .regular` is the smallest step that lands the arrow on exactly 18 × 14
     /// without changing its weight (`.regular` is AppKit's default, i.e. the neighbours' weight).
-    /// Encoded here rather than in `TopBarView` so the reason travels with the glyph.
-    public static let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12.25, weight: .regular)
+    /// 442 —— 现在全顶栏共用一份（`ToolButton.symbolConfiguration`）：导入/导出那两个
+    /// `square.and.arrow.*` 不套配置时是 15×17 / 15×18，和这一行按钮的 18×14 不是一套。
+    public static let symbolConfiguration = ToolButton.symbolConfiguration
 
     /// The icon as the toolbar draws it: a **template** image (SF Symbols already are, and this is
     /// asserted) so the glyph is tinted by `contentTintColor`/`labelColor` and therefore follows the
     /// light/dark appearance instead of being baked into one colour.
     public static func icon() -> NSImage? {
-        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: Loc.t("按拍摄时间排序"))
-        let configured = base?.withSymbolConfiguration(symbolConfiguration) ?? base
-        configured?.isTemplate = true
-        return configured
+        // 442 —— 与顶栏其它按钮同一条图标入口（配置 + 归一化高度），不再各写一份。
+        ToolButton.icon(symbol, accessibility: Loc.t("按拍摄时间排序"))
     }
 
     /// What the button says: the order in force, arrow included.
