@@ -574,7 +574,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private var providerCache: ThumbnailCache?
     /// Outstanding loads by item index. One per index, cancelled the moment the cell scrolls away.
     private var thumbRequests: [Int: ThumbnailRequest] = [:]
-    private var reconcileWork: DispatchWorkItem?
+    /// 449 — leading + 40 ms trailing + 120 ms cap, shared with the sidebar and the filmstrip.
+    private let reconcileGate = ScrollReconcileGate()
+    /// 449 — prefetch-priority asks handed to the provider; read by the continuous-scroll acceptance.
+    private(set) var prefetchRequestCount = 0
+    private(set) var prefetchRequestedIndexes: Set<Int> = []
     private var cellTier: ThumbTier = .t256
     /// Signatures of the last reconcile pass, so the scroll handler does no work when nothing
     /// visible changed (the main thread budget is 8 ms, 006 §5).
@@ -1091,6 +1095,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
         }
         thumbRequests[index] = token
+        if priority == .prefetch {
+            prefetchRequestCount += 1
+            prefetchRequestedIndexes.insert(index)
+        }
         lastReconcilePriorities.append(priority)
         requestLog.append((index, priority))
         if requestLog.count > 4096 { requestLog.removeFirst(requestLog.count - 4096) }
@@ -1126,14 +1134,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     private func scheduleThumbnailReconcile() {
-        reconcileWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
+        // 449 — pure trailing 40 ms never fired during a live scroll (bounds change every 8–16 ms).
+        // Same shared gate as the sidebar and filmstrip: leading, 40 ms trailing, 120 ms cap.
+        reconcileGate.note()
+        reconcileGate.schedule { [weak self] in
             self?.reconcileThumbnails(force: false)
         }
-        reconcileWork = work
-        // One frame of coalescing: a live scroll fires this dozens of times per second and the
-        // answer only changes when the visible *row range* changes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
     }
 
     /// 429 — visible items plus **four rows** either side (computed from the layout function, not
@@ -1269,7 +1275,12 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // 437 — the cancellation moved **after** the asks so a pass ends with exactly `wanted`
         // queued: issue the new band first, then condemn what it left. (Nothing can land in
         // between: this whole function runs synchronously on the main actor.)
-        for (index, token) in thumbRequests where !wanted.contains(index) {
+        //
+        // 449 — condemn only what left the **outer ring** (±`warmSlackRows` = ±12 rows), not the
+        // narrow core (±4): a continuous scroll moves by a few rows, and cancelling those asks
+        // dropped bytes that had just been produced (`ThumbnailService.suppressWrite`). §3 fixes
+        // this value at `warmSlackRows`; the request band itself is unchanged.
+        for (index, token) in thumbRequests where !wide.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
         }
@@ -1283,7 +1294,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         //
         // 437 — `wanted` is now core ∪ the warm ring, so this is still exactly "nothing queued
         // outside what this pass asked for"; the *window* reading below widened to match.
-        lastRebuildOutsideCount = Set(thumbRequests.keys).subtracting(wanted).count
+        // 449 — cancellation now stops at the outer ring (±12 rows), so the structural reading is
+        // taken against that same ring (`wide`); anything past it must still be gone.
+        lastRebuildOutsideCount = Set(thumbRequests.keys).subtracting(wide).count
     }
 
     /// 437 — ask for one band stage unless the memory LRU already has the pixels or a request for
@@ -1475,8 +1488,22 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Drop the coalesced work item so a test can run its own pass without a queued one landing
     /// first (the two would share `thumbRequests`, and the second would look like a no-op).
     func cancelScheduledThumbnailReconcileForTesting() {
-        reconcileWork?.cancel()
-        reconcileWork = nil
+        reconcileGate.cancelPending()
+    }
+
+    /// 449 — reconcile passes the shared gate actually ran. Read by the continuous-scroll acceptance.
+    var reconcileRunCount: Int { reconcileGate.runCount }
+
+    /// 449 — reset the scroll counters without touching the live band (acceptance only).
+    func resetScrollCountersForTesting() {
+        reconcileGate.resetRunCountForTesting()
+        prefetchRequestCount = 0
+        prefetchRequestedIndexes.removeAll()
+    }
+
+    /// 449 — item indices currently on screen (the side-by-side reading for `prefetchRequestedIndexes`).
+    func visibleIndexes() -> Set<Int> {
+        Set(collectionView.indexPathsForVisibleItems().map { $0.item })
     }
 
     /// Start a fresh request-order reading. The acceptance calls this after the bands settle.
@@ -1516,6 +1543,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     /// Cancel everything and drop the memory layer — used when the library changes under the grid.
     public func resetThumbnails() {
+        reconcileGate.cancelPending()
         for (_, token) in thumbRequests { token.cancel() }
         thumbRequests.removeAll()
         lastWanted = []

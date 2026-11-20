@@ -278,8 +278,12 @@ final class ThumbnailWarm437Tests: XCTestCase {
         print("437 A② empty cache: wanted \(wanted.count) core \(core.count) "
               + "queued \(queued.count) warm asks \(h.grid.lastReconcileWarmRequests) peeks \(peeks)")
         XCTAssertEqual(wanted, core, "no disk cache ⇒ the band is exactly ±4 rows")
-        XCTAssertTrue(queued.isSubset(of: core),
-                      "an empty cache must not grow the request set")
+        // 449 — the *request* band is still core, but cancellation now stops at the outer ring
+        // (±`warmSlackRows` = ±12 rows), so asks from the band before a small scroll may still be
+        // in flight. That is intended (it is what keeps a continuous scroll from discarding bytes);
+        // what must not grow is the set this pass asks for, which `wanted == core` above proves.
+        XCTAssertTrue(queued.isSubset(of: h.grid.wideWantedIndexes()),
+                      "an empty cache must not queue anything past the ±12-row ring")
         XCTAssertEqual(h.grid.warmRequests, 0)
         XCTAssertEqual(h.grid.lastReconcileWarmRequests, 0)
         XCTAssertGreaterThan(peeks, 0, "the filter still peeks and finds nothing")
