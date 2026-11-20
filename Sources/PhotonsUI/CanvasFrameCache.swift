@@ -54,6 +54,41 @@ public final class CanvasFrameCache {
         case editing
     }
 
+    /// 458 — why a lookup missed. 「没存」and「存了但没读上」were indistinguishable before this;
+    /// a miss now names the component that moved.
+    public enum MissReason: String, CaseIterable, Sendable, Hashable {
+        /// No entry names this photo at all (a first visit, or the table was just released).
+        case noEntryForPhoto
+        /// The entry is the right canvas, but the display read its pixels under another
+        /// headroom/primaries. Never served: clearing the table is the honest answer.
+        case displayChanged
+        /// `decodeInputs` (white balance/detail/decoder), `editDigest` or `geometry` moved.
+        case documentChanged
+        /// `LoupeViewState` (mode/zoom/centre) moved.
+        case cameraChanged
+        /// The canvas, fit multiplier, role, crop/warning flag or highlight ceiling moved.
+        case canvasChanged
+        /// The entry was rendered from another rung than the one this job predicts.
+        case decodeScaleChanged
+    }
+
+    /// One counter per `MissReason`. A struct (not a dictionary) so the diagnostics line has a
+    /// stable spelling and a test can subscript it by case.
+    public struct MissReasons: Equatable, Sendable {
+        private var counts: [MissReason: Int] = [:]
+
+        public init() {}
+
+        public subscript(reason: MissReason) -> Int {
+            get { counts[reason] ?? 0 }
+            set { counts[reason] = newValue }
+        }
+
+        public var total: Int { counts.values.reduce(0, +) }
+
+        mutating func record(_ reason: MissReason) { counts[reason, default: 0] += 1 }
+    }
+
     /// What a cached canvas is *of*.
     ///
     /// Every component is a fact that reaches the pixels. Equality of `Key` is the claim "these two
@@ -83,11 +118,18 @@ public final class CanvasFrameCache {
         /// The clipping-warning grid is drawn into the frame's pixels.
         public let highlightWarning: Bool
         /// S4's ceiling (`DisplayOptions.headroom`).
+        ///
+        /// 458 — kept for the 434 key-completeness contract, but **not part of `softIdentity`**:
+        /// `lookup` checks the entry's rendered headroom bit-for-bit instead.
         public let headroom: Double
         /// The rung the frame was rendered from. Not in the dispatch list, but two rungs of the same
         /// photo are two different resamplings of the canvas and must never alias.
+        ///
+        /// 458 — same soft-key treatment as `headroom`: the caller predicts, the entry knows.
         public let decodeScale: Double
         /// `OutputPrimaries.rawValue` — the presenter's storage decides the S4 matrix.
+        ///
+        /// 458 — same soft-key treatment as `headroom`: checked against the entry, not spelled.
         public let primaries: String
         /// 320/323 — the highlight ceiling the renderer clamps at (a preference, not a document field).
         public let highlightCeiling: Double
@@ -139,6 +181,22 @@ public final class CanvasFrameCache {
 
         private static func number(_ value: Double) -> String {
             String(format: "%.17g", value.isFinite ? value : 0)
+        }
+
+        /// 458 — **the soft key**: everything that names *which canvas* it is, minus the three
+        /// display/rung facts that are verified against the entry instead of spelled twice.
+        ///
+        /// `headroom` and `primaries` are the live display reading at lookup time, but the stored
+        /// entry carries the values the GPU actually rendered under. Spelling either side with
+        /// `%.17g` made a 1-ulp difference two keys and every return a miss (the user's 「建好了但没
+        /// 读取上」). They are not identity here; `lookup` compares them with the entry and misses
+        /// when they differ. The rung is the same argument: the caller predicts, the entry knows.
+        public var softIdentity: String {
+            "\(photo)|\(decodeInputs)|\(editDigest)|\(geometry.isEmpty ? "-" : geometry)"
+                + "|\(cameraState)|\(viewport.width)x\(viewport.height)|\(mode)"
+                + "|fit=\(Self.number(fitScale))|role=\(canvasRole)"
+                + "|crop=\(cropIsActive ? 1 : 0)|warn=\(highlightWarning ? 1 : 0)"
+                + "|ceil=\(Self.number(highlightCeiling))"
         }
     }
 
@@ -197,6 +255,11 @@ public final class CanvasFrameCache {
     public private(set) var misses = 0
     public private(set) var stores = 0
     public private(set) var evictions = 0
+    /// 458 — misses by component.
+    public private(set) var missReasons = MissReasons()
+    /// 458 — set by `invalidateForDisplayChange`; the next lookup attributes its miss to the display
+    /// move even though the table is already empty.
+    private var displayChangePending = false
     /// Wall time of the last GPU blit (main thread, including the wait).
     public private(set) var lastBlitMilliseconds: Double = 0
 
@@ -232,18 +295,68 @@ public final class CanvasFrameCache {
         entries.first { $0.key == key }?.value
     }
 
+    /// 458 — the display-agnostic peek: the same canvas whatever headroom/primaries/rung it was
+    /// stored under. Diagnostic only, like `cachedCanvas(for:)`.
+    public func cachedCanvas(matching key: Key) -> CachedCanvas? {
+        entries.first { $0.key.softIdentity == key.softIdentity }?.value
+    }
+
     /// `hits` means 「这次上屏早于解码」, not 「省了一次解码」 (口径修正 2026-11-19 18:1x): a hit is
     /// presented immediately and the scheduled render still runs.
-    public func lookup(_ key: Key) -> CachedCanvas? {
+    ///
+    /// 458 — matching is **soft key + hard display/rung check**. The caller passes the display facts
+    /// it is about to present under; the entry must have been rendered under exactly those values
+    /// (bit-for-bit for the headroom, exact for the primaries and rung). A miss is counted, the
+    /// component that moved is named, and the entry is left alone (the next store replaces it).
+    public func lookup(_ key: Key, headroom: Double? = nil,
+                       primaries: OutputPrimaries? = nil,
+                       decodeScale: Double? = nil) -> CachedCanvas? {
         currentPhoto = key.photo
-        guard let index = entries.firstIndex(where: { $0.key == key }) else {
+        let requestedHeadroom = headroom ?? key.headroom
+        let requestedPrimaries = primaries
+            ?? OutputPrimaries(rawValue: key.primaries) ?? .displayP3
+        let requestedScale = decodeScale ?? key.decodeScale
+
+        if let index = entries.firstIndex(where: { $0.key.softIdentity == key.softIdentity }) {
+            let entry = entries[index]
+            let displayMatches = entry.value.headroom.bitPattern == requestedHeadroom.bitPattern
+                && entry.value.primaries == requestedPrimaries
+            let scaleMatches = entry.value.decodeScale == Float(requestedScale)
+            if displayMatches && scaleMatches {
+                displayChangePending = false
+                hits += 1
+                entries.remove(at: index)
+                entries.append(entry)                  // most recently used is last
+                return entry.value
+            }
             misses += 1
+            if !displayMatches { missReasons.record(.displayChanged) }
+            if !scaleMatches { missReasons.record(.decodeScaleChanged) }
             return nil
         }
-        hits += 1
-        let entry = entries.remove(at: index)
-        entries.append(entry)                  // most recently used is last
-        return entry.value
+
+        misses += 1
+        if displayChangePending {
+            displayChangePending = false
+            missReasons.record(.displayChanged)
+        } else if let closest = entries.first(where: { $0.key.photo == key.photo }) {
+            missReasons.record(Self.missReason(entryKey: closest.key, requested: key))
+        } else {
+            missReasons.record(.noEntryForPhoto)
+        }
+        return nil
+    }
+
+    /// Which component of a same-photo key moved. The display/rung components never reach here: they
+    /// are excluded from `softIdentity` and checked against the entry instead.
+    private static func missReason(entryKey: Key, requested: Key) -> MissReason {
+        if entryKey.decodeInputs != requested.decodeInputs
+            || entryKey.editDigest != requested.editDigest
+            || entryKey.geometry != requested.geometry {
+            return .documentChanged
+        }
+        if entryKey.cameraState != requested.cameraState { return .cameraChanged }
+        return .canvasChanged
     }
 
     // MARK: writing
@@ -272,11 +385,15 @@ public final class CanvasFrameCache {
         // `lookup` names the photo on screen; a store that arrives without one (a direct test
         // seed) names itself.
         if currentPhoto == nil { currentPhoto = key.photo }
-        if let existing = entries.firstIndex(where: { $0.key == key }) {
+        // 458 — one canvas has one entry. Replacing by the **soft** identity evicts a variant stored
+        // under a display reading that was never notified (a silent EDR/primaries move): the new
+        // frame's display facts are the only ones that may be served from now on.
+        if let existing = entries.firstIndex(where: { $0.key.softIdentity == key.softIdentity }) {
             entries.remove(at: existing)
         }
         entries.append(Entry(key: key, value: value))
         stores += 1
+        displayChangePending = false
         enforceCapacity()
         return true
     }
@@ -286,6 +403,19 @@ public final class CanvasFrameCache {
     public func cleanup() {
         entries.removeAll()
         currentPhoto = nil
+        displayChangePending = false
+    }
+
+    /// 458 — headroom or primaries moved: **clear, do not approximate**. A tolerance match between
+    /// the stored reading and the live one is exactly how a canvas rendered for one display gets
+    /// served on another; an empty table costs one development, a wrong pixel costs the user's trust.
+    public func invalidateForDisplayChange() {
+        // Only a table that actually held something was invalidated; a cold start's first lookup is
+        // 「no entry for this photo」, not a display move.
+        let hadEntries = !entries.isEmpty
+        entries.removeAll()
+        currentPhoto = nil
+        displayChangePending = hadEntries || displayChangePending
     }
 
     private func enforceCapacity() {

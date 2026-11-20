@@ -368,6 +368,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// identical pixels, and re-presenting the cached copy on every scheduled request would only add
     /// draws. A photo switch always changes the key.
     private var lastCanvasCachePresentedKey: String?
+    /// 458 — the display facts the cache entries were last known to be rendered under. A move here
+    /// clears the table (`refreshDisplay` / `setDisplayHeadroom`); it is never compared with a
+    /// tolerance at lookup time.
+    private var canvasCachePrimaries: OutputPrimaries?
+    /// 458 — what the last **cache hit** actually put on the layer. The acceptance compares these
+    /// with the entry's own values, so 「命中但头空间不对」 cannot pass silently.
+    public private(set) var lastPresentedHeadroomForTesting: Double?
+    public private(set) var lastPresentedPrimariesForTesting: OutputPrimaries?
     /// Document digests last seen per photo, so a digest move is recognised as an edit landing even
     /// on the harness' `frameSource` path (which has no `CatalogSession.editRevision`).
     private var canvasCacheSeenDigest: [String: String] = [:]
@@ -1878,6 +1886,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// Re-read the screen's EDR budget and apply it to the layer. A no-op when nothing moved, so a
     /// notification storm cannot turn into a render storm.
     public func refreshDisplay() {
+        noteCanvasCachePrimariesIfChanged()
         let screen = view.window?.screen ?? NSScreen.main
         let layerAcceptsEDR = (presenter?.storage ?? .linear16) == .linear16
         let next = DisplayHeadroom.current(for: screen, layerAcceptsEDR: layerAcceptsEDR)
@@ -1885,11 +1894,26 @@ public final class LoupeController: NSViewController, HeadroomSource {
         setDisplayHeadroom(next)
     }
 
-    /// Apply display facts explicitly (the screen observer, and the tests that need a chosen
-    /// headroom). A new budget is new pixels — `headroom` is in the display key chain.
+    /// 458 — the presenter can fall back from 16-bit to 8-bit sRGB when the layer refuses a drawable.
+    /// That is a primaries move even when the headroom number does not change, so the cache is
+    /// released here as well.
+    private func noteCanvasCachePrimariesIfChanged() {
+        let current = currentCanvasPrimaries
+        if let previous = canvasCachePrimaries, previous != current {
+            canvasFrameCache.invalidateForDisplayChange()
+            lastCanvasCachePresentedKey = nil
+        }
+        canvasCachePrimaries = current
+    }
+
+    /// 458 — the two spellings of "the display moved": a new headroom clears the window canvas cache
+    /// immediately. `lookup` also compares the values, so a missed notification still cannot serve a
+    /// frame rendered for another display — it misses and says `.displayChanged`.
     public func setDisplayHeadroom(_ next: DisplayHeadroom) {
         guard next != displayHeadroom else { return }
         displayHeadroom = next
+        canvasFrameCache.invalidateForDisplayChange()
+        lastCanvasCachePresentedKey = nil
         applyLayerEDR()
         updateStatusChip()
         if lastFrame != nil || autoRenderEnabled { scheduleRender() }
@@ -6056,8 +6080,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 let settledKind = job.kind == .scheduled || job.kind == .resize || job.cacheable
                 let atTarget = frame.decodeScale >= job.target - 1e-4
                 let storeKey: CanvasFrameCache.Key? = (settledKind && atTarget && !job.previewTarget)
-                    ? self.canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale),
-                                               headroom: frame.headroom, primaries: frame.primaries)
+                    ? self.canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale))
                     : nil
                 self.present(frame: frame, renderMilliseconds: ms, state: job.state,
                              storeKey: storeKey)
@@ -7397,9 +7420,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
             lastCanvasFrameCacheKey = key
             // One immediate present per key. The real frame that follows draws the same pixels; a
             // second cached present would only add a draw.
+            //
+            // 458 — the display facts are passed **here** from the same source the writer used
+            // (`headroom` / `currentCanvasPrimaries`). They are hard-checked against the entry, not
+            // spelled into the key: two live screen readings of the same display can differ in the
+            // last ulp, and that used to be two keys and a guaranteed miss.
             if key.identity != lastCanvasCachePresentedKey,
-               let cached = canvasFrameCache.lookup(key) {
+               let cached = canvasFrameCache.lookup(key, headroom: headroom,
+                                                    primaries: currentCanvasPrimaries,
+                                                    decodeScale: predictedScale) {
                 lastCanvasCachePresentedKey = key.identity
+                lastPresentedHeadroomForTesting = cached.headroom
+                lastPresentedPrimariesForTesting = cached.primaries
                 canvasCachePresents += 1
                 // 5.1 (口径修正 18:1x): the cached frame takes the place of the 1920 px stand-in
                 // *now*; the scheduled render below still develops and renders as usual.
@@ -7445,9 +7477,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// Everything that reaches the canvas pixels, spelled. See `CanvasFrameCache.Key`.
-    private func canvasFrameCacheKey(for job: RenderJob, decodeScale: Double,
-                                     headroom: Double? = nil,
-                                     primaries: OutputPrimaries? = nil) -> CanvasFrameCache.Key {
+    ///
+    /// 458 — `headroom` and `primaries` here are the **live** display facts, the same source for the
+    /// store and the lookup. The entry keeps what the GPU actually rendered under; `lookup` compares
+    /// the two and misses (never approximates) when they moved.
+    private func canvasFrameCacheKey(for job: RenderJob,
+                                     decodeScale: Double) -> CanvasFrameCache.Key {
         let edit = job.edit
         return CanvasFrameCache.Key(facts: LoupeFrameFacts(
             canvas: job.baseIdentity,
@@ -7459,11 +7494,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             canvasRole: job.canvasRole,
             cropIsActive: job.cropIsActive,
             highlightWarning: job.highlightWarning,
-            headroom: headroom ?? self.headroom,
+            headroom: headroom,
             decodeScale: decodeScale,
-            primaries: primaries ?? ((presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3),
+            primaries: currentCanvasPrimaries,
             ceiling: HighlightCeiling.current,
             digestSuffix: ""))
+    }
+
+    /// The presenter's storage decides the S4 matrix. One function, because the writer and the
+    /// reader must ask the same question (458).
+    private var currentCanvasPrimaries: OutputPrimaries {
+        (presenter?.storage ?? .linear16) == .srgb8 ? .sRGB : .displayP3
     }
 
     /// A document write landed for `photo` since the last job. That is the edit-landing hook (the
@@ -7495,6 +7536,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     public var canvasCacheRegime: String { canvasFrameCache.regime.rawValue }
+
+    /// 458 — why the lookups missed, by component. Surfaced unchanged on `--ui-smoke`'s report.
+    public var canvasCacheMissReasons: CanvasFrameCache.MissReasons {
+        canvasFrameCache.missReasons
+    }
 
     /// Which rungs are in memory right now (diagnostics and the first-frame test).
     public var residentRungScales: [Float] { ladder.residentScales }

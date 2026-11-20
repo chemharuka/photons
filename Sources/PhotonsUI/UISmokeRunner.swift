@@ -299,6 +299,16 @@ public final class UISmokeRunner {
             fail("no asset for the loupe")
         }
 
+        let canvasCache = root.loupeController.canvasFrameCacheDiagnostics
+        let reasons = root.loupeController.canvasCacheMissReasons
+        log("canvas cache            hits=\(canvasCache.hits)/misses=\(canvasCache.misses)"
+            + "/stores=\(canvasCache.stores)/evictions=\(canvasCache.evictions)"
+            + " count=\(canvasCache.count)/\(canvasCache.capacity) regime=\(root.loupeController.canvasCacheRegime)"
+            + " miss reasons: noEntry=\(reasons[.noEntryForPhoto])"
+            + " display=\(reasons[.displayChanged]) document=\(reasons[.documentChanged])"
+            + " camera=\(reasons[.cameraChanged]) canvas=\(reasons[.canvasChanged])"
+            + " decodeScale=\(reasons[.decodeScaleChanged])")
+
         return finish()
     }
 
