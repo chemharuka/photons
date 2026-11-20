@@ -206,6 +206,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
     /// §386 — 「模型降噪…」's target.
     private lazy var denoiseMenuTarget = DenoiseMenuTarget(session: session)
+    /// 453 — 「自动调整」's target (single-photo only).
+    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(session: session)
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
 
@@ -541,6 +543,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // §386 — 「模型降噪…」, same builder as the grid and the sidebar.
         DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session, target: denoiseMenuTarget,
                                   selectedIDs: session.selectedAssets.map(\.id))
+        // 453 — 「自动调整」, same builder; hidden for multi-selection (batch is 454).
+        AutoAdjustMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                     target: autoAdjustMenuTarget)
         // 442 —— 与网格/侧栏同一条「导出…」。
         ExportMenuBuilder.attach(to: contextMenu.menu, session: session,
                                  selectedIDs: session.selectedAssets.map(\.id))

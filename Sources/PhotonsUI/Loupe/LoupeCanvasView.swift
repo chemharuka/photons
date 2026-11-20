@@ -335,6 +335,12 @@ public final class LoupeCanvasView: NSView {
         }
     }
 
+    /// 453 — right-click on the canvas. The view owns no verb: `LoupeController` builds the menu
+    /// (「自动调整」) and the view only forwards the event.
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        controller?.canvasContextMenu(for: event) ?? super.menu(for: event)
+    }
+
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)

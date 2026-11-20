@@ -529,6 +529,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     private lazy var hdrMenuTarget = HDRMenuTarget(session: session)
     /// §386 — 「模型降噪…」, built from the same three-line shape.
     private lazy var denoiseMenuTarget = DenoiseMenuTarget(session: session)
+    /// 453 — 「自动调整」's target. The row is hidden for multi-selection (batch is 454).
+    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(session: session)
     private let container = FlippedCanvasView()
     private let flow = NSCollectionViewFlowLayout()
     private let bridge = ObservationBridge()
@@ -1587,6 +1589,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         DenoiseMenuBuilder.attach(to: contextMenu.menu, session: session,
                                   target: denoiseMenuTarget,
                                   selectedIDs: session.selectedAssets.map(\.id))
+        // 453 — 「自动调整」, single-photo only (multi hides it; 454 is the batch ticket).
+        AutoAdjustMenuBuilder.attach(to: contextMenu.menu, session: session,
+                                     target: autoAdjustMenuTarget)
         // 442 —— 选好照片右键就能导出（单选/多选都行），与「文件 ▸ 导出…」同一个 selector。
         ExportMenuBuilder.attach(to: contextMenu.menu, session: session,
                                  selectedIDs: session.selectedAssets.map(\.id))
@@ -2144,6 +2149,63 @@ public enum DenoiseMenuBuilder {
         let after = insertAt + DenoiseEngine.allCases.count
         let alreadySeparated = after < menu.items.count && menu.items[after].isSeparatorItem
         if !alreadySeparated { menu.insertItem(.separator(), at: after) }
+    }
+}
+
+/// 右键 ▸「自动调整」 — 453's one verb: 黑电平 + 明暗 + 自动颜色, one history row.
+///
+/// The row is present only for a **single** photo. 批量自动调整 is a background job (454) and does
+/// not belong to this ticket, so a multi-selection hides the row instead of promising a batch that
+/// would run synchronously in the middle of the menu tracking. The loupe canvas builds its own menu
+/// (one photo by definition).
+@MainActor
+public final class AutoAdjustMenuTarget: NSObject {
+    public weak var session: CatalogSession?
+    /// The loupe supplies its own verb; the two browsers send the command through the responder chain
+    /// so `EditorWindowController` can open the photo first.
+    public var perform: (() -> Void)?
+
+    public init(session: CatalogSession?, perform: (() -> Void)? = nil) {
+        self.session = session
+        self.perform = perform
+        super.init()
+    }
+
+    @objc func autoDevelopPressed(_ sender: Any?) {
+        if let perform {
+            perform()
+            return
+        }
+        NSApp.sendAction(#selector(EditorWindowController.autoDevelopAction(_:)), to: nil, from: sender)
+    }
+}
+
+@MainActor
+public enum AutoAdjustMenuBuilder {
+
+    public static let title = Loc.t("自动调整")
+
+    private static var action: Selector { #selector(AutoAdjustMenuTarget.autoDevelopPressed(_:)) }
+
+    /// Put the row at the top of a browser's shared context menu. Repeated opens remove the previous
+    /// row by **action** (the title is a sentinel, the action is the identity), then the single-photo
+    /// guard decides whether it comes back.
+    public static func attach(to menu: NSMenu, session: CatalogSession?,
+                              target: AutoAdjustMenuTarget?) {
+        for (index, item) in menu.items.enumerated().reversed() where item.action == action {
+            menu.removeItem(at: index)
+            if index < menu.items.count, menu.items[index].isSeparatorItem {
+                menu.removeItem(at: index)
+            }
+        }
+        guard let session else { return }
+        // 454 owns batch auto; hide for a multi-selection rather than run N synchronous measurements.
+        guard session.mode == .loupe || session.selectedAssets.count == 1 else { return }
+        guard session.anchorID != nil || !session.selectedAssets.isEmpty else { return }
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = target
+        menu.insertItem(item, at: 0)
+        menu.insertItem(.separator(), at: 1)
     }
 }
 

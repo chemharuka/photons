@@ -4658,6 +4658,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case light
         case black
         case whiteBalance
+        case all
     }
     public private(set) var pendingAuto: PendingAuto?
 
@@ -4739,6 +4740,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = autoBlackOffset()
         case .whiteBalance:
             _ = autoWhiteBalance()
+        case .all:
+            _ = autoDevelop()
         }
     }
 
@@ -4975,6 +4978,63 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let scale = scaleOverride ?? backingScale
         guard let mapping = cropMapping(viewport: viewport) else { return nil }
         return cropTool.layout(mapping: mapping, source: cropSourceSize, pointScale: scale)
+    }
+
+    // MARK: 自动调整 — 复合动作 (453)
+
+    /// **派单 453 — 自动调整.** 黑电平 → 明暗 → 自动颜色, **one** document write and **one** history row.
+    ///
+    /// The order is load-bearing: `AutoLight` step 4 reads `light.blackOffset` to cancel the lift, so
+    /// 明暗 must measure the document that already carries the new black level. The three candidates
+    /// are measured against staged copies and written together, so no intermediate document is ever
+    /// committed (or observed) between them; a step whose candidate is `nil` is skipped.
+    ///
+    /// The full-rung gate is 448's: a click before the anchor's full frame queues `.all` and returns
+    /// `false`; `runPendingAutoIfReady` calls this same verb when that frame lands.
+    @discardableResult
+    public func autoDevelop() -> Bool {
+        guard let session, session.mode == .loupe else { return false }
+        if autoAdjustMustWait() {
+            queuePendingAuto(.all)
+            return false
+        }
+        var staged = session.edit
+        var changed = false
+        // 1. 黑电平 — the floor the 明暗 measurement must see.
+        if let black = blackOffsetCandidate() {
+            staged.light.blackOffset = black
+            changed = true
+        }
+        // 2. 明暗 — measured on the staged black level.
+        if let plan = lightPlanCandidate(from: staged) {
+            staged = plan.apply(to: staged)
+            changed = true
+        }
+        // 3. 自动颜色 — measured on the staged black level + 明暗.
+        if let vibrance = colorVibranceCandidate(from: staged) {
+            staged.color.vibrance = vibrance
+            changed = true
+        }
+        guard changed else { return false }
+        session.applyEdit { $0 = staged }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("自动调整"), coalesce: false)
+        return true
+    }
+
+    /// 453 — the loupe canvas' right-click menu. The canvas view forwards `menu(for:)` here; a photo
+    /// and the loupe are the only requirements, and the row calls this controller's own verb.
+    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(session: session) { [weak self] in
+        _ = self?.autoDevelop()
+    }
+
+    public func canvasContextMenu(for event: NSEvent) -> NSMenu? {
+        _ = event
+        guard let session, session.mode == .loupe, session.anchorID != nil else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        AutoAdjustMenuBuilder.attach(to: menu, session: session, target: autoAdjustMenuTarget)
+        return menu
     }
 
     /// The projection the crop layout is built from at the current camera.
