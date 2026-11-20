@@ -34,9 +34,12 @@ public struct HalfSizeCrop: Sendable, Equatable {
     }
 
     /// The sheet's grey line; `nil` when nothing is cropped (the row is not built at all).
+    ///
+    /// 438 —— 用户口径：「Half Size 右侧的提示太长了，修改为：将会裁剪至 1000x2000 ……，前面一句话不要」
+    /// ⇒ 去掉了「半尺寸需要偶数像素：当前 W×H，」这半句，只报结果尺寸与裁边。
     public func hint(current: ImageSize) -> String? {
         guard isNeeded else { return nil }
-        return Loc.t("半尺寸需要偶数像素：当前 {0}×{1}，将裁到 ", String(describing: (current.width)), String(describing: (current.height)))
+        return Loc.t("将会裁剪至 ")
             + "\(current.width - dx)×\(current.height - dy)（\(sideText)）"
     }
 

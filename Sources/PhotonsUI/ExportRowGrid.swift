@@ -83,6 +83,12 @@ enum ExportRowGrid {
     /// 下拉菜单（预设 / 元数据 / 重名 / 水印位置）的宽度。
     static let presetWidth: CGFloat = 150
     static let menuWidth: CGFloat = 160
+    /// 438 —— 增益图那一行两个分段控件的宽度：**一段 = 控制列的 1/5**，所以两段的分段控件 = 2/5。
+    /// 控制列 402 pt ⇒ 一段 80.4、控件 **161 pt**；两个控件 322 + 中间空隙 80 = 402，正好铺满控制列，
+    /// `ISO/Apple` 因此自然贴右缘。用户口径：「RGB 就是 1/5，所以 RGB/B&W 是 2/5，用控制列 402 算」。
+    static var gainMapControlWidth: CGFloat { (controlWidth / 5 * 2).rounded() }
+    /// 两个分段控件之间的空隙 = 控制列的 1/5（402 ⇒ 80 pt）。
+    static var gainMapControlGap: CGFloat { (controlWidth / 5).rounded() }
 
     // MARK: 控件
 

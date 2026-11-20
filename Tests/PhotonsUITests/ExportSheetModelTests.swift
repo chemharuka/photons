@@ -617,7 +617,7 @@ final class ExportSheetModelTests: XCTestCase {
         XCTAssertEqual(sheet.hdrKind, .gainMap)
         sheet.selectionContents = [ImageSize(width: 6001, height: 4001)]
         XCTAssertEqual(sheet.halfSizeCropHint,
-                       "半尺寸需要偶数像素：当前 6001×4001，将裁到 6000×4000（右/下各 1 px）")
+                       "将会裁剪至 6000×4000（右/下各 1 px）")
         XCTAssertEqual(sheet.predictedSizeText(native: ImageSize(width: 6001, height: 4001)),
                        "6000×4000")
 
