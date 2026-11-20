@@ -62,6 +62,23 @@ public final class ImportService: @unchecked Sendable {
         self.catalog = catalog
     }
 
+    /// 451 — the startup sweep's DB half: a session still saying `running` belongs to a process that
+    /// died. `run` already rewrites those at the start of the *next* import (to `failed`); this is
+    /// the same bookkeeping for the moment the library is opened, before the user does anything.
+    ///
+    /// Returns the number of rows changed. `interrupted` is deliberately not an `ImportState` case:
+    /// schema stays as it is (the state column is free text), and only the value of these rows moves.
+    @discardableResult
+    public static func markRunningSessionsInterrupted(in catalog: Catalog) throws -> Int {
+        try catalog.dbQueue.write { db in
+            try db.execute(sql: """
+                UPDATE import_sessions SET state = 'interrupted'
+                WHERE state = 'running'
+                """)
+            return db.changesCount
+        }
+    }
+
     // MARK: main
 
     /// `onFile` is called after *every* file (`processed, total`) — the GUI progress line needs
