@@ -212,9 +212,10 @@ public final class TopBarView: NSView {
     static let gridSymbol = "square.grid.2x2"
     static let singleSymbol = "rectangle.portrait"
     private let modeButton = ToolButton(title: Loc.t("网格"), symbol: TopBarView.gridSymbol)
-    /// 「胶片条 / 侧栏」这一对同理，互斥。
-    private let stripButton = ToolButton(title: Loc.t("胶片条"), symbol: "rectangle.split.1x2")
-    private let sidebarButton = ToolButton(title: Loc.t("侧栏"), symbol: "sidebar.left")
+    /// 「胶片条 / 侧栏」也是**一个**按钮（与网格/单图同一个行为）：写当前形态，点一下换到另一个。
+    static let filmstripSymbol = "rectangle.split.1x2"
+    static let sidebarSymbol = "sidebar.left"
+    private let browserButton = ToolButton(title: Loc.t("胶片条"), symbol: TopBarView.filmstripSymbol)
 
     /// 442 —— 按钮之间的间距（原 10 pt，用户口径「减少为现在的一半」）。
     static let itemGap: CGFloat = 5
@@ -261,8 +262,6 @@ public final class TopBarView: NSView {
         exportButton.action = #selector(EditorWindowController.exportAction(_:))
         exportButton.toolTip = Loc.t("导出…") + "（⇧⌘E）"
         exportButton.isEnabled = false
-        stripButton.target = self
-        stripButton.action = #selector(stripTapped)
         sortButton.target = self
         sortButton.action = #selector(sortTapped)
         // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
@@ -270,13 +269,11 @@ public final class TopBarView: NSView {
 
         modeButton.target = self
         modeButton.action = #selector(modeTapped(_:))
-        stripButton.target = self
-        stripButton.action = #selector(browserTapped(_:))
-        sidebarButton.target = self
-        sidebarButton.action = #selector(browserTapped(_:))
+        browserButton.target = self
+        browserButton.action = #selector(browserTapped(_:))
 
         for v: NSView in [openButton, importButton, exportButton, modeButton,
-                          stripButton, sidebarButton, sortButton, statusCluster] {
+                          browserButton, sortButton, statusCluster] {
             addSubview(v)
         }
         // 442 —— 顶栏只留**一条**分隔线（导出 | 网格/单图），其余按钮靠间距分组。
@@ -315,8 +312,9 @@ public final class TopBarView: NSView {
         modeButton.title = mode == .grid ? Loc.t("网格") : Loc.t("单图")
         modeButton.image = ToolButton.icon(mode == .grid ? Self.gridSymbol : Self.singleSymbol,
                                            accessibility: modeButton.title)
-        stripButton.isActive = filmstrip
-        sidebarButton.isActive = !filmstrip
+        browserButton.title = filmstrip ? Loc.t("胶片条") : Loc.t("侧栏")
+        browserButton.image = ToolButton.icon(filmstrip ? Self.filmstripSymbol : Self.sidebarSymbol,
+                                              accessibility: browserButton.title)
         // 047: the corner carries the **build** revision, so a glance answers "is this the build with
         // my merge?" without going back to a commit list. Since 2026-10-27 the four facts are one
         // block of one type (`TopBarStatusCluster`), left to right:
@@ -348,17 +346,38 @@ public final class TopBarView: NSView {
 
     /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
     public var sortButtonView: ToolButton { sortButton }
+    /// 442 —— 排序刷新期间把按钮置灰（点击会被 `WorkspaceRootView` 丢弃）。
+    public func setSortEnabled(_ enabled: Bool) { sortButton.isEnabled = enabled }
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
-    public var filmstripButtonView: ToolButton { stripButton }
+    /// 442 —— 兼容旧读数：顶栏现在只有一个「胶片条/侧栏」按钮。
+    public var filmstripButtonView: ToolButton { browserButton }
+    public var browserButtonView: ToolButton { browserButton }
     /// 442 —— 切换按钮的本体（测试量宽度/激活底色用）。
     public var modeButtonView: ToolButton { modeButton }
-    public var sidebarButtonView: ToolButton { sidebarButton }
+
     /// 网格/单图那一个按钮的固定宽度（两者较宽者），测试据此断言「切换不抖」。
     public var modeButtonWidthForTesting: CGFloat { Self.modeWidth() }
+    public var sortButtonWidthForTesting: CGFloat { Self.sortWidth() }
+    public var browserButtonWidthForTesting: CGFloat { Self.browserWidth() }
     static func modeWidth() -> CGFloat {
         let a = ToolButton(title: Loc.t("网格"), symbol: gridSymbol)
         let b = ToolButton(title: Loc.t("单图"), symbol: singleSymbol)
         return max(a.intrinsicContentSize.width, b.intrinsicContentSize.width)
+    }
+
+    /// 442 —— 排序按钮（`新→旧` ⇄ `旧→新`）同样按**两者较宽者**定宽：它是同一个按钮换文字，
+    /// 不固定的话每次切换顶栏都会抖一下。用户口径：「Olderst first 点击切换为 Newest first 目前也要统一宽度」。
+    /// 442 —— 「胶片条/侧栏」那一个按钮的固定宽度（两者较宽者）。
+    static func browserWidth() -> CGFloat {
+        let a = ToolButton(title: Loc.t("胶片条"), symbol: filmstripSymbol)
+        let b = ToolButton(title: Loc.t("侧栏"), symbol: sidebarSymbol)
+        return max(a.intrinsicContentSize.width, b.intrinsicContentSize.width)
+    }
+
+    static func sortWidth() -> CGFloat {
+        PhotoSortOrder.allCases
+            .map { ToolButton(title: $0.label, symbol: PhotoSortOrder.symbol).intrinsicContentSize.width }
+            .max() ?? 0
     }
     /// 「打开」按钮本体（A①/A⑥ 用它作为样式基准）。
     public var openButtonView: ToolButton { openButton }
@@ -389,14 +408,10 @@ public final class TopBarView: NSView {
         // 「网格/单图」是一个按钮，宽度固定为两者较宽者。
         place(modeButton, width: Self.modeWidth())
         x += Self.itemGap
-        // 「胶片条 / 侧栏」一对：同样按较宽的来。
-        let browserWidth = max(stripButton.intrinsicContentSize.width,
-                               sidebarButton.intrinsicContentSize.width)
-        place(stripButton, width: browserWidth)
+        // 「胶片条/侧栏」一个按钮：宽度固定为两者较宽者。
+        place(browserButton, width: Self.browserWidth())
         x += Self.itemGap
-        place(sidebarButton, width: browserWidth)
-        x += Self.itemGap
-        place(sortButton, width: sortButton.intrinsicContentSize.width)
+        place(sortButton, width: Self.sortWidth())
 
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
@@ -422,7 +437,6 @@ public final class TopBarView: NSView {
     }
 
     @objc private func openTapped() { onOpen?() }
-    @objc private func stripTapped() { onToggleFilmstrip?() }
     @objc private func sortTapped() { onToggleSort?() }
     @objc private func modeTapped(_ sender: ToolButton) {
         // 按钮写的是当前模式 ⇒ 点它换到另一个。
@@ -430,7 +444,8 @@ public final class TopBarView: NSView {
     }
 
     @objc private func browserTapped(_ sender: ToolButton) {
-        onBrowserMode?(sender === stripButton ? .filmstrip : .list)
+        // 按钮写的是当前形态 ⇒ 点它换到另一个。
+        onBrowserMode?(sender.title == Loc.t("胶片条") ? .list : .filmstrip)
     }
 }
 
@@ -556,6 +571,25 @@ public final class WorkspaceRootView: NSView {
     public var canExport: Bool { !session.selection.isEmpty }
 
     private let defaults = UserDefaults.standard
+
+    // MARK: - 442 · 排序切换的「刷新中」闸门
+
+    /// 上一次排序切换之后，**刷新完成之前不再接受点击**。
+    ///
+    /// 用户口径（2026-11-20）：「点击切换后直到刷新完成，不响应后面的点击。例如重复点击 Oldest first
+    /// 几次，如果照片很多每次加载四五秒，就会不断切换直到点击的次数都响应完」。
+    /// 所以第二次点击**被丢弃**（不是排队）：连点 5 下只切 1 次。
+    private var sortBusyDeadline: CFAbsoluteTime = 0
+    private var sortSettleTimer: Timer?
+    /// 测试读数：这次刷新期间被忽略的点击数。
+    public private(set) var sortClicksIgnored = 0
+    /// 测试读数：闸门当前是否关着。
+    public var isSortBusy: Bool { CFAbsoluteTimeGetCurrent() < sortBusyDeadline }
+
+    /// 安全上限：无论缩略图队列说什么，5 s 后一定放开，按钮不许卡死。
+    private static let sortSettleTimeout: CFAbsoluteTime = 5.0
+    /// 最短占用：重排刚开始时队列还是空的，太早放开会让连点漏过去。
+    private static let sortSettleMinimumTicks = 5      // × 0.1 s = 0.5 s
 
     public init(session: CatalogSession) {
         let browserPane = BrowserPaneController(session: session)
@@ -688,8 +722,14 @@ public final class WorkspaceRootView: NSView {
         // `session.sortOrder`），按钮文字在 `updateTopBar` 里跟着刷新。
         topBar.onToggleSort = { [weak self] in
             guard let self else { return }
+            // 442 —— 刷新期间不接受后续点击（丢弃，不排队）。
+            if self.isSortBusy {
+                self.sortClicksIgnored += 1
+                return
+            }
             self.session.toggleSortOrder()
             self.updateTopBar()
+            self.beginSortSettling()
         }
 
         // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
@@ -895,6 +935,28 @@ public final class WorkspaceRootView: NSView {
         applyBrowserMode()
         needsLayout = true
         updateTopBar()
+    }
+
+    /// 442 —— 排序切换之后关门，等缩略图队列空下来再开：`pending 0 && queueDepth 0`，
+    /// 最短 0.5 s、最长 5 s。期间按钮置灰，点击被丢弃。
+    private func beginSortSettling() {
+        sortBusyDeadline = CFAbsoluteTimeGetCurrent() + Self.sortSettleTimeout
+        topBar.setSortEnabled(false)
+        sortSettleTimer?.invalidate()
+        let deadline = sortBusyDeadline
+        var ticks = 0
+        sortSettleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            ticks += 1
+            let idle = self.gridController.pendingThumbnailRequests == 0
+                && self.gridController.thumbnailQueueDepth == 0
+            let timedOut = CFAbsoluteTimeGetCurrent() >= deadline
+            guard timedOut || (idle && ticks >= Self.sortSettleMinimumTicks) else { return }
+            timer.invalidate()
+            self.sortSettleTimer = nil
+            self.sortBusyDeadline = 0
+            self.topBar.setSortEnabled(true)
+        }
     }
 
     public func toggleFilmstrip() {

@@ -444,7 +444,7 @@ final class SortOrderUITests: XCTestCase {
         XCTAssertEqual(sort.frame.midY, neighbour.frame.midY, accuracy: 0.001, "与邻居不在同一基线")
         XCTAssertEqual(sort.frame.minY, neighbour.frame.minY, accuracy: 0.001)
         // 442 —— 排序按钮左边现在是「侧栏」按钮（胶片条旁边多了一个），间距按 `TopBarView.itemGap`。
-        XCTAssertEqual(sort.frame.minX - bar.sidebarButtonView.frame.maxX, TopBarView.itemGap,
+        XCTAssertEqual(sort.frame.minX - bar.browserButtonView.frame.maxX, TopBarView.itemGap,
                        accuracy: 0.001, "与左邻（侧栏）的间距不是 itemGap")
         XCTAssertLessThan(sort.frame.maxX, bar.statusCluster.frame.minX, "按钮压到了右上角状态文本")
 

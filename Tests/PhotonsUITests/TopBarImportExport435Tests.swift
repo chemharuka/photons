@@ -406,4 +406,55 @@ final class TopBarImportExport435Tests: XCTestCase {
         XCTAssertEqual(button.frame.width, width, accuracy: 0.01, "切换模式后按钮宽度变了")
         XCTAssertNotNil(button.image)
     }
+
+    /// 442 —— 排序按钮也是「一个按钮换文字」，宽度必须固定为两种顺序里较宽的那个，
+    /// 否则每次切换顶栏都会抖（用户口径：「Olderst first 点击切换为 Newest first 目前也要统一宽度」）。
+    func testSortButtonKeepsItsWidthAcrossBothOrders() throws {
+        let bar = makeBar()
+        bar.updateSortOrder(.newestFirst)
+        bar.layoutSubtreeIfNeeded()
+        let width = bar.sortButtonView.frame.width
+        XCTAssertEqual(width, bar.sortButtonWidthForTesting, accuracy: 0.01,
+                       "排序按钮宽度不是两种顺序里较宽的那个")
+
+        bar.updateSortOrder(.oldestFirst)
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertEqual(bar.sortButtonView.frame.width, width, accuracy: 0.01,
+                       "切换顺序后排序按钮宽度变了")
+        XCTAssertEqual(bar.sortButtonView.title, PhotoSortOrder.oldestFirst.label)
+    }
+
+    /// 442 —— 「胶片条 / 侧栏」也是一个按钮：标题写当前形态，点一下换到另一个，宽度固定。
+    func testBrowserButtonTogglesFilmstripAndSidebarKeepingWidth() throws {
+        let bar = makeBar()
+        let button = bar.browserButtonView
+        bar.update(mode: .grid, assetCount: 45, selectionCount: 4,
+                   libraryName: "topbar-demo", filmstrip: true)
+        bar.layoutSubtreeIfNeeded()
+        let width = button.frame.width
+        XCTAssertEqual(button.title, Loc.t("胶片条"))
+        bar.update(mode: .grid, assetCount: 45, selectionCount: 4,
+                   libraryName: "topbar-demo", filmstrip: false)
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertEqual(button.title, Loc.t("侧栏"))
+        XCTAssertEqual(button.frame.width, width, accuracy: 0.01, "切换后宽度变了")
+        XCTAssertEqual(width, bar.browserButtonWidthForTesting, accuracy: 0.01)
+    }
+
+    /// 442 —— 排序切换后**刷新完成之前**的点击被丢弃（不排队）：连点 3 下只切 1 次。
+    func testSortClicksDuringRefreshAreDropped() throws {
+        let controller = EditorWindowController(size: NSSize(width: 1600, height: 940))
+        defer { controller.window?.orderOut(nil) }
+        let root = try XCTUnwrap(controller.rootView)
+        let before = root.session.sortOrder
+        let toggle = try XCTUnwrap(root.topBar.onToggleSort)
+        toggle()
+        XCTAssertTrue(root.isSortBusy, "第一次点击之后闸门应关着")
+        let afterFirst = root.session.sortOrder
+        XCTAssertNotEqual(afterFirst, before, "第一次点击应该切了顺序")
+        toggle()
+        toggle()
+        XCTAssertEqual(root.session.sortOrder, afterFirst, "刷新期间的点击不许再切")
+        XCTAssertEqual(root.sortClicksIgnored, 2, "被丢弃的点击应计数")
+    }
 }
