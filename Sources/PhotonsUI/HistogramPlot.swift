@@ -222,19 +222,36 @@ extension HistogramCardFormat {
         return percent(histogram[channel].clippedScreen)
     }
 
-    /// The vertical scale for both segments: the largest count *between* the drawn path's first and
-    /// last bin.
+    /// The vertical scale for both segments: the largest count *between* each channel's drawn path's
+    /// first and last bin, shared by every channel passed in.
     ///
-    /// Same rule as 005f's, generalised to the two-segment axis: a photo with a clipped highlight has
-    /// thousands of pixels in the last bin and a normal distribution everywhere else, and scaling by
-    /// that spike would draw a flat line along the bottom. When the ends are not the peak they are
-    /// included as normal.
+    /// **One ceiling for all channels (446).** Every curve is normalised by the same number, so the
+    /// three heights are comparable across colours: a bin with 50 samples sits at the same y on red,
+    /// green and blue, and only the channel with the overall peak reaches 100 %. Taking a peak per
+    /// channel made each colour touch the card's top independently and flattened the other two.
+    ///
+    /// The rule itself is 005f's, unchanged: a photo with a clipped highlight has thousands of pixels
+    /// in the last bin and a normal distribution everywhere else, and scaling by that spike would draw
+    /// a flat line along the bottom. So the drawn path's two ends are skipped, and when the ends are
+    /// not the peak they are included as normal. If no channel has a non-zero interior bin (all
+    /// zero, or only the ends), fall back to the largest count anywhere so an all-end histogram still
+    /// has a height.
+    public static func scalePeak(_ channels: [HistogramChannel]) -> Int {
+        var interiorPeak = 0
+        var overallPeak = 0
+        for channel in channels {
+            let all = channel.bins + channel.hdrBins
+            overallPeak = max(overallPeak, all.max() ?? 0)
+            guard all.count > 2 else { continue }
+            for i in 1..<(all.count - 1) { interiorPeak = max(interiorPeak, all[i]) }
+        }
+        return interiorPeak > 0 ? interiorPeak : overallPeak
+    }
+
+    /// One channel's peak, through the same shared-ceiling rule (kept for callers that scale a single
+    /// channel, such as the geometry tests).
     public static func scalePeak(_ channel: HistogramChannel) -> Int {
-        let all = channel.bins + channel.hdrBins
-        guard all.count > 2 else { return all.max() ?? 0 }
-        var interior = 0
-        for i in 1..<(all.count - 1) { interior = max(interior, all[i]) }
-        return interior > 0 ? interior : (all.max() ?? 0)
+        scalePeak([channel])
     }
 
     /// Points for one channel across **both** segments, in `axis.plot`'s coordinates (y down).
