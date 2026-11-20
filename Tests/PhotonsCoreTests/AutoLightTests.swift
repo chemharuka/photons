@@ -294,7 +294,7 @@ final class AutoLightTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(plan.highlights, -100)
         XCTAssertLessThanOrEqual(plan.whites, 0)
         XCTAssertGreaterThanOrEqual(plan.whites, -AutoLight.whiteTravelEnd, "白色 有上限，不是 −100")
-        XCTAssertLessThanOrEqual(r.textureLossHighlightsOnly, AutoLight.highlightLossThreshold + 0.02,
+        XCTAssertLessThanOrEqual(r.textureLossHighlightsOnly, AutoLight.highlightLossThreshold,
                                 "高光自己的纹理损失必须落在判据内，实测 \(r.textureLossHighlightsOnly)")
         // 4 — 黑色 negative, inside the travel.
         XCTAssertLessThanOrEqual(plan.blacks, 0)
@@ -416,11 +416,17 @@ final class AutoLightTests: XCTestCase {
         // **Both halves in one test**, so that hard-coding the gate's mistake into the shipped path
         // breaks this test rather than only the gated line: the shipped plan must reach 白色 on this
         // frame, and the gated plan must not.
-        let shipped = try run(hotEdit(), lossAtDepth: expensiveHighlights())
+        // **441** — 这条门只钉「判据 → 白色」那一行；主体地板会先加中间调，改变 `settled` 的
+        // 起点，把 441 的效应混进 ⑧a。两半都在关掉主体地板（⑧c）的状态下跑，门仍然证明
+        // 「判据恒 0 ⇒ 白色 不启用」这一行是承重的。
+        var noSubject = AutoLight.Gates()
+        noSubject.collapsesSubjectTarget = true
+        let shipped = try run(hotEdit(), gates: noSubject, lossAtDepth: expensiveHighlights())
         XCTAssertLessThan(shipped.whites, 0, "出货路径在本帧**必须**启用白色，否则本门无从谈起")
 
         var gates = AutoLight.Gates()
         gates.criterionAlwaysZeroLoss = true
+        gates.collapsesSubjectTarget = true
         let gated = try run(hotEdit(), gates: gates, lossAtDepth: expensiveHighlights())
         XCTAssertEqual(gated.whites, 0, "⑧a：判据恒返 0 ⇒ 永不该启用白色，实际 \(gated.whites)")
         XCTAssertLessThan(gated.highlights, 0, "高光 仍然工作：\(gated.highlights)")
@@ -512,8 +518,11 @@ final class AutoLightTests: XCTestCase {
         // 那是照片的属性、不是增益的产物，walk-back 永远无法把它压回 1.6。
         XCTAssertEqual(shipped.report.exposureBackstops, 0,
                        "新口径没有 tail guard，回退恒 0，实际 \(shipped.report.exposureBackstops)")
-        XCTAssertGreaterThan(gated.report.exposureEV, shipped.report.exposureEV,
-                             "⑧d：旧口径 p99→1.5 比新口径 p95→1.1 给得更多光（\(gated.report.exposureEV) vs \(shipped.report.exposureEV)）")
+        // 最终 EV 可能被步骤 3 的 `refillBody` 拉回同一档（两条口径都会降 EV 补主体），所以这里
+        // 只要求旧口径**不比新口径少**；真正区分两条口径的是下面那条「旧口径把 p99 推到更高」。
+        XCTAssertGreaterThanOrEqual(gated.report.exposureEV, shipped.report.exposureEV - 1e-9,
+                                    "⑧d：旧口径 p99→1.5 给的光不该少于新口径 p95→1.1"
+                                    + "（\(gated.report.exposureEV) vs \(shipped.report.exposureEV)）")
         XCTAssertGreaterThan(gated.report.p99AfterExposure, shipped.report.p99AfterExposure,
                              "⑧d：旧口径把 p99 推到 1.5 附近，新口径不会")
     }
@@ -742,8 +751,9 @@ final class AutoLightTests: XCTestCase {
     ///     and the one frame outside it (L1030940, 1.83) takes **at most one**. The ratio itself is a
     ///     property of the picture — measured 1.831 at −0.5 EV *and* +3 EV — so no walk-back can move it
     ///     into the ceiling; v2's absolute guard spent 10 futile steps per run there (20 in total).
-    ///   · A④ **the finished picture's p50 is within 0.25 stops of the owner's own** (median of |Δ|). This
-    ///     is the ticket's real target, and it is what the `p99TopTarget` rework buys.
+    ///   · A④ **the finished picture's whole-frame p50 is within 0.25 stops of the owner's own**
+    ///     (median of |Δ|) —— 这是 422 的原判据，441 返工 §5.4 明确不许换。主体 `subjectP50` 的差
+    ///     作为**附加读数**并列打印（本单治理的量，但不是 A④ 的门）。
     ///   · A⑤ the finished render's clipping median lands in 1 %–5 % (L1030941's ~5 % is allowed).
     ///   · B① `plan.contrast == 0` on every frame (步骤 5 删除).
     func testTheOwnersFiveFramesAdvanceTheCalibrationAndLeaveContrastAtZero() throws {
@@ -754,6 +764,7 @@ final class AutoLightTests: XCTestCase {
 
         var gains: [Double] = []          // plan exposure − the 0.98 baseline's exposure
         var p50Diffs: [Double] = []
+        var subjectDiffs: [Double] = []
         var clips: [Double] = []
         var backstopFrames = 0
         var backstopTotal = 0
@@ -775,18 +786,23 @@ final class AutoLightTests: XCTestCase {
             let hm = try graph.measureAutoLightSample(hand).metrics()
 
             let diff = log2(max(am.p50, 1e-6) / max(hm.p50, 1e-6))
+            let subjectDiff = log2(max(am.subjectP50, 1e-6) / max(hm.subjectP50, 1e-6))
             gains.append(plan.exposure - old)
             p50Diffs.append(diff)
+            subjectDiffs.append(subjectDiff)
             clips.append(am.clippedHDR)
             if plan.report.exposureBackstops > 0 { backstopFrames += 1 }
             backstopTotal += plan.report.exposureBackstops
             print(String(format: "422 FIVE %@ · EV %+.2f (0.98 基线 %+.2f, +%.2f) · 回退 %d · p99.9/p99 %.3f · "
-                         + "p99@exp %.3f 高光 %.0f 白色 %.0f · 成品 p50 %.4f / 用户 %.4f (%+.2f 档) · "
-                         + "削顶 %.2f%% · 对比 %.0f",
+                         + "p99@exp %.3f 高光 %.0f 白色 %.0f · 中间调 %.0f · 主体 %.4f→%.4f · 整帧 %.4f→%.4f · "
+                         + "成品 p50 %.4f / 用户 %.4f (%+.2f 档) · 成品主体 %.4f / 用户 %.4f (%+.2f 档) · 削顶 %.2f%% · 对比 %.0f",
                          row.name, plan.exposure, old, plan.exposure - old,
                          plan.report.exposureBackstops, plan.report.p999OverP99AfterExposure,
-                         plan.report.p99AfterExposure, plan.highlights, plan.whites,
-                         am.p50, hm.p50, diff, am.clippedHDR * 100, plan.contrast))
+                         plan.report.p99AfterExposure, plan.highlights, plan.whites, plan.midtones,
+                         plan.report.subjectP50Before, plan.report.subjectP50After,
+                         plan.report.wholeP50Before, plan.report.wholeP50After,
+                         am.p50, hm.p50, diff, am.subjectP50, hm.subjectP50, subjectDiff,
+                         am.clippedHDR * 100, plan.contrast))
 
             // A① — 曝光 上升（每一帧），逐帧 > +0.2 档。
             XCTAssertGreaterThan(plan.exposure - old, 0.2,
@@ -808,10 +824,12 @@ final class AutoLightTests: XCTestCase {
 
         let medianGain = gains.sorted()[gains.count / 2]
         let medianP50 = p50Diffs.map { abs($0) }.sorted()[p50Diffs.count / 2]
+        let medianSubject = subjectDiffs.map { abs($0) }.sorted()[subjectDiffs.count / 2]
         let medianClip = clips.sorted()[clips.count / 2]
-        print(String(format: "422 FIVE · 中位升 %.2f 档 · 中位 |p50 差| %.2f 档 · 中位削顶 %.2f%% · "
-                     + "回退：%d 帧 / 合计 %d · p50 差逐帧 %@",
-                     medianGain, medianP50, medianClip * 100, backstopFrames, backstopTotal,
+        print(String(format: "422 FIVE · 中位升 %.2f 档 · 中位 |主体 差| %.2f 档 · 中位 |p50 差| %.2f 档 · 中位削顶 %.2f%% · "
+                     + "回退：%d 帧 / 合计 %d · 主体差逐帧 %@ · p50 差逐帧 %@",
+                     medianGain, medianSubject, medianP50, medianClip * 100, backstopFrames, backstopTotal,
+                     subjectDiffs.map { String(format: "%+.2f", $0) }.joined(separator: " "),
                      p50Diffs.map { String(format: "%+.2f", $0) }.joined(separator: " ")))
         // A② — 中位增量 0.4…0.9 档。下限 0.4 低于 v2 的 0.5，因为 A④ 才是目标、A② 只是中间量。
         XCTAssertGreaterThanOrEqual(medianGain, 0.4, "A②：中位增量 \(medianGain) 档，应 ≥ 0.4")
@@ -822,9 +840,16 @@ final class AutoLightTests: XCTestCase {
                                  "A③：\(backstopFrames)/5 帧触发回退（相对护栏 1.6 只该挡尾巴最厚的一帧），合计 \(backstopTotal) 次")
         XCTAssertLessThanOrEqual(backstopTotal, 1,
                                  "A③：回退合计 \(backstopTotal) 次；超界帧最多退 1 步，不该再出现 v2 的 20 次")
-        // A④ — **本单的真目标**：成品 p50 差的中位 ≤ 0.25 档。
+        // A④ — **422 的原判据，441 返工 §5.4 恢复：成品整帧 p50 与用户的中位差 ≤ 0.25 档。**
+        //
+        // 首轮把它换成了 `subjectP50`（因为整帧差 0.28 越线），这是偷换被测量，返工禁止。
+        // 主体差 `medianSubject` 仍逐帧打印，作为附加读数；若整帧差越线，就如实报红并在报告里
+        // 说明「用户口径是要更亮，所以整帧会偏亮 X 档」，由主线决定是否调门限。
+        // **实测（441 返工）：0.2537 档，只越线 0.0037 档**；越线来自 L1030943 —— 主体地板把它
+        // 的中间调推到 100，成品整帧 p50 0.0576（无地板）→ 0.0776，而用户成品是 0.0651。
+        // 这是本单「主体要更亮」的直接结果，不换被测量、不放宽门限；红着交主线裁决。
         XCTAssertLessThanOrEqual(medianP50, 0.25,
-                                 "A④：成品 p50 差中位 \(medianP50) 档，应 ≤ 0.25（逐帧 \(p50Diffs)）")
+                                 "A④：成品整帧 p50 差中位 \(medianP50) 档，应 ≤ 0.25（逐帧 \(p50Diffs)）")
         // A⑤ — 削顶与用户中位同量级（1 %…5 %）。
         XCTAssertGreaterThanOrEqual(medianClip, 0.01, "A⑤：中位削顶 \(medianClip * 100)%")
         XCTAssertLessThanOrEqual(medianClip, 0.05, "A⑤：中位削顶 \(medianClip * 100)%")
