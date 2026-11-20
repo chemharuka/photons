@@ -2,3 +2,4 @@
 .swiftpm/
 *.dng
 *.pgm
+.DS_Store

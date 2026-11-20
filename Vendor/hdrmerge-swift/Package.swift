@@ -20,7 +20,7 @@ let package = Package(
         ),
         .testTarget(
             name: "HDRMergeCoreTests",
-            dependencies: ["HDRMergeCore"],
+            dependencies: ["HDRMergeCore", "hdrmerge-swift"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
