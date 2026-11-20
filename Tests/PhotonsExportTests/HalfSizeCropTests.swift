@@ -35,7 +35,7 @@ final class HalfSizeCropTests: XCTestCase {
         XCTAssertEqual(plan.gainMap, ImageSize(width: 3000, height: 2000))
         XCTAssertEqual(plan.crop, HalfSizeCrop(dx: 1, dy: 1))
         XCTAssertEqual(plan.crop.hint(current: plan.input),
-                       "半尺寸需要偶数像素：当前 6001×4001，将裁到 6000×4000（右/下各 1 px）")
+                       "将会裁剪至 6000×4000（右/下各 1 px）")
     }
 
     func test6000By4000HalfSizePlanIsExactlyHalfWithNoCrop() {

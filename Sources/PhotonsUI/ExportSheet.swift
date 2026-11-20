@@ -220,7 +220,9 @@ public enum GainMapColorModel: String, Sendable, CaseIterable {
     public var displayName: String {
         switch self {
         case .rgb: return "RGB"
-        case .mono: return Loc.t("黑白")
+        // 438 —— 用户口径：英文要「B&W」，和旁边 RGB 同样宽才协调（`Black & White` 会把分段控件
+        // 拉到「ISO / Apple」那一栏，两个控件一起占满整行）。中文仍是「黑白」。
+        case .mono: return Loc.t("B&W")
         }
     }
 }
@@ -1072,7 +1074,9 @@ public struct ExportSheetView: View {
         self.model = model
         self.sectionStore = sectionStore
         let titles = [Self.colourSection, Self.hdrSection, Self.afterSection]
-        _expandedSections = State(initialValue: Set(titles.filter { sectionStore.read($0) == true }))
+        // 438 —— 用户口径「折叠段默认是展开的，除非用户自己折叠了」：没存过就当作展开
+        // （以前是 `read($0) == true`，没存过即折叠）。
+        _expandedSections = State(initialValue: Set(titles.filter { sectionStore.read($0) ?? true }))
     }
 
     public var body: some View {
@@ -1195,16 +1199,15 @@ public struct ExportSheetView: View {
         .background(ExportLayoutProbeHost(kind: .form))
     }
 
-    /// 6 个常驻决定，顺序固定。HDR 关时多一行 SDR 色调映射（它是 HDR 关时的核心决定，
-    /// 不能藏进折叠段，否则 168 的「色调映射行跟着 HDR 走」就无法在视图里成立）。
+    /// 6 个常驻决定，顺序固定。
     ///
     /// 322 —— 322 之前这里是 7 行：水印不透明度曾经常驻，现在它是水印段里的第三行。
+    /// 438 —— 色调映射不再是常驻行：用户口径「不选 HDR 时第二行是色调映射，应该放在下面的
+    /// HDR 与色调映射里」。它现在和 HDR 类型 / 增益图 / 半尺寸同段，由 HDR 开关决定段内显示哪一组
+    /// （HDR 关 ⇒ 只有色调映射；HDR 开 ⇒ 类型 + 增益图 + 半尺寸）。
     @ViewBuilder
     private var residentRows: some View {
         formatRow
-        if model.showsToneMappingRow {
-            toneMappingRow
-        }
         // 302 —— 质量：容器没有质量档时这一行仍在（滑杆/数值禁用）。**为什么不对 PNG / TIFF 直接
         // 抽掉**：250 的真实点击测试靠行位置稳定（先点 PPI 再换格式），少一行会让探针 frame 过期。
         // 收窄发生在选项层：位深、HDR 类型都按容器给（不出现没有的选项）。
@@ -1596,10 +1599,25 @@ public struct ExportSheetView: View {
 
     // MARK: HDR 与色调映射
 
+    /// 438 —— 段标题右侧的摘要跟着段内实际显示的那一组走：HDR 关时这一段只剩色调映射，
+    /// 还写「类型 / 增益图 / 半尺寸」就是在说段里没有的东西。
+    private var hdrSectionSummary: String {
+        model.hdrEnabled ? Loc.t("类型 / 增益图 / 半尺寸") : Loc.t("色调映射")
+    }
+
+    /// 109 / 168 / 438 —— 「HDR 与色调映射」段。
+    ///
+    /// 段内**只有一组**：HDR 关时是 SDR 的决定（色调映射），HDR 开时是 HDR 的决定（类型 / 增益图 /
+    /// 半尺寸）。用户口径（2026-11-19）：「不选择 HDR 时，第二行是 tone mapping，按道理应该放在下面的
+    /// HDR&TONE MAPPING 中，而且不选择 HDR 就不应该有 HDR type 可选」⇒ 色调映射从常驻行搬进来，
+    /// **HDR 类型在 HDR 关时整行不出现**（不是灰着占位）。
     private var hdrSectionView: some View {
-        ExportCollapsibleSection(Self.hdrSection, summary: Loc.t("类型 / 增益图 / 半尺寸"),
+        ExportCollapsibleSection(Self.hdrSection, summary: hdrSectionSummary,
                                  isExpanded: isExpanded(Self.hdrSection),
                                  toggle: { toggleSection(Self.hdrSection) }) {
+            if model.showsToneMappingRow {
+                toneMappingRow
+            }
             if model.availableHDRKinds.isEmpty {
                 ExportRowGridRow(
                     rowID: "export.hdr.unavailable",
@@ -1612,7 +1630,7 @@ public struct ExportSheetView: View {
                     value: { EmptyView() },
                     unit: { EmptyView() },
                     accessory: { EmptyView() })
-            } else {
+            } else if model.hdrEnabled {
                 ExportRowGridRow(
                     rowID: "export.hdr.kind",
                     label: { rowLabel(Loc.t("HDR 类型")) },
@@ -1626,7 +1644,7 @@ public struct ExportSheetView: View {
                         .labelsHidden()
                         .exportControlFont("export.hdr", kind: .picker)
                         .frame(maxWidth: .infinity)
-                        .disabled(model.phase == .running || !model.hdrEnabled)
+                        .disabled(model.phase == .running)
                     },
                     value: { EmptyView() },
                     unit: { EmptyView() },
@@ -1636,7 +1654,9 @@ public struct ExportSheetView: View {
                         rowID: "export.hdr.gainMap",
                         label: { rowLabel(Loc.t("增益图")) },
                         control: {
-                            HStack(spacing: 6) {
+                            // 438 —— 两个分段控件各固定 110 pt（同宽、段内等宽），中间留 10 pt：
+                            // 用户口径「宽度都一样，然后两个 switch 中间稍微隔开一点距离」。
+                            HStack(spacing: 10) {
                                 Picker("", selection: gainMapColorBinding) {
                                     ForEach(GainMapColorModel.allCases, id: \.self) { colorModel in
                                         Text(colorModel.displayName).tag(colorModel)
@@ -1645,6 +1665,8 @@ public struct ExportSheetView: View {
                                 .pickerStyle(.segmented)
                                 .labelsHidden()
                                 .exportControlFont("export.hdr.gainMap", kind: .picker)
+                                // 438 —— **固定宽度**，不是内容定宽：RGB/B&W 与 ISO/Apple 两个分段控件
+                                // 同宽（各 110 pt），段内两段也等宽（segmented 的默认），右侧不吃剩余空间。
                                 .frame(width: 110)
                                 .disabled(model.phase == .running)
                                 Picker("", selection: gainMapVersionBinding) {
@@ -1655,7 +1677,8 @@ public struct ExportSheetView: View {
                                 .pickerStyle(.segmented)
                                 .labelsHidden()
                                 .exportControlFont("export.hdr.gainMap.version", kind: .picker)
-                                .frame(maxWidth: .infinity)
+                                // 438 —— 与左边同宽（110），ISO / Apple 两段等宽，不占剩余空间。
+                                .frame(width: 110)
                                 .disabled(model.phase == .running)
                             }
                         },
@@ -1671,8 +1694,8 @@ public struct ExportSheetView: View {
                                           help: Loc.t("增益图按 1/2 边长写入（-H），SDR 基底不缩放"))
                         },
                         control: {
-                            // 322 —— 裁偶数边的说明有 377.9 pt（「半尺寸需要偶数像素：当前
-                            // 4096×2731，将裁到 …」），一行装不下：两行，行高按内容长。
+                            // 438 —— 只有真要裁边时才写这一行；不需要裁（`halfSizeCropHint == nil`）时
+                            // **不写任何说明文字**（用户口径）。文案本身也缩短到「将会裁剪至 W×H（…）」。
                             if let hint = model.halfSizeCropHint {
                                 Text(hint)
                                     .font(.system(size: ExportRowGrid.Font.hint))
@@ -1680,12 +1703,6 @@ public struct ExportSheetView: View {
                                     .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
                                     .lineLimit(2)
                                     .help(hint)
-                            } else {
-                                Text(Loc.t("增益图小一半；SDR 基底不缩放"))
-                                    .font(.system(size: ExportRowGrid.Font.hint))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(maxWidth: ExportRowGrid.controlWidth, alignment: .leading)
-                                    .lineLimit(2)
                             }
                         },
                         value: { EmptyView() },

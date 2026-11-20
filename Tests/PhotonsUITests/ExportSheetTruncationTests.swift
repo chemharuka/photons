@@ -66,7 +66,7 @@ final class ExportSheetTruncationTests: XCTestCase {
     /// 测试里手抄一份就是「表和界面各说各话」。
     private func state(model: ExportSheetModel) -> [Cell] {
         let megapixels = model.predictedMegapixelText ?? "—"
-        let halfSizeHint = model.halfSizeCropHint ?? "增益图小一半；SDR 基底不缩放"
+        let halfSizeHint = model.halfSizeCropHint ?? ""
         return [
             // 常驻
             Cell("export.format", .label, "格式", weight: .medium),
