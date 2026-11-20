@@ -26,9 +26,30 @@ public final class SettingsWindowController: NSWindowController {
     public required init?(coder: NSCoder) { fatalError("no nib") }
 
     @objc public func openSettings(_ sender: Any?) {
+        centreOnAppScreen()
         showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 设置窗要出现在**当前 app 所在的那块屏**上，而不是主屏。
+    ///
+    /// 三件事都由这一处收口：
+    /// 1. 首次打开时 `NSWindow.center()` 用的是 `NSScreen.main`（主屏），多屏用户会看到设置窗
+    ///    跳到另一块屏上 —— 所以改成按 app 自己那块屏的 `visibleFrame` 居中。
+    /// 2. 「app 那块屏」= 键盘窗口所在屏；没有键盘窗口时退到主窗口，再退到 `NSScreen.main`。
+    /// 3. `setFrameAutosaveName` 会跨启动记住位置，而记住的位置可能属于另一块屏 —— 所以每次
+    ///    打开时若窗当前所在的屏不是 app 的屏，就重新居中一次；已经在同一块屏上则**不动**
+    ///    （用户自己拖的位置要留住，只在换屏时纠正）。
+    private func centreOnAppScreen() {
+        guard let window else { return }
+        let appScreen = NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main
+        guard let screen = appScreen else { window.center(); return }
+        if window.screen === screen { return }
+        let visible = screen.visibleFrame
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
+                                      y: visible.midY - size.height / 2))
     }
 }
 
