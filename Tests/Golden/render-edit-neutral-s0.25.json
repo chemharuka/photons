@@ -1,5 +1,5 @@
 {
-  "createdAt" : "2026-11-10T13:46:13Z",
+  "createdAt" : "2026-11-20T14:44:52Z",
   "decoderVersion" : "8",
   "edit" : "edit-neutral",
   "fileSHA256" : "8eb2d822eeabb039fe6c9bed483c60d5e59243d484d66835707a554b918cfce1",
@@ -10,6 +10,6 @@
   "raw" : "L1030433.dng",
   "rawSHA256" : "3c33888215a1969a3d9fb82fddf6c9bcfd389dc5b647737dd0d78826a832ebd1",
   "scale" : 0.25,
-  "stageKeys" : "s0=8a266e83 s1=61b3363d s1.7=742059b5 s3-vignette=bfe8f3b9 s2=47f2956b s3-color=13cad0b7 s3.10=46c3df3e s4=9343c001",
+  "stageKeys" : "s0=551c3475 s1=729ac221 s1.7=f5272c4f s3-vignette=acbc0b7f s2=2a5880b3 s3-color=b7c2b303 s3.10=d9a92e12 s4=2bc9a1df",
   "width" : 2380
 }
