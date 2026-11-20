@@ -484,6 +484,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 333 probe seam — the identity `makeFrame` stamps on the frame state, read on the main thread
     /// (the probe must not read `session` from its own queue: that would be a second race).
     var backdropPhotoKeyForTesting: String? { backdropPhotoKey }
+    /// 444 / §20 P1 — the only readers of `presentation`: the state is written, never obeyed.
+    var presentationForTesting: CanvasPresentation { presentation }
+    var presentationContentForTesting: String { presentation.content.label }
     /// 333 test seam — whose pixels the frame state holds (`202 ④`'s gate). The ③ equivalence suite
     /// transcribes the pre-333 `framing()` and needs this value by name.
     var decodedIdentityForTesting: String? { frameState.identity }
@@ -2346,6 +2349,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // (instead of the landing frame being recycled the moment it is presented).
     private var canvasTexture: OwnedCanvasTexture?
 
+    /// 444 / §20 P1 — 画布上此刻是什么。**只写不读**：没有任何绘制路径读它，
+    /// 只有 `show` / `hold` 两处写入和两个 `*ForTesting` 访问器。先让状态「写得对」，
+    /// 让状态机做决定是 P2。
+    private var presentation = CanvasPresentation()
+
     /// 054: where the photograph sat inside `canvasTexture`, in canvas pixels, and the canvas it was
     /// normalised against. `cancelZoomBridge` re-presents that same texture with `window: .whole`; without
     /// this the matte it paints would cover the photograph, because a canvas-sized frame's letterbox is
@@ -2721,6 +2729,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// fight over which canvas they were built for.
     public func cancelZoomBridge(rePresent: Bool = true) {
         guard zoomBridge != nil || pendingFrame != nil || zoomBridgeTicker != nil else { return }
+        presentation.show(.empty, reason: "teardown")
         if let pending = pendingFrame {
             pending.canvas.recycle(on: queue)
             zoomBridgePendingDrops += 1
@@ -5349,6 +5358,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard held != key else { return }
         lastCanvasGeometry = key
         frozenFrame = nil
+        presentation.hold(nil, reason: "gesture")
         canvasPicture = nil
     }
 
@@ -6265,6 +6275,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if session?.mode != .loupe || session?.anchorAsset == nil {
             canvasView.endPhotoSwitchCover()
             canvasView.hideFirstFramePlaceholder()
+            presentation.show(.empty, reason: "teardown")
             firstFramePlaceholderToken?.cancel()
             firstFramePlaceholderToken = nil
             firstFramePlaceholderPhoto = nil
@@ -6348,6 +6359,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             canvasPicture = nil
             canvasContent = nil
             frozenFrame = nil
+            presentation.hold(nil, reason: "gesture")
             // No frame of the *new* photo is on the canvas yet: a resize must ask for one instead of
             // matching the previous photo's canvas.
             //
@@ -6414,6 +6426,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         firstFramePlaceholderPixelSize = nil
         firstFramePlaceholderOrientation = nil
         canvasView.hideFirstFramePlaceholder()
+        presentation.show(.empty, reason: "standin withdrawn")
         let started = CACurrentMediaTime()
         guard let cache = session.thumbnailCache else { return }
         let provider = ThumbnailProvider.shared(for: cache)
@@ -6517,6 +6530,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         firstFramePlaceholderPixelSize = pixels
         canvasView.showFirstFramePlaceholder(placeholder,
                                             contentRect: firstFramePlaceholderContentRect(imageSize: pixels))
+        presentation.show(.placeholder(ThumbFrame(photo: photo, pixelSize: pixels)), reason: "standin")
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
     }
 
@@ -7291,6 +7305,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                                    milliseconds: milliseconds, serial: serial,
                                                    scale: scale, rungScale: Float(rungScale))
                 if adopted { self.lastBackdropRenderedPhoto = photo }
+                if adopted {
+                    self.presentation.show(
+                        .lowRes(BackdropFrame(photo: self.backdropPhotoKey,
+                                              key: self.backdropKey?.identity)),
+                        reason: "backdrop")
+                }
                 if adopted, let at = self.backdropWantedAt {
                     self.backdropWantedAt = nil
                     self.lastPhotoSwitchBackdropMilliseconds = (CACurrentMediaTime() - at) * 1000
@@ -8645,6 +8665,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The pixels on the layer are `frame.texture` now, and they must stay alive for as long as a
         // bridge may re-sample them.
         canvasTexture = frameCanvas
+        presentation.hold(frameCanvas, reason: "gesture")
+        presentation.show(.frame(frameCanvas, settled: !fromCanvasCache), reason: "present")
         // 067: kept — not for the matte (there is none any more) but because it is the **only** thing
         // that says where the photograph is inside the texture on the canvas. Every present that
         // re-draws this frame (a bridge, a teardown, a window drag) derives its quad from it.
