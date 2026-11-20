@@ -38,6 +38,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// (`CanvasFrameCache.CachedCanvas.frameResult()`), and the wrong direction there is a leak,
         /// not a corrupted pool.
         public private(set) var owner: CanvasTextureOwner = .cacheCopy
+        /// 443 — **whose** picture this frame is: the photo identity (`contentHash|assetID`, or a
+        /// harness `FrameSource.identity`). A frame can outlive its photo's anchor (a switch lands
+        /// while it renders), so the identity travels with the pixels instead of being re-read from
+        /// the session at present time. `private(set)` + `stamp(photo:)` because the canvas-cache
+        /// construction path has no session to ask and names it from its key.
+        public private(set) var photo: String = ""
+        /// 443 — the **rung's** upright source size: the buffer this frame was rendered from, before
+        /// the `decodeScale` division `publishIngestedSource` does. `nil` on a canvas-cache hit —
+        /// those pixels came from no graph and no ingest, so they have no size to publish.
+        public private(set) var sourceSize: ImageSize? = nil
         public let canvas: ImageSize
         public let content: ImageSize
         /// 054: where the photograph sits inside `texture`, in canvas pixels — `RenderResult.photoRect`,
@@ -116,6 +126,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let frameOrigin: SIMD2<Float>
         public let expandedCanvas: ImageSize?
         public let neverUpscalesContent: Bool
+
+        /// 443 — name the photo on a frame that was built without one. The render path passes
+        /// `photo:` to the memberwise init; the canvas cache builds its frame from a key and stamps
+        /// the key's photo through this door (`CachedCanvas.frameResult(photo:)`).
+        mutating func stamp(photo: String) { self.photo = photo }
     }
 
     /// One frame's cost, in milliseconds, as measured on the render queue.
@@ -7344,8 +7359,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 canvasCachePresents += 1
                 // 5.1 (口径修正 18:1x): the cached frame takes the place of the 1920 px stand-in
                 // *now*; the scheduled render below still develops and renders as usual.
-                present(frame: cached.frameResult(), renderMilliseconds: 0, state: job.state,
-                        fromCanvasCache: true, cachePhoto: key.photo)
+                // 443 — the cache's key is the only thing that knows whose canvas this is; the frame
+                // must carry that photo too, exactly as a rendered frame carries its own.
+                present(frame: cached.frameResult(photo: key.photo), renderMilliseconds: 0,
+                        state: job.state, fromCanvasCache: true, cachePhoto: key.photo)
                 if !rendersAfterCanvasCacheHit { return }
             }
         }
@@ -7869,6 +7886,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }()
         let shotForFrame = mode == .original ? originalShot : editedShot
         return FrameResult(texture: texture, owner: .graph(graph),
+                           photo: baseIdentity, sourceSize: graph.sourceSize,
                            canvas: drawing.canvas, content: drawing.content,
                            photoRect: photoRect, presentRect: presentRect,
                            outputWindow: drawing.outputWindow,
@@ -9457,6 +9475,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func zoomFromSlider(to stop: Double) {
         // `nil` → `canvasCentrePoint()` inside `zoom(to:aroundView:)`.
         zoom(to: stop, aroundView: nil)
+    }
+}
+
+extension CanvasFrameCache.CachedCanvas {
+    /// 443 — 434's cached frame, told which photo it is of. The cache entry's own value has no
+    /// session to ask (`frameResult()` builds it from pixels and geometry alone); its **key** names
+    /// the photo, so the caller hands it over here instead of present guessing from the live anchor.
+    func frameResult(photo: String) -> LoupeController.FrameResult {
+        var frame = frameResult()
+        frame.stamp(photo: photo)
+        return frame
     }
 }
 
