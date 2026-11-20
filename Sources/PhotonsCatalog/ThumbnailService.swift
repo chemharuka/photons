@@ -4,9 +4,11 @@ import Foundation
 //
 // Priority, high to low: the loupe's current frame, the visible grid/filmstrip, one off-screen row,
 // re-renders of edited visible items, then import backfill of `t256` / offline recovery. Prefetch is
-// the visible window ± 1 row and only resumes 150 ms after scrolling stops; cancellation bumps a
-// `generation` and drops stale jobs, but an in-flight decode cannot be interrupted — it runs to
-// completion and is written, its result is simply not delivered.
+// the browsers' band outside the viewport; the callers drive it through a shared reconcile gate
+// (leading edge + 40 ms trailing coalescing + a 120 ms maximum latency, §449), so a continuous
+// scroll keeps issuing prefetch instead of waiting for it to stop. Cancellation bumps a `generation`
+// and drops stale jobs, but an in-flight decode cannot be interrupted — it runs to completion and is
+// written, its result is simply not delivered.
 //
 // The service is deliberately *pipeline-agnostic*: it owns the queue, the single-flight map, the
 // cancellation tokens and the counters, and it asks an injected `ThumbnailProducer` for JPEG bytes.
@@ -18,7 +20,8 @@ import Foundation
 public enum ThumbPriority: Int, Sendable, Comparable, CaseIterable {
     /// §4 ⑤ — import backfill of `t256`, offline-root recovery. Cheapest claim on the machine.
     case background = 0
-    /// §4 ③ — one row above/below the viewport, released 150 ms after scrolling stops.
+    /// §4 ③ — the band outside the viewport; issued by the shared leading + 40 ms trailing +
+    /// 120 ms cap reconcile gate (§449), so it keeps running during a continuous scroll.
     case prefetch = 1
     /// §4 ①② — the loupe frame and the visible grid/filmstrip.
     case onScreen = 2

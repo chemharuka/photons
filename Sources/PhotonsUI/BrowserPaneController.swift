@@ -170,7 +170,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private var thumbRequests: [Int: ThumbnailRequest] = [:]
     /// 363 — deliveries dropped because the document moved on while the frame was rendering.
     public private(set) var staleThumbnailDrops = 0
-    private var reconcileWork: DispatchWorkItem?
+    /// 449 — leading + 40 ms trailing + 120 ms cap, shared with the grid and the filmstrip.
+    private let reconcileGate = ScrollReconcileGate()
+    /// 449 — prefetch-priority asks handed to the provider; read by the continuous-scroll acceptance.
+    private(set) var prefetchRequestCount = 0
+    private(set) var prefetchRequestedRows: Set<Int> = []
     private var cellTier: ThumbTier = .t256
     private var lastWanted: Set<Int> = []
     private var lastTier: ThumbTier?
@@ -954,6 +958,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             self?.thumbnailDidLoad(row: idx, key: key, display: display, image: image)
         }
         thumbRequests[row] = token
+        if priority == .prefetch {
+            prefetchRequestCount += 1
+            prefetchRequestedRows.insert(row)
+        }
     }
 
     private func thumbnailDidLoad(row: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
@@ -981,12 +989,11 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     }
 
     private func scheduleThumbnailReconcile() {
-        reconcileWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.reconcileThumbnails(force: false) }
-        reconcileWork = work
-        // One frame of coalescing: a live scroll fires this dozens of times a second and the answer
-        // only changes when the visible row range does.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+        // 449 — the old code was a pure 40 ms trailing debounce that every bounds change cancelled,
+        // so a continuous scroll (a frame every 8–16 ms) never reconciled at all. The shared gate
+        // runs on the leading edge, coalesces 40 ms at most, and forces a pass at 120 ms.
+        reconcileGate.note()
+        reconcileGate.schedule { [weak self] in self?.reconcileThumbnails(force: false) }
     }
 
     /// Visible rows plus ten either side; everything else is cancelled (§5). 429 raised the slack
@@ -1017,7 +1024,12 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         lastWanted = wanted
         let visible = visibleRows()
 
-        for (row, token) in thumbRequests where !wanted.contains(row) {
+        // 449 — cancel only what left the **outer ring**: visible ± 2 × prefetchSlackRows (±20
+        // rows). A continuous scroll usually moves the band by only a few rows; cancelling the
+        // ±10-row band every pass threw away bytes that had just been produced
+        // (`ThumbnailService.suppressWrite`). The value is fixed by §3: slack × 2.
+        let outer = outerWantedRows()
+        for (row, token) in thumbRequests where !outer.contains(row) {
             token.cancel()
             thumbRequests.removeValue(forKey: row)
         }
@@ -1034,7 +1046,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         }
     }
 
-    private func visibleRows() -> Set<Int> {
+    /// Internal (449): the acceptance reads the visible set next to `wantedRows()`.
+    func visibleRows() -> Set<Int> {
         Set(integers(in: photosTable.rows(in: photosScroll.contentView.bounds)))
     }
 
@@ -1071,6 +1084,19 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         return Set(lower..<upper)
     }
 
+    /// 449 — the cancellation ring, **visible ± 2 × `prefetchSlackRows`** (±20 rows). Requests are
+    /// kept while they sit inside this ring even if the narrower request band (±10) has moved past
+    /// them; only the outer edge condemns a request. Fixed by §3, not tunable here.
+    func outerWantedRows() -> Set<Int> {
+        let visible = photosTable.rows(in: photosScroll.contentView.bounds)
+        guard visible.length > 0 else { return [] }
+        let slack = BrowserPaneController.prefetchSlackRows * 2
+        let lower = max(0, visible.location - slack)
+        let upper = min(session?.assets.count ?? 0, visible.location + visible.length + slack)
+        guard lower < upper else { return [] }
+        return Set(lower..<upper)
+    }
+
     // MARK: thumbnail probes (used by `--grid-probe`)
 
     public var thumbnailStats: ThumbnailProvider.Stats {
@@ -1095,15 +1121,27 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     public var pendingThumbnailRequests: Int { thumbRequests.count }
 
-    /// Outstanding loads for rows outside the wanted band. Must be 0 once the scroll handler ran.
+    /// Outstanding loads for rows outside the **cancellation ring** (449: ±20 rows). Must be 0 once
+    /// the scroll handler ran; the ring is wider than the ±10 request band on purpose.
     public var pendingThumbnailIndexesOutsideWindow: Int {
-        Set(thumbRequests.keys).subtracting(wantedRows()).count
+        Set(thumbRequests.keys).subtracting(outerWantedRows()).count
+    }
+
+    /// 449 — reconcile passes the shared gate actually ran. Read by the continuous-scroll acceptance.
+    var reconcileRunCount: Int { reconcileGate.runCount }
+
+    /// 449 — reset the scroll counters without touching the live band (acceptance only).
+    func resetScrollCountersForTesting() {
+        reconcileGate.resetRunCountForTesting()
+        prefetchRequestCount = 0
+        prefetchRequestedRows.removeAll()
     }
 
     /// The provider the rows draw from — the probe asserts it is `===` the grid's.
     public var thumbnailProviderForSmoke: ThumbnailProvider? { provider() }
 
     public func resetThumbnails() {
+        reconcileGate.cancelPending()
         for (_, token) in thumbRequests { token.cancel() }
         thumbRequests.removeAll()
         lastWanted = []

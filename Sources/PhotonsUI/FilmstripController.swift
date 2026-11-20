@@ -240,7 +240,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private var providerCache: ThumbnailCache?
     /// Outstanding loads by item index. One per index; cancelled the moment the cell scrolls out.
     private var thumbRequests: [Int: ThumbnailRequest] = [:]
-    private var reconcileWork: DispatchWorkItem?
+    /// 449 — leading + 40 ms trailing + 120 ms cap, shared with the sidebar and the grid.
+    private let reconcileGate = ScrollReconcileGate()
+    /// 449 — prefetch-priority asks handed to the provider; read by the continuous-scroll acceptance.
+    private(set) var prefetchRequestCount = 0
+    private(set) var prefetchRequestedIndexes: Set<Int> = []
     private var cellTier: ThumbTier = .t256
     private var lastWanted: Set<Int> = []
     private var lastTier: ThumbTier?
@@ -639,6 +643,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             self?.thumbnailDidLoad(index: idx, key: key, display: display, image: image)
         }
         thumbRequests[index] = token
+        if priority == .prefetch {
+            prefetchRequestCount += 1
+            prefetchRequestedIndexes.insert(index)
+        }
     }
 
     private func thumbnailDidLoad(index: Int, key: ThumbKey, display: ImageSize, image: CGImage?) {
@@ -660,12 +668,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     }
 
     private func scheduleThumbnailReconcile() {
-        reconcileWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.reconcileThumbnails(force: false) }
-        reconcileWork = work
-        // One frame of coalescing: a live scroll fires this dozens of times per second and the
-        // answer only changes when the visible index range changes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+        // 449 — pure trailing 40 ms never fired during a live scroll (bounds change every 8–16 ms).
+        // Same shared gate as the sidebar and grid: leading, 40 ms trailing, 120 ms cap.
+        reconcileGate.note()
+        reconcileGate.schedule { [weak self] in self?.reconcileThumbnails(force: false) }
     }
 
     /// Visible cells plus one cell of slack on either side (006 §5 "可见 + 上下一行"; horizontally
@@ -719,7 +725,11 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         lastWanted = wanted
         let visible = visibleIndexes()
 
-        for (index, token) in thumbRequests where !wanted.contains(index) {
+        // 449 — cancel only what left the **outer ring**: visible ± 2 × 10 cells (±20), not the
+        // ±10-cell request band. A live scroll moves a few cells per pass; condemning the narrow
+        // band every time discarded bytes that had just been produced (§3 fixes this at slack × 2).
+        let outer = outerWantedIndexes()
+        for (index, token) in thumbRequests where !outer.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
         }
@@ -741,7 +751,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         }
     }
 
-    private func visibleIndexes() -> Set<Int> {
+    /// Internal (449): the acceptance reads the visible set next to `wantedIndexes()`.
+    func visibleIndexes() -> Set<Int> {
         Set(collectionView.indexPathsForVisibleItems().map { $0.item })
     }
 
@@ -754,6 +765,18 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
         let slack = max(24, flow.itemSize.width) * 10
+        let expanded = bounds.insetBy(dx: -slack, dy: 0)
+        guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
+        else { return [] }
+        return Set(attributes.compactMap { $0.indexPath?.item })
+    }
+
+    /// 449 — the cancellation ring, **visible ± 2 × 10 cells** (±20). Requests inside it survive a
+    /// pass even when the narrower ±10-cell request band has moved past them. §3 fixes the value.
+    func outerWantedIndexes() -> Set<Int> {
+        guard let scroll = collectionView.enclosingScrollView else { return [] }
+        let bounds = scroll.contentView.bounds
+        let slack = max(24, flow.itemSize.width) * 20
         let expanded = bounds.insetBy(dx: -slack, dy: 0)
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
@@ -773,10 +796,20 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     public var pendingThumbnailRequests: Int { thumbRequests.count }
 
-    /// Outstanding requests for indices that are no longer visible or in the slack band. Must be 0
-    /// once the scroll handler has run.
+    /// Outstanding requests for indices outside the **cancellation ring** (449: ±20 cells). Must be
+    /// 0 once the scroll handler has run; the ring is wider than the ±10-cell request band.
     public var pendingThumbnailIndexesOutsideWindow: Int {
-        Set(thumbRequests.keys).subtracting(wantedIndexes()).count
+        Set(thumbRequests.keys).subtracting(outerWantedIndexes()).count
+    }
+
+    /// 449 — reconcile passes the shared gate actually ran. Read by the continuous-scroll acceptance.
+    var reconcileRunCount: Int { reconcileGate.runCount }
+
+    /// 449 — reset the scroll counters without touching the live band (acceptance only).
+    func resetScrollCountersForTesting() {
+        reconcileGate.resetRunCountForTesting()
+        prefetchRequestCount = 0
+        prefetchRequestedIndexes.removeAll()
     }
 
     public var visibleCellCount: Int { collectionView.indexPathsForVisibleItems().count }
@@ -814,6 +847,7 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
 
     /// Drop every outstanding request (library switch / teardown).
     public func resetThumbnails() {
+        reconcileGate.cancelPending()
         for (_, token) in thumbRequests { token.cancel() }
         thumbRequests.removeAll()
         lastWanted = []
