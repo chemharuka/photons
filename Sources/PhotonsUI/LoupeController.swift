@@ -1,5 +1,6 @@
 import PhotonsLocalization
 import AppKit
+import Observation
 import QuartzCore
 import CryptoKit
 import Metal
@@ -490,6 +491,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 333 test seam — whose pixels the frame state holds (`202 ④`'s gate). The ③ equivalence suite
     /// transcribes the pre-333 `framing()` and needs this value by name.
     var decodedIdentityForTesting: String? { frameState.identity }
+    /// 448 — the rung the resident frame came from, read the same way the gate reads it.
+    var frameScaleForTesting: Double { frameState.scale }
     /// 333 probe seam — the other main-thread reader in the crash chain (`290`).
     var hasIngestedPlaceholderSourceForProbe: Bool { hasIngestedPlaceholderSource }
     /// 340 probe / acceptance seam — the **graph group** (`graph / graphIdentity / graphPhoto /
@@ -1700,6 +1703,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             self.handleCropPhotoChange()
             if revision != self.lastHandledRevision {
                 self.lastHandledRevision = revision
+                // 448 ④ — the document moved while a click was waiting: the full rung it was waiting
+                // for no longer describes this edit, so the queue is dropped instead of measuring the
+                // wrong document. (The action itself clears `pendingAuto` before it writes, so its own
+                // commit never gets here with a pending click.)
+                self.clearPendingAuto()
                 self.requestEditRender()
                 // 344 — **any** document write, from any door (裁切应用, 透视/拉直, ⌘Z, 粘贴, a preset,
                 // a history jump), moves what the whole picture is of. One call, coalesced by the
@@ -4595,6 +4603,108 @@ public final class LoupeController: NSViewController, HeadroomSource {
         "\(GeometryGroup.normalizedQuarterTurns(turns) * 90)°"
     }
 
+    // MARK: 448 — 自动动作要等全档 RAW 解码
+
+    /// `@Observable` so the inspector's two 自动 buttons can disable themselves while the click is
+    /// waiting for the full rung. `LoupeController` is an `NSViewController`, not an observable model,
+    /// so this tiny holder is the existing observation bridge for exactly this one bit.
+    @Observable
+    public final class AutoAdjustWaitState {
+        public var isWaitingForDecode = false
+        public init() {}
+    }
+
+    public let autoAdjustWait = AutoAdjustWaitState()
+    /// The wait spelled the way the task names it. The observable bit above is what SwiftUI reads.
+    public var isWaitingForDecode: Bool { autoAdjustWait.isWaitingForDecode }
+
+    /// The click that is queued behind the full-rung decode. **Only the newest click survives** — a
+    /// second press while waiting replaces this value and asks for no second development.
+    public enum PendingAuto: Equatable, Sendable {
+        case light
+        case black
+        case whiteBalance
+        case all
+    }
+    public private(set) var pendingAuto: PendingAuto?
+
+    /// What the 448 acceptance reads: the photo whose graph the 明暗 measurement actually ran through.
+    /// `nil` until an `autoLight()` measurement has happened.
+    private(set) var lastAutoLightSampleIdentityForTesting: String?
+
+    /// 448 ④ — the frame on screen is the **full rung of the current anchor**. Same spelling as
+    /// `measureHistogramNow`'s reuse gate: the photo and the document's decode inputs both name the
+    /// rung, and the identity must be the rung's (`-s1.0`), not a preview's or the previous photo's.
+    private func anchorFrameIsFullRung() -> Bool {
+        let frame = frameState
+        guard frame.graph != nil, frame.scale == Double(DecodeLadder.fullScale) else { return false }
+        guard let anchor = currentAnchorBaseIdentity(),
+              let inputs = currentAnchorDecodeInputs() else { return false }
+        guard frame.identity == anchor else { return false }
+        let identity = Self.rungIdentity(anchor, inputs: inputs)
+        return frame.graphIdentity == "\(identity)-s\(DecodeLadder.fullScale)"
+    }
+
+    /// The anchor's photo identity (`contentHash|assetID`, or the harness's frame-source identity).
+    private func currentAnchorBaseIdentity() -> String? {
+        if let source = frameSource { return source.identity }
+        guard let session, session.mode == .loupe, let asset = session.anchorAsset else { return nil }
+        return ladderIdentity(asset)
+    }
+
+    /// The decode inputs of the document the anchor owns — what makes a rung *this* document's.
+    private func currentAnchorDecodeInputs() -> DecodeInputs? {
+        if let source = frameSource { return source.edit.decodeInputs }
+        guard let session, session.mode == .loupe else { return nil }
+        return session.edit.decodeInputs
+    }
+
+    /// True when this click must wait. A controller with **no anchor** is the URL-only unit seam
+    /// (`AutoLightCardTests` / `BlackLevelCardTests` develop a file and call the action directly);
+    /// the app always has an anchor in the loupe, so this legacy path cannot hide the gate there.
+    private func autoAdjustMustWait() -> Bool {
+        guard currentAnchorBaseIdentity() != nil else { return false }
+        return !anchorFrameIsFullRung()
+    }
+
+    /// Queue the newest click and make sure a full-rung frame is on its way. The request goes through
+    /// the ordinary viewport path (`renderFrame → requestDevelopment`), which is already coalesced and
+    /// already asks for `DecodeLadder.fullScale` — no second decoder and no hand-built job.
+    private func queuePendingAuto(_ action: PendingAuto) {
+        let alreadyWaiting = pendingAuto != nil
+        pendingAuto = action
+        autoAdjustWait.isWaitingForDecode = true
+        if !alreadyWaiting { requestViewportRender(cacheable: true) }
+    }
+
+    /// 448 ④ — a different photo, leaving the loupe, or a document change while the click waits.
+    private func clearPendingAuto() {
+        guard pendingAuto != nil else { return }
+        pendingAuto = nil
+        autoAdjustWait.isWaitingForDecode = false
+    }
+
+    /// Called from `presentCanvas` after the frame really reached the layer. The gate is checked again
+    /// here: a preview frame presented while waiting changes nothing, and a full frame of another photo
+    /// can never run a click that belonged to this one.
+    private func runPendingAutoIfReady() {
+        guard let pending = pendingAuto, anchorFrameIsFullRung() else { return }
+        pendingAuto = nil
+        autoAdjustWait.isWaitingForDecode = false
+        switch pending {
+        case .light:
+            _ = autoLight()
+        case .black:
+            _ = autoBlackOffset()
+        case .whiteBalance:
+            _ = autoWhiteBalance()
+        case .all:
+            _ = autoLight()
+            _ = autoBlackOffset()
+            _ = autoWhiteBalance()
+        }
+    }
+
     // MARK: 自动黑电平 (2026-10-28)
 
     /// 派单 105: the measurement-side decode, replaceable by the fallback test.
@@ -4622,7 +4732,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func autoBlackOffset() -> Double? {
         let frame = frameState
-        guard let session, session.mode == .loupe, let display = frame.image else { return nil }
+        guard let session, session.mode == .loupe else { return nil }
+        // 448 — the click waits for the anchor's full rung. Until then the buffer on screen may be the
+        // 0.5 preview (or the previous photo): measuring it is the reported "采到缩略图缓存".
+        if autoAdjustMustWait() {
+            queuePendingAuto(.black)
+            return nil
+        }
+        guard let display = frame.image else { return nil }
 
         let measured: LinearImage
         if let url = frame.url, let image = try? measurementImage(url) {
@@ -4695,7 +4812,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     @discardableResult
     public func autoLight() -> AutoLight.Plan? {
         let frame = frameState
-        guard let session, session.mode == .loupe, let graph = frame.graph else { return nil }
+        guard let session, session.mode == .loupe else { return nil }
+        // 448 — same gate as 自动黑电平 / 自动白平衡: never measure a preview rung or the previous
+        // photo's graph. The click is queued and a full-rung frame is requested through the normal
+        // viewport path; `runPendingAutoIfReady` calls this function again when that frame lands.
+        if autoAdjustMustWait() {
+            queuePendingAuto(.light)
+            return nil
+        }
+        guard let graph = frame.graph else { return nil }
+        lastAutoLightSampleIdentityForTesting = frame.graphPhoto ?? frame.identity
         let gates = Self.autoLightGates
         let plan: AutoLight.Plan
         do {
@@ -4722,6 +4848,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         requestEditRender()
         session.commitEdit(label: Loc.t("明暗 · 自动"), coalesce: false)
         return plan
+    }
+
+    /// 448 — 自动白平衡 through the same full-rung gate. The measurement is the one the panel's
+    /// 「预设 → 自动」 has always used (`averageSceneRGB` on the resident buffer, then the grey-world
+    /// solve and one commit); only *when* it runs changed.
+    @discardableResult
+    public func autoWhiteBalance() -> WhiteBalanceSolve? {
+        guard let session, session.mode == .loupe else { return nil }
+        if autoAdjustMustWait() {
+            queuePendingAuto(.whiteBalance)
+            return nil
+        }
+        guard let average = averageSceneRGB() else { return nil }
+        let commands = WhiteBalanceCommands(
+            session: session,
+            asShot: asShotWhiteBalance ?? session.capabilities?.asShotWhiteBalance)
+        return commands.applyAuto(average)
     }
 
     /// The document's flips — what the menu ticks and the bar's two switches show.
@@ -6211,6 +6354,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// with it and cannot be aborted.
     public func cancelPendingFrames() {
         generation += 1
+        // 448 ④ — the queued 自动 click belongs to the photo (and the loupe) that is going away. A
+        // switch or leaving the module must not let the new photo's full frame run the old click.
+        clearPendingAuto()
         // P1b — the document this graph was feeding is going away (leaving the loupe, another module,
         // another photo), so its idle textures are for a canvas no frame will ask for. Trimmed on the
         // render queue because the pool belongs to that queue; a queued frame still runs unchanged.
@@ -8180,6 +8326,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // (the brightness slider moves it and posts no notification). One property read that ends in
         // "nothing changed" nine times out of ten — the histogram card's ceiling is the consumer.
         onFramePresented?()
+        // 448 — a queued 自动 click runs **after** the frame that made the gate true reached the
+        // layer, so its measurement is of the pixels the user is looking at.
+        runPendingAutoIfReady()
         return true
     }
 

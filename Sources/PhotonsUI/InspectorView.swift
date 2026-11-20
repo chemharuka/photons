@@ -675,7 +675,9 @@ public struct InspectorView: View {
         .buttonStyle(.plain)
         .padding(.trailing, -2)
         .onHover { autoBlackHovered = $0 }
-        .help(Loc.t("自动黑电平：把解码后的线性数据拉到非负"))
+        .disabled(autoAdjustWaitingForDecode)
+        .help(autoAdjustWaitingForDecode ? Loc.t("等待解码…")
+                                          : Loc.t("自动黑电平：把解码后的线性数据拉到非负"))
         .accessibilityLabel(Loc.t("自动黑电平"))
         .accessibilityIdentifier("inspector.blackLevel.auto")
     }
@@ -1537,6 +1539,12 @@ public struct InspectorView: View {
         }
     }
 
+    /// 448 — the 自动 actions queue behind the full-rung RAW decode. While they do, both wand buttons
+    /// are disabled and say why; the state is the loupe's observable bit, not a copy in this view.
+    private var autoAdjustWaitingForDecode: Bool {
+        loupe?.autoAdjustWait.isWaitingForDecode == true
+    }
+
     /// 422 — 「明暗」标题行右侧的 自动调节 (the same bare-icon family as 自动黑电平).
     ///
     /// 14 pt `wand.and.stars`, no bottom, no border, no capsule; hover only lifts the icon from
@@ -1561,7 +1569,9 @@ public struct InspectorView: View {
         .buttonStyle(.plain)
         .padding(.trailing, -2)
         .onHover { autoLightHovered = $0 }
-        .help(Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
+        .disabled(autoAdjustWaitingForDecode)
+        .help(autoAdjustWaitingForDecode ? Loc.t("等待解码…")
+                                          : Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
         .accessibilityLabel(Loc.t("自动调节"))
         .accessibilityIdentifier("inspector.light.auto")
     }
@@ -2667,17 +2677,25 @@ public struct InspectorView: View {
             lastPresetID = preset.id
             hint = "\(preset.name) · \(preset.valueText)"
         case .auto:
-            guard let average = loupe?.averageSceneRGB() else {
+            // 448 — the same action, but queued behind the anchor's full RAW rung. `nil` while waiting
+            // means "nothing was written yet", not "the picture has no colour".
+            guard let loupe else {
                 hint = Loc.t("自动白平衡：画面尚未就绪，未写入")
                 return
             }
-            guard let solve = commands.applyAuto(average) else {
-                hint = Loc.t("自动白平衡：画面没有可用的颜色信息，未写入")
+            let average = loupe.averageSceneRGB()
+            guard let solve = loupe.autoWhiteBalance() else {
+                if loupe.isWaitingForDecode {
+                    hint = Loc.t("自动白平衡：等待解码…")
+                } else {
+                    hint = Loc.t("自动白平衡：画面没有可用的颜色信息，未写入")
+                }
                 return
             }
             lastPresetID = preset.id
             hint = String(format: Loc.t("自动（灰世界）· %@ · 画面均值 RGB %@%@"),
-                          solve.whiteBalance.summary, average.text,
+                          solve.whiteBalance.summary,
+                          average?.text ?? "—",
                           solve.clamped ? Loc.t(" · 已到量程边界（近似）") : "")
         }
     }
