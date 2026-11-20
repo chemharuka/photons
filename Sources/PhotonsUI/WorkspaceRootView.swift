@@ -80,6 +80,8 @@ public final class ToolButton: NSButton {
 
     public override var intrinsicContentSize: NSSize {
         let text = (title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 10.5)])
+        // 442 —— 图标盒仍是**固定 14 pt**（布局契约，`SortOrderUITests` 按这个算式断言）；
+        // 归一化后实际字形宽 12–18 不等，但按钮宽度不跟着抖。
         let imageWidth: CGFloat = image == nil ? 0 : 14
         return NSSize(width: WorkspaceLayout.toolButtonPaddingH * 2 + imageWidth + text.width + 6,
                       height: WorkspaceLayout.toolButtonHit)
@@ -100,7 +102,66 @@ public final class ToolButton: NSButton {
             NSBezierPath(roundedRect: rect, xRadius: WorkspaceLayout.toolCornerRadius,
                          yRadius: WorkspaceLayout.toolCornerRadius).fill()
         }
-        super.draw(dirtyRect)
+        drawIconAndTitle()
+    }
+
+    /// 442 —— **自己画图标和标题**，不再让 `NSButtonCell` 摆。
+    ///
+    /// 为什么必须自己画：cell 会把「图标 + 标题」当成一条基线组来居中，而 SF Symbols 的
+    /// **对齐矩形**（alignment rect）随字形不同（`folder` / `square.and.arrow.down` /
+    /// `arrow.up.arrow.down` 各不相同），于是同一排里标题的 y 会差 0.25–1.5 px ——
+    /// 实测（`cell.titleRect(forBounds:)`）：打开 8.00 / 胶片条 8.50 / 排序 8.25 /
+    /// 导入 9.00 / 导出 9.50。用户看到的就是「导入导出偏低约 2 px、胶片条偏低约 1 px」。
+    ///
+    /// 这里只用两条固定公式：图标 `(bounds.height - icon.height)/2`、标题
+    /// `(bounds.height - text.height)/2`，五个按钮逐点相同，与字形无关。
+    /// 把 template 图标染成 `color`（保持 alpha 掩码，用来跟随明暗外观）。
+    private func tinted(_ image: NSImage, color: NSColor) -> NSImage {
+        let out = NSImage(size: image.size)
+        out.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        color.set()
+        NSRect(origin: .zero, size: image.size).fill(using: .sourceAtop)
+        out.unlockFocus()
+        out.isTemplate = false
+        return out
+    }
+
+    /// 442 —— 图标与标题的**唯一**几何：`draw` 用它画，测试用它断言「五个按钮的标题逐点同高」。
+    /// 两条都是固定公式，与字形、宽度、字号无关；返回的 `title` 是文字行框（不是基线）。
+    public func contentGeometry(in box: NSRect) -> (icon: NSRect?, title: NSRect) {
+        var x = WorkspaceLayout.toolButtonPaddingH
+        var iconRect: NSRect?
+        if let icon = image {
+            let size = icon.size
+            let iy = ((box.height - size.height) / 2).rounded()
+            iconRect = NSRect(x: x, y: iy, width: size.width, height: size.height)
+            x += size.width + 6
+        }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        ]
+        let size = (title as NSString).size(withAttributes: attributes)
+        let ty = ((box.height - size.height) / 2).rounded()
+        return (iconRect, NSRect(x: x, y: ty, width: size.width, height: size.height))
+    }
+
+    private func drawIconAndTitle() {
+        let dimmed = !isEnabled
+        let geometry = contentGeometry(in: bounds)
+        if let icon = image, let rect = geometry.icon {
+            // 442 —— template 图标自己画不会被 `contentTintColor` 着色（那只有 cell 画才生效），
+            // 所以按当前外观把 `labelColor` / `disabledControlTextColor` 叠上去，
+            // 否则明暗外观下图标一样亮（`SortOrderUITests` 的暗色断言会红）。
+            let tint = tinted(icon, color: dimmed ? .disabledControlTextColor : .labelColor)
+            tint.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0,
+                      respectFlipped: true, hints: nil)
+        }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+            .foregroundColor: dimmed ? NSColor.disabledControlTextColor : NSColor.labelColor
+        ]
+        (title as NSString).draw(at: geometry.title.origin, withAttributes: attributes)
     }
 
     public override func updateTrackingAreas() {

@@ -353,4 +353,37 @@ final class TopBarImportExport435Tests: XCTestCase {
             XCTAssertEqual(button.imagePosition, open.imagePosition, "\(name) 的 imagePosition 与打开不同")
         }
     }
+
+    /// 442 —— **五个按钮的标题逐点同高**（用户报「导入/导出偏低约 2 px、胶片条偏低约 1 px」）。
+    ///
+    /// 这一条是回归门：`NSButtonCell` 会把「图标 + 标题」当一条基线组居中，而 SF Symbols 的
+    /// 对齐矩形随字形不同 —— 实测旧实现的 `cell.titleRect` y 是 8.00 / 8.50 / 8.25 / 9.00 / 9.50。
+    /// 现在 `ToolButton` 自己按固定公式摆（`contentGeometry(in:)`），五个按钮必须逐点相等。
+    func testAllFiveButtonsShareTheSameTitleBaseline() throws {
+        let bar = makeBar()
+        let buttons: [(String, ToolButton)] = [
+            ("打开", bar.openButtonView),
+            ("导入", bar.importButtonView),
+            ("导出", bar.exportButtonView),
+            ("胶片条", bar.filmstripButtonView),
+            ("排序", bar.sortButtonView)
+        ]
+        for (name, b) in buttons {
+            XCTAssertEqual(b.frame.height, WorkspaceLayout.toolButtonHit, accuracy: 0.01,
+                           "\(name) 的命中高不是 28")
+        }
+        let reference = buttons[0].1.contentGeometry(in: buttons[0].1.bounds)
+        for (name, b) in buttons.dropFirst() {
+            let g = b.contentGeometry(in: b.bounds)
+            XCTAssertEqual(g.title.minY, reference.title.minY, accuracy: 0.01,
+                           "\(name) 的标题比打开低/高了 \(g.title.minY - reference.title.minY) pt")
+            XCTAssertEqual(g.title.height, reference.title.height, accuracy: 0.01,
+                           "\(name) 的标题行高与打开不同")
+            if let icon = g.icon, let refIcon = reference.icon {
+                XCTAssertEqual(icon.midY, refIcon.midY, accuracy: 0.01,
+                               "\(name) 的图标竖直中心与打开不同")
+            }
+        }
+        print("442 · 标题 minY = \(reference.title.minY) · 行高 \(reference.title.height) · 五个按钮逐点相等")
+    }
 }
