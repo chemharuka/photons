@@ -115,6 +115,17 @@ public final class CanvasFrameCache {
             self.highlightCeiling = highlightCeiling
         }
 
+        /// 439 — the same key, projected from the one place the identity facts are computed.
+        public init(facts: LoupeFrameFacts) {
+            self.init(photo: facts.photo, decodeInputs: facts.decodeInputs,
+                      editDigest: facts.editDigest, geometry: facts.geometry,
+                      cameraState: facts.camera, viewport: facts.viewport, mode: facts.mode,
+                      fitScale: facts.fitScale, canvasRole: facts.canvasRole,
+                      cropIsActive: facts.cropIsActive, highlightWarning: facts.highlightWarning,
+                      headroom: facts.headroom, decodeScale: facts.decodeScale,
+                      primaries: facts.primaries, highlightCeiling: facts.ceiling)
+        }
+
         /// The whole identity in one string. Doubles use `%.17g`: a shortened format would let two
         /// distinct cameras share a key, which is the "old picture" bug this type exists to prevent.
         public var identity: String {
