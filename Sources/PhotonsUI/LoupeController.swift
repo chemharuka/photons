@@ -704,6 +704,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 045: a zoomed edit's whole-picture measurement counts here too, because it *is* a measurement —
     /// so this is "measurements of the picture", not "frames that measured".
     public private(set) var histogramRefreshCount = 0
+    /// 457 — measurements a **frame** ran (`histogramStep`'s `measured == true`).
+    ///
+    /// The acceptance for a photo switch reads the delta across the switch: a photo whose numbers are
+    /// already in the cache must be `0` here. Different from `histogramRefreshCount` on purpose — the
+    /// latter also counts 045's background whole-picture measurement, and the switch claim is about
+    /// the frame that carries the plot.
+    public private(set) var histogramMeasurementCount = 0
     /// The last measurement's own cost (frame readback + binning + the GPU wait), in milliseconds.
     ///
     /// **034 changed what it measures**: it used to be a whole extra thumbnail render (≈11 ms), now it
@@ -868,6 +875,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public private(set) var lastClipped: ClippedGrid?
     /// Frames whose histogram reached the session — the smoke asserts it is not a second render.
     public private(set) var histogramPublishCount = 0
+    /// 457 — the publish count under the name the switch acceptance reads. One writer (`publish`), so
+    /// "one publish on a switch to a measured photo" cannot be satisfied by a second counter drifting.
+    public var histogramPublishedCount: Int { histogramPublishCount }
 
     /// Read-only, for the cadence tests: **nothing is measuring and nothing is on its way to the
     /// card**, so a counter read now is the settled answer and not a sample taken mid-flight.
@@ -6096,6 +6106,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                       edit: job.edit, state: job.state, mode: job.mode,
                                       fitScale: job.fitScale,
                                       hashPixels: hashesFrames, resolve: .residentOnly,
+                                      targetScale: job.target,
                                       // 333 — the render queue reads the job and nothing else.
                                       canvasRole: job.canvasRole,
                                       cropIsActive: job.cropIsActive,
@@ -6375,6 +6386,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // A picker is aimed at one picture; a different one is a cancellation, like the crop frame.
         if isEyedropperArmed { cancelEyedropper() }
         cancelPendingFrames()
+        // 457 — 「切到已测过的照片」 publishes **at the switch**, before the new photo's first frame
+        // exists. The key is the canonical one (`…-s1.0`), so an entry measured by another visit (or
+        // another launch) is a hit even though the ladder holds nothing of this photo yet. A miss
+        // leaves the card empty rather than the previous photo's numbers: the first frame that can
+        // measure will fill it.
+        let switchEdit = frameSource?.edit ?? session?.edit ?? .neutral
+        if let identity {
+            publishHistogramIfCached(forPhoto: identity, edit: switchEdit)
+        } else {
+            lastHistogram = nil
+            histogramMeasuredKey = nil
+            session?.recordHistogram(nil)
+        }
         // 065b: 「低清照片渲染在切换/打开照片的一瞬间就要完成并且换进来」. The ask is armed here, at the
         // instant the photo changes, and **served by the first frame of that photo** — the render queue
         // is serial, so nothing this asks for can be queued in front of the frame the user is waiting
@@ -7574,12 +7598,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// chain already.
     public func makeFrame(url: URL, viewport: ImageSize, decodeScale: Float, edit: EditModel,
                           state: LoupeViewState = .fit, mode: LoupeFrameMode = .edited,
-                          hashPixels: Bool = false, useCache: Bool = true) throws -> FrameResult {
+                          hashPixels: Bool = false, useCache: Bool = true,
+                          targetScale: Float? = nil) throws -> FrameResult {
         try makeFrame(url: url, cacheIdentity: url.lastPathComponent,
                       viewport: viewport, decodeScale: decodeScale, edit: edit,
                       state: state, mode: mode,
                       fitScale: currentCropWorkspaceFitScale,
                       hashPixels: hashPixels, useCache: useCache,
+                      targetScale: targetScale,
                       canvasRole: cropTool.canvasRole, cropIsActive: cropTool.isActive,
                       editRevision: session?.editRevision ?? 0,
                       highlightWarning: session?.highlightWarning ?? false)
@@ -7616,6 +7642,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            fitScale: Double = 1,
                            hashPixels: Bool, resolve: RungResolution = .developIfMissing,
                            useCache: Bool = true, measurement: Bool = true,
+                           // 457 — the rung this frame is the **target** of (`RenderJob.target`), which
+                           // is what the histogram key names. `nil` means a synchronous caller asked
+                           // for exactly `decodeScale`, so that rung is the target.
+                           targetScale: Float? = nil,
                            rungInputs: DecodeInputs? = nil,
                            // 333 — every caller on the render queue passes these from its job /
                            // request snapshot; the synchronous callers pass the live tool's values
@@ -7626,6 +7656,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            editRevision: Int,
                            highlightWarning: Bool) throws -> FrameResult {
         let ds = Double(max(decodeScale, 0.01))
+        // 457 — the picture's canonical rung: what the caller asked the loupe for, not the rung this
+        // particular frame could render. A preview frame is drawn from 0.5 while the target is 1.0; the
+        // histogram key must say 1.0 in both cases, so a switch to a measured photo is a cache read
+        // instead of a second measurement.
+        let canonicalScale = max(targetScale ?? decodeScale, 0.01)
         // 194: the white balance is a **decode** input for the *settled* frame, so a 2850 K document
         // is its own development — and S1 is identity on that buffer because the decoder already
         // baked the pair (`RenderInput.whiteBalance`). `DecodeInputs` is still the only thing allowed
@@ -7758,7 +7793,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let measureHistogram = measurement && mode != .original
             && wantsHistogramMeasurement(photo: baseIdentity, edit: model,
                                          identity: cacheIdentity,
-                                         fallbackScale: decodeScale, coverage: coverage)
+                                         decodeScale: decodeScale,
+                                         fallbackScale: canonicalScale,
+                                         coverage: coverage)
 
         // One render over the resident rung. `useCache: true` in both sources: the edited pipeline's
         // keys are the document's, so a compare frame hits S1…S3 exactly where the plain frame did and
@@ -7886,8 +7923,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                   measured: e.result.histogram,
                                   milliseconds: e.result.histogramMilliseconds,
                                   identity: cacheIdentity,
+                                  decodeScale: decodeScale,
                                   coverage: coverage, primaries: primaries, ceiling: ceiling,
-                                  fallbackScale: decodeScale, sourceURL: url,
+                                  fallbackScale: canonicalScale, sourceURL: url,
                                   startedAt: t1))
         }
         let hash = hashPixels ? LoupeController.hash(texture) : nil
@@ -8887,12 +8925,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// The key the picture would be measured under right now.
     ///
-    /// The rung is the **biggest one the ladder has**, not the one this frame renders from: a frame at
-    /// fit may render from the preview rung while 1:1 renders from the full one, and if the key carried
-    /// the frame's rung the card would re-measure — with slightly different numbers — every time the
-    /// zoom changed. The ladder keeps one rung in practice (`RenderJob.target` is always full scale),
-    /// so this is the same buffer at every zoom; `fallbackScale` is only used before the first rung
-    /// lands, and the key changes (and re-measures once) when the real one does.
+    /// 457 — the key names the picture's **canonical** rung, never the rung this frame happened to
+    /// render: in production that canonical rung is always `DecodeLadder.fullScale` (`RenderJob.target`
+    /// is full scale for every settled frame), and the 0.5 preview that arrives first is a temporary
+    /// buffer of the same picture. Keying it as `…-s0.5` missed every entry measured at `…-s1.0` and
+    /// then stored a second, low-quality set of numbers under a key nothing would read again — the
+    /// reported 「切换图片没接入」 behaviour. `fallbackScale` is the caller's canonical rung (the
+    /// requested target), not the frame's own scale; the two are the same on the synchronous paths
+    /// (`makeFrame` with an explicit rung), and the target is full scale on the loupe's frame path.
     private func histogramKey(identity: String, facts: LoupeFrameFacts,
                               fallbackScale: Float) -> String {
         let rung = histogramRungScale(identity: identity, fallbackScale: fallbackScale)
@@ -8901,12 +8941,27 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                   ceiling: facts.ceiling)
     }
 
-    /// The rung a picture's histogram is measured from — the biggest one the ladder has, or the frame's
-    /// own scale before the first rung lands. Split out of `histogramKey` because 045's background
-    /// measurement has to build its graph from **this** buffer: the key names it, the numbers are
-    /// labelled with it, and a measurement from any other rung would be a different picture.
+    /// The canonical rung a picture's histogram belongs to.
+    ///
+    /// 457 — **decoupled from the frame's rung**. A photo switch starts with the 0.5 preview rung in
+    /// the ladder (or with no rung of the new photo at all), while every cached entry was measured
+    /// from the full-scale buffer. Deriving the key from the biggest resident rung therefore made the
+    /// preview frame a miss, measured it, and stored `…-s0.5`; when the full rung landed the key moved
+    /// to `…-s1.0` and the picture was measured a second time. The canonical rung is the one the
+    /// frame was **asked for** (`RenderJob.target`, full scale in production), so the preview and the
+    /// settled frame name the same cache entry and only the settled frame may measure it.
+    ///
+    /// `fallbackScale` is that requested target (the historical name is kept because 045's
+    /// `PictureRequest` already carries this value). The synchronous `makeFrame` paths pass the rung
+    /// they explicitly asked ImageIO for, which keeps tests and `--ui-smoke` honest about the buffer
+    /// they rendered.
     private func histogramRungScale(identity: String, fallbackScale: Float) -> Float {
-        ladder.best(identity: identity, atOrBelow: DecodeLadder.fullScale)?.scale ?? fallbackScale
+        if let override = histogramCanonicalRungOverrideForTesting { return override }
+        // 457 — the ladder is deliberately not consulted: `best(atOrBelow:)` answers with the preview
+        // rung while the full one is still developing, which is exactly the answer that poisoned the
+        // key. The target rung is the picture; the resident rung is only what can be drawn yet.
+        _ = identity
+        return fallbackScale
     }
 
     /// The document's facts, memoised against the document and the photo it belongs to (render queue
@@ -8983,7 +9038,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// texture at all, and nothing here reads pixels.
     private func histogramStep(for edit: EditModel, photo: String,
                                measured: Histogram?, milliseconds: Double,
-                               identity: String, coverage: Double,
+                               identity: String, decodeScale: Float, coverage: Double,
                                primaries: OutputPrimaries, ceiling: Double,
                                fallbackScale: Float, sourceURL: URL,
                                startedAt: CFAbsoluteTime) -> HistogramStep {
@@ -8995,6 +9050,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The picture's key has not moved: a pan, a zoom, a mask-visibility toggle. Nothing to measure
         // and nothing to publish — the card already has this picture's numbers.
         guard !frameAlreadyMeasured(key) else { return HistogramStep(key: key) }
+        // 457 — a preview frame (0.5) is a temporary buffer of the picture, not the picture the key
+        // names. Its pixels may only *show* numbers already measured from the canonical rung; running
+        // a measurement here is what wrote `…-s0.5` entries and made the full frame measure again.
+        // The canonical frame is the one whose scale is the key's rung; that one is measured below.
+        guard abs(histogramRungScale(identity: identity, fallbackScale: fallbackScale) - decodeScale)
+                < 1e-6 else {
+            if let cached = cachedHistogram(for: key) {
+                rememberMeasuredFrame(key)
+                return HistogramStep(key: key, histogram: cached, latency: latency())
+            }
+            // Not an error: the canonical frame has not arrived yet. `apply` counts it as a skipped
+            // frame, and the settled frame publishes the picture's numbers.
+            return HistogramStep(key: key, latency: latency())
+        }
         // The frame is a window into the picture (1:1 or beyond): its pixels are a *crop*, so any
         // numbers read out of it would be the crop's. This frame publishes nothing and says why — but
         // the *picture* may well have changed (an edit made at 1:1 or 400 %), so 045 answers it in the
@@ -9049,12 +9118,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     ///   · the card's switch is off → no measurement (`collectsHistogram`);
     ///   · the frame is a window into the picture → no measurement (a crop's numbers are the crop's);
+    ///   · 457 — the frame is a preview (its rung is not the key's canonical rung) → no measurement;
     ///   · this key was already measured, or its numbers are in the cache → no measurement (A → B → A
     ///     publishes the cache and nothing needs re-counting).
     private func wantsHistogramMeasurement(photo: String, edit: EditModel, identity: String,
-                                           fallbackScale: Float, coverage: Double) -> Bool {
+                                           decodeScale: Float, fallbackScale: Float,
+                                           coverage: Double) -> Bool {
         guard collectsHistogram else { return false }
         guard coverage >= Self.histogramWholePictureCoverage else { return false }
+        // 457 — only the canonical frame may measure. The preview and the settled frame share one key,
+        // so measuring the preview would store a second set of numbers for the same picture (and the
+        // settled frame would then be a cache hit of the wrong buffer). This is the pre-render half of
+        // `histogramStep`'s identical guard.
+        guard abs(histogramRungScale(identity: identity, fallbackScale: fallbackScale) - decodeScale)
+                < 1e-6 else { return false }
         let key = histogramKey(identity: identity, facts: cachedEditFacts(photo: photo, edit: edit),
                                fallbackScale: fallbackScale)
         guard !frameAlreadyMeasured(key) else { return false }
@@ -9081,6 +9158,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         histogramLock.unlock()
         if step.measured {
             histogramRefreshCount += 1
+            histogramMeasurementCount += 1
             lastHistogramMilliseconds = step.milliseconds
         }
         if let histogram = step.histogram {
@@ -9412,12 +9490,50 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return loaded
     }
 
+    /// 457 — the photo switch's cache read: publish the incoming photo's numbers **now**, on main,
+    /// before its first frame has been rendered.
+    ///
+    /// The key is the same canonical key a frame would build (`…-s1.0` + document digest + ceiling),
+    /// not the preview rung the ladder happens to expose at this instant. A hit is one publish and no
+    /// measurement; a miss clears the card so the previous photo's plot cannot stand in for this one
+    /// while the measurement is on its way.
+    ///
+    /// Main thread only: it publishes to the session and to `lastHistogram`, exactly like `apply`.
+    private func publishHistogramIfCached(forPhoto photo: String, edit: EditModel) {
+        guard collectsHistogram else { return }
+        let identity = Self.rungIdentity(photo, inputs: edit.decodeInputs)
+        let facts = LoupeFrameFacts(documentOnly: photo, edit: edit,
+                                    ceiling: HighlightCeiling.current)
+        let key = histogramKey(identity: identity, facts: facts,
+                               fallbackScale: DecodeLadder.fullScale)
+        if let cached = cachedHistogram(for: key) {
+            publish(histogram: cached, key: key, frame: false)
+            return
+        }
+        lastHistogram = nil
+        histogramMeasuredKey = nil
+        session?.recordHistogram(nil)
+    }
+
     /// 428 — what the A② assertion reads: a photo switch must not empty this.
     var histogramCacheCount: Int {
         histogramLock.lock()
         defer { histogramLock.unlock() }
         return histogramCache.count
     }
+
+    /// 457 — the memory entries' keys, so "a preview frame wrote no `…-s0.5` entry" is asserted on the
+    /// cache itself rather than inferred from a count.
+    var histogramCacheKeysForTesting: [String] {
+        histogramLock.lock()
+        defer { histogramLock.unlock() }
+        return Array(histogramCache.keys)
+    }
+
+    /// 457 — the reverse gate: make `histogramRungScale` answer with the frame's old behaviour (the
+    /// preview rung) so a test can show that this is exactly what measured twice and wrote
+    /// `…-s0.5`. `nil` in production.
+    var histogramCanonicalRungOverrideForTesting: Float?
 
     /// 428 — the key the card's numbers are filed under, for a test that wants to ask the disk for
     /// exactly what a frame produced. Main thread only (the publish path writes it there).
