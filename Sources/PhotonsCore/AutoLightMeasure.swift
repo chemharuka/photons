@@ -28,6 +28,16 @@ extension RenderGraph {
     /// texture criterion takes would read sampling noise rather than contrast if the grid were coarser.
     public func measureAutoLightSample(_ edit: EditModel, longEdge: Int = AutoLight.sampleLongEdge)
         throws -> AutoLight.Sample {
+        AutoLight.Sample(try measureLinearSample(edit, longEdge: longEdge))
+    }
+
+    /// **452 — the same render and readback, handed back as the scene-linear RGBA grid.**
+    ///
+    /// 自动颜色 needs the **chroma** of the picture, which `AutoLight.Sample` throws away by
+    /// weighting each texel to luma. This is the same measurement — same scale, same options, same
+    /// `histogramSample` texture — with the RGBA intact; nothing about the measurement changed.
+    public func measureLinearSample(_ edit: EditModel, longEdge: Int = AutoLight.sampleLongEdge)
+        throws -> LinearSample {
         let pixels = edit.geometry.outputPixels(in: sourceSize)
         let long = Double(max(pixels.width, pixels.height))
         let cap = max(64, longEdge)
@@ -47,6 +57,6 @@ extension RenderGraph {
         guard let sample = result.histogramSample else {
             throw RenderError.executeFailed("auto light: no scene-linear sample")
         }
-        return AutoLight.Sample(sample)
+        return sample
     }
 }
