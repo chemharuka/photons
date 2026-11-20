@@ -254,7 +254,10 @@ public struct Preset: Sendable, Equatable, Codable {
     /// carries; it is the fragment that decides which leaves land.
     public func apply(to target: EditModel) -> EditModel {
         if let sections, !sections.isEmpty {
-            return EditSnapshot.capture(edit).filtered(to: sections).applied(to: target)
+            // 442: a section-scoped preset is a *fragment* whose untouched leaves are defaults, so
+            // it keeps the pre-442 explicit-only reading. The clipboard's all-leaves contract must
+            // not turn "the preset never named redHue" into "write redHue = 0".
+            return EditSnapshot.captureExplicit(edit).filtered(to: sections).applied(to: target)
         }
         var out = target
         for group in PresetGroup.ordered(groups) {

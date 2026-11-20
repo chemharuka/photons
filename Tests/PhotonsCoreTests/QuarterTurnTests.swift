@@ -397,9 +397,12 @@ final class QuarterTurnTests: XCTestCase {
     func testPastingATurnCarriesTheDestinationCropWithIt() {
         var source = EditModel.neutral
         XCTAssertTrue(source.turn(clockwise: true))
+        // 442: the full capture carries the crop too; this case is about a payload that names the
+        // turn alone, so it is narrowed to that child.
         let payload = EditSnapshot.capture(source)
+            .filtered(to: [.geometry], children: [.quarterTurns])
         XCTAssertEqual(payload.geometry?.quarterTurns, 1, "转了 90° 的整幅文档，快照里应该有 turn")
-        XCTAssertNil(payload.geometry?.cropX, "整幅裁切不该出现在稀疏快照里")
+        XCTAssertNil(payload.geometry?.cropX, "只勾旋转时裁切边不在载荷里")
 
         var target = EditModel.neutral
         target.geometry.crop = NormalizedRect(x: 0.1, y: 0.2, width: 0.5, height: 0.4)
@@ -414,6 +417,7 @@ final class QuarterTurnTests: XCTestCase {
         var croppedSource = EditModel.neutral
         croppedSource.geometry.crop = NormalizedRect(x: 0.05, y: 0.1, width: 0.6, height: 0.5)
         let edges = EditSnapshot.capture(croppedSource)
+            .filtered(to: [.geometry], children: [.crop])
         XCTAssertNotNil(edges.geometry?.cropX)
         var turnedTarget = EditModel.neutral
         turnedTarget.geometry.quarterTurns = 1

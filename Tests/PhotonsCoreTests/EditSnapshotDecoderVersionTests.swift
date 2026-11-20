@@ -7,7 +7,7 @@ import PhotonsCore
 /// cause was not the sheet: `EditSnapshot` had **no** decoder field at all, so copying 开发 collected
 /// five render-side leaves and left the one decoder fact behind. What is pinned here:
 ///
-///   ① `capture` carries the model, and only when the document pins one (`nil` = 跟随 Apple);
+///   ① `capture` carries the model, and 442 also carries the pin's absence as `decoderVersionAuto`;
 ///   ② the wire key is `decoderVersion` and a pre-319 blob (no key) still decodes — as "keep yours";
 ///   ③ `applied` writes it, and `requiresDecode` is **true** for exactly that leaf;
 ///   ④ a copy narrowed to 解码器版本 alone is not empty (it is one leaf of 开发), while 锐化 alone asks
@@ -49,13 +49,17 @@ final class EditSnapshotDecoderVersionTests: XCTestCase {
               + " sections=\(withVersion.sections.map(\.rawValue).sorted())")
 
         XCTAssertEqual(withVersion.decoderVersion, "9")
-        XCTAssertNil(without.decoderVersion, "nil is 跟随 Apple：不携带，也不覆盖目标")
+        XCTAssertEqual(withVersion.decoderVersionAuto, false)
+        XCTAssertNil(without.decoderVersion)
+        XCTAssertEqual(without.decoderVersionAuto, true, "nil is 跟随 Apple, carried explicitly (442)")
         // 开发 卡 is the card that owns it, so a version-only payload still names 开发.
         XCTAssertTrue(withVersion.sections.contains(.detail))
         // The other five leaves of the card are untouched by this field.
         XCTAssertEqual(withVersion.detail?.sharpening, 30)
-        XCTAssertEqual(withVersion.fieldCount, 2, "曝光 + 锐化；版本不计入 slider 算术")
+        XCTAssertEqual(withVersion.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "442: a capture is complete; the version itself is not slider arithmetic")
         XCTAssertTrue(withVersion.carriesDecoderVersion)
+        XCTAssertTrue(without.carriesDecoderVersion, "「自动」 is a decoder state too")
         XCTAssertEqual(EditSnapshotChild.decoderVersion.standaloneTitle, "解码器版本",
                        "开发 卡没有行表，所以它的名字写在字段旁边（325：spec 卡的行名一律从 `ToneRow` 取）")
         XCTAssertEqual(EditSnapshotChild.decoderVersion.section, .detail)
@@ -99,6 +103,15 @@ final class EditSnapshotDecoderVersionTests: XCTestCase {
         XCTAssertEqual(pasted.light.exposure, 0.8)
         XCTAssertTrue(source.requiresDecode, "版本变了就是新缓冲：必须重解")
 
+        // 442 — the reverse direction: an automatic source writes nil over a pinned destination.
+        let automatic = EditSnapshot.capture(document(version: nil))
+        var pinned = target
+        pinned.decoderVersion = "9.dng"
+        let reset = automatic.filtered(to: [.detail], children: [.decoderVersion]).applied(to: pinned)
+        XCTAssertNil(reset.decoderVersion, "源是自动 ⇒ 粘贴把目标写回自动")
+        XCTAssertTrue(automatic.filtered(to: [.detail], children: [.decoderVersion]).requiresDecode,
+                      "写回自动也要真的重新解码")
+
         // The narrowed payload 只勾「解码器版本」 is the ticket's exact gesture, and it must still carry
         // 开发 + the version and nothing else.
         let onlyVersion = source.filtered(to: [.detail], children: [.decoderVersion])
@@ -116,9 +129,11 @@ final class EditSnapshotDecoderVersionTests: XCTestCase {
         XCTAssertFalse(onlySharpen.requiresDecode,
                        "只勾锐化不许重解：v9 冷启 60 MP 要 4.9 s")
 
-        // And without the field there is nothing to require the development for — the pre-319 shape.
+        // And without either field there is nothing to require the development for — the pre-319
+        // shape, which 442's explicit 「自动」 must not be confused with.
         var legacy = source
         legacy.decoderVersion = nil
+        legacy.decoderVersionAuto = nil
         XCTAssertFalse(legacy.requiresDecode)
     }
 

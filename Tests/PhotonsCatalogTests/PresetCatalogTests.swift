@@ -172,12 +172,16 @@ final class PresetCatalogTests: XCTestCase {
         XCTAssertEqual(record.groups, [.light, .color])
         XCTAssertEqual(record.edit.color, .identity, "widening a subset cannot add values")
         XCTAssertEqual(record.edit.light, document.light)
-        XCTAssertEqual(EditSnapshot.capture(record.edit).fieldCount, 2)
+        // 442: capture is complete, so the fragment's own values are what this checks — color is
+        // still neutral, light is still the captured document.
+        XCTAssertEqual(EditSnapshot.capture(record.edit).fieldCount,
+                       EditSnapshot.fullDocumentFieldCount)
 
         // The returned record is exactly what the blob carries.
         let reloaded = try catalog.requirePreset(named: "Widen")
         XCTAssertEqual(record.edit, reloaded.edit)
-        XCTAssertEqual(EditSnapshot.capture(reloaded.edit).fieldCount, 2)
+        XCTAssertEqual(EditSnapshot.capture(reloaded.edit).fieldCount,
+                       EditSnapshot.fullDocumentFieldCount)
     }
 
     // MARK: - 2. the default preset
@@ -249,19 +253,21 @@ final class PresetCatalogTests: XCTestCase {
 
     // MARK: - 4. copy / paste settings
 
-    func testCopySettingsIsSparse() throws {
+    func testCopySettingsCarriesEveryLeaf() throws {
         let catalog = try newLibrary()
         let id = try insertAsset(catalog)
         _ = try catalog.appendDevelop(edit(exposure: 0.5, contrast: 15), forAsset: id)
 
+        // 442: `Catalog.copySettings` is the raw capture, so it is the full leaf table — the UI's
+        // checklist narrows it. Both the source's values and its defaults are present.
         let snapshot = try catalog.copySettings(fromAsset: id)
-        XCTAssertEqual(snapshot.fieldCount, 2, "two changed leaves, two stored fields")
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount)
         XCTAssertEqual(snapshot.light?.exposure, 0.5)
         XCTAssertEqual(snapshot.light?.contrast, 15)
-        XCTAssertNil(snapshot.color)
-        XCTAssertEqual(snapshot.groups, [.light])
-        XCTAssertLessThan(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount / 10,
-                          "two fields out of 57: the payload is sparse by construction")
+        XCTAssertEqual(snapshot.light?.highlights, 0, "a default is a copied value now")
+        XCTAssertNotNil(snapshot.color)
+        XCTAssertEqual(snapshot.groups,
+                       [.geometry, .light, .curve, .color, .colorGrading, .detail, .effects])
     }
 
     func testPasteSettingsProducesExactlyOneHistoryRowAndAppendsMasks() throws {
@@ -292,7 +298,8 @@ final class PresetCatalogTests: XCTestCase {
         let after = try catalog.develop(forAsset: target)
         XCTAssertEqual(after.light, sourceEdit.light, "the copied group landed")
         XCTAssertEqual(after.color, sourceEdit.color)
-        XCTAssertEqual(after.effects, targetEdit.effects, "Effects was not copied")
+        XCTAssertEqual(after.effects, sourceEdit.effects,
+                       "442: the source's default effects are copied too, so the target's 暗角 resets")
         // P1-5: the mask list is carried **appended** — the destination keeps its own mask and gains
         // the source's as a new, re-identified mask. The overlay is still never pasted.
         print("PASTE  masks: \(targetEdit.masks.map(\.id)) + \(sourceEdit.masks.map(\.id))"
@@ -337,6 +344,29 @@ final class PresetCatalogTests: XCTestCase {
         XCTAssertFalse(saved.changed)
         XCTAssertEqual(try historyRowCount(catalog, id), rowsBefore)
         XCTAssertEqual(try catalog.develop(forAsset: id), edit(exposure: 0.5))
+    }
+
+    /// 442 A⑤ — a *complete* payload from a neutral source is still a no-op on a neutral target:
+    /// the same values written back leave the document (and therefore the pixels) untouched, and no
+    /// history row is appended.
+    func testPastingAFullNeutralPayloadWritesNoRow() throws {
+        let catalog = try newLibrary()
+        // A library asset's blob is canonical; insert it that way so "changed" measures the paste,
+        // not the first canonicalisation of a hand-written "{}".
+        let neutralJSON = try Catalog.encode(.neutral)
+        let source = try insertAsset(catalog, name: "source.dng", developJson: neutralJSON)
+        let target = try insertAsset(catalog, name: "target.dng", developJson: neutralJSON)
+        let before = try catalog.develop(forAsset: target)
+        let rowsBefore = try historyRowCount(catalog, target)
+
+        let snapshot = try catalog.copySettings(fromAsset: source)
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "the payload is complete, not empty")
+        let saved = try catalog.pasteSettings(snapshot, intoAsset: target)
+        XCTAssertFalse(saved.changed)
+        XCTAssertEqual(try historyRowCount(catalog, target), rowsBefore)
+        XCTAssertEqual(try catalog.develop(forAsset: target), before,
+                       "same document ⇒ same rendering inputs ⇒ same pixels")
     }
 
     // MARK: - 5. version guard

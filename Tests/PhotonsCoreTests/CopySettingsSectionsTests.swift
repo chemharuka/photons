@@ -7,15 +7,14 @@ import XCTest
 /// whole-document comparison (a whole-document assert cannot say *which* leaf moved, and the ticket
 /// is precisely about which leaves may move):
 ///
-///   ① **sparse**: what ⌘C captures is the source's non-default leaves, nothing else;
-///   ② **只带非默认字段 for the destination too**: pasting writes those leaves and no others, so a
-///      photo that has its own white balance keeps it whenever the source did not pin one;
+///   ① **complete**: what ⌘C captures is the source's every copyable leaf, defaults included (442);
+///   ② **paste writes what it carries**: a full paste resets the destination's leaves to the
+///      source's values (defaults included); a narrowed paste leaves every other leaf alone;
 ///   ③ **选组**: narrowing to a section drops its leaves *only* — 曝光 + 曲线 cannot touch 白平衡,
 ///      colour, crop or masks.
 ///
-/// `testAWholeDocumentPasteWouldClobberTheDestination` is the 反证: it shows what the naive
-/// implementation would do, so the assertions above are visibly about the sparse path and not about
-/// two documents that happened to agree.
+/// The 反证 lives in `testAWholeDocumentPasteWouldClobberTheDestination`: it shows the destination's
+/// own values being reset, which is the contract as of 442.
 final class CopySettingsSectionsTests: XCTestCase {
 
     // MARK: - fixtures
@@ -68,36 +67,37 @@ final class CopySettingsSectionsTests: XCTestCase {
         return out
     }
 
-    // MARK: - ① sparse capture
+    // MARK: - ① complete capture (442)
 
-    func testCaptureCarriesOnlyTheNonDefaultLeaves() {
+    func testCaptureCarriesEveryLeafIncludingDefaults() {
         let snapshot = EditSnapshot.capture(documentA())
         print("COPY  A: \(snapshot.fieldCount) fields of \(EditSnapshot.fullDocumentFieldCount)"
               + " sections=\(EditSnapshotSection.panelOrder.filter { snapshot.sections.contains($0) }.map(\.title))"
               + " masks=\(snapshot.maskCount)")
-        // temperature, tint, exposure, contrast, curve.white, vibrance, crop ×4, vignetteAmount = 11.
-        XCTAssertEqual(snapshot.fieldCount, 11)
-        // 蒙版 is a section since P1-5: A has one mask, so the payload carries one — but a mask is a
-        // nested document, not a leaf, and does not enter that count.
-        XCTAssertEqual(snapshot.sections,
-                       [.whiteBalance, .light, .curve, .color, .geometry, .correction, .masks])
+        XCTAssertEqual(snapshot.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "every copyable leaf travels, not only the source's non-default ones")
+        XCTAssertEqual(snapshot.sections, Set(EditSnapshotSection.copyable))
+        XCTAssertEqual(snapshot.light?.temperature, 5500)
+        XCTAssertEqual(snapshot.light?.exposure, 1.2)
+        XCTAssertEqual(snapshot.light?.highlights, 0, "a default travels as a value")
+        XCTAssertEqual(snapshot.color?.blackAndWhite, false)
         XCTAssertEqual(snapshot.maskCount, 1)
         XCTAssertEqual(snapshot.masks?.masks.map(\.id), ["A-mask"])
 
-        let empty = EditSnapshot.capture(.neutral)
-        XCTAssertTrue(empty.isEmpty)
-        XCTAssertTrue(empty.sections.isEmpty)
-        XCTAssertEqual(empty.maskCount, 0, "no masks in, no masks out")
-        XCTAssertFalse(empty.requiresDecode)
+        let neutral = EditSnapshot.capture(.neutral)
+        XCTAssertFalse(neutral.isEmpty, "a neutral source is still a complete payload")
+        XCTAssertEqual(neutral.fieldCount, EditSnapshot.fullDocumentFieldCount)
+        XCTAssertEqual(neutral.maskCount, 0, "no masks in, no masks out")
+        XCTAssertTrue(neutral.requiresDecode, "自动 is carried, so a pinned destination re-develops")
     }
 
-    /// 090: 中间调 is one leaf — a copy of a midtones-only edit carries `midtones` and nothing else,
-    /// and pasting it moves only that leaf on the destination.
+    /// 090 + 442: the checklist can still narrow to 中间调 alone, and then only that leaf moves.
     func testCopyingOnlyMidtonesCarriesOneLeafAndPastesOnlyIt() {
         var a = EditModel.neutral
         a.light.midtones = 40
 
         let payload = EditSnapshot.capture(a)
+            .filtered(to: [.light], children: [.midtones])
         XCTAssertEqual(payload.fieldCount, 1, "只有中间调这一叶")
         XCTAssertEqual(payload.sections, [.light])
         XCTAssertEqual(payload.light?.midtones, 40)
@@ -152,7 +152,7 @@ final class CopySettingsSectionsTests: XCTestCase {
     }
 
     func testAWhiteBalancePayloadIsARenderChange() {
-        XCTAssertFalse(EditSnapshot.capture(documentA()).requiresDecode,
+        XCTAssertFalse(EditSnapshot.capture(documentA()).filtered(to: [.whiteBalance]).requiresDecode,
                        "since 143 the balance is an S1 gain, not a development")
 
         var toneOnly = EditModel.neutral
@@ -160,36 +160,31 @@ final class CopySettingsSectionsTests: XCTestCase {
         toneOnly.color.saturation = 10
         toneOnly.geometry.crop = NormalizedRect(x: 0.2, y: 0.2, width: 0.5, height: 0.5)
         toneOnly.detail.sharpening = 20
-        XCTAssertFalse(EditSnapshot.capture(toneOnly).requiresDecode,
+        XCTAssertFalse(EditSnapshot.capture(toneOnly).filtered(to: [.light, .color, .geometry])
+                        .requiresDecode,
                        "exposure / alignment / crop / stored detail are not decode inputs")
     }
 
     // MARK: - ② paste writes only what it carries
 
-    func testPastingTheWholePayloadOntoBMovesExactlyTheSourcesLeaves() {
+    func testFullPasteResetsTheDestinationToTheSourcesValues() {
         let a = documentA()
         let b = documentB()
         let merged = EditSnapshot.capture(a).applied(to: b)
 
         let keys = changedKeys(b, merged)
         print("PASTE  A → B: \(keys.sorted())")
-        // Mask keys are id-keyed (`masks.<id>.added`), so they are folded out of the panel table and
-        // asserted on their own below — otherwise this test would pin a random UUID.
-        let maskKeys = keys.filter { $0.hasPrefix("masks.") }
-        XCTAssertEqual(panels(keys.subtracting(maskKeys)),
-                       ["light.temperature", "light.tint", "light.exposure", "light.contrast",
-                        "curve.white", "color.vibrance",
-                        "geometry.crop.x", "geometry.crop.y",
-                        "geometry.crop.width", "geometry.crop.height",
-                        "effects.vignetteAmount"],
-                       "exactly the source's non-default leaves; got \(keys.sorted())")
-        XCTAssertFalse(maskKeys.isEmpty, "蒙版 was checked in, so the mask list moved too")
-
-        // The destination's own values in every group the source did **not** change.
-        XCTAssertEqual(merged.color.saturation, 30, "B's saturation is B's: A never touched it")
-        XCTAssertEqual(merged.detail.sharpening, 40, "B's sharpening is B's")
-        XCTAssertEqual(merged.light.whites, 0)
-        XCTAssertEqual(merged.light.blacks, 0)
+        // Every leaf A carries is written, so B's own values in those sections are reset. The mask
+        // list is appended, not substituted.
+        XCTAssertEqual(merged.light, a.light)
+        XCTAssertEqual(merged.curve, a.curve)
+        XCTAssertEqual(merged.color, a.color)
+        XCTAssertEqual(merged.colorGrading, a.colorGrading)
+        XCTAssertEqual(merged.detail, a.detail)
+        XCTAssertEqual(merged.effects, a.effects)
+        XCTAssertEqual(merged.geometry, a.geometry)
+        XCTAssertEqual(merged.color.saturation, 0, "B's 30 is reset: A carried the default 0")
+        XCTAssertEqual(merged.detail.sharpening, 0, "B's 40 is reset: A carried the default 0")
 
         // Masks since P1-5: appended, never substituted. B's own mask survives; A's arrives as a
         // new mask (new id, same shape — the aspect ratios are both unknown here, so the normalised
@@ -202,19 +197,27 @@ final class CopySettingsSectionsTests: XCTestCase {
         XCTAssertEqual(merged.masks[1].feather, 0.2, "the carried mask's own feather")
     }
 
-    /// A source photo that left its balance at as-shot carries **no** Kelvin leaf, so pasting it
-    /// cannot reset the destination's pinned balance. This is the 「粘贴把别人的白平衡冲掉」 case.
-    func testAnAsShotSourceLeavesTheDestinationsWhiteBalanceAlone() {
+    /// 442's core: an as-shot source carries an explicit 「自动」, so a full paste clears the
+    /// destination's pinned balance. Narrowing to Light keeps B's balance — that is the checklist's
+    /// job, not a missing leaf's.
+    func testAnAsShotSourceResetsTheDestinationsWhiteBalance() {
         var a = EditModel.neutral
         a.light.exposure = 1.2                     // A changed tone, not balance
         XCTAssertNil(a.light.temperature)
         let b = documentB()
         let merged = EditSnapshot.capture(a).applied(to: b)
 
-        XCTAssertEqual(merged.light.temperature, 4800, "B kept its own Kelvin")
-        XCTAssertEqual(merged.light.tint, 5)
-        XCTAssertEqual(changedKeys(b, merged), ["light.exposure"])
-        XCTAssertFalse(EditSnapshot.capture(a).requiresDecode)
+        XCTAssertNil(merged.light.temperature, "B's 4800 K is replaced by the source's as-shot state")
+        XCTAssertNil(merged.light.tint)
+        XCTAssertEqual(merged.light.exposure, 1.2)
+        XCTAssertTrue(EditSnapshot.capture(a).requiresDecode,
+                      "自动 is a carried decoder state: a pinned target has to re-develop")
+
+        let lightOnly = EditSnapshot.capture(a).filtered(to: [.light]).applied(to: b)
+        XCTAssertEqual(lightOnly.light.temperature, 4800, "the checklist kept 白平衡 out")
+        XCTAssertEqual(lightOnly.light.tint, 5)
+        XCTAssertEqual(changedKeys(b, lightOnly), ["light.exposure"])
+        XCTAssertFalse(EditSnapshot.capture(a).filtered(to: [.light]).requiresDecode)
     }
 
     // MARK: - ③ 选组
@@ -329,31 +332,24 @@ final class CopySettingsSectionsTests: XCTestCase {
 
     // MARK: - 反证 (what the naive implementation would have done)
 
-    /// Replacing the document wholesale — the "paste everything" implementation this ticket rejects —
-    /// overwrites B's balance with A's and re-installs every value A never set. Kept as a test so the
-    /// difference is a measurement: the assertions above are about the *sparse* merge, and this one
-    /// shows the number they would have been without it.
-    func testAWholeDocumentPasteWouldClobberTheDestination() {
+    /// 442's contract, measured against "paste = copy the document": the values now agree (a full
+    /// capture carries defaults), while the mask list is still the one place the merge **adds**
+    /// instead of replacing. Narrowing — not sparseness — is what protects the rest.
+    func testAWholeDocumentPasteNowResetsTheDestinationExceptTheMaskList() {
         let a = documentA()
         let b = documentB()
         let naive = a                              // "paste = copy the document"
         XCTAssertEqual(naive.light.temperature, 5500)
-        XCTAssertNotEqual(naive.light.temperature, b.light.temperature,
-                          "反证: a whole-document paste moves B's white balance — sparseness is what prevents it")
-        XCTAssertNotEqual(naive.masks.map(\.id), b.masks.map(\.id),
-                          "反证: a whole-document paste would also replace the destination's masks")
-        XCTAssertEqual(naive.color.saturation, 0,
-                       "反证: and it would zero B's saturation, which A never touched")
+        XCTAssertNotEqual(naive.light.temperature, b.light.temperature)
+        XCTAssertEqual(naive.masks.count, 1)
 
         let merged = EditSnapshot.capture(a).applied(to: b)
-        // A pinned its balance, so the sparse paste carries it — that IS a setting (派单 006: assigning
-        // 5500 K on a 4803 K shot is a decision). What sparseness prevents is the *rest*: 30 → 0 on
-        // saturation, the mask list replaced, the effects invented. The as-shot variant of this case
-        // is `testAnAsShotSourceLeavesTheDestinationsWhiteBalanceAlone`.
         XCTAssertEqual(merged.light.temperature, 5500)
-        XCTAssertEqual(merged.color.saturation, 30)
+        XCTAssertEqual(merged.color.saturation, 0,
+                       "A carried the default 0, so B's 30 is reset — the new contract")
+        XCTAssertEqual(merged.effects, a.effects, "defaults travel too; the effects card is A's")
         // The mask list is the one place the merge **adds** rather than replaces (P1-5): replacing it
-        // — what `naive` does — would delete B's own mask, which the user never named.
+        // would delete B's own mask, which the user never named.
         XCTAssertEqual(merged.masks.count, 2)
         XCTAssertEqual(merged.masks.first?.id, b.masks.first?.id)
         XCTAssertEqual(naive.masks.count, 1, "反证: a whole-document paste has one mask, not two")
@@ -425,9 +421,14 @@ final class CopySettingsSectionsTests: XCTestCase {
         }
         let stripped = try JSONDecoder().decode(EditSnapshot.self,
                                                from: JSONSerialization.data(withJSONObject: object))
-        XCTAssertEqual(stripped.fieldCount, today.fieldCount, "documentA 没有这两项，删掉不掉字段")
+        // 442: capture now fills both keys (blackOffset 1 + 色彩分级 9), so stripping them removes
+        // ten leaves. The *paste* is still identical on this destination, whose two sections are at
+        // their defaults — which is the compatibility claim, not "the keys were absent".
+        XCTAssertEqual(stripped.fieldCount, today.fieldCount - 1 - ColorGradingPatch.fullFieldCount,
+                       "删掉 blackOffset + 色彩分级 的 10 个叶子")
         XCTAssertEqual(stripped.applied(to: b), today.applied(to: b),
-                       "golden: 旧载荷的粘贴结果与今天逐字节相同")
-        XCTAssertEqual(stripped.sections, today.sections)
+                       "golden: 旧载荷的粘贴结果与今天逐字节相同（目标那两段本来就是默认）")
+        XCTAssertEqual(stripped.sections,
+                       today.sections.subtracting([.blackLevel, .colorGrading]))
     }
 }

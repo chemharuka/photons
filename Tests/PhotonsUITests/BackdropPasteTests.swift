@@ -178,6 +178,35 @@ final class BackdropPasteTests: XCTestCase {
 
     private func photoKey(_ asset: Asset) -> String { "\(asset.contentHash)|\(asset.id)" }
 
+    // MARK: - ⓪ A⑤: a full default payload is not an edit
+
+    /// 442 A⑤ — the source is neutral, so the complete payload writes the values the target already
+    /// has: no history row, and the open frame's pixels are bit-identical before and after.
+    func testPastingAFullNeutralPayloadDoesNotChangeThePixels() throws {
+        let (session, catalog, ids) = try makeLibrary(photoCount: 2)
+        _ = try catalog.appendDevelop(.neutral, forAsset: ids[0])
+        _ = try catalog.appendDevelop(.neutral, forAsset: ids[1])
+
+        session.selectOnly(ids[1])
+        let payload = try XCTUnwrap(session.copySettingsFromAnchor())
+        XCTAssertEqual(payload.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "the neutral source still produces a complete payload (442)")
+        let rowsBefore = try catalog.editHistory(forAsset: ids[0]).count
+
+        let loupe = makeLoupe(session: session)
+        loupe.hashesFrames = true
+        XCTAssertTrue(open(ids[0], session: session, loupe: loupe), "the target never opened")
+        let beforeHash = try XCTUnwrap(loupe.lastFrame?.displayHash)
+
+        let reports = session.pasteSettings()
+        let report = try XCTUnwrap(reports.first)
+        XCTAssertFalse(report.changed, "same values ⇒ no write")
+        XCTAssertEqual(loupe.lastFrame?.displayHash, beforeHash,
+                       "源全默认 ⇒ 像素的 displayHash 前后相同")
+        XCTAssertEqual(try catalog.editHistory(forAsset: ids[0]).count, rowsBefore,
+                       "no new history row")
+    }
+
     // MARK: - ① paste into the open document
 
     func testPasteIntoTheOpenDocumentRebuildsTheBackdropImmediately() throws {
@@ -188,7 +217,8 @@ final class BackdropPasteTests: XCTestCase {
         XCTAssertTrue(open(source, session: session, loupe: loupe), "the source never opened")
         session.selectOnly(source)
         let payload = try XCTUnwrap(session.copySettingsFromAnchor())
-        XCTAssertEqual(payload.fieldCount, 2)
+        XCTAssertEqual(payload.fieldCount, EditSnapshot.fullDocumentFieldCount,
+                       "442: the capture is complete")
         XCTAssertTrue(open(target, session: session, loupe: loupe), "the target never opened")
         XCTAssertEqual(session.edit.light.exposure, documentB().light.exposure)
 

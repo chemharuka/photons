@@ -303,7 +303,8 @@ extension Catalog {
 
     // MARK: copy / paste settings
 
-    /// The sparse clipboard payload for one asset: non-default fields only, never masks.
+    /// The clipboard payload for one asset: **every copyable leaf, defaults included** (442), never
+    /// masks. The narrowing to the user's checklist happens in `CatalogSession.copySettingsFromAnchor`.
     public func copySettings(fromAsset id: String) throws -> EditSnapshot {
         EditSnapshot.capture(try develop(forAsset: id))
     }
