@@ -401,6 +401,20 @@ public final class EditorWindowController: NSWindowController {
         rootView.loupeController.rotateQuarterCounterClockwise()
     }
 
+    // MARK: 453 · 编辑 ▸ 自动调整 (⌘U)
+
+    /// 编辑 ▸ 自动调整 — 黑电平 + 明暗 + 自动颜色, one write and one history row.
+    ///
+    /// From the grid/filmstrip's right-click the photo is opened first (the verb needs the loupe's
+    /// frame graph to measure); the menu item itself is grey outside the loupe (`validateMenuItem`).
+    @objc public func autoDevelopAction(_ sender: Any?) {
+        if session.mode != .loupe {
+            guard session.selection.count == 1, let id = session.anchorID else { return }
+            session.activate(id)
+        }
+        _ = rootView.loupeController.autoDevelop()
+    }
+
     // MARK: 080 · 原图 / 前后对比
     //
     // Three verbs, no document. Each one asks the loupe to change what its next frame is *of*; the
@@ -481,6 +495,10 @@ public final class EditorWindowController: NSWindowController {
         case #selector(rotateClockwiseAction(_:)), #selector(rotateCounterClockwiseAction(_:)):
             // Enabled only where there is a photo to turn — the same rule as 裁切. Not ticked: a
             // rotation is a command, not a mode, and the card's badge is where the angle is read.
+            return session.mode == .loupe && session.anchorID != nil
+        case #selector(autoDevelopAction(_:)):
+            // 453 — the measurement needs the loupe's frame graph and an anchor; outside the loupe the
+            // row is grey (a grid click reaches the verb through the context menu, which opens it).
             return session.mode == .loupe && session.anchorID != nil
         case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
             // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or

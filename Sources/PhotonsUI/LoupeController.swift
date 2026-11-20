@@ -4666,6 +4666,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `nil` until an `autoLight()` measurement has happened.
     private(set) var lastAutoLightSampleIdentityForTesting: String?
 
+    /// 453 — the `blackOffset` the last `AutoLight.plan` measurement was handed. The composite action
+    /// stages the new black level before measuring 明暗, and this is the seam that proves it.
+    private(set) var lastAutoLightBlackOffsetInputForTesting: Double?
+
+    /// 453 — the 自动颜色 metrics the last run measured. `AutoColor` only raises, so a picture already
+    /// above the calibrated target legitimately yields 0; this lets a test see that the step ran.
+    private(set) var lastAutoColorMetricsForTesting: AutoColor.Metrics?
+
     /// 448 ④ — the frame on screen is the **full rung of the current anchor**. Same spelling as
     /// `measureHistogramNow`'s reuse gate: the photo and the document's decode inputs both name the
     /// rung, and the identity must be the rung's (`-s1.0`), not a preview's or the previous photo's.
@@ -4733,9 +4741,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case .whiteBalance:
             _ = autoWhiteBalance()
         case .all:
-            _ = autoLight()
-            _ = autoBlackOffset()
-            _ = autoWhiteBalance()
+            _ = autoDevelop()
         }
     }
 
@@ -4765,6 +4771,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 切换估计量的分支。干净解码之后最负的那颗就是电平该补的量，哪怕只有一颗。
     @discardableResult
     public func autoBlackOffset() -> Double? {
+        guard let session, let offset = blackOffsetCandidate() else { return nil }
+        session.applyEdit { $0.light.blackOffset = offset }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("黑电平 · 自动"), coalesce: false)
+        return offset
+    }
+
+    /// 453 — 自动黑电平的**测量**，不写文档、不提交。`autoBlackOffset()` 与 `autoDevelop()` 共用。
+    /// `nil` 表示这一步该跳过（无图 / 门未满足 / 值未变）。
+    public func blackOffsetCandidate() -> Double? {
         let frame = frameState
         guard let session, session.mode == .loupe else { return nil }
         // 448 — the click waits for the anchor's full rung. Until then the buffer on screen may be the
@@ -4793,9 +4809,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             print(String(format: Loc.t("AUTO BLACK · min %.6f → offset 钳到 ±0.01"), candidates.min))
         }
         guard abs(offset - session.edit.light.blackOffset) >= 1e-9 else { return nil }
-        session.applyEdit { $0.light.blackOffset = offset }
-        requestEditRender()
-        session.commitEdit(label: Loc.t("黑电平 · 自动"), coalesce: false)
         return offset
     }
 
@@ -4845,6 +4858,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// settled picture is a no-op, exactly like 自动黑电平).
     @discardableResult
     public func autoLight() -> AutoLight.Plan? {
+        guard let session, let plan = lightPlanCandidate() else { return nil }
+        session.applyEdit { $0 = plan.apply(to: $0) }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("明暗 · 自动"), coalesce: false)
+        return plan
+    }
+
+    /// 453 — 自动明暗的**测量**，不写文档、不提交。`autoLight()` 与 `autoDevelop()` 共用。
+    ///
+    /// `from` lets 复合动作 measure the document that *already carries the new black offset* without
+    /// writing it first: order 黑电平 → 明暗 is load-bearing (`AutoLight` step 4 cancels the lift), and
+    /// measuring the staged copy keeps the ordering while still committing exactly once. Standalone,
+    /// this is still the very same call the card has always made: `AutoLight.plan(for: session.edit,`
+    /// `gates:)`; the composite only substitutes the staged document.
+    public func lightPlanCandidate() -> AutoLight.Plan? {
+        lightPlanCandidate(from: nil)
+    }
+
+    func lightPlanCandidate(from document: EditModel?) -> AutoLight.Plan? {
         let frame = frameState
         guard let session, session.mode == .loupe else { return nil }
         // 448 — same gate as 自动黑电平 / 自动白平衡: never measure a preview rung or the previous
@@ -4856,10 +4888,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         guard let graph = frame.graph else { return nil }
         lastAutoLightSampleIdentityForTesting = frame.graphPhoto ?? frame.identity
+        let source = document ?? session.edit
+        lastAutoLightBlackOffsetInputForTesting = source.light.blackOffset
         let gates = Self.autoLightGates
         let plan: AutoLight.Plan
         do {
-            plan = try AutoLight.plan(for: session.edit, gates: gates) { document in
+            plan = try AutoLight.plan(for: source, gates: gates) { document in
                 try graph.measureAutoLightSample(document)
             }
         } catch {
@@ -4876,11 +4910,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                      plan.midtones, plan.shadows, plan.blacks,
                      plan.report.clippedLowAfterBlacks * 100, plan.contrast,
                      plan.report.renderCount, plan.report.milliseconds))
-        let next = plan.apply(to: session.edit)
-        guard next.light != session.edit.light else { return nil }
-        session.applyEdit { $0 = next }
-        requestEditRender()
-        session.commitEdit(label: Loc.t("明暗 · 自动"), coalesce: false)
+        let next = plan.apply(to: source)
+        guard next.light != source.light else { return nil }
         return plan
     }
 
@@ -4901,6 +4932,39 @@ public final class LoupeController: NSViewController, HeadroomSource {
         return commands.applyAuto(average)
     }
 
+    // MARK: 自动调整 (453)
+
+    /// 453 — 自动颜色：measure the picture's OKLab chroma and return the suggested `color.vibrance`,
+    /// or `nil` when there is no frame or the value would not move. `AutoColor` is 452's pure decision;
+    /// this is the wiring, and it is deliberately independent of `AutoLight`'s luma measurement.
+    public func colorVibranceCandidate() -> Double? {
+        colorVibranceCandidate(from: nil)
+    }
+
+    /// `from` is the staged document: 自动调整 measures colour **after** 明暗 changed the picture, still
+    /// without writing it. A standalone call reads the live document.
+    func colorVibranceCandidate(from document: EditModel?) -> Double? {
+        let frame = frameState
+        guard let session, session.mode == .loupe else { return nil }
+        if autoAdjustMustWait() { return nil }
+        guard let graph = frame.graph else { return nil }
+        let source = document ?? session.edit
+        let sample: LinearSample
+        do {
+            sample = try graph.measureLinearSample(source)
+        } catch {
+            print("AUTO COLOR · measurement failed: \(error)")
+            return nil
+        }
+        let metrics = AutoColor.metrics(from: sample)
+        let vibrance = AutoColor.plan(metrics)
+        lastAutoColorMetricsForTesting = metrics
+        print(String(format: "AUTO COLOR · chroma p50 %.4f · coloured %.1f%% → vibrance %+.2f",
+                     metrics.chromaP50, metrics.coloredFraction * 100, vibrance))
+        guard abs(vibrance - source.color.vibrance) >= 1e-9 else { return nil }
+        return vibrance
+    }
+
     /// The document's flips — what the menu ticks and the bar's two switches show.
 
     /// The crop frame's layout in view points, for the overlay and for the tests.
@@ -4914,6 +4978,63 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let scale = scaleOverride ?? backingScale
         guard let mapping = cropMapping(viewport: viewport) else { return nil }
         return cropTool.layout(mapping: mapping, source: cropSourceSize, pointScale: scale)
+    }
+
+    // MARK: 自动调整 — 复合动作 (453)
+
+    /// **派单 453 — 自动调整.** 黑电平 → 明暗 → 自动颜色, **one** document write and **one** history row.
+    ///
+    /// The order is load-bearing: `AutoLight` step 4 reads `light.blackOffset` to cancel the lift, so
+    /// 明暗 must measure the document that already carries the new black level. The three candidates
+    /// are measured against staged copies and written together, so no intermediate document is ever
+    /// committed (or observed) between them; a step whose candidate is `nil` is skipped.
+    ///
+    /// The full-rung gate is 448's: a click before the anchor's full frame queues `.all` and returns
+    /// `false`; `runPendingAutoIfReady` calls this same verb when that frame lands.
+    @discardableResult
+    public func autoDevelop() -> Bool {
+        guard let session, session.mode == .loupe else { return false }
+        if autoAdjustMustWait() {
+            queuePendingAuto(.all)
+            return false
+        }
+        var staged = session.edit
+        var changed = false
+        // 1. 黑电平 — the floor the 明暗 measurement must see.
+        if let black = blackOffsetCandidate() {
+            staged.light.blackOffset = black
+            changed = true
+        }
+        // 2. 明暗 — measured on the staged black level.
+        if let plan = lightPlanCandidate(from: staged) {
+            staged = plan.apply(to: staged)
+            changed = true
+        }
+        // 3. 自动颜色 — measured on the staged black level + 明暗.
+        if let vibrance = colorVibranceCandidate(from: staged) {
+            staged.color.vibrance = vibrance
+            changed = true
+        }
+        guard changed else { return false }
+        session.applyEdit { $0 = staged }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("自动调整"), coalesce: false)
+        return true
+    }
+
+    /// 453 — the loupe canvas' right-click menu. The canvas view forwards `menu(for:)` here; a photo
+    /// and the loupe are the only requirements, and the row calls this controller's own verb.
+    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(session: session) { [weak self] in
+        _ = self?.autoDevelop()
+    }
+
+    public func canvasContextMenu(for event: NSEvent) -> NSMenu? {
+        _ = event
+        guard let session, session.mode == .loupe, session.anchorID != nil else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        AutoAdjustMenuBuilder.attach(to: menu, session: session, target: autoAdjustMenuTarget)
+        return menu
     }
 
     /// The projection the crop layout is built from at the current camera.

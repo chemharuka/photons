@@ -727,6 +727,7 @@
 "自动调节：按纹理损失安排曝光、高光、白色、黑色与对比" = "Auto: arrange exposure, highlights, whites, blacks and contrast by texture loss";
 "自动黑电平" = "Automatic black level";
 "自动黑电平：把解码后的线性数据拉到非负" = "Automatic black level: shift decoded linear data to nonnegative values";
+"自动调整" = "Auto Adjust";
 "自动（灰世界）· %@ · 画面均值 RGB %@%@" = "Auto (gray world) · %@ · Mean image RGB %@%@";
 "自定义" = "Custom";
 "自定义比例" = "Custom ratio";

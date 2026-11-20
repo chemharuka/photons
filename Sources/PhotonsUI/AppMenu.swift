@@ -88,6 +88,13 @@ public enum MainMenu {
                                       action: #selector(EditorWindowController.chooseCopySettingsAction(_:)),
                                       keyEquivalent: "c")
         chooseCopy.keyEquivalentModifierMask = [.command, .option]
+        edit.addItem(.separator())
+        // 453 — 自动调整: 黑电平 + 明暗 + 自动颜色 in one write / one history row. ⌘U is Lightroom's
+        // 自动 key and was free (the bare `U` on 清除旗标 stays bare).
+        let autoDevelop = edit.addItem(withTitle: Loc.t("自动调整"),
+                                       action: #selector(EditorWindowController.autoDevelopAction(_:)),
+                                       keyEquivalent: "u")
+        autoDevelop.keyEquivalentModifierMask = [.command]
 
         // Photo — rating / flag / colour label. Catalog metadata, not edits, so these live outside
         // the undo pair above. Bare digits and letters (no ⌘) because that is the convention every
