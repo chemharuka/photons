@@ -162,6 +162,51 @@ final class DNGXMPMetadata486Tests: XCTestCase {
         print("486 槽位复用：inode \(before.inode) → \(after.inode) · birth \(before.birth.map(String.init(describing:)) ?? "nil") · size \(before.size) → \(after.size)")
     }
 
+    // MARK: - ①b first save: baseline is the untouched copy
+
+    /// 486's original case compared `save#2` with `save#1`. The user's complaint was about **save#1**,
+    /// so this case stamps the freshly copied file — before any write at all — and holds the first
+    /// save against it: birth (Date Created), permissions, xattrs and the EXIF dates must survive;
+    /// mtime may move.
+    ///
+    /// A camera DNG's packet has its padding *before* `<?xpacket end="w"?>`, where `merged` cannot
+    /// spend it, so the first insert grows the packet and takes the append path: inode and size
+    /// change and birth is put back by `DNGFileMetadata.restore`. Slot reuse — the in-place path
+    /// that keeps inode, size and Date Added — starts with save#2, covered by case ①. If the sample
+    /// does have a reusable slot, this case additionally asserts the full file identity.
+    func testFirstSaveKeepsBirthPermissionsXattrsAndExifTimestamps() throws {
+        let url = try copyOfSource()
+        let baseline = try stamp(url)
+        let originalExif = exiftoolMetadata(url)
+        let document = #"{"schemaVersion":12,"light":{"exposure":0.75},"masks":[{"name":"渐变"}]}"#
+
+        let outcome = try DNGXMP.writeDocument(document, to: url, journal: journal())
+        let after = try stamp(url)
+
+        XCTAssertEqual(try DNGXMP.documentString(at: url), document, "第一次保存必须真的写进文档")
+        XCTAssertEqual(after.birth, baseline.birth, "第一次保存：创建日期（%SB）变了")
+        XCTAssertEqual(after.permissions, baseline.permissions, "第一次保存：权限位变了")
+        XCTAssertEqual(after.xattrs, baseline.xattrs, "第一次保存：扩展属性变了")
+
+        if outcome.reusedSlot {
+            assertSameFileIdentity(baseline, after, "第一次保存（槽位复用）")
+            XCTAssertEqual(after.size, baseline.size, "第一次保存复用槽位时不许改文件大小")
+        } else {
+            XCTAssertEqual(after.size, baseline.size + outcome.appendedBytes,
+                           "追加字节数必须和文件增长一致")
+            print("486 第一次保存：原包放不下 ⇒ 追加 \(outcome.appendedBytes) 字节，inode \(baseline.inode) → \(after.inode)（append 路径）；birth 已由写后还原保持")
+        }
+
+        if let originalExif {
+            XCTAssertEqual(exiftoolMetadata(url), originalExif,
+                           "第一次保存后 DateTimeOriginal / CreateDate / XMP:CreateDate 必须不变")
+        } else {
+            print("486 第一次保存：exiftool 不可用，EXIF 日期断言 skip")
+        }
+
+        print("486 第一次保存：inode \(baseline.inode) → \(after.inode) · birth \(baseline.birth.map(String.init(describing:)) ?? "nil") · size \(baseline.size) → \(after.size)")
+    }
+
     // MARK: - ② append: atomic, then birth/permissions/xattrs restored
 
     func testAppendPathRestoresBirthPermissionsAndExtendedAttributes() throws {
