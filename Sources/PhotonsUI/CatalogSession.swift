@@ -183,6 +183,81 @@ struct DenoiseRunner: Sendable {
     }
 }
 
+/// 477 — read-only counters for `--ui-smoke` and the tests. Counts, never file paths.
+public struct DNGWriteStats: Equatable, Sendable {
+    /// DNG `DNGXMP.writeDocument` calls that actually changed the file.
+    public var xmpWrites = 0
+    /// Of those, how many reused tag 700's existing slot (`appendedBytes == 0`).
+    public var reusedSlots = 0
+    public var appendedBytes = 0
+    /// Non-DNG saves that wrote/updated `‹original›.xmp`.
+    public var sidecarWrites = 0
+    public var thumbnailWrites = 0
+    public var failures = 0
+    /// Non-DNG sources skipped by a thumbnail-only door.
+    public var skipped = 0
+    /// Rows filled from a DNG's XMP because the library had no document.
+    public var backfills = 0
+    /// 文件 ▸ 从 DNG 读取编辑 successes.
+    public var readsFromDNG = 0
+    /// 撤销 DNG 里的上次写入 successes.
+    public var undos = 0
+
+    public init() {}
+}
+
+/// 477 — the one thing a write did, before it is folded into `DNGWriteStats` on the main actor.
+public struct DNGWriteResult: Equatable, Sendable {
+    public var wroteXMP = false
+    public var reusedSlot = false
+    public var appendedBytes = 0
+    public var wroteSidecar = false
+    public var wroteThumbnail = false
+    public var thumbnailInPlace = false
+    public var thumbnailBytes = 0
+    public var thumbnailSize: ImageSize?
+    public var failed = false
+    public var skipped = false
+    public var error: String?
+
+    public init() {}
+}
+
+/// 477 — 载入回填的审计行写进 `local/`（gitignored），不进 UI。注入目录是为了测试不碰仓库。
+public struct DNGXPMAuditLog: Sendable {
+    public let directory: URL
+
+    public init(directory: URL) {
+        self.directory = directory
+    }
+
+    public static var standard: DNGXPMAuditLog {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        return DNGXPMAuditLog(directory: cwd.appendingPathComponent("local", isDirectory: true))
+    }
+
+    public func append(source: String, assetID: String, path: String) {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        let entry: [String: String] = [
+            "source": source,
+            "asset_id": assetID,
+            "path": path,
+            "at": ISO8601.now(),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        let target = directory.appendingPathComponent("dng-xmp-audit.log")
+        if let handle = try? FileHandle(forWritingTo: target) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: target)
+        }
+    }
+}
+
 /// The one and only source of truth for the workspace.
 ///
 /// Research `ui-stack.md` F5: the projects that mixed AppKit + SwiftUI did **not** keep two state
@@ -323,6 +398,20 @@ public final class CatalogSession {
     /// How many times `persist()` has actually written the catalog. Cheap proof that a commit
     /// reached the database instead of only the undo stack.
     public private(set) var persistCount = 0
+
+    // MARK: DNG XMP / thumbnail (477)
+
+    /// Read-only counters for `--ui-smoke` (`session.dngWriteStats`).
+    public private(set) var dngWriteStats = DNGWriteStats()
+    /// Last human-readable DNG failure (read-only file, no embedded preview, …). `nil` = last action
+    /// succeeded or did not fail.
+    public private(set) var lastDNGError: String?
+    /// Injectable for tests; production writes to Application Support.
+    public var dngJournal = DNGXMPJournal.standard
+    /// Injectable for tests; production appends to `local/dng-xmp-audit.log` when that directory exists.
+    public var dngAuditLog = DNGXPMAuditLog.standard
+    /// Saved to disk by 文件 ▸ 保存 only (the library writes `develop_json` on every commit).
+    public var dngWriteQueue = DispatchQueue(label: "photons.dng.write", qos: .utility)
 
     // MARK: catalog metadata (rating / flag / colour label)
     //
@@ -641,6 +730,9 @@ public final class CatalogSession {
         // The preset list and the Develop menu read this cache; fill it as soon as the library is
         // open instead of waiting for the panel's first `onAppear`.
         reloadPresets()
+        // 477 — rows the library has no document for get one chance from the DNG's own XMP. Async:
+        // opening a library must not wait on a folder of 60 MB originals.
+        backfillEditsFromXMP()
         // 081 §3: the 复制设置 checklist is remembered **per library**, so it is read here and not
         // from `UserDefaults`. A library that never stored one answers 全部.
         copySelection = (try? c.copySelection()) ?? .all
@@ -2810,6 +2902,8 @@ public final class CatalogSession {
             // and a refresh that runs before the row is updated would derive the pre-edit key again.
             adoptCommittedDocument(document, save: result)
             persistCount += 1
+            // 477 — **no file write here.** The library is the real-time store; the DNG/XMP is written
+            // only by the explicit 文件 ▸ 保存 (⌘S) / right-click 保存 command.
         } catch {
             // A failed write is reported, never swallowed: the document is still on screen and
             // still undoable, and the next commit retries.
@@ -3723,6 +3817,385 @@ public final class CatalogSession {
         if let date = f.date(from: iso) { return date }
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.date(from: iso)
+    }
+
+    // MARK: - Saving edits (477)
+
+    /// The photos a save/thumbnail command applies to: the selection, or the anchor when nothing is
+    /// selected. Unlike the old automatic writer this includes **non-DNG** sources — 保存 writes a
+    /// sidecar for those.
+    public var dngTargetAssets: [Asset] {
+        let ids = selection.isEmpty ? Set([anchorID].compactMap { $0 }) : selection
+        return assets.filter { ids.contains($0.id) }
+    }
+
+    /// Only the DNGs in the target set. `更新缩略图` is unavailable without at least one.
+    public var dngOnlyTargets: [Asset] {
+        dngTargetAssets.filter { $0.ext.lowercased() == "dng" }
+    }
+
+    /// Does the current target have a DNG to act on? The thumbnail menu's grey rule.
+    public var hasDNGTarget: Bool { !dngOnlyTargets.isEmpty }
+
+    /// A one-sentence reason for a greyed 更新缩略图 row, or `nil` when it is usable.
+    public var thumbnailUnavailableReason: String? {
+        guard let first = dngTargetAssets.first else { return Loc.t("没有选中的照片") }
+        if dngOnlyTargets.isEmpty {
+            return Loc.t("{0} 不是 DNG，无法写内嵌缩略图", String(describing: (first.filename)))
+        }
+        return nil
+    }
+
+    /// 477 — the document a save should carry. The live document for the loaded photo (so ⌘S right
+    /// after a slider writes what is on screen), the stored row for every other photo.
+    private func documentForSave(assetID: String) -> EditModel? {
+        if assetID == loadedEditAssetID { return MaskViewState.documentOnly(edit) }
+        if let catalog, let stored = try? catalog.develop(forAsset: assetID) {
+            return MaskViewState.documentOnly(stored)
+        }
+        guard let asset = assets.first(where: { $0.id == assetID }),
+              let data = asset.developJson.data(using: .utf8),
+              let model = try? JSONDecoder().decode(EditModel.self, from: data) else { return nil }
+        return MaskViewState.documentOnly(model)
+    }
+
+    /// 文件 ▸ 保存 (⌘S) / 右键 ▸ 保存 — **只写 XMP，不碰缩略图**. DNG gets tag 700; every other
+    /// source gets `‹original›.xmp` next to it. Asynchronous so a multi-selection of 60 MB originals
+    /// does not block the UI; `saveEditsNow` is the synchronous door tests use.
+    public func saveEditsToFiles() {
+        let targets = dngTargetAssets
+        guard !targets.isEmpty else {
+            lastDNGError = Loc.t("没有可保存的照片")
+            return
+        }
+        let queue = dngWriteQueue
+        let journal = dngJournal
+        for asset in targets {
+            guard let document = documentForSave(assetID: asset.id),
+                  let url = fileURL(for: asset) else {
+                lastDNGError = Loc.t("照片文件不在原位置")
+                continue
+            }
+            queue.async {
+                let result = Self.performSave(asset: asset, url: url, document: document,
+                                              journal: journal)
+                Task { @MainActor [weak self] in self?.recordDNG(result) }
+            }
+        }
+    }
+
+    /// Synchronous save for tests and callers that already own the document.
+    @discardableResult
+    public func saveEditsNow(assetID: String) -> Bool {
+        guard let asset = assets.first(where: { $0.id == assetID }) else {
+            lastDNGError = Loc.t("找不到这张照片")
+            return false
+        }
+        guard let url = fileURL(for: asset), let document = documentForSave(assetID: asset.id) else {
+            lastDNGError = Loc.t("照片文件不在原位置")
+            return false
+        }
+        let result = Self.performSave(asset: asset, url: url, document: document, journal: dngJournal)
+        recordDNG(result)
+        return !result.failed
+    }
+
+    /// 右键 ▸ 更新缩略图 (also 文件 ▸ 更新缩略图). Slow on purpose: decode + render + JPEG + IFD.
+    /// Non-DNG is grey at the menu and skipped here with the same sentence.
+    public func updateThumbnailsForSelection() {
+        let targets = dngTargetAssets
+        guard !targets.isEmpty else {
+            lastDNGError = Loc.t("没有可更新缩略图的照片")
+            return
+        }
+        let queue = dngWriteQueue
+        let journal = dngJournal
+        for asset in targets {
+            guard asset.ext.lowercased() == "dng" else {
+                dngWriteStats.skipped += 1
+                lastDNGError = thumbnailUnavailableReason
+                continue
+            }
+            guard let document = documentForSave(assetID: asset.id),
+                  let url = fileURL(for: asset) else { continue }
+            queue.async {
+                let result = Self.performThumbnailWrite(url: url, document: document, journal: journal)
+                Task { @MainActor [weak self] in self?.recordDNG(result) }
+            }
+        }
+    }
+
+    /// Synchronous thumbnail update for tests.
+    @discardableResult
+    public func updateThumbnailNow(assetID: String) -> Bool {
+        guard let asset = assets.first(where: { $0.id == assetID }) else {
+            lastDNGError = Loc.t("找不到这张照片")
+            return false
+        }
+        guard asset.ext.lowercased() == "dng" else {
+            dngWriteStats.skipped += 1
+            lastDNGError = Loc.t("{0} 不是 DNG，无法写内嵌缩略图", String(describing: (asset.filename)))
+            return false
+        }
+        guard let url = fileURL(for: asset), let document = documentForSave(assetID: asset.id) else {
+            lastDNGError = Loc.t("照片文件不在原位置")
+            return false
+        }
+        let result = Self.performThumbnailWrite(url: url, document: document, journal: dngJournal)
+        recordDNG(result)
+        return !result.failed
+    }
+
+    // MARK: - explicit read / undo doors (kept off the main menu)
+
+    /// 从 DNG 读取编辑 — the explicit 「用 XMP 覆盖当前照片的 DB 行」 door. The window asks first.
+    @discardableResult
+    public func readEditFromDNG(for assetID: String) -> Bool {
+        guard let asset = assets.first(where: { $0.id == assetID }),
+              asset.ext.lowercased() == "dng",
+              let url = fileURL(for: asset) else {
+            lastDNGError = Loc.t("当前照片不是 DNG")
+            return false
+        }
+        do {
+            guard let text = try DNGXMP.documentString(at: url), !text.isEmpty else {
+                lastDNGError = Loc.t("这张 DNG 里没有 photons:document")
+                return false
+            }
+            let model = try JSONDecoder().decode(EditModel.self, from: Data(text.utf8))
+            guard let catalog else { throw DNGXMP.Failure.writeFailed("没有打开的库") }
+            let json = try Catalog.encode(model)
+            let stamp = ISO8601.now()
+            try catalog.dbQueue.write { db in
+                try db.execute(sql: "DELETE FROM asset_history WHERE asset_id = ?", arguments: [assetID])
+                try db.execute(sql: """
+                    UPDATE assets SET develop_json = ?, develop_version = develop_version + 1,
+                                      edit_time = ?, history_end = 0
+                    WHERE id = ?
+                    """, arguments: [json, stamp, assetID])
+            }
+            if let index = assets.firstIndex(where: { $0.id == assetID }) {
+                assets[index].developJson = json
+                assets[index].developVersion += 1
+                assets[index].editTime = stamp
+                assets[index].historyEnd = 0
+            }
+            if loadedEditAssetID == assetID || anchorID == assetID {
+                loadEditForAnchor(force: true)
+            }
+            dngWriteStats.readsFromDNG += 1
+            lastDNGError = nil
+            return true
+        } catch {
+            lastDNGError = Self.dngSentence(error)
+            return false
+        }
+    }
+
+    /// 撤销 DNG 里的上次写入 — restores the header `DNGXMP` journaled. Synchronous: 8 bytes.
+    @discardableResult
+    public func undoLastDNGWriteForSelection() -> Bool {
+        var restored = 0
+        for asset in dngOnlyTargets {
+            guard let url = fileURL(for: asset) else { continue }
+            do {
+                try DNGXMP.undo(at: url, journal: dngJournal)
+                restored += 1
+            } catch {
+                lastDNGError = Self.dngSentence(error)
+            }
+        }
+        dngWriteStats.undos += restored
+        return restored > 0
+    }
+
+    // MARK: - audit backfill
+
+    /// 477 — rows whose `develop_json` is empty/`{}` or will not decode get one chance from the
+    /// DNG's own XMP. The library stays the only truth: a row with a real document is never read
+    /// from the file, and a row that changed while this scan ran is not overwritten.
+    public func backfillEditsFromXMP(completion: ((Int) -> Void)? = nil) {
+        guard let catalog else {
+            completion?(0)
+            return
+        }
+        let rows = (try? catalog.assets(AssetFilter(limit: 200_000))) ?? []
+        var targets: [(id: String, url: URL, original: String)] = []
+        for asset in rows where asset.ext.lowercased() == "dng" {
+            guard !hasUsableDevelop(asset.developJson),
+                  let url = try? catalog.fileURL(for: asset) else { continue }
+            targets.append((asset.id, url, asset.developJson))
+        }
+        guard !targets.isEmpty else {
+            completion?(0)
+            return
+        }
+        let audit = dngAuditLog
+        let queue = dngWriteQueue
+        queue.async {
+            var found: [(id: String, json: String, path: String, original: String)] = []
+            for target in targets {
+                guard let text = try? DNGXMP.documentString(at: target.url),
+                      let model = try? JSONDecoder().decode(EditModel.self, from: Data(text.utf8)),
+                      let json = try? Catalog.encode(model) else { continue }
+                found.append((target.id, json, target.url.path, target.original))
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let n = self.applyBackfill(found, catalog: catalog, audit: audit)
+                completion?(n)
+            }
+        }
+    }
+
+    private func hasUsableDevelop(_ json: String) -> Bool {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "{}" else { return false }
+        return (try? JSONDecoder().decode(EditModel.self, from: Data(trimmed.utf8))) != nil
+    }
+
+    private func applyBackfill(_ found: [(id: String, json: String, path: String, original: String)],
+                               catalog: Catalog, audit: DNGXPMAuditLog) -> Int {
+        var applied = 0
+        let stamp = ISO8601.now()
+        for entry in found {
+            do {
+                let changed = try catalog.dbQueue.write { db -> Int in
+                    try db.execute(sql: """
+                        UPDATE assets SET develop_json = ?, develop_version = develop_version + 1,
+                                          edit_time = ?
+                        WHERE id = ? AND develop_json = ?
+                        """, arguments: [entry.json, stamp, entry.id, entry.original])
+                    return db.changesCount
+                }
+                guard changed > 0 else { continue }
+                if let index = assets.firstIndex(where: { $0.id == entry.id }),
+                   assets[index].developJson == entry.original {
+                    assets[index].developJson = entry.json
+                    assets[index].developVersion += 1
+                    assets[index].editTime = stamp
+                }
+                audit.append(source: "xmp", assetID: entry.id, path: entry.path)
+                applied += 1
+            } catch {
+                lastDNGError = Self.dngSentence(error)
+            }
+        }
+        dngWriteStats.backfills += applied
+        return applied
+    }
+
+    // MARK: - the two writers (off main)
+
+    /// Save = one tag write for DNG, one small file for anything else. Never decodes and never
+    /// re-encodes a JPEG.
+    nonisolated static func performSave(asset: Asset, url: URL, document: EditModel,
+                                        journal: DNGXMPJournal) -> DNGWriteResult {
+        var result = DNGWriteResult()
+        do {
+            let text = try Catalog.encode(document)
+            if asset.ext.lowercased() == "dng" {
+                let existing = (try? DNGXMP.documentString(at: url)) ?? nil
+                if existing != text {
+                    let outcome = try DNGXMP.writeDocument(text, to: url, journal: journal)
+                    result.wroteXMP = true
+                    result.reusedSlot = outcome.reusedSlot
+                    result.appendedBytes = outcome.appendedBytes
+                }
+            } else {
+                let outcome = try DNGXMP.writeSidecar(document: text, for: url)
+                result.wroteSidecar = outcome.wrote
+                result.appendedBytes = outcome.bytes
+            }
+        } catch {
+            result.failed = true
+            result.error = dngSentence(error)
+        }
+        return result
+    }
+
+    nonisolated static func performThumbnailWrite(url: URL, document: EditModel,
+                                                   journal: DNGXMPJournal) -> DNGWriteResult {
+        var result = DNGWriteResult()
+        do {
+            let (jpeg, size) = try makeDNGThumbnailJPEG(url: url, document: document)
+            let old = (try? DNGThumbnail.embeddedPreviewJPEG(at: url)) ?? nil
+            if old != jpeg {
+                let outcome = try DNGThumbnail.write(jpeg, size: size, to: url, journal: journal)
+                result.wroteThumbnail = true
+                result.thumbnailInPlace = outcome.replacedInPlace
+                result.thumbnailBytes = outcome.appendedBytes
+                result.thumbnailSize = ImageSize(width: outcome.width, height: outcome.height)
+            }
+        } catch {
+            result.failed = true
+            result.error = dngSentence(error)
+        }
+        return result
+    }
+
+    /// 477 — render the cropped picture at the thumbnail's size. One decode at the scale the target
+    /// needs, one graph frame, one JPEG. This is why 更新缩略图 is a separate command.
+    nonisolated static func makeDNGThumbnailJPEG(url: URL,
+                                                 document: EditModel) throws -> (Data, ImageSize) {
+        // The full source size decides the crop's output pixels; a 0.25 proxy cannot answer it.
+        let fullSource = DNGThumbnail.mainImagePixelSize(at: url)
+            ?? ImageSize(width: 1, height: 1)
+        let cropCanvas = CropGeometry(geometry: document.geometry, source: fullSource).canvas
+        let target = DNGThumbnail.targetSize(forCrop: cropCanvas)
+        let cropLong = max(cropCanvas.width, cropCanvas.height, 1)
+        let decodeScale = Float(min(1.0, max(0.25, Double(max(target.width, target.height)) / Double(cropLong))))
+        let inputs = document.decodeInputs
+        let decoded = try RAWDecoder().decode(url, options: DecodeOptions(
+            decoderVersion: inputs.decoderVersion,
+            scale: decodeScale,
+            whiteBalance: inputs.whiteBalance,
+            detail: inputs.detail))
+        let decodedSize = ImageSize(width: decoded.uprightSize.width, height: decoded.uprightSize.height)
+        let proxyScale = Double(decodedSize.width) / Double(max(fullSource.width, 1))
+        let scale = Double(target.width)
+            / (Double(max(cropCanvas.width, 1)) * max(proxyScale, 0.01))
+        let graph = try RenderGraph(input: RenderInput(image: decoded,
+                                                       identity: "dng-thumb|\(url.path)|\(target.keyString)",
+                                                       sourceURL: url,
+                                                       whiteBalance: inputs.whiteBalance),
+                                    textureRetention: .none)
+        defer { graph.releaseAllTextures() }
+        let frame = try graph.render(document, options: RenderOptions(
+            canvas: nil,
+            scale: max(0.01, scale),
+            display: DisplayOptions(primaries: .sRGB, bitDepth: 8, headroom: 1),
+            useCache: false,
+            wantsPixels: true))
+        guard let display = frame.display else {
+            throw DNGThumbnail.Failure.encodeFailed("渲染没有返回像素")
+        }
+        let cg = try Exporter.cgImage(display, bitDepth: 8)
+        guard let jpeg = DNGThumbnail.jpegData(from: cg, targetSize: target) else {
+            throw DNGThumbnail.Failure.encodeFailed("\(target.width)×\(target.height)")
+        }
+        return (jpeg, target)
+    }
+
+    private func recordDNG(_ result: DNGWriteResult) {
+        if result.skipped { dngWriteStats.skipped += 1 }
+        if result.wroteXMP {
+            dngWriteStats.xmpWrites += 1
+            if result.reusedSlot { dngWriteStats.reusedSlots += 1 }
+            dngWriteStats.appendedBytes += result.appendedBytes
+        }
+        if result.wroteSidecar { dngWriteStats.sidecarWrites += 1 }
+        if result.wroteThumbnail { dngWriteStats.thumbnailWrites += 1 }
+        if result.failed {
+            dngWriteStats.failures += 1
+            lastDNGError = result.error
+        } else if result.wroteXMP || result.wroteSidecar || result.wroteThumbnail {
+            lastDNGError = nil
+        }
+    }
+
+    nonisolated static func dngSentence(_ error: Error) -> String {
+        (error as? CustomStringConvertible)?.description ?? error.localizedDescription
     }
 
     // MARK: paths

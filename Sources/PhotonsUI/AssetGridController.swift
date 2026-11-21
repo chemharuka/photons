@@ -1891,21 +1891,31 @@ public enum StackMenuBuilder {
 public enum ExportMenuBuilder {
 
     public static let title = Loc.t("导出…")
+    public static let saveTitle = Loc.t("保存")
 
     private static var action: Selector { #selector(EditorWindowController.exportAction(_:)) }
+    private static var saveAction: Selector { #selector(EditorWindowController.saveAction(_:)) }
+    private static let actions: Set<Selector> = [action, saveAction]
 
-    /// 把「导出…」插到菜单最上面（一条分隔线收尾）。重复打开时按 **action** 清掉上一轮那一行 ——
-    /// 标题会随张数变成「导出 3 张…」，所以不能按标题认。
+    /// 把「导出…」插到菜单最上面（一条分隔线收尾），并在它下面放 477 的「保存」。
+    /// 重复打开时按 **action** 清掉上一轮那几行 —— 导出标题会随张数变，不能按标题认。
     public static func attach(to menu: NSMenu, session: CatalogSession?, selectedIDs: [String]) {
-        for item in menu.items.reversed() where item.action == action {
-            menu.removeItem(item)
+        var index = menu.items.count - 1
+        while index >= 0 {
+            if let selector = menu.items[index].action, actions.contains(selector) {
+                menu.removeItem(at: index)
+            }
+            index -= 1
         }
         guard let session, !selectedIDs.isEmpty else { return }
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        let export = NSMenuItem(title: title, action: action, keyEquivalent: "")
         // nil target ⇒ 响应链到 `EditorWindowController.validateMenuItem`：可用性、标题（张数）都由它定。
-        item.target = nil
-        menu.insertItem(item, at: 0)
-        menu.insertItem(.separator(), at: 1)
+        export.target = nil
+        let save = NSMenuItem(title: saveTitle, action: saveAction, keyEquivalent: "")
+        save.target = nil
+        menu.insertItem(export, at: 0)
+        menu.insertItem(save, at: 1)
+        menu.insertItem(.separator(), at: 2)
     }
 }
 

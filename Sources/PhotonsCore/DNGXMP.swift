@@ -114,6 +114,57 @@ public enum DNGXMP {
         return Outcome(reusedSlot: entry.count >= newPacket.count, appendedBytes: 0)
     }
 
+    /// `‹original›.xmp` — Adobe's generic sidecar suffix, extension preserved (`IMG_1234.CR3` ⇒
+    /// `IMG_1234.CR3.xmp`).
+    public static func sidecarURL(for source: URL) -> URL {
+        source.appendingPathExtension("xmp")
+    }
+
+    public struct SidecarOutcome: Equatable {
+        public var wrote: Bool
+        public var bytes: Int
+    }
+
+    /// The document in a source's sidecar, if one exists. Used only by the explicit read door.
+    public static func sidecarDocument(at source: URL) throws -> String? {
+        let url = sidecarURL(for: source)
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return extractDocument(from: text)
+    }
+
+    /// Write the edit to `sidecarURL(for:)`. Fast: one small UTF-8 file, no decode.
+    ///
+    /// The packet is **merged** with any existing sidecar, so another program's properties survive.
+    /// Unchanged documents do not touch the file (保存 is idempotent on disk too).
+    @discardableResult
+    public static func writeSidecar(document: String, for source: URL) throws -> SidecarOutcome {
+        let url = sidecarURL(for: source)
+        let existingData = try? Data(contentsOf: url)
+        let existingText = existingData.flatMap { String(data: $0, encoding: .utf8) }
+        if let existingText, extractDocument(from: existingText) == document {
+            return SidecarOutcome(wrote: false, bytes: 0)
+        }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            guard fm.isWritableFile(atPath: url.path) else {
+                throw Failure.writeFailed("\(url.lastPathComponent) 是只读文件，未写入")
+            }
+        } else {
+            let directory = url.deletingLastPathComponent()
+            guard fm.isWritableFile(atPath: directory.path) else {
+                throw Failure.writeFailed("\(directory.lastPathComponent) 目录不可写，未写入 \(url.lastPathComponent)")
+            }
+        }
+        let packet = merged(existing: existingData, document: document)
+        do {
+            try packet.write(to: url, options: .atomic)
+        } catch {
+            throw Failure.writeFailed("\(url.lastPathComponent): \(error.localizedDescription)")
+        }
+        return SidecarOutcome(wrote: true, bytes: packet.count)
+    }
+
     /// Puts the header's IFD0 pointer back where the first write found it, which makes everything this
     /// type appended unreachable. The file's image is exactly the original again.
     public static func undo(at url: URL, journal: DNGXMPJournal = .standard) throws {
@@ -333,6 +384,7 @@ struct TIFFFile {
 
     func entries(of tag: UInt16, in ifd: UInt32) -> Entry? {
         let base = Int(ifd)
+        guard base + 2 <= data.count else { return nil }
         let n = Int(u16(base))
         for i in 0..<n {
             let at = base + 2 + 12 * i
@@ -347,8 +399,12 @@ struct TIFFFile {
     }
 
     /// Every entry of IFD0, in file order (they are already sorted by tag).
-    func allEntries() -> [Entry] {
-        let base = Int(ifd0)
+    func allEntries() -> [Entry] { allEntries(in: ifd0) }
+
+    /// Every entry of any directory, in file order.
+    func allEntries(in ifd: UInt32) -> [Entry] {
+        let base = Int(ifd)
+        guard base + 2 <= data.count else { return [] }
         let n = Int(u16(base))
         return (0..<n).compactMap { i in
             let at = base + 2 + 12 * i
@@ -358,7 +414,35 @@ struct TIFFFile {
         }
     }
 
-    func `next`() -> UInt32 { u32(Int(ifd0) + 2 + 12 * Int(u16(Int(ifd0)))) }
+    func `next`() -> UInt32 { nextIFD(after: ifd0) }
+
+    /// The next-IFD pointer of any directory (0 = end of the chain).
+    func nextIFD(after ifd: UInt32) -> UInt32 {
+        let base = Int(ifd)
+        guard base + 2 <= data.count else { return 0 }
+        let at = base + 2 + 12 * Int(u16(base))
+        guard at + 4 <= data.count else { return 0 }
+        return u32(at)
+    }
+
+    /// The SubIFD directories a directory lists (tag 330), in file order.
+    func subIFDOffsets(in ifd: UInt32) -> [UInt32] {
+        guard let e = entries(of: 330, in: ifd), let bytes = try? payload(e) else { return [] }
+        var out: [UInt32] = []
+        out.reserveCapacity(bytes.count / 4)
+        var i = bytes.startIndex
+        while i + 4 <= bytes.endIndex {
+            if littleEndian {
+                out.append(UInt32(bytes[i]) | UInt32(bytes[i + 1]) << 8
+                           | UInt32(bytes[i + 2]) << 16 | UInt32(bytes[i + 3]) << 24)
+            } else {
+                out.append(UInt32(bytes[i]) << 24 | UInt32(bytes[i + 1]) << 16
+                           | UInt32(bytes[i + 2]) << 8 | UInt32(bytes[i + 3]))
+            }
+            i += 4
+        }
+        return out
+    }
 
     /// The bytes an entry's value lives in.
     func payload(_ e: Entry) throws -> Data {
@@ -375,11 +459,30 @@ struct TIFFFile {
         return data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + size))
     }
 
+    /// The value of a scalar SHORT/LONG entry, decoded in the file's own byte order.
+    func scalarValue(_ e: Entry) -> UInt32? {
+        switch e.type {
+        case 3, 8:
+            guard e.raw.count >= 2 else { return nil }
+            let value = littleEndian
+                ? UInt16(e.raw[0]) | UInt16(e.raw[1]) << 8
+                : UInt16(e.raw[0]) << 8 | UInt16(e.raw[1])
+            return UInt32(value)
+        case 4, 9, 13:
+            guard e.raw.count >= 4 else { return nil }
+            return littleEndian
+                ? UInt32(e.raw[0]) | UInt32(e.raw[1]) << 8 | UInt32(e.raw[2]) << 16 | UInt32(e.raw[3]) << 24
+                : UInt32(e.raw[0]) << 24 | UInt32(e.raw[1]) << 16 | UInt32(e.raw[2]) << 8 | UInt32(e.raw[3])
+        default:
+            return nil
+        }
+    }
+
     static func typeSize(_ type: UInt16) -> Int {
         switch type {
         case 1, 2, 6, 7: return 1          // BYTE, ASCII, SBYTE, UNDEFINED
         case 3, 8: return 2                // SHORT, SSHORT
-        case 4, 9, 11: return 4            // LONG, SLONG, FLOAT
+        case 4, 9, 11, 13: return 4        // LONG, SLONG, FLOAT, IFD
         case 5, 10, 12: return 8           // RATIONAL, SRATIONAL, DOUBLE
         default: return 1
         }
@@ -389,21 +492,67 @@ struct TIFFFile {
 
     /// Writes `packet` over the existing tag-700 payload in place and records the new length.
     mutating func overwritePayload(_ entry: Entry, with packet: Data) throws {
-        guard let position = entryPosition(tag: 700) else {
+        guard let position = entryPosition(tag: 700, in: ifd0) else {
             throw DNGXMP.Failure.unsupportedLayout("tag 700 vanished")
         }
         try writePayload(entry, at: position, packet: packet)
     }
 
-    private func entryPosition(tag: UInt16) -> Int? {
-        let base = Int(ifd0)
+    func entryPosition(tag: UInt16, in ifd: UInt32) -> Int? {
+        let base = Int(ifd)
+        guard base + 2 <= data.count else { return nil }
         let n = Int(u16(base))
         for i in 0..<n {
             let at = base + 2 + 12 * i
+            guard at + 12 <= data.count else { return nil }
             if u16(at) == tag { return at }
         }
         return nil
     }
+
+    /// Replaces the inline 4-byte value of a LONG/SHORT entry (an offset or a count).
+    mutating func setEntryValue(_ value: UInt32, tag: UInt16, in ifd: UInt32) throws {
+        guard let position = entryPosition(tag: tag, in: ifd) else {
+            throw DNGXMP.Failure.unsupportedLayout("tag \(tag) is missing from IFD \(ifd)")
+        }
+        let type = u16(position + 2)
+        switch type {
+        case 3, 8:                          // SHORT
+            guard value <= UInt32(UInt16.max) else {
+                throw DNGXMP.Failure.unsupportedLayout("tag \(tag) is SHORT but the value is \(value)")
+            }
+            putU16(UInt16(value), at: position + 8)
+        case 4, 9, 13:                      // LONG, SLONG, IFD
+            putU32(value, at: position + 8)
+        default:
+            throw DNGXMP.Failure.unsupportedLayout("tag \(tag) has type \(type), not a scalar integer")
+        }
+    }
+
+    /// Overwrites `bytes` at `offset`, then zero-fills up to `limit` bytes. Used by the thumbnail
+    /// replacement, where a shorter JPEG is padded so the slot's old length is not left with stale
+    /// bytes from the previous picture.
+    mutating func overwriteBytes(at offset: Int, with bytes: Data, zeroFillTo limit: Int) throws {
+        let total = max(bytes.count, limit)
+        guard offset >= 0, offset + total <= data.count else {
+            throw DNGXMP.Failure.unsupportedLayout("write \(total) bytes at \(offset) past EOF \(data.count)")
+        }
+        let base = data.startIndex + offset
+        for k in 0..<total {
+            data[base + k] = k < bytes.count ? bytes[bytes.startIndex + k] : 0
+        }
+    }
+
+    /// Appends `block` at EOF, keeping the file even-aligned. Returns the byte offset it landed at.
+    mutating func appendBlock(_ block: Data) -> Int {
+        if data.count % 2 != 0 { data.append(0) }
+        let offset = data.count
+        data.append(block)
+        if data.count % 2 != 0 { data.append(0) }
+        return offset
+    }
+
+    private func entryPosition(tag: UInt16) -> Int? { entryPosition(tag: tag, in: ifd0) }
 
     private mutating func writePayload(_ entry: Entry, at position: Int, packet: Data) throws {
         let size = TIFFFile.typeSize(entry.type) * Int(entry.count)
@@ -483,6 +632,12 @@ struct TIFFFile {
     }
 
     func persist(to url: URL) throws {
+        // A read-only original must fail with one sentence and leave zero bytes changed. `.atomic`
+        // would happily replace a writable-directory file even when the file itself is read-only, so
+        // the check has to be here, before any work.
+        guard FileManager.default.isWritableFile(atPath: url.path) else {
+            throw DNGXMP.Failure.writeFailed("\(url.lastPathComponent) 是只读文件，未写入")
+        }
         do {
             try data.write(to: url, options: .atomic)
         } catch {

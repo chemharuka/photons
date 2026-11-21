@@ -54,6 +54,13 @@ public enum MainMenu {
                                       action: #selector(EditorWindowController.exportAction(_:)),
                                       keyEquivalent: "e")
         exportItem.keyEquivalentModifierMask = [.command, .shift]
+        // 477 — 保存 is the **explicit** file write (⌘S): DNG gets tag 700, every other source gets
+        // a same-directory `‹original›.xmp`. It never touches the embedded thumbnail.
+        file.addItem(.separator())
+        let saveItem = file.addItem(withTitle: Loc.t("保存"),
+                                    action: #selector(EditorWindowController.saveAction(_:)),
+                                    keyEquivalent: "s")
+        saveItem.keyEquivalentModifierMask = [.command]
 
         // Edit
         let editItem = NSMenuItem()
