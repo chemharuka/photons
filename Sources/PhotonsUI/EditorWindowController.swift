@@ -418,13 +418,14 @@ public final class EditorWindowController: NSWindowController {
         _ = rootView.loupeController.autoDevelop()
     }
 
-    // MARK: 474 · 编辑 ▸ 降噪 N 张…
+    // MARK: 474/478 · 编辑 ▸ 降噪 N 张（引擎）…
 
-    /// 474 — the edit menu's batch row. It is installed on the real `编辑` menu (the item must exist
-    /// before AppKit validates it) and appears only while the selection has ≥ 2 photos. The item is
-    /// per-window because the selection is; a second editor window installs its own row on the same
-    /// application menu, which AppKit validates against the key window's controller.
-    private var batchDenoiseMenuItem: NSMenuItem?
+    /// 474/478 — the edit menu's batch rows. They are installed on the real `编辑` menu (the items
+    /// must exist before AppKit validates them) and appear only while the selection has ≥ 2 photos.
+    /// One row per engine, so the title says which path the click takes; both are per-window because
+    /// the selection is, and a second editor window installs its own pair on the same application
+    /// menu, which AppKit validates against the key window's controller.
+    private var batchDenoiseMenuItems: [DenoiseEngine: NSMenuItem] = [:]
 
     /// Test seam for the 「已跳过 N 张」 sentence (the menu hides the alert behind a modal).
     public var presentDenoiseBatchNotice: ((String) -> Void)?
@@ -434,36 +435,52 @@ public final class EditorWindowController: NSWindowController {
         super.showWindow(sender)
     }
 
-    /// Install (or reuse) the batch row. `editMenu` is injectable so tests can drive the row without
-    /// an application menu; production finds 编辑 on `NSApp.mainMenu`.
+    /// Install (or reuse) the two batch rows, Ansel first then Nonlocal. `editMenu` is injectable so
+    /// tests can drive the rows without an application menu; production finds 编辑 on `NSApp.mainMenu`.
     @discardableResult
     public func installBatchDenoiseMenuItem(in editMenu: NSMenu? = nil) -> NSMenuItem? {
         let menu = editMenu ?? NSApp?.mainMenu?.items
             .first(where: { $0.submenu?.title == Loc.t("编辑") })?.submenu
         guard let menu else { return nil }
-        if let existing = menu.items.first(where: { $0.action == #selector(batchDenoiseAction(_:)) }) {
-            existing.target = self
-            batchDenoiseMenuItem = existing
-            return existing
+        let action = #selector(batchDenoiseAction(_:))
+        var stored: [DenoiseEngine: NSMenuItem] = [:]
+        var anchor = menu.items.firstIndex(where: { $0.action == #selector(autoDevelopAction(_:)) })
+            ?? (menu.items.count - 1)
+        let count = session.selection.count
+        for engine in DenoiseEngine.allCases {
+            let tag = DenoiseMenuBuilder.tag(for: engine)
+            let item: NSMenuItem
+            if let existing = menu.items.first(where: { $0.action == action && $0.tag == tag }) {
+                item = existing
+            } else {
+                item = NSMenuItem(title: DenoiseMenuBuilder.batchTitle(count: count, engine: engine),
+                                  action: action, keyEquivalent: "")
+                item.target = self
+                item.tag = tag
+                anchor += 1
+                menu.insertItem(item, at: min(anchor, menu.items.count))
+            }
+            // Reused rows must follow the same engine/count as a fresh install.
+            item.target = self
+            item.tag = tag
+            item.title = DenoiseMenuBuilder.batchTitle(count: count, engine: engine)
+            item.isHidden = count < 2
+            stored[engine] = item
+            if let index = menu.items.firstIndex(where: { $0 === item }) { anchor = index }
         }
-        let item = NSMenuItem(title: DenoiseMenuBuilder.batchTitle(count: session.selection.count),
-                              action: #selector(batchDenoiseAction(_:)), keyEquivalent: "")
-        item.target = self
-        item.isHidden = session.selection.count < 2
-        if let auto = menu.items.firstIndex(where: { $0.action == #selector(autoDevelopAction(_:)) }) {
-            menu.insertItem(item, at: auto + 1)
-        } else {
-            menu.addItem(item)
-        }
-        batchDenoiseMenuItem = item
-        return item
+        batchDenoiseMenuItems = stored
+        // The previous signature returned one row; keep returning Ansel so existing callers/tests can
+        // still read its action without knowing about the pair.
+        return stored[.ansel]
     }
 
-    /// 编辑 ▸ 降噪 N 张… — one background task, serial. Uses the in-process NLMF path, the same one
-    /// the right-click batch row uses; the two single-photo entries (Ansel / Nonlocal) are untouched.
+    /// 编辑 ▸ 降噪 N 张（引擎）… — one background task, serial. The clicked row's `tag` picks the
+    /// engine, exactly like the right-click batch rows; no sender keeps the old in-process default.
     @objc public func batchDenoiseAction(_ sender: Any?) {
         guard session.selection.count >= 2 else { return }
-        session.denoiseBatchSelection(engine: .nonlocal) { [weak self] message in
+        let engine = (sender as? NSMenuItem)
+            .flatMap { DenoiseMenuBuilder.engine(forTag: $0.tag) } ?? .nonlocal
+        session.denoiseBatchSelection(engine: engine) { [weak self] message in
             guard let self else { return }
             if let present = self.presentDenoiseBatchNotice {
                 present(message)
@@ -471,6 +488,26 @@ public final class EditorWindowController: NSWindowController {
                 DenoiseMenuBuilder.presentBatchSkipAlert(message)
             }
         }
+    }
+
+    /// Refresh one batch row from the live selection, with the same per-engine availability rule the
+    /// right-click rows use. Returns whether that row is clickable.
+    @discardableResult
+    private func refreshBatchDenoiseRow(_ row: NSMenuItem, engine: DenoiseEngine,
+                                        count: Int, selectedIDs: [String]) -> Bool {
+        row.title = DenoiseMenuBuilder.batchTitle(count: count, engine: engine)
+        row.tag = DenoiseMenuBuilder.tag(for: engine)
+        row.isHidden = count < 2
+        if let reason = DenoiseMenuBuilder.batchUnavailableReason(session: session,
+                                                                  selectedIDs: selectedIDs,
+                                                                  engine: engine) {
+            row.isEnabled = false
+            row.toolTip = count >= 2 ? reason : nil
+            return false
+        }
+        row.isEnabled = true
+        row.toolTip = nil
+        return true
     }
 
     // MARK: 080 · 原图 / 前后对比
@@ -559,12 +596,19 @@ public final class EditorWindowController: NSWindowController {
             // row is grey (a grid click reaches the verb through the context menu, which opens it).
             return session.mode == .loupe && session.anchorID != nil
         case #selector(batchDenoiseAction(_:)):
-            // 474 — appears only for a multi-selection. The title carries the live count, so the row
-            // never promises a different batch than the one the click would start.
+            // 474/478 — appears only for a multi-selection. Validating either row refreshes **both**
+            // titles/counts, so the pair never disagree while the menu is open. The 478 rows also
+            // carry their own engine's availability reason (Ansel tool/model vs Nonlocal model).
             let count = session.selection.count
-            item.isHidden = count < 2
-            item.title = DenoiseMenuBuilder.batchTitle(count: count)
-            return count >= 2
+            let selectedIDs = session.selectedAssets.map(\.id)
+            for engine in DenoiseEngine.allCases {
+                guard let row = batchDenoiseMenuItems[engine] else { continue }
+                refreshBatchDenoiseRow(row, engine: engine, count: count,
+                                       selectedIDs: selectedIDs)
+            }
+            let engine = DenoiseMenuBuilder.engine(forTag: item.tag) ?? .ansel
+            return refreshBatchDenoiseRow(item, engine: engine, count: count,
+                                          selectedIDs: selectedIDs)
         case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
             // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or
             // cancel. (2026-10-27: the two rows moved into the 裁切 card, whose buttons follow the same

@@ -2017,8 +2017,8 @@ public enum HDRMenuBuilder {
 public final class DenoiseMenuTarget: NSObject {
     public weak var session: CatalogSession?
 
-    /// 474 — which network the batch row uses. The in-process path by default: it is the one with
-    /// the injectable `nlmfDenoiseBody` seam, so batch tests never launch the GPL tool.
+    /// 474/478 — the fallback engine for a programmatic `batchDenoisePressed` with no menu item
+    /// (older tests). The two real rows each carry their own engine in `NSMenuItem.tag`.
     public var batchEngine: DenoiseEngine = .nonlocal
 
     /// 474 — test/integration seam for the one-line 「已跳过 N 张」 notice. `nil` = a real `NSAlert`.
@@ -2038,7 +2038,11 @@ public final class DenoiseMenuTarget: NSObject {
     }
 
     @objc func batchDenoisePressed(_ sender: Any?) {
-        session?.denoiseBatchSelection(engine: batchEngine) { [weak self] message in
+        // 478 — the two batch rows carry their engine on the item (`tag`), so the click decides which
+        // path runs. The fallback keeps the programmatic `batchEngine` call used by older tests.
+        let engine = (sender as? NSMenuItem)
+            .flatMap { DenoiseMenuBuilder.engine(forTag: $0.tag) } ?? batchEngine
+        session?.denoiseBatchSelection(engine: engine) { [weak self] message in
             if let present = self?.presentBatchSkipNotice {
                 present(message)
             } else {
@@ -2061,15 +2065,30 @@ public enum DenoiseMenuBuilder {
         }
     }
 
-    // MARK: 474 — batch row
+    // MARK: 474/478 — batch rows
 
     /// The multi-selection row. The count is the **selected** photos (the title's promise), while
     /// the task's `total` is the usable subset; the one-line alert explains the difference.
-    public static func batchTitle(count: Int) -> String {
-        Loc.t("降噪 {0} 张…", String(describing: (count)))
+    ///
+    /// 478 — the engine is part of the title so a multi-selection says which path it will take.
+    /// `displayName` is the single source of the Ansel / Nonlocal spelling (the same one the single
+    /// rows and the log use), never a third hand-written copy.
+    public static func batchTitle(count: Int, engine: DenoiseEngine) -> String {
+        Loc.t("降噪 {0} 张（{1}）…", String(describing: (count)), engine.displayName)
     }
 
     public static var batchAction: Selector { #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
+
+    /// 478 — `NSMenuItem.tag` is the engine carrier for the batch rows. Two values, stable across
+    /// both menus; `nil` means "not one of ours" (the single rows use their own selectors, so they
+    /// never reach this lookup).
+    public static func tag(for engine: DenoiseEngine) -> Int {
+        engine == .ansel ? 0 : 1
+    }
+
+    public static func engine(forTag tag: Int) -> DenoiseEngine? {
+        DenoiseEngine.allCases.first { self.tag(for: $0) == tag }
+    }
 
     /// Same shape as the single rows: nil = clickable, otherwise the reason. A mixed selection is
     /// still clickable **when at least two photos are usable** — the skipped ones are reported by
@@ -2099,9 +2118,10 @@ public enum DenoiseMenuBuilder {
 
     public static func batchItem(session: CatalogSession?, target: DenoiseMenuTarget,
                                  selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
-        let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count),
+        let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count, engine: engine),
                                action: batchAction, keyEquivalent: "")
         entry.target = target
+        entry.tag = tag(for: engine)
         if let reason = batchUnavailableReason(session: session, selectedIDs: selectedIDs,
                                                engine: engine) {
             entry.isEnabled = false
@@ -2209,13 +2229,16 @@ public enum DenoiseMenuBuilder {
             if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
         }
         var row = insertAt
-        // 474 — only a real multi-selection gets the batch row. A single photo keeps exactly the two
-        // existing entries ("降噪" behaviour unchanged).
+        // 474/478 — only a real multi-selection gets the batch rows. A single photo keeps exactly
+        // the two existing entries ("降噪" behaviour unchanged). Two rows, one per engine, so the
+        // title itself says which path the click will take.
         if selectedIDs.count >= 2 {
-            menu.insertItem(batchItem(session: session, target: target, selectedIDs: selectedIDs,
-                                      engine: target.batchEngine),
-                            at: row)
-            row += 1
+            for engine in DenoiseEngine.allCases {
+                menu.insertItem(batchItem(session: session, target: target,
+                                          selectedIDs: selectedIDs, engine: engine),
+                                at: row)
+                row += 1
+            }
         }
         // 两项挨着插：Ansel 在上，Nonlocal 在下，读完一行再读一行是同一个决定。
         for engine in DenoiseEngine.allCases {
