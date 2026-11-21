@@ -102,6 +102,18 @@ final class NativeTrafficLightsTests: XCTestCase {
         return false
     }
 
+    /// 488 — 顶栏子视图按**行为**分类，不看类名：自身中心的 `hitTest` 回到自己或自己的
+    /// 后代，就是可交互控件；返回 nil，就是装饰（例如 `BackgroundTaskBars`：
+    /// 1–4 条进度线，`hitTest` 恒为 nil，不吃鼠标也不挡拖动）。下一个装饰视图进来时
+    /// 会自动落进第二类，不用再改这张用例。
+    private func classify(_ view: NSView) -> (kind: String, ownHit: NSView?, interactive: Bool) {
+        let centre = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
+        // `hitTest` 的入参在**父视图**坐标里，不是视图自己的坐标系。
+        let own = view.superview.flatMap { view.hitTest(view.convert(centre, to: $0)) }
+        let interactive = isOurs(own, root: view)
+        return (interactive ? "interactive" : "decorative", own, interactive)
+    }
+
     // MARK: - 1 · 红绿灯 frame 与裸窗口逐项相同
 
     func testTrafficLightFramesMatchABareWindow() {
@@ -256,14 +268,36 @@ final class NativeTrafficLightsTests: XCTestCase {
             XCTAssertNil(root.headerGlass.hitTest(NSPoint(x: 4, y: 4)), "玻璃抢了点击")
             XCTAssertNil(root.headerGlass.hitTest(NSPoint(x: 700, y: 18)), "玻璃抢了点击")
 
-            // 反向：顶栏的控件照样拿得到自己的点击（空白让给窗口 ≠ 控件也让出去）。
-            for control in root.topBar.subviews where control.isHidden == false && !control.frame.isEmpty {
+            // 反向：顶栏的控件照样拿得到自己的点击（空白让给窗口 ≠ 控件也让出去）；
+            // 装饰视图则相反：它必须把点击让给窗口，自己既不接鼠标、也不挡拖动。
+            let bar = root.topBar
+            for control in bar.subviews where control.isHidden == false && !control.frame.isEmpty {
                 let centre = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY),
                                              to: themeFrame)
                 let hit = themeFrame.hitTest(centre)
-                print("control \(type(of: control)) centre → \(hit.map { "\(type(of: $0))" } ?? "nil")")
-                XCTAssertTrue(isOurs(hit, root: control), "顶栏控件 \(type(of: control)) 的点击没到自己手里")
+                let (kind, ownHit, interactive) = classify(control)
+                print("control \(type(of: control)) → \(kind)  centre → \(hit.map { "\(type(of: $0))" } ?? "nil")")
+                if interactive {
+                    // 可交互控件：点击必须落在自己（或自己的子视图）手里 —— 原断言，一字不改。
+                    XCTAssertTrue(isOurs(hit, root: control), "顶栏控件 \(type(of: control)) 的点击没到自己手里")
+                } else {
+                    // 装饰视图：自身 hitTest 必须是 nil，且窗口中心的命中必须落到 titlebar / theme frame。
+                    XCTAssertNil(ownHit, "装饰视图 \(type(of: control)) 自己接住了点击")
+                    XCTAssertNotNil(hit, "装饰视图 \(type(of: control)) 的中心点没人接：窗口拖不动")
+                    XCTAssertFalse(isOurs(hit, root: root),
+                                   "装饰视图 \(type(of: control)) 吃掉了鼠标 / 挡住了窗口拖动"
+                                   + "（命中 \(hit.map { "\(type(of: $0))" } ?? "nil")）")
+                }
             }
+
+            // 488 的契约：进度条就在顶栏里，且它的 hitTest 恒为 nil（上面装饰分类的前提）。
+            guard let bars = bar.subviews.first(where: { $0 is BackgroundTaskBars }) as? BackgroundTaskBars else {
+                return XCTFail("488: 顶栏里没有 BackgroundTaskBars")
+            }
+            XCTAssertTrue(bars === bar.backgroundTaskBars, "顶栏里的 BackgroundTaskBars 不是同一个实例")
+            let barsCentre = NSPoint(x: bars.bounds.midX, y: bars.bounds.midY)
+            XCTAssertNil(bars.hitTest(bars.convert(barsCentre, to: bar)),
+                         "488 契约：BackgroundTaskBars 不吃鼠标")
 
             // 顶栏空白处：命中必须落在 AppKit 的窗体（titlebar / theme frame）上，不是我们的视图，
             // 否则窗口既拖不动、点下去也没人接。拖动契约仍是「只有顶栏那条能拖」。
