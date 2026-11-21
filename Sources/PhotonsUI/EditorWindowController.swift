@@ -574,6 +574,45 @@ public final class EditorWindowController: NSWindowController {
 
     @objc public func ungroupSelectionAction(_ sender: Any?) { ungroupSelection() }
 
+    // MARK: 477 · 保存 / 更新缩略图
+
+    /// 文件 ▸ 保存 (⌘S) and 右键 ▸ 保存 — **only XMP**; DNG gets tag 700, other sources a sidecar.
+    @objc public func saveAction(_ sender: Any?) {
+        session.saveEditsToFiles()
+    }
+
+    /// 右键 ▸ 更新缩略图 — the slow, separate verb: decode + render + JPEG + IFD.
+    @objc public func updateThumbnailAction(_ sender: Any?) {
+        session.updateThumbnailsForSelection()
+    }
+
+    /// 撤销 DNG 里的上次写入 — kept as a responder-chain verb (not a main-menu row; it is not a
+    /// daily action).
+    @objc public func undoDNGWriteAction(_ sender: Any?) {
+        _ = session.undoLastDNGWriteForSelection()
+    }
+
+    /// 从 DNG 读取编辑 — asks first: it overwrites the row and clears that photo's stack. Not on the
+    /// main menu, for the same reason.
+    public var confirmReadEditsFromDNG: ((String) -> Bool)?
+
+    @objc public func readEditsFromDNGAction(_ sender: Any?) {
+        guard let asset = session.anchorAsset, asset.ext.lowercased() == "dng" else { return }
+        let confirmed = confirmReadEditsFromDNG?(asset.filename)
+            ?? defaultConfirmReadEdits(filename: asset.filename)
+        guard confirmed else { return }
+        _ = session.readEditFromDNG(for: asset.id)
+    }
+
+    private func defaultConfirmReadEdits(filename: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = Loc.t("从 DNG 读取编辑？")
+        alert.informativeText = Loc.t("会用「{0}」里的 photons:document 覆盖这张照片在库中的编辑，并清空它的撤销历史。", String(describing: (filename)))
+        alert.addButton(withTitle: Loc.t("读取"))
+        alert.addButton(withTitle: Loc.t("取消"))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     // MARK: menu validation
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -751,6 +790,22 @@ public final class EditorWindowController: NSWindowController {
             return session.anchorID != nil
         case #selector(deletePresetAction(_:)), #selector(setDefaultPresetAction(_:)):
             return session.presetRecords.contains { $0.name == (item.representedObject as? String) }
+        case #selector(saveAction(_:)):
+            // 477 — 保存 works for every source (DNG tag 700, others a sidecar). Title stays exactly
+            // 「保存」 (the user's contract); grey only with nothing selected.
+            return !session.dngTargetAssets.isEmpty
+        case #selector(updateThumbnailAction(_:)):
+            // 477 — only DNG can carry an embedded preview. A JPEG/CR3 original is grey with the
+            // reason on the row/tooltip.
+            if let reason = session.thumbnailUnavailableReason {
+                item.toolTip = reason
+                return false
+            }
+            return true
+        case #selector(undoDNGWriteAction(_:)):
+            return session.hasDNGTarget
+        case #selector(readEditsFromDNGAction(_:)):
+            return session.anchorAsset?.ext.lowercased() == "dng"
         default:
             return true
         }
