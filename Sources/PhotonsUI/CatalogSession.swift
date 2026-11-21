@@ -700,6 +700,10 @@ public final class CatalogSession {
         // A missing cache directory is created by the initialiser; a failure here only means the
         // grid falls back to placeholders, which must not stop the library from opening.
         thumbnailCache = try? ThumbnailCache(layout: c.layout)
+        // 485 — the edit-time denoise cache. Global (not per library) on purpose: the key starts
+        // with the source content hash, so the same original cleans once across libraries.
+        makeDenoiseCleaner()
+        denoiseStats = DenoiseCleanerStats()
         loadedEditAssetID = nil
         // Anything still pending belongs to the library we are leaving (043): write it before the
         // path changes, so a fast 打开另一个库 → 回来 does not lose the last click.
@@ -1519,6 +1523,129 @@ public final class CatalogSession {
     /// 这一段而不用等 ~90 s 的推理；命名与临时名/改名仍然是生产的 `NLMFDenoiseExecutor`。
     /// internal：它是模块内的接缝，不进公开 API。
     var nlmfDenoiseBody: NLMFDenoiseExecutor.Body?
+
+    // MARK: 485 — edit-time clean + cache
+
+    /// The edit-time cleaner. Created on `open()`; `nil` only before a library is open (or when the
+    /// cache directory cannot be created, which the interactive entry reports like any other failure).
+    public private(set) var denoiseCleaner: DenoiseCleaner?
+
+    /// Read-only counters for `--ui-smoke` and tests (`cacheHits / computes / computesFailed /
+    /// bytesWritten`). Mirrored on the main actor because the smoke reads them synchronously.
+    public private(set) var denoiseStats = DenoiseCleanerStats()
+
+    /// Injectable cache directory. Production is
+    /// `~/Library/Application Support/Photons/denoise-v1/`; tests point this at their own temp tree
+    /// so the user's cache is never touched.
+    public var denoiseCacheDirectory: URL?
+
+    /// Test seam for the cleaner's pixel computation (the real one runs CPU NLM over a 60 MP file).
+    var denoiseComputeOverride: DenoiseCleaner.Compute?
+
+    /// 485 — the built-in cleaner's identity. It is independent of the *edit*: the reducer cleans
+    /// source pixels, so exposure/crop/masks must not move this key.
+    public static let denoiseCleanerID = "builtin-nlm"
+    public static let denoiseCleanerVersion = "builtin-nlm-v1"
+
+    /// The DNG path feeds the cleaned CFA planes through the cell adapter; non-DNG files decode to
+    /// a linear buffer and use the NLM backend's RGB adapter. Both end in `DenoiseLinearAdapter`,
+    /// so the cache only ever holds linear RGBA. 480's menu/engine is gone; this is its only caller.
+    nonisolated static func nlmFallbackCompute() -> DenoiseCleaner.Compute {
+        { source, progress in
+            if source.url.pathExtension.lowercased() == "dng" {
+                let clean = try DenoiseNLMBackend.cleanDNG(input: source.url, progress: progress)
+                return DenoiseLinearAdapter.linearImage(cfaPlanes: clean.planes,
+                                                        width: clean.width / 2,
+                                                        height: clean.height / 2,
+                                                        cfa: clean.cfa)
+            }
+            let image = try RAWDecoder().decode(source.url, options: DecodeOptions())
+            let n = image.width * image.height
+            var rgb = [[Float]](repeating: [Float](repeating: 0, count: n), count: 3)
+            for i in 0..<n {
+                let base = i * 4
+                rgb[0][i] = Float(image.rgba[base])
+                rgb[1][i] = Float(image.rgba[base + 1])
+                rgb[2][i] = Float(image.rgba[base + 2])
+            }
+            let cleaned = DenoiseNLMBackend.cleanRGB(rgb, width: image.width,
+                                                     height: image.height, progress: progress)
+            return DenoiseLinearAdapter.linearImage(fourPlanes: cleaned.planes,
+                                                    width: image.width, height: image.height)
+        }
+    }
+
+    nonisolated static func defaultDenoiseCacheDirectory() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                               in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("Photons/denoise-v1", isDirectory: true)
+    }
+
+    /// Build the cleaner once per open. The resolver is the session's only job: asset id → the
+    /// catalogue's content hash / size (asked on the main actor, never from the actor's worker).
+    private func makeDenoiseCleaner() {
+        let directory = denoiseCacheDirectory ?? Self.defaultDenoiseCacheDirectory()
+        let compute = denoiseComputeOverride ?? Self.nlmFallbackCompute()
+        denoiseCleaner = try? DenoiseCleaner(
+            directory: directory,
+            cleanerID: Self.denoiseCleanerID,
+            cleanerVersion: Self.denoiseCleanerVersion,
+            params: "amount=100;tile=256;overlap=16;anscombe=1;domain=cfa-or-rgb",
+            resolver: { [weak self] assetID in
+                guard let self else {
+                    throw DenoiseCleanerFailure.sourceUnavailable(DenoiseNotices.noLibrary)
+                }
+                return try await MainActor.run { try self.resolveDenoiseSource(assetID: assetID) }
+            },
+            compute: compute)
+    }
+
+    private func resolveDenoiseSource(assetID: String) throws -> DenoiseSource {
+        guard let asset = assets.first(where: { $0.id == assetID }) else {
+            throw DenoiseCleanerFailure.sourceUnavailable(Loc.t("照片不在库里"))
+        }
+        guard let url = fileURL(for: asset) else {
+            throw DenoiseCleanerFailure.sourceUnavailable(DenoiseNotices.onlyDNG(asset.filename))
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw DenoiseCleanerFailure.sourceUnavailable(MissingMarkText.fileGone)
+        }
+        return DenoiseSource(assetID: asset.id, url: url, contentSHA256: asset.contentHash,
+                             width: max(asset.width ?? 0, 1), height: max(asset.height ?? 0, 1))
+    }
+
+    /// 485 — the service door `P2`/`P3` will call. A cache hit costs one read; concurrent requests
+    /// for the same photo join the running compute; a failure leaves no cache file behind.
+    @discardableResult
+    public func cleanDenoiseIfNeeded(assetID: String,
+                                     progress: (@Sendable (String) -> Void)? = nil)
+        async -> Result<LinearImage, DenoiseCleanerFailure> {
+        guard let cleaner = denoiseCleaner else {
+            return .failure(.sourceUnavailable(Loc.t("降噪缓存不可用")))
+        }
+        let result = await cleaner.cleanIfNeeded(assetID: assetID, progress: progress)
+        denoiseStats = await cleaner.statsSnapshot()
+        return result
+    }
+
+    /// 485 — fill the cache for several photos **serially** (one clean alive at a time). 480's batch
+    /// menu row is gone; this is the service entry a future multi-select action calls. Returns the
+    /// photos that failed, so a caller can report them without re-querying the cleaner.
+    @discardableResult
+    public func precomputeDenoiseCache(assetIDs: [String],
+                                       progress: (@Sendable (String) -> Void)? = nil)
+        async -> [String: DenoiseCleanerFailure] {
+        var failures: [String: DenoiseCleanerFailure] = [:]
+        for assetID in assetIDs {
+            if case .failure(let error) = await cleanDenoiseIfNeeded(assetID: assetID,
+                                                                    progress: progress) {
+                failures[assetID] = error
+            }
+        }
+        return failures
+    }
 
     /// 对选中的**那一张**跑 Ansel 模型降噪（子进程，GPL 权重）。
     @discardableResult
