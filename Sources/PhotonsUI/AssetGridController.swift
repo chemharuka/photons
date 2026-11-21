@@ -2002,6 +2002,13 @@ public enum HDRMenuBuilder {
 public final class DenoiseMenuTarget: NSObject {
     public weak var session: CatalogSession?
 
+    /// 474 — which network the batch row uses. The in-process path by default: it is the one with
+    /// the injectable `nlmfDenoiseBody` seam, so batch tests never launch the GPL tool.
+    public var batchEngine: DenoiseEngine = .nonlocal
+
+    /// 474 — test/integration seam for the one-line 「已跳过 N 张」 notice. `nil` = a real `NSAlert`.
+    public var presentBatchSkipNotice: ((String) -> Void)?
+
     public init(session: CatalogSession?) {
         self.session = session
         super.init()
@@ -2013,6 +2020,16 @@ public final class DenoiseMenuTarget: NSObject {
 
     @objc func nonlocalPressed(_ sender: Any?) {
         session?.denoiseSelection(engine: .nonlocal)
+    }
+
+    @objc func batchDenoisePressed(_ sender: Any?) {
+        session?.denoiseBatchSelection(engine: batchEngine) { [weak self] message in
+            if let present = self?.presentBatchSkipNotice {
+                present(message)
+            } else {
+                DenoiseMenuBuilder.presentBatchSkipAlert(message)
+            }
+        }
     }
 }
 
@@ -2027,6 +2044,70 @@ public enum DenoiseMenuBuilder {
         case .ansel: return Loc.t("模型降噪（Ansel）…")
         case .nonlocal: return Loc.t("模型降噪（Nonlocal）…")
         }
+    }
+
+    // MARK: 474 — batch row
+
+    /// The multi-selection row. The count is the **selected** photos (the title's promise), while
+    /// the task's `total` is the usable subset; the one-line alert explains the difference.
+    public static func batchTitle(count: Int) -> String {
+        Loc.t("降噪 {0} 张…", String(describing: (count)))
+    }
+
+    public static var batchAction: Selector { #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
+
+    /// Same shape as the single rows: nil = clickable, otherwise the reason. A mixed selection is
+    /// still clickable **when at least two photos are usable** — the skipped ones are reported by
+    /// the alert, not by hiding the verb.
+    public static func batchUnavailableReason(session: CatalogSession?, selectedIDs: [String],
+                                              engine: DenoiseEngine) -> String? {
+        guard let session else { return DenoiseNotices.noLibrary }
+        guard selectedIDs.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
+        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
+        let usable = session.selectedAssets.filter {
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+        }
+        guard usable.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
+        switch engine {
+        case .ansel:
+            guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }
+            guard session.isDenoiseModelAvailable else {
+                return DenoiseNotices.anselModelMissing(session.denoiseModelPathHint)
+            }
+        case .nonlocal:
+            guard session.isNLMFDenoiseModelAvailable else {
+                return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
+            }
+        }
+        return nil
+    }
+
+    public static func batchItem(session: CatalogSession?, target: DenoiseMenuTarget,
+                                 selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
+        let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count),
+                               action: batchAction, keyEquivalent: "")
+        entry.target = target
+        if let reason = batchUnavailableReason(session: session, selectedIDs: selectedIDs,
+                                               engine: engine) {
+            entry.isEnabled = false
+            entry.toolTip = reason
+        } else {
+            entry.isEnabled = true
+            let usable = session?.selectedAssets.filter {
+                $0.ext.lowercased() == "dng" && session?.fileURL(for: $0) != nil
+            }.count ?? selectedIDs.count
+            entry.toolTip = Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
+                                  String(describing: (usable)))
+        }
+        return entry
+    }
+
+    public static func presentBatchSkipAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = Loc.t("批量降噪")
+        alert.informativeText = message
+        alert.addButton(withTitle: Loc.t("好"))
+        alert.runModal()
     }
 
     /// 这一行为什么灰，或 nil（可点）。public 是因为它就是全部规则：菜单、tooltip 和动词
@@ -2093,7 +2174,8 @@ public enum DenoiseMenuBuilder {
     /// 同一段话。重复打开时先按标题清掉上一轮的两行，和 `HDRMenuBuilder.attach` 同一条规矩。
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
                               selectedIDs: [String]) {
-        for (index, existing) in menu.items.enumerated().reversed() where titles.contains(existing.title) {
+        for (index, existing) in menu.items.enumerated().reversed()
+            where titles.contains(existing.title) || existing.action == batchAction {
             menu.removeItem(at: index)
             // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
             // one after its own row, and the previous open may have put one after ours.
@@ -2111,13 +2193,23 @@ public enum DenoiseMenuBuilder {
             insertAt = stackIndex + 1
             if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
         }
+        var row = insertAt
+        // 474 — only a real multi-selection gets the batch row. A single photo keeps exactly the two
+        // existing entries ("降噪" behaviour unchanged).
+        if selectedIDs.count >= 2 {
+            menu.insertItem(batchItem(session: session, target: target, selectedIDs: selectedIDs,
+                                      engine: target.batchEngine),
+                            at: row)
+            row += 1
+        }
         // 两项挨着插：Ansel 在上，Nonlocal 在下，读完一行再读一行是同一个决定。
-        for (offset, engine) in DenoiseEngine.allCases.enumerated() {
+        for engine in DenoiseEngine.allCases {
             menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
                                  engine: engine),
-                            at: insertAt + offset)
+                            at: row)
+            row += 1
         }
-        let after = insertAt + DenoiseEngine.allCases.count
+        let after = row
         let alreadySeparated = after < menu.items.count && menu.items[after].isSeparatorItem
         if !alreadySeparated { menu.insertItem(.separator(), at: after) }
     }

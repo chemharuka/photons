@@ -38,6 +38,9 @@ public final class EditorWindowController: NSWindowController {
             window.setContentSize(size)
         }
         window.center()
+        // 474 — the row lives on the app's 编辑 menu, but its visibility is per-window state
+        // (`session.selection`), so it is installed here rather than baked into `MainMenu.build()`.
+        installBatchDenoiseMenuItem()
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -415,6 +418,61 @@ public final class EditorWindowController: NSWindowController {
         _ = rootView.loupeController.autoDevelop()
     }
 
+    // MARK: 474 · 编辑 ▸ 降噪 N 张…
+
+    /// 474 — the edit menu's batch row. It is installed on the real `编辑` menu (the item must exist
+    /// before AppKit validates it) and appears only while the selection has ≥ 2 photos. The item is
+    /// per-window because the selection is; a second editor window installs its own row on the same
+    /// application menu, which AppKit validates against the key window's controller.
+    private var batchDenoiseMenuItem: NSMenuItem?
+
+    /// Test seam for the 「已跳过 N 张」 sentence (the menu hides the alert behind a modal).
+    public var presentDenoiseBatchNotice: ((String) -> Void)?
+
+    public override func showWindow(_ sender: Any?) {
+        installBatchDenoiseMenuItem()
+        super.showWindow(sender)
+    }
+
+    /// Install (or reuse) the batch row. `editMenu` is injectable so tests can drive the row without
+    /// an application menu; production finds 编辑 on `NSApp.mainMenu`.
+    @discardableResult
+    public func installBatchDenoiseMenuItem(in editMenu: NSMenu? = nil) -> NSMenuItem? {
+        let menu = editMenu ?? NSApp?.mainMenu?.items
+            .first(where: { $0.submenu?.title == Loc.t("编辑") })?.submenu
+        guard let menu else { return nil }
+        if let existing = menu.items.first(where: { $0.action == #selector(batchDenoiseAction(_:)) }) {
+            existing.target = self
+            batchDenoiseMenuItem = existing
+            return existing
+        }
+        let item = NSMenuItem(title: DenoiseMenuBuilder.batchTitle(count: session.selection.count),
+                              action: #selector(batchDenoiseAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.isHidden = session.selection.count < 2
+        if let auto = menu.items.firstIndex(where: { $0.action == #selector(autoDevelopAction(_:)) }) {
+            menu.insertItem(item, at: auto + 1)
+        } else {
+            menu.addItem(item)
+        }
+        batchDenoiseMenuItem = item
+        return item
+    }
+
+    /// 编辑 ▸ 降噪 N 张… — one background task, serial. Uses the in-process NLMF path, the same one
+    /// the right-click batch row uses; the two single-photo entries (Ansel / Nonlocal) are untouched.
+    @objc public func batchDenoiseAction(_ sender: Any?) {
+        guard session.selection.count >= 2 else { return }
+        session.denoiseBatchSelection(engine: .nonlocal) { [weak self] message in
+            guard let self else { return }
+            if let present = self.presentDenoiseBatchNotice {
+                present(message)
+            } else {
+                DenoiseMenuBuilder.presentBatchSkipAlert(message)
+            }
+        }
+    }
+
     // MARK: 080 · 原图 / 前后对比
     //
     // Three verbs, no document. Each one asks the loupe to change what its next frame is *of*; the
@@ -500,6 +558,13 @@ public final class EditorWindowController: NSWindowController {
             // 453 — the measurement needs the loupe's frame graph and an anchor; outside the loupe the
             // row is grey (a grid click reaches the verb through the context menu, which opens it).
             return session.mode == .loupe && session.anchorID != nil
+        case #selector(batchDenoiseAction(_:)):
+            // 474 — appears only for a multi-selection. The title carries the live count, so the row
+            // never promises a different batch than the one the click would start.
+            let count = session.selection.count
+            item.isHidden = count < 2
+            item.title = DenoiseMenuBuilder.batchTitle(count: count)
+            return count >= 2
         case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
             // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or
             // cancel. (2026-10-27: the two rows moved into the 裁切 card, whose buttons follow the same

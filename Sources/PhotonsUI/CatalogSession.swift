@@ -57,8 +57,13 @@ public enum DenoiseNotices {
     public static let noLibrary = Loc.t("未打开库")
     public static let singlePhotoOnly = Loc.t("模型降噪只处理单张照片")
     public static let alreadyRunning = Loc.t("已有一次模型降噪在进行")
+    public static let batchNeedsTwo = Loc.t("批量降噪至少需要两张可处理的 DNG")
     public static func onlyDNG(_ filename: String) -> String {
         Loc.t("只支持 DNG：{0}", String(describing: (filename)))
+    }
+    public static func batchSkipped(_ skipped: Int, kept: Int) -> String {
+        Loc.t("已跳过 {0} 张不支持降噪的照片，只对 {1} 张运行降噪。",
+              String(describing: (skipped)), String(describing: (kept)))
     }
 
     // Ansel（子进程，GPL 权重）—— 与 §386 时一模一样的三句，只是搬到这里按引擎分组。
@@ -1532,6 +1537,261 @@ public final class CatalogSession {
             Task { @MainActor in self?.finishDenoise(run, taskID: taskID) }
         }
         return [participantID]
+    }
+
+    // MARK: - 474 · 批量降噪（一条任务，串行）
+
+    /// One catalogue item of a batch: everything `runDenoise` needs, captured on the main actor so
+    /// the background half never reads session state. `thumbKey` is the same square HD key the
+    /// sidebar uses (`ThumbKey.hdJPEG`), stored as a string because `BackgroundTask` is a value type.
+    private struct DenoiseBatchItem: Sendable {
+        let assetID: String
+        let source: URL
+        let rootID: String
+        let thumbKey: String
+    }
+
+    /// 474 — the batch's bookkeeping. Main actor only; `nextIndex` is the item that will start next,
+    /// `completed` is the number that has finished (success **or** failure).
+    private struct DenoiseBatchState {
+        let taskID: UUID
+        let engine: DenoiseEngine
+        let job: DenoiseRunner
+        let catalog: Catalog
+        let importService: ImportService
+        let items: [DenoiseBatchItem]
+        var nextIndex = 0
+        var completed = 0
+        var failures = 0
+        var successes = 0
+        var lastOutputAssetID: String?
+        var cancelled = false
+    }
+
+    private var denoiseBatch: DenoiseBatchState?
+
+    /// 474 — how many selected photos the last batch had to skip (not DNG / no file URL).
+    public private(set) var lastDenoiseBatchSkippedCount = 0
+    /// 474 — one sentence for the caller to show before the batch starts. `nil` = nothing skipped.
+    public private(set) var lastDenoiseBatchSkipNotice: String?
+
+    /// Run **one** background task over the selected photos, one at a time. The single-photo path
+    /// (`denoiseSelection`) is untouched: this is only reachable when the caller selected ≥ 2 photos.
+    ///
+    /// - `beforeStart` is called synchronously **before** the first item starts, and only when some
+    ///   selected photos were skipped. The menu uses it for the one-line alert; tests use it as the
+    ///   seam instead of walking an `NSAlert`.
+    /// - Cancellation follows P3's one-shot handle: the current item is allowed to finish, then no
+    ///   new item starts and the task closes as `.cancelled`.
+    /// - A failed item counts towards `failureCount` and the next item still runs.
+    @discardableResult
+    public func denoiseBatchSelection(engine: DenoiseEngine,
+                                      beforeStart: ((String) -> Void)? = nil) -> [String] {
+        denoiseRunCount += 1
+        lastDenoiseError = nil
+        lastDenoiseBatchSkippedCount = 0
+        lastDenoiseBatchSkipNotice = nil
+        lastDenoiseProgress = nil
+        denoiseRanOffMain = nil
+
+        guard let catalog else {
+            lastDenoiseError = DenoiseNotices.noLibrary
+            return []
+        }
+        guard !isDenoiseRunning else {
+            lastDenoiseError = DenoiseNotices.alreadyRunning
+            return []
+        }
+        switch engine {
+        case .ansel:
+            guard isDenoiseToolAvailable else {
+                lastDenoiseError = DenoiseNotices.anselToolMissing
+                return []
+            }
+            guard isDenoiseModelAvailable else {
+                lastDenoiseError = DenoiseNotices.anselModelMissing(denoiseModelPathHint)
+                return []
+            }
+        case .nonlocal:
+            guard isNLMFDenoiseModelAvailable else {
+                lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
+                return []
+            }
+        }
+
+        let chosen = selectedAssets
+        guard chosen.count >= 2 else {
+            lastDenoiseError = DenoiseNotices.batchNeedsTwo
+            return []
+        }
+        // Per-photo availability is the single-photo rule (`dng` + a file URL), applied one photo at
+        // a time. Skipped photos are counted here and named to the user before the first item starts.
+        var items: [DenoiseBatchItem] = []
+        var skipped: [String] = []
+        for asset in chosen {
+            guard asset.ext.lowercased() == "dng", let url = fileURL(for: asset) else {
+                skipped.append(asset.filename)
+                continue
+            }
+            items.append(DenoiseBatchItem(assetID: asset.id,
+                                          source: url,
+                                          rootID: asset.sourceRootId,
+                                          thumbKey: ThumbnailProvider.hdJPEGKey(for: asset).keyString))
+        }
+        guard items.count >= 2 else {
+            lastDenoiseError = DenoiseNotices.batchNeedsTwo
+            return []
+        }
+        lastDenoiseBatchSkippedCount = skipped.count
+        if !skipped.isEmpty {
+            let notice = DenoiseNotices.batchSkipped(skipped.count, kept: items.count)
+            lastDenoiseBatchSkipNotice = notice
+            beforeStart?(notice)
+        }
+
+        // 451 — same per-operation cleanup as single denoise, once per directory in the batch.
+        for directory in Set(items.map { $0.source.deletingLastPathComponent() }) {
+            _ = InterruptedWorkSweep.removeLeftovers(in: directory, kinds: ["denoise"])
+        }
+        guard let importService = makeImportService() else {
+            lastDenoiseError = DenoiseNotices.noLibrary
+            return []
+        }
+
+        let job = DenoiseRunner(engine: engine,
+                                ansel: AnselDenoiseJob(location: denoiseLocation),
+                                nonlocal: nlmfDenoiseJob,
+                                nonlocalBody: nlmfDenoiseBody)
+        let taskID = backgroundTasks.begin(BackgroundTask(
+            kind: .denoise,
+            title: Loc.t("降噪 {0} 张", String(describing: (items.count))),
+            total: items.count,
+            currentAssetID: items[0].assetID,
+            currentThumbKey: items[0].thumbKey))
+        backgroundTasks.registerCancel(id: taskID) { [weak self] in
+            // Only a flag: the item already running is allowed to finish (§3 P4).
+            self?.denoiseBatch?.cancelled = true
+        }
+        denoiseBatch = DenoiseBatchState(taskID: taskID, engine: engine, job: job,
+                                         catalog: catalog, importService: importService,
+                                         items: items)
+        startNextDenoiseBatchItem()
+        return items.map(\.assetID)
+    }
+
+    /// Start the next item. The queue is the existing serial `photons.denoise`; the next item is
+    /// only dispatched from the previous item's main-actor completion, so two executors can never
+    /// be alive at once (that is the acceptance's 「并发度 = 1」).
+    private func startNextDenoiseBatchItem() {
+        guard var batch = denoiseBatch else { return }
+        guard !batch.cancelled, batch.nextIndex < batch.items.count else {
+            finishDenoiseBatch()
+            return
+        }
+        let itemIndex = batch.nextIndex
+        let item = batch.items[itemIndex]
+        batch.nextIndex += 1
+        denoiseBatch = batch
+
+        isDenoiseRunning = true
+        denoiseAssetID = item.assetID
+        lastDenoiseEngine = batch.engine
+        lastDenoiseProgress = Loc.t("准备降噪…")
+        backgroundTasks.advance(id: batch.taskID,
+                                currentAssetID: item.assetID,
+                                currentThumbKey: item.thumbKey)
+
+        let taskID = batch.taskID
+        let report: @Sendable (String) -> Void = { [weak self] text in
+            Task { @MainActor in
+                guard let self, self.denoiseBatch?.taskID == taskID else { return }
+                self.lastDenoiseProgress = text
+                self.backgroundTasks.advance(id: taskID, currentAssetID: item.assetID)
+            }
+        }
+        let job = batch.job
+        let importService = batch.importService
+        let catalog = batch.catalog
+        denoiseQueue.async { [weak self] in
+            let run = Self.runDenoise(job: job, importService: importService, catalog: catalog,
+                                      source: item.source, participantID: item.assetID,
+                                      rootID: item.rootID, progress: report)
+            Task { @MainActor in
+                self?.finishDenoiseBatchItem(run, itemIndex: itemIndex, taskID: taskID)
+            }
+        }
+    }
+
+    /// One item is done. Book-keeping is the single path's, minus stopping `isDenoiseRunning` and
+    /// minus selecting each product: the batch reloads once at the end (with 40 photos, selecting
+    /// each intermediate stack top would fight the user's own selection 40 times).
+    private func finishDenoiseBatchItem(_ run: DenoiseRun, itemIndex: Int, taskID: UUID) {
+        guard var batch = denoiseBatch, batch.taskID == taskID,
+              itemIndex == batch.completed, itemIndex < batch.nextIndex else { return }
+        let succeeded = run.failure == nil && run.assetID != nil
+
+        batch.completed += 1
+        if succeeded { batch.successes += 1 } else { batch.failures += 1 }
+        if succeeded, let assetID = run.assetID { batch.lastOutputAssetID = assetID }
+        denoiseBatch = batch
+
+        denoiseCompletionCount += 1
+        denoiseRanOffMain = run.ranOffMain
+        lastDenoiseError = run.failure
+        lastDenoiseInheritError = run.inheritFailure
+        lastDenoiseReport = nil
+        if succeeded, let assetID = run.assetID {
+            metadataWriteCount += 1
+            lastMetadataAffectedRows = run.stackCount
+            metadataRevision &+= 1
+            lastStackError = nil
+            lastStackAffectedRows = run.stackCount
+            if let output = run.output {
+                lastDenoiseReport = DenoiseReport(output: output,
+                                                  source: run.source ?? output,
+                                                  width: run.width, height: run.height,
+                                                  whiteLevel: run.whiteLevel, cfa: run.cfa,
+                                                  tiles: run.tiles, seconds: run.seconds,
+                                                  byteCount: run.byteCount,
+                                                  assetID: assetID, stackTopID: run.stackTopID ?? "",
+                                                  stackCount: run.stackCount)
+            }
+            lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+        } else {
+            lastDenoiseProgress = nil
+        }
+        backgroundTasks.advance(id: taskID, completed: batch.completed)
+
+        if batch.cancelled {
+            // The item that was running when 取消 arrived has just been consumed; no new item starts.
+            finishDenoiseBatch()
+        } else {
+            startNextDenoiseBatchItem()
+        }
+    }
+
+    private func finishDenoiseBatch() {
+        guard let batch = denoiseBatch else { return }
+        denoiseBatch = nil
+        isDenoiseRunning = false
+        denoiseAssetID = nil
+        backgroundTasks.forgetCancel(id: batch.taskID)
+        // The panel's square describes 「正在跑的那张」, so it disappears with the run. (A single
+        // run keeps P2a's behaviour and leaves `currentAssetID` on its one photo.)
+        backgroundTasks.clearCurrent(id: batch.taskID)
+        if batch.cancelled {
+            backgroundTasks.finish(id: batch.taskID, state: .cancelled,
+                                   failureCount: batch.failures)
+        } else {
+            backgroundTasks.finish(id: batch.taskID,
+                                   state: batch.successes > 0 ? .finished : .failed,
+                                   failureCount: batch.failures)
+        }
+        guard batch.successes > 0 else { return }
+        reload()
+        if let last = batch.lastOutputAssetID, assets.contains(where: { $0.id == last }) {
+            selectOnly(last)
+        }
     }
 
     /// 一次降噪的产物。纯 `Sendable` 盒子，后台那一半永远不碰 session。

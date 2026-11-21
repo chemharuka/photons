@@ -131,6 +131,15 @@ public final class BackgroundTaskStore {
         }
     }
 
+    /// 474 — drop the "currently running" photo without touching counts. A batch clears it at the
+    /// end (the panel then has no square to draw); a single run keeps the existing P2a behaviour,
+    /// where `currentAssetID` records the one photo it worked on.
+    public func clearCurrent(id: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[index].currentAssetID = nil
+        tasks[index].currentThumbKey = nil
+    }
+
     /// Close a task. `finished` means every item was accounted for, so its count reads `40/40`
     /// without the producer having to send one last `advance`; `cancelled`/`failed` keep the count
     /// they stopped at.
