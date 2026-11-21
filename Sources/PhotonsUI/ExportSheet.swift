@@ -324,6 +324,34 @@ public final class ExportSheetModel {
     public private(set) var startedAt: CFAbsoluteTime = 0
     public private(set) var finishedAt: CFAbsoluteTime = 0
 
+    /// 454 P3 — the one store the top bar's 后台 panel reads. `nil` in pure-logic tests that do not
+    /// care about the panel; the controller passes the session's store, so the sheet and the panel
+    /// write the same object.
+    public let backgroundTasks: BackgroundTaskStore?
+    /// The row this run owns. Non-nil only while that run is in flight.
+    private var backgroundTaskID: UUID?
+    /// Cancel is one-way for the row's count: after the panel's 取消, in-flight render callbacks may
+    /// still arrive, and they must not make a cancelled task look like it progressed further.
+    private var taskCancelled = false
+    /// Item id → the square-thumbnail key the panel can resolve in P4.
+    private var taskThumbKeys: [String: String] = [:]
+
+    /// 454 P3 — the batch seam. Production is `BatchExporter.run`; the tests hand in a fake so a
+    /// 40-file batch never has to decode a RAW. Captured on the main actor before the worker hop.
+    typealias BatchRun = ([ExportItem], ExportPreset, URL, CancellationToken,
+                          @escaping (ExportItem, ExportPreset) throws -> DisplayImage) -> BatchExportReport
+    var batchRun: BatchRun = { items, preset, directory, token, render in
+        BatchExporter.run(items: items, preset: preset, outputDirectory: directory,
+                          concurrency: BatchExporter.defaultConcurrency, cancel: token,
+                          render: render)
+    }
+
+    /// 454 P3 — the per-item pixel seam, same reason as `batchRun`: a fake exporter can drive the
+    /// progress callbacks without a catalog file or a GPU.
+    var imageRenderer: (ExportItem, ExportPreset, ImageSize?) throws -> DisplayImage = { item, preset, native in
+        try UIExportRenderer.render(item: item, preset: preset, native: native)
+    }
+
     /// Closed by the view; wired by `ExportSheetController`.
     public var onClose: (() -> Void)?
     public var onReveal: (([URL]) -> Void)?
@@ -343,9 +371,11 @@ public final class ExportSheetModel {
                 outputDirectory: URL? = nil,
                 presetStore: ExportPresetStore? = nil,
                 writableUTIs: Set<String>? = nil,
-                draftStore: ExportDraftPersistence.Store? = nil) {
+                draftStore: ExportDraftPersistence.Store? = nil,
+                backgroundTasks: BackgroundTaskStore? = nil) {
         let draftStore = draftStore ?? UserDefaults.standard
         self.draftStore = draftStore
+        self.backgroundTasks = backgroundTasks
 
         let recalled = ExportDraftPersistence.recall(from: draftStore)
         var notice: String?
@@ -811,21 +841,25 @@ public final class ExportSheetModel {
 
     // MARK: running
 
-    /// Validate, then hand the batch to the engine on a worker. Returns immediately.
+    /// Validate, then hand the batch to the engine on a worker. Returns immediately; `true` means
+    /// this run actually started and the caller (the controller) may close the sheet.
     ///
     /// - Parameter natives: asset id → the asset's own pixel size, when the catalog knows it. Items
     ///   without an entry are probed. This is what keeps the UI out of the decoder for sizes.
-    public func run(items: [ExportItem], natives: [String: ImageSize] = [:]) {
-        guard phase != .running else { return }
+    /// - Parameter thumbKeys: asset id → the square thumbnail key the 后台 row shows while it runs.
+    @discardableResult
+    public func run(items: [ExportItem], natives: [String: ImageSize] = [:],
+                    thumbKeys: [String: String] = [:]) -> Bool {
+        guard phase != .running else { return false }
         guard !items.isEmpty else {
             errorText = Loc.t("没有选中的照片")
-            return
+            return false
         }
         do {
             _ = try preset.validated()
         } catch {
             errorText = error.localizedDescription
-            return
+            return false
         }
         errorText = nil
         report = nil
@@ -838,6 +872,23 @@ public final class ExportSheetModel {
         finishedAt = 0
         let token = CancellationToken()
         cancellation = token
+        taskCancelled = false
+        taskThumbKeys = thumbKeys
+
+        // 454 P3 — one row, created before the worker starts. The panel's 取消 is the registered
+        // action; dismissing the sheet is not.
+        if let store = backgroundTasks {
+            let taskID = store.begin(BackgroundTask(kind: .export,
+                                                    title: Loc.t("导出 {0} 张照片",
+                                                                 String(describing: items.count)),
+                                                    total: items.count,
+                                                    currentAssetID: items.first?.id,
+                                                    currentThumbKey: items.first.flatMap {
+                                                        thumbKeys[$0.id]
+                                                    }))
+            backgroundTaskID = taskID
+            store.registerCancel(id: taskID) { [weak self] in self?.cancel() }
+        }
 
         // Snapshot at the click, not at completion: the sheet is disabled during the run, and the
         // rows' sizes must describe the preset the files were actually written with.
@@ -846,33 +897,40 @@ public final class ExportSheetModel {
         // 161 §5 — what a successful run remembers. The draft is the *run's* snapshot, so a field
         // the user changes after the report appears cannot leak into "last used".
         pendingRunDraft = ExportDraftPersistence.Draft(preset: preset, outputDirectory: directory)
+        let imageRenderer = self.imageRenderer
+        let batchRun = self.batchRun
         let render: (ExportItem, ExportPreset) throws -> DisplayImage = { item, preset in
-            let image = try UIExportRenderer.render(item: item, preset: preset,
-                                                    native: natives[item.id])
+            let image = try imageRenderer(item, preset, natives[item.id])
             // Called on a `BatchExporter` worker: the counter belongs to the main actor.
-            DispatchQueue.main.async { [weak self] in self?.markRendered(item.id) }
+            DispatchQueue.main.async { [weak self] in self?.markRendered(item) }
             return image
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let report = BatchExporter.run(items: items, preset: preset,
-                                           outputDirectory: directory,
-                                           concurrency: BatchExporter.defaultConcurrency,
-                                           cancel: token,
-                                           render: render)
+            let report = batchRun(items, preset, directory, token, render)
             DispatchQueue.main.async { self?.finish(with: report) }
         }
+        return true
     }
 
     /// The 取消 button. In-flight renders finish; queued items come back as cancelled.
     public func cancel() {
         guard phase == .running else { return }
+        taskCancelled = true
         cancellation?.cancel()
     }
 
-    private func markRendered(_ id: String) {
-        guard phase == .running else { return }
+    /// `rendered` is the count of callbacks, not an index: `BatchExporter` runs two items at once,
+    /// so completion order is not request order. The row must say 1, 2, 3 in callback order.
+    private func markRendered(_ item: ExportItem) {
+        guard phase == .running, !taskCancelled else { return }
         rendered = min(total, rendered + 1)
-        if let index = rows.firstIndex(where: { $0.id == id }) {
+        if let taskID = backgroundTaskID, let store = backgroundTasks {
+            store.advance(id: taskID,
+                          completed: rendered,
+                          currentAssetID: item.id,
+                          currentThumbKey: taskThumbKeys[item.id])
+        }
+        if let index = rows.firstIndex(where: { $0.id == item.id }) {
             rows[index].state = .rendering
             rows[index].detail = Loc.t("已渲染，写入中…")
         }
@@ -881,6 +939,19 @@ public final class ExportSheetModel {
     /// Internal (not private) so the persistence/status tests can feed it a real `BatchExporter` report
     /// without a RAW fixture; the app reaches it from the worker's main-queue hop.
     func finish(with report: BatchExportReport) {
+        // 454 P3 — close the row before resetting the run's own flags. A cancelled run must not read
+        // as finished just because the engine returned a report; its count stays where it stopped.
+        if let taskID = backgroundTaskID, let store = backgroundTasks {
+            let state: BackgroundTask.State = taskCancelled
+                ? .cancelled
+                : (report.failures.isEmpty ? .finished : .failed)
+            store.finish(id: taskID, state: state, failureCount: report.failures.count)
+            store.forgetCancel(id: taskID)
+        }
+        backgroundTaskID = nil
+        taskCancelled = false
+        taskThumbKeys = [:]
+
         self.report = report
         finishedAt = CFAbsoluteTimeGetCurrent()
         cancellation = nil
@@ -2211,12 +2282,18 @@ public final class ExportSheetController: NSObject {
     /// re-capture deliberately.
     public private(set) var items: [ExportItem] = []
     private var natives: [String: ImageSize] = [:]
+    /// 454 P3 — item id → the square-thumbnail key the 后台 row shows while that item is rendering.
+    private var thumbKeys: [String: String] = [:]
+    /// 454 P3 — how many times this controller closed its sheet. The app never reads it; the
+    /// background-export test asserts that pressing 导出 dismisses exactly once.
+    public private(set) var dismissCount = 0
 
     public init(session: CatalogSession, outputDirectory: URL? = nil) {
         self.session = session
         // `nil` lets the model use 161 §5's remembered directory (or the factory default). An
         // explicit directory still wins — that is the caller asking for this run's destination.
-        let model = ExportSheetModel(outputDirectory: outputDirectory)
+        let model = ExportSheetModel(outputDirectory: outputDirectory,
+                                     backgroundTasks: session.backgroundTasks)
         self.model = model
         self.hosting = NSHostingController(rootView: ExportSheetView(model: model))
         super.init()
@@ -2264,6 +2341,7 @@ public final class ExportSheetController: NSObject {
     }
 
     public func dismiss() {
+        dismissCount += 1
         // 161 §5 — the close-time write. It saves the last *exported* draft when there is one (M3),
         // so unexported edits cannot overwrite what the next sheet should start from.
         model.saveDraftOnClose()
@@ -2281,14 +2359,30 @@ public final class ExportSheetController: NSObject {
     ///
     /// The document comes from the catalog (`session.exportItems`), not from a side file, and the
     /// pixel size from the asset row when it exists — one probe less per picture.
-    public func runExport() {
+    @discardableResult
+    public func runExport() -> Bool {
         guard !items.isEmpty else {
             model.selectionCount = 0
             model.run(items: [])
-            return
+            return false
         }
         model.selectionCount = items.count
-        model.run(items: items, natives: natives)
+        let started = model.run(items: items, natives: natives, thumbKeys: thumbKeys)
+        // 454 P3 — 开始导出后界面不再展示，工作继续在后台任务里跑。收起不是取消：only the row's
+        // 取消 (the store's registered action) stops the batch.
+        if started { dismiss() }
+        return started
+    }
+
+    /// 454 P3 — the dismiss test needs the controller's click path without a catalog fixture. This
+    /// only fills the same fields `refreshItems()` would; it is not a second item-assembly path.
+    func setItemsForTesting(_ items: [ExportItem],
+                           natives: [String: ImageSize] = [:],
+                           thumbKeys: [String: String] = [:]) {
+        self.items = items
+        self.natives = natives
+        self.thumbKeys = thumbKeys
+        model.selectionCount = items.count
     }
 
     /// Re-capture what the sheet will write (a new selection, a new document).
@@ -2300,6 +2394,14 @@ public final class ExportSheetController: NSObject {
             captured[index].cameraKey = assets[index].cameraKey
         }
         items = captured
+        // 454 P3 — the panel's current-photo square. P4 resolves this key to pixels; until then it
+        // is the same `ThumbKey` the sidebar uses, carried as its stable string.
+        var keys: [String: String] = [:]
+        for (item, asset) in zip(captured, assets) {
+            let document = item.edit ?? ThumbnailProvider.document(from: asset)
+            keys[item.id] = ThumbnailProvider.hdJPEGKey(for: asset, document: document).keyString
+        }
+        thumbKeys = keys
         var sizes: [String: ImageSize] = [:]
         for asset in assets {
             if let w = asset.width, let h = asset.height, w > 0, h > 0 {

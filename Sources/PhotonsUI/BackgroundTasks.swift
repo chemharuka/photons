@@ -86,6 +86,11 @@ public final class BackgroundTaskStore {
 
     public private(set) var tasks: [BackgroundTask] = []
 
+    /// 454 P3 — the cancel handle for a running task. It cannot live in `BackgroundTask`: the value
+    /// type is `Sendable` and describes the row, while the action belongs to the producer's thread
+    /// (the export `CancellationToken` lives on the main actor).
+    private var cancelActions: [UUID: @MainActor () -> Void] = [:]
+
     /// Instance spelling of the same limit, so callers can ask the store without naming the type.
     public var retainedFinishedLimit: Int { Self.retainedFinishedLimit }
 
@@ -139,9 +144,33 @@ public final class BackgroundTaskStore {
         pruneFinished()
     }
 
+    /// Remember how to stop a running task. The handle is deliberately not part of the value type:
+    /// the row knows an id, the producer knows its token.
+    public func registerCancel(id: UUID, action: @escaping @MainActor () -> Void) {
+        guard tasks.contains(where: { $0.id == id }) else { return }
+        cancelActions[id] = action
+    }
+
+    /// Run the registered cancel action **once**, then forget it. A second call is a no-op, so a
+    /// double-click on the panel's 取消 cannot cancel the producer twice; a terminal task's stale
+    /// handle is dropped without running.
+    public func cancel(id: UUID) {
+        guard let action = cancelActions.removeValue(forKey: id) else { return }
+        if let index = tasks.firstIndex(where: { $0.id == id }), tasks[index].state.isTerminal {
+            return
+        }
+        action()
+    }
+
+    /// Drop a handle without running it — used when the producer reaches a terminal state on its own.
+    public func forgetCancel(id: UUID) {
+        cancelActions.removeValue(forKey: id)
+    }
+
     /// Remove every terminal task (finished, cancelled, failed); in-flight tasks stay.
     public func clearFinished() {
         tasks.removeAll { $0.state.isTerminal }
+        pruneCancelActions()
     }
 
     /// `8/40` — the spelling the header row uses. Pure: reads only the value it is given.
@@ -186,5 +215,13 @@ public final class BackgroundTaskStore {
 
         let doomed = Set(evict)
         tasks = tasks.enumerated().filter { !doomed.contains($0.offset) }.map(\.element)
+        pruneCancelActions()
+    }
+
+    /// A handle is only meaningful while its row exists; eviction and `clearFinished` both drop the
+    /// rows, so the dictionary must not keep the producer's closure alive.
+    private func pruneCancelActions() {
+        let live = Set(tasks.map(\.id))
+        cancelActions = cancelActions.filter { live.contains($0.key) }
     }
 }
