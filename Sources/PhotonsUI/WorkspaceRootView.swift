@@ -231,12 +231,22 @@ public final class TopBarView: NSView, NSPopoverDelegate {
     /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
     /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
+    /// 488 — 1–4 条后台进度线，占「后台」与状态簇之间的固定槽位（没有任务也留位）。
+    public let backgroundTaskBars = BackgroundTaskBars()
+    private let taskBarsBridge = ObservationBridge()
     private var separators: [NSView] = []
 
     /// 454 P1 — the panel's model. P2a moved the single instance to `CatalogSession`; the workspace
     /// hands that same object in (`TopBarView(store:)`), and tests that build a bare bar get a fresh
     /// one by default. The popover and the header therefore cannot drift apart.
     public let backgroundTaskStore: BackgroundTaskStore
+    /// 488 — where the panel row's square thumbnail comes from (the library's own provider and
+    /// asset lookup; the root wires it after `open`). Without it the row keeps its placeholder.
+    public var backgroundTaskThumbnailSource: BackgroundTaskThumbnailSource? {
+        didSet {
+            backgroundTasksPopoverController.thumbnailSource = backgroundTaskThumbnailSource
+        }
+    }
     private lazy var backgroundTasksPopoverController = BackgroundTasksPopover(store: backgroundTaskStore)
     private let backgroundTasksPopover = NSPopover()
     /// Test/`--ui-smoke` read: whether the popover was opened. Mirrors `isShown` whenever there is a
@@ -293,12 +303,22 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         backgroundTasksPopover.contentViewController = backgroundTasksPopoverController
 
         for v: NSView in [openButton, importButton, exportButton, modeButton,
-                          browserButton, sortButton, backgroundButton, statusCluster] {
+                          browserButton, sortButton, backgroundButton,
+                          backgroundTaskBars, statusCluster] {
             addSubview(v)
         }
         // 442 —— 顶栏第一条分隔线在导出之后；454 P1 在「排序 | 后台」之间加第二条。
         addSeparator()
         addSeparator()
+
+        // 488 — keep the 1–4 lines live while tasks begin/advance/finish. The bars read the store's
+        // one newest-first spelling; they never re-order it themselves.
+        taskBarsBridge.observe({ [weak self] in
+            _ = self?.backgroundTaskStore.tasks
+        }, { [weak self] in
+            self?.syncBackgroundTaskBars()
+        })
+        syncBackgroundTaskBars()
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
@@ -345,6 +365,12 @@ public final class TopBarView: NSView, NSPopoverDelegate {
                              selectionCount: selectionCount,
                              libraryName: libraryName)
         needsLayout = true
+    }
+
+    /// 488 — read `store.displayTasks` (newest-first) into the bar slot. Idempotent; called by the
+    /// observation bridge and available to tests without waiting for an observation turn.
+    public func syncBackgroundTaskBars() {
+        backgroundTaskBars.update(tasks: backgroundTaskStore.displayTasks)
     }
 
     /// 排序按钮的状态：文字 = 当前顺序，tooltip = 键 + 顺序。
@@ -448,16 +474,28 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         x += Self.separatorGapOut
         place(backgroundButton, width: backgroundButton.intrinsicContentSize.width)
 
+        // 488 — the bar slot sits immediately right of 后台 and is **always** reserved, even with
+        // zero tasks. Width = the button's own width (owner: 「宽度和现在的七个按钮保持差不多一致」),
+        // height = the whole top-bar row so the group can centre in it.
+        let barsX = backgroundButton.frame.maxX
+        let barsWidth = backgroundButton.intrinsicContentSize.width
+        backgroundTaskBars.frame = NSRect(x: barsX, y: 0,
+                                          width: max(0, barsWidth), height: h)
+        backgroundTaskBars.needsLayout = true
+
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
         // 两个约束，取更紧的那个：
         // ① 检查器列宽（`statusColumnWidth`）：让整块留在列上方，而不是横到画布上去；
         // ② 顶栏最后一个可交互控件的右边缘 + 16 pt：库名再长也不许压到按钮上。
+        // 488 — `controlsTrailingEdge` 仍 = 后台按钮右边缘；条区在它右边，所以这里的 16 pt
+        // 从**条区右边缘**算，状态簇不会压到进度线上。
         // 簇内部只截库名一段（中间省略），计数与版本号按自身实际宽度完整显示；
         // ①② 都塞不下 40 pt 库名时 `width(limit:)` 返回 0，整块隐藏（退化到没有状态文本，
         // 而不是压住控件或画出一段被剪碎的省略号）。
         let rightEdge = bounds.width - TopBarStatusCluster.Metrics.trailingInset
-        let controlLimit = controlsTrailingEdge + TopBarStatusCluster.Metrics.minimumGapFromControls
+        let controlLimit = backgroundTaskBars.frame.maxX
+            + TopBarStatusCluster.Metrics.minimumGapFromControls
         let limit = max(0, rightEdge - controlLimit)
         statusCluster.columnWidth = statusColumnWidth
         statusCluster.widthLimit = limit
@@ -670,6 +708,21 @@ public final class WorkspaceRootView: NSView {
         self.session = session
         // 454 P2a — the bar's popover reads the model-owned store, exactly as the header does.
         self.topBar = TopBarView(store: session.backgroundTasks)
+        // 488 — the panel's 28×28 square is the real square-tier thumbnail, resolved through the
+        // same provider the three browsers use (no second cache). `displayTasks` keeps its newest-
+        // first order; all three closures read the live session, so opening another library changes
+        // the provider with it.
+        self.topBar.backgroundTaskThumbnailSource = BackgroundTaskThumbnailSource(
+            provider: { [weak session] in
+                guard let session, let cache = session.thumbnailCache else { return nil }
+                return ThumbnailProvider.shared(for: cache)
+            },
+            assetForID: { [weak session] id in
+                session?.assets.first { $0.id == id }
+            },
+            fileURLForAsset: { [weak session] asset in
+                session?.fileURL(for: asset)
+            })
         self.browserPane = browserPane
         self.gridController = gridController
         self.loupeController = LoupeController(session: session)

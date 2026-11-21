@@ -902,6 +902,9 @@ public final class ExportSheetModel {
         let imageRenderer = self.imageRenderer
         let batchRun = self.batchRun
         let render: (ExportItem, ExportPreset) throws -> DisplayImage = { item, preset in
+            // 488 — the panel's square is 「正在处理的那张」, so the row moves to this item when its
+            // render starts, not when it finishes. The count still advances on completion.
+            DispatchQueue.main.async { [weak self] in self?.markStarted(item) }
             let image = try imageRenderer(item, preset, natives[item.id])
             // Called on a `BatchExporter` worker: the counter belongs to the main actor.
             DispatchQueue.main.async { [weak self] in self?.markRendered(item) }
@@ -923,6 +926,15 @@ public final class ExportSheetModel {
 
     /// `rendered` is the count of callbacks, not an index: `BatchExporter` runs two items at once,
     /// so completion order is not request order. The row must say 1, 2, 3 in callback order.
+    private func markStarted(_ item: ExportItem) {
+        guard phase == .running, !taskCancelled else { return }
+        if let taskID = backgroundTaskID, let store = backgroundTasks {
+            store.advance(id: taskID,
+                          currentAssetID: item.id,
+                          currentThumbKey: taskThumbKeys[item.id])
+        }
+    }
+
     private func markRendered(_ item: ExportItem) {
         guard phase == .running, !taskCancelled else { return }
         rendered = min(total, rendered + 1)
@@ -943,6 +955,11 @@ public final class ExportSheetModel {
     func finish(with report: BatchExportReport) {
         // 454 P3 — close the row before resetting the run's own flags. A cancelled run must not read
         // as finished just because the engine returned a report; its count stays where it stopped.
+        // 488 — the panel's square describes 「正在处理的那张」, so it goes back to the placeholder
+        // with the run. (`finish` below then keeps the terminal row for its counts.)
+        if let taskID = backgroundTaskID, let store = backgroundTasks {
+            store.clearCurrent(id: taskID)
+        }
         if let taskID = backgroundTaskID, let store = backgroundTasks {
             let state: BackgroundTask.State = taskCancelled
                 ? .cancelled

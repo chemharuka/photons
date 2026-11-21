@@ -116,7 +116,9 @@ final class BackgroundTaskEntry454Tests: XCTestCase {
         XCTAssertEqual(store.progressFraction(for: store.tasks[0]), 1, accuracy: 0.0001)
     }
 
-    func testRetentionKeepsTheNewestTwentyFinishedAndClearFinishedLeavesRunningOnes() {
+    func testRetentionKeepsFiveRowsIncludingRunningOnesAndClearFinishedLeavesRunningOnes() {
+        // 488 — owner rule: five retained rows **including** in-flight tasks. These numbers are the
+        // dispatch's §2.2 item 7; changing the limit back to 20 must turn this red.
         let store = BackgroundTaskStore()
         for index in 0..<25 {
             let id = store.begin(BackgroundTask(kind: .export,
@@ -125,15 +127,19 @@ final class BackgroundTaskEntry454Tests: XCTestCase {
                                                 startedAt: Date(timeIntervalSince1970: Double(index))))
             store.finish(id: id)
         }
-        XCTAssertEqual(BackgroundTaskStore.retainedFinishedLimit, 20)
-        XCTAssertEqual(store.retainedFinishedLimit, 20)
-        XCTAssertEqual(store.tasks.count, 20, "已完成最多留 20 条")
-        XCTAssertEqual(Set(store.tasks.map(\.title)), Set((5..<25).map { "批次\($0)" }),
-                       "超出时按 startedAt 淘汰最旧的五条")
+        XCTAssertEqual(BackgroundTaskStore.retainedFinishedLimit, 5)
+        XCTAssertEqual(store.retainedFinishedLimit, 5)
+        XCTAssertEqual(store.tasks.count, 5, "已完成最多留 5 条")
+        XCTAssertEqual(Set(store.tasks.map(\.title)), Set((20..<25).map { "批次\($0)" }),
+                       "超出时按 startedAt 淘汰最旧的已完成")
 
+        // 5 finished + 1 running: the running one is never evicted, so the total is 6 and the
+        // finished budget becomes max(0, 5 − 1) = 4 ⇒ the oldest finished row goes immediately.
         let running = store.begin(BackgroundTask(kind: .denoise, title: "降噪中", total: 3))
         store.advance(id: running, completed: 1)
-        XCTAssertEqual(store.tasks.count, 21, "进行中的任务不参与保留淘汰")
+        XCTAssertEqual(store.tasks.count, 5, "进行中的任务占一个保留位，完成记录同步减一")
+        XCTAssertEqual(Set(store.tasks.map(\.title)),
+                       Set(["降噪中"] + (21..<25).map { "批次\($0)" }))
 
         store.clearFinished()
         XCTAssertEqual(store.tasks.count, 1, "clearFinished 只清已结束（finished/cancelled/failed）")
