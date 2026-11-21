@@ -2244,9 +2244,11 @@ public enum DenoiseMenuBuilder {
             if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
         }
         var row = insertAt
-        // 474/478 — only a real multi-selection gets the batch rows. A single photo keeps exactly
-        // the two existing entries ("降噪" behaviour unchanged). Two rows, one per engine, so the
-        // title itself says which path the click will take.
+        // 474/478/480 — **一共只有两行**，一行一个引擎；选中几张就只给那一种行：
+        //   · 单选（0 或 1 张）⇒ 「模型降噪（Ansel）…」/「（Nonlocal）…」，不可用时灰并写原因；
+        //   · 多选（≥ 2 张）⇒ 「降噪 N 张（Ansel）…」/「…（Nonlocal）…」。
+        // 以前多选时把四行都插进去（两行批量 + 两行单选，后者灰着说「只处理单张照片」），
+        // 同一个动作在菜单里出现两遍，用户看到的是四个入口。
         if selectedIDs.count >= 2 {
             for engine in DenoiseEngine.allCases {
                 menu.insertItem(batchItem(session: session, target: target,
@@ -2254,13 +2256,13 @@ public enum DenoiseMenuBuilder {
                                 at: row)
                 row += 1
             }
-        }
-        // 两项挨着插：Ansel 在上，Nonlocal 在下，读完一行再读一行是同一个决定。
-        for engine in DenoiseEngine.allCases {
-            menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
-                                 engine: engine),
-                            at: row)
-            row += 1
+        } else {
+            for engine in DenoiseEngine.allCases {
+                menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
+                                     engine: engine),
+                                at: row)
+                row += 1
+            }
         }
         let after = row
         let alreadySeparated = after < menu.items.count && menu.items[after].isSeparatorItem

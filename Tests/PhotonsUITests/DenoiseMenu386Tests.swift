@@ -11,7 +11,7 @@ import PhotonsExtensions
 /// The ticket's acceptance table, walked in order:
 ///
 ///   ① 选 1 张 DNG ⇒ 三个面（网格 / 胶片条 / 侧栏）的右键菜单里各有**一行可点**的 `模型降噪…`；
-///   ② 2 张 ⇒ 灰 + `模型降噪只处理单张照片`；1 张 JPEG ⇒ 灰 + `只支持 DNG：xxx`；
+///   ② 2 张 ⇒ **换成两行批量**（480：单选行不再出现）；1 张 JPEG ⇒ 灰 + `只支持 DNG：xxx`；
 ///      工具缺失 ⇒ 灰 + `未找到 ansel-denoise-swift`；模型缺失 ⇒ 灰 + tooltip 带**完整期望路径**；
 ///   ③ 跑一次（假 tool，恒等）⇒ 产物是原图的兄弟、`-denoised.dng`，新堆叠 topID = 产物、
 ///      count == 2，原图若本在别的堆叠里会被抽离，完成后选中的是产物；
@@ -246,7 +246,9 @@ final class DenoiseMenu386Tests: XCTestCase {
 
     // MARK: - ② 灰掉的四种条件（三面各一次）
 
-    func testTwoPhotosGreyTheRowInAllThreeBrowsers() throws {
+    /// 480（用户 2026-11-21）—— 多选时**不再**出现「单选行 + 灰着说只处理单张」那一对；
+    /// 菜单里只留两行，换成这一档的批量行。单选与多选各自只有两个入口，不是四个。
+    func testTwoPhotosSwapTheSingleRowsForTheTwoBatchRows() throws {
         let assets = try makeSession()
         try installFakeTool(on: session)
         let dngs = assets.filter { $0.ext == "dng" }
@@ -256,10 +258,18 @@ final class DenoiseMenu386Tests: XCTestCase {
 
         let menus = try self.menus(surfaces)
         for name in ["grid", "filmstrip", "browser"] {
-            let row = try XCTUnwrap(denoiseRow(in: try XCTUnwrap(menus[name])))
-            print("② 两张 DNG [\(name)]：enabled=\(row.isEnabled) tooltip=\(row.toolTip ?? "nil")")
-            XCTAssertFalse(row.isEnabled)
-            XCTAssertEqual(row.toolTip, "模型降噪只处理单张照片")
+            let menu = try XCTUnwrap(menus[name])
+            print("② 两张 DNG [\(name)]：\(menu.items.map(\.title))")
+            XCTAssertNil(denoiseRow(in: menu), "② \(name)：多选时不该再有「模型降噪（…）…」单选行")
+            let batchTitles = DenoiseEngine.allCases.map {
+                DenoiseMenuBuilder.batchTitle(count: dngs.count, engine: $0)
+            }
+            let rows = menu.items.filter { batchTitles.contains($0.title) }
+            XCTAssertEqual(rows.count, 2,
+                           "② \(name)：多选应是两行批量，实际 \(menu.items.map(\.title))")
+            XCTAssertEqual(DenoiseEngine.allCases.filter { engine in
+                menu.items.contains { $0.title == DenoiseMenuBuilder.batchTitle(count: dngs.count, engine: engine) }
+            }.count, 2, "② \(name)：两个引擎各一行")
         }
     }
 
