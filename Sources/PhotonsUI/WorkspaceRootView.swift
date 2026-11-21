@@ -601,6 +601,13 @@ public final class WorkspaceRootView: NSView {
     /// follows a loupe visit is the only one allowed to centre the anchor and rematerialise cells.
     /// A plain `grid → grid` (⌘1) or a metadata tick never moves this.
     private var pendingGridEntry = false
+    /// 471 — 浏览器面切换后，等新出现那一面的几何落地（`layout()` 设完 frame）再把锚点带进去。
+    /// 只在 `setBrowserMode` 的 `guard mode != browserMode` 之后置位；启动路径与任何不是由
+    /// `setBrowserMode` 触发的 `applyBrowserMode()` 一律不置。
+    private var pendingBrowserReveal = false
+    /// 471 — 真正进入 reveal 动作的次数（旗标被消费且没有被「编辑窗口 / 用户滚动」跳过）。
+    /// `SingleClickNoCenter383Tests.testFive` 要求编辑提交前后增量为 0。
+    public private(set) var browserRevealCount = 0
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
     private let inspectorBackdrop = NSVisualEffectView()
@@ -999,6 +1006,8 @@ public final class WorkspaceRootView: NSView {
         guard mode != browserMode else { return }
         browserMode = mode
         defaults.set(mode.rawValue, forKey: "photons.browserMode")
+        // 471 — 只有模式**真的变了**才登记一次 reveal；消费在 `layout()` 里（几何已落地）。
+        pendingBrowserReveal = true
         applyBrowserMode()
         needsLayout = true
         updateTopBar()
@@ -1094,6 +1103,44 @@ public final class WorkspaceRootView: NSView {
                                            height: ForwardCompatNotice.lineHeight)
         topBar.needsLayout = true
         topBar.needsDisplay = true
+        // 471 — 布局已经把这轮浏览器面的最终几何写下去了，现在才轮到「把锚点带进新出现的一面」。
+        // 一次性：消费掉旗标，后续任何布局（拖动分隔条、缩略图落地）都不会再把用户滚走的视口拽回来。
+        if pendingBrowserReveal {
+            pendingBrowserReveal = false
+            consumeBrowserReveal()
+        }
+    }
+
+    /// 471 — 把锚点带进刚变可见的那一面：
+    ///
+    /// - 网格：只要锚点**可见**即可（两面位置大致匹配，不要求居中）；
+    /// - 单图：锚点那张在这一面里**居中**（既有 `centreForLoupeEntry()`，≤ 2 pt 幂等）。
+    ///
+    /// 383 的「单击不居中」不受影响：这条只由模式切换触发，不接选择变化。相机与缩放不动。
+    ///
+    /// §6.3 — 这是「跳过」而不是「延后」：编辑的 0.25 s 合并窗口还没关（这一刻的布局可能正是
+    /// 编辑落地带出来的），或者用户正在驱动目标面的滚动条，就直接丢弃这次 reveal。
+    private func consumeBrowserReveal() {
+        guard session.anchorID != nil,
+              editThumbnailRefresher.pendingAssetID == nil else { return }
+        let targetIsFilmstrip = browserMode == .filmstrip
+        if targetIsFilmstrip {
+            guard !filmstripController.isUserScrolling else { return }
+            // The surface's own frame just changed in this pass; let it lay its scroll view out
+            // before reading a viewport rect (no layout invalidation, just this subtree).
+            filmstripController.view.layoutSubtreeIfNeeded()
+        } else {
+            guard !browserPane.isUserScrolling else { return }
+            browserPane.view.layoutSubtreeIfNeeded()
+        }
+        browserRevealCount += 1
+        if session.mode == .loupe {
+            if targetIsFilmstrip { filmstripController.centreForLoupeEntry() }
+            else { browserPane.centreForLoupeEntry() }
+        } else {
+            if targetIsFilmstrip { filmstripController.revealAnchor() }
+            else { browserPane.revealAnchor() }
+        }
     }
 
     /// Distance from the window's top edge to the traffic-light centre, measured live (§2b item 1).
