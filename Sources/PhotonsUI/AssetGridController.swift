@@ -2013,8 +2013,10 @@ public enum HDRMenuBuilder {
 
 /// 右键 ▸「模型降噪（Ansel）…」/「模型降噪（Nonlocal）…」 — §386 的一项，§432 拆成两项。
 ///
-/// 用户的契约（2026-11-11）：「选择单个照片，右键-"模型降噪"，会自动在原文件的同位置生成
-/// XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的放在顶部」，以及「不弹窗口」。
+/// 480 × 485：**内置行只填缓存**（「预计算降噪并写入缓存（不再生成新文件）」），它不再有
+/// 「产物 + 堆叠」这一步。模型两行仍是 §386 的用户契约（2026-11-11）：「选择单个照片，右键-
+/// "模型降噪"，会自动在原文件的同位置生成 XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的
+/// 放在顶部」，以及「不弹窗口」。
 /// 所以每一项只有一个动词和一个决定：*这一张能不能降噪*，不能的时候原因就写在行上。
 ///
 /// §432（用户口径 2026-11-19「模型降噪(AI denoise)要设置两个入口」）：两条网络并存 ——
@@ -2144,8 +2146,10 @@ public enum DenoiseMenuBuilder {
         guard let session else { return DenoiseNotices.noLibrary }
         guard selectedIDs.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
+        // 485 — the built-in row fills the cache and accepts any decodable source; the model rows
+        // still need a DNG because their engines write a DNG internally.
         let usable = session.selectedAssets.filter {
-            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+            (engine == .builtin || $0.ext.lowercased() == "dng") && session.fileURL(for: $0) != nil
         }
         guard usable.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         switch engine {
@@ -2178,10 +2182,14 @@ public enum DenoiseMenuBuilder {
         } else {
             entry.isEnabled = true
             let usable = session?.selectedAssets.filter {
-                $0.ext.lowercased() == "dng" && session?.fileURL(for: $0) != nil
+                (engine == .builtin || $0.ext.lowercased() == "dng")
+                    && session?.fileURL(for: $0) != nil
             }.count ?? selectedIDs.count
-            entry.toolTip = Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
-                                  String(describing: (usable)))
+            entry.toolTip = engine == .builtin
+                ? Loc.t("依次为可用的 {0} 张照片预计算降噪缓存（不再生成新文件）",
+                        String(describing: (usable)))
+                : Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
+                        String(describing: (usable)))
         }
         return entry
     }
@@ -2207,7 +2215,8 @@ public enum DenoiseMenuBuilder {
         guard let asset = session.selectedAssets.first else {
             return DenoiseNotices.singlePhotoOnly
         }
-        guard asset.ext.lowercased() == "dng" else {
+        // 485 — only the model engines are DNG-only; the built-in row cleans any decodable source.
+        guard engine == .builtin || asset.ext.lowercased() == "dng" else {
             return DenoiseNotices.onlyDNG(asset.filename)
         }
         // 「正在跑」在依赖之前：跑着的时候再说「缺模型」是假消息，而它其实什么都不缺。
@@ -2247,7 +2256,12 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            entry.toolTip = Loc.t("在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）", String(describing: (denoisedFileNameHint(session: session))))
+            // 485 — the built-in row no longer produces a second RAW; it only fills the cache. The
+            // model rows keep their existing product (they are §432's separate engines).
+            entry.toolTip = engine == .builtin
+                ? Loc.t("预计算降噪并写入缓存（不再生成新文件）")
+                : Loc.t("在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）",
+                        String(describing: (denoisedFileNameHint(session: session))))
         }
         return entry
     }

@@ -5,6 +5,11 @@
 //  NLM) → DNG. Naming, temp-file discipline and the report shape are deliberately the same as
 //  `AnselDenoiseJob` / `NLMFDenoiseJob`; `CatalogSession` therefore keeps one stacking path.
 //
+//  485 — the **pure calculation** is now `cleanPlanes(planes:width:height:options:)`. It takes the
+//  four planes and returns the four cleaned planes: no file, no DNG writer, no output URL. The
+//  edit-time path (`DenoiseCleaner`) calls it and caches the result as linear RGB, while `denoise`
+//  below keeps the old file-to-file behaviour for the explicit export path.
+//
 //  Why the input is the file's mosaic, not a `CIRAWFilter` RGB buffer
 //  ----------------------------------------------------------------
 //  The ADR's rule is about the *display* pipeline: `CIRAWFilter` hands back demosaiced RGB, so a
@@ -63,6 +68,34 @@ public struct BuiltinDenoiseJob: Sendable {
         public let output: URL
     }
 
+    /// 485 — the pure calculation's result: cleaned planes, no file.
+    public struct PlaneResult: Sendable {
+        public let planes: [[Float]]
+        public let width: Int
+        public let height: Int
+        public let tiles: Int
+        public let seconds: Double
+        public let noiseA: Float
+        public let noiseB: Float
+    }
+
+    /// 485 — everything `denoise` needs from the source plus the cleaned planes. The edit-time
+    /// caller takes `planes`, `denoise` takes `samples`; neither re-reads the file.
+    public struct Clean: Sendable {
+        public let width: Int
+        public let height: Int
+        public let cfa: String
+        /// Cleaned, normalised CFA planes (`width/2 × height/2` cells each).
+        public let planes: [[Float]]
+        public let samples: [UInt16]
+        public let tiles: Int
+        public let seconds: Double
+        public let whiteLevel: Double
+        public let blackLevels: [Double]
+        public let noiseA: Float
+        public let noiseB: Float
+    }
+
     public var options: Options
 
     public init(options: Options = Options()) {
@@ -91,6 +124,26 @@ public struct BuiltinDenoiseJob: Sendable {
     public func denoise(input: URL,
                         output: URL,
                         progress: (@Sendable (String) -> Void)? = nil) throws -> Report {
+        let started = Date()
+        let clean = try clean(input: input, progress: progress)
+        progress?(Loc.t("写入 DNG…"))
+        do {
+            let result = try DNGRawWriter.write(samples: clean.samples, width: clean.width,
+                                                height: clean.height, from: input, to: output)
+            return Report(width: clean.width, height: clean.height, cfa: clean.cfa,
+                          tiles: clean.tiles, seconds: Date().timeIntervalSince(started),
+                          byteCount: result.byteCount, whiteLevel: clean.whiteLevel,
+                          blackLevels: clean.blackLevels, noiseA: clean.noiseA,
+                          noiseB: clean.noiseB, output: output)
+        } catch {
+            throw Failure.write(error.localizedDescription)
+        }
+    }
+
+    /// 485 — decode the mosaic and clean it. **No output file, no DNG writer**: this is the half the
+    /// edit-time cache and the old file-to-file job share.
+    public func clean(input: URL,
+                      progress: (@Sendable (String) -> Void)? = nil) throws -> Clean {
         let started = Date()
         let fm = FileManager.default
         guard input.pathExtension.lowercased() == "dng", fm.fileExists(atPath: input.path) else {
@@ -148,12 +201,56 @@ public struct BuiltinDenoiseJob: Sendable {
             }
         }
 
+        let result = Self.cleanPlanes(planes: planes, width: pw, height: ph,
+                                      options: options, progress: progress)
+        planes = result.planes
+
+        // Back to the mosaic: one sample per CFA site.
+        var samples = mosaic.samples
+        for c in 0..<4 {
+            let (dx, dy) = (c % 2, c / 2)
+            let black = Self.blackLevel(for: c, channel: channel, levels: blacks)
+            let span = Double(white) - black
+            for y in 0..<ph {
+                let dstRow = (2 * y + dy) * width
+                let srcRow = y * pw
+                for x in 0..<pw {
+                    let v = black + Double(planes[c][srcRow + x]) * span
+                    samples[dstRow + 2 * x + dx] = UInt16(min(max(v.rounded(), 0), 65535))
+                }
+            }
+        }
+
+        return Clean(width: width, height: height, cfa: cfa, planes: planes, samples: samples,
+                     tiles: result.tiles, seconds: Date().timeIntervalSince(started),
+                     whiteLevel: Double(white), blackLevels: blacks,
+                     noiseA: result.noiseA, noiseB: result.noiseB)
+    }
+
+    /// 485 — the pure filter: four planes in, four cleaned planes out. No file access, no writer.
+    ///
+    /// This is the body §480 had inline. With it extracted, the edit-time cache can hold the same
+    /// cleaned pixels without ever producing a DNG, and `denoise` calls it once for the export path.
+    public static func cleanPlanes(planes: [[Float]],
+                                   width: Int,
+                                   height: Int,
+                                   options: Options,
+                                   progress: (@Sendable (String) -> Void)? = nil) -> PlaneResult {
+        guard planes.count == 4, width > 2, height > 2,
+              planes.allSatisfy({ $0.count == width * height }) else {
+            return PlaneResult(planes: planes, width: width, height: height, tiles: 0,
+                               seconds: 0, noiseA: 0, noiseB: BuiltinDenoise.minVariance)
+        }
+        let started = Date()
+
         progress?(Loc.t("估计噪声…"))
-        let measured = options.noise ?? BuiltinDenoise.estimateNoise(planes: planes, width: pw, height: ph)
+        let measured = options.noise ?? BuiltinDenoise.estimateNoise(planes: planes,
+                                                                    width: width, height: height)
         let noise = max(measured.b, BuiltinDenoise.minVariance)
 
         let st = BuiltinDenoise.Stabiliser(a: measured.a, b: noise)
         let stabilise = options.anscombe
+        var planes = planes
         if stabilise {
             for c in 0..<4 {
                 for i in 0..<planes[c].count { planes[c][i] = st.forward(planes[c][i]) }
@@ -174,18 +271,18 @@ public struct BuiltinDenoiseJob: Sendable {
         let side = tile + 2 * margin
         var originsX: [Int] = []
         var x = 0
-        while x < pw { originsX.append(x); x += step }
+        while x < width { originsX.append(x); x += step }
         var originsY: [Int] = []
         var y = 0
-        while y < ph { originsY.append(y); y += step }
+        while y < height { originsY.append(y); y += step }
         let tiles = originsX.count * originsY.count
 
         progress?(Loc.t("内置降噪 {0}×{1}，{2} 个 tile…",
-                        String(describing: (width)), String(describing: (height)),
+                        String(describing: (width * 2)), String(describing: (height * 2)),
                         String(describing: (tiles))))
 
-        var out = [[Float]](repeating: [Float](repeating: 0, count: pw * ph), count: 4)
-        var weights = [Float](repeating: 0, count: pw * ph)
+        var out = [[Float]](repeating: [Float](repeating: 0, count: width * height), count: 4)
+        var weights = [Float](repeating: 0, count: width * height)
 
         // One chunk of tiles at a time, on all cores; the blend is serial and cheap.
         let chunk = max(1, min(tiles, ProcessInfo.processInfo.activeProcessorCount * 2))
@@ -203,11 +300,11 @@ public struct BuiltinDenoiseJob: Sendable {
                     var tilePlanes = [[Float]](repeating: [Float](repeating: 0, count: side * side), count: 4)
                     for c in 0..<4 {
                         for ty in 0..<side {
-                            let sy = min(max(oy - margin + ty, 0), ph - 1)
-                            let srcRow = sy * pw
+                            let sy = min(max(oy - margin + ty, 0), height - 1)
+                            let srcRow = sy * width
                             let dstRow = ty * side
                             for tx in 0..<side {
-                                tilePlanes[c][dstRow + tx] = planes[c][srcRow + min(max(ox - margin + tx, 0), pw - 1)]
+                                tilePlanes[c][dstRow + tx] = planes[c][srcRow + min(max(ox - margin + tx, 0), width - 1)]
                             }
                         }
                     }
@@ -242,14 +339,14 @@ public struct BuiltinDenoiseJob: Sendable {
                 let base = index * stride
                 for ty in 0..<tile {
                     let gy = oy + ty
-                    if gy >= ph { break }
-                    let wy = Self.taper(local: ty, origin: oy, length: tile, overlap: overlap, total: ph)
+                    if gy >= height { break }
+                    let wy = Self.taper(local: ty, origin: oy, length: tile, overlap: overlap, total: height)
                     for tx in 0..<tile {
                         let gx = ox + tx
-                        if gx >= pw { break }
-                        let w = wy * Self.taper(local: tx, origin: ox, length: tile, overlap: overlap, total: pw)
+                        if gx >= width { break }
+                        let w = wy * Self.taper(local: tx, origin: ox, length: tile, overlap: overlap, total: width)
                         if w <= 0 { continue }
-                        let at = gy * pw + gx
+                        let at = gy * width + gx
                         for c in 0..<4 {
                             out[c][at] += results[base + c * tile * tile + ty * tile + tx] * w
                         }
@@ -262,7 +359,7 @@ public struct BuiltinDenoiseJob: Sendable {
 
         // Inverse transform, then Amount in the original (normalised) domain.
         for c in 0..<4 {
-            for i in 0..<(pw * ph) {
+            for i in 0..<(width * height) {
                 let w = weights[i]
                 let filtered = w > 0 ? out[c][i] / w : planes[c][i]
                 let original: Float
@@ -280,34 +377,9 @@ public struct BuiltinDenoiseJob: Sendable {
             }
         }
 
-        // Back to the mosaic: one sample per CFA site.
-        var samples = mosaic.samples
-        for c in 0..<4 {
-            let (dx, dy) = (c % 2, c / 2)
-            let black = Self.blackLevel(for: c, channel: channel, levels: blacks)
-            let span = Double(white) - black
-            for y in 0..<ph {
-                let dstRow = (2 * y + dy) * width
-                let srcRow = y * pw
-                for x in 0..<pw {
-                    let v = black + Double(out[c][srcRow + x]) * span
-                    samples[dstRow + 2 * x + dx] = UInt16(min(max(v.rounded(), 0), 65535))
-                }
-            }
-        }
-
-        progress?(Loc.t("写入 DNG…"))
-        do {
-            let result = try DNGRawWriter.write(samples: samples, width: width, height: height,
-                                                from: input, to: output)
-            let seconds = Date().timeIntervalSince(started)
-            return Report(width: width, height: height, cfa: cfa, tiles: tiles,
-                          seconds: seconds, byteCount: result.byteCount,
-                          whiteLevel: Double(white), blackLevels: blacks,
-                          noiseA: measured.a, noiseB: noise, output: output)
-        } catch {
-            throw Failure.write(error.localizedDescription)
-        }
+        return PlaneResult(planes: out, width: width, height: height, tiles: tiles,
+                           seconds: Date().timeIntervalSince(started),
+                           noiseA: measured.a, noiseB: noise)
     }
 
     // MARK: - Tags

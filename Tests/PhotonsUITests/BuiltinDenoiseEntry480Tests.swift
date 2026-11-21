@@ -6,10 +6,10 @@ import PhotonsCore
 import PhotonsExtensions
 @testable import PhotonsUI
 
-/// §480 — the built-in engine's entry points. The algorithm is tested in `BuiltinDenoiseTests`; this
-/// suite is about the product contract: the row exists in all three browsers with no model or tool
-/// installed, a click lands on the same `<原名>-denoised.dng` + stack path, and the batch row runs
-/// the same engine serially.
+/// §480 × 485 — the built-in engine's entry points. The algorithm is tested in
+/// `BuiltinDenoiseTests`; this suite is about the product contract: the row exists in all three
+/// browsers with no model or tool installed, a click fills the edit-time cache instead of writing
+/// `<原名>-denoised.dng`, and the batch row fills the same cache serially.
 @MainActor
 final class BuiltinDenoiseEntry480Tests: XCTestCase {
 
@@ -52,7 +52,8 @@ final class BuiltinDenoiseEntry480Tests: XCTestCase {
     }
 
     @discardableResult
-    private func makeSession(dngCount: Int) throws -> [Asset] {
+    private func makeSession(dngCount: Int,
+                             compute: DenoiseCleaner.Compute? = nil) throws -> [Asset] {
         let library = workDir.appendingPathComponent("S480.\(LibraryLayout.packageExtension)",
                                                      isDirectory: true)
         catalog = try Catalog.create(at: library)
@@ -76,18 +77,12 @@ final class BuiltinDenoiseEntry480Tests: XCTestCase {
         let store = MemoryStore()
         let s = CatalogSession(filterStore: store, sortPreferenceStore: store,
                                remembersRecentLibrary: false)
+        s.denoiseCacheDirectory = workDir.appendingPathComponent("denoise-v1", isDirectory: true)
+        if let compute { s.denoiseComputeOverride = compute }
         try s.open(library)
         s.setSortOrder(.oldestFirst)
         session = s
         return assets
-    }
-
-    private func installBody() {
-        session.builtinDenoiseBody = { source, output, _ in
-            try FileManager.default.copyItem(at: source, to: output)
-            return BuiltinDenoiseExecutor.Report(width: 1024, height: 1024, cfa: "rggb",
-                                                 tiles: 1, seconds: 0.01, byteCount: 1)
-        }
     }
 
     private func pump(_ seconds: TimeInterval) {
@@ -156,38 +151,45 @@ final class BuiltinDenoiseEntry480Tests: XCTestCase {
             print("480 单张 [\(name)] \(row.title) enabled=\(row.isEnabled) tooltip=\(row.toolTip ?? "nil")")
             XCTAssertTrue(row.isEnabled, "\(name)：内置引擎没有依赖，不该灰")
             XCTAssertEqual(row.action, #selector(DenoiseMenuTarget.builtinPressed(_:)))
+            // 485 §3 ⑥ — the built-in row must not promise a new file any more.
+            XCTAssertEqual(row.toolTip, "预计算降噪并写入缓存（不再生成新文件）")
+            XCTAssertFalse(row.toolTip?.contains("-denoised.dng") ?? false)
         }
     }
 
-    func testTheBuiltinSingleRunsTheSameProductAndStackPath() throws {
-        let assets = try makeSession(dngCount: 1)
-        installBody()
+    func testTheBuiltinSingleFillsTheCacheAndWritesNoDNG() throws {
+        let assets = try makeSession(dngCount: 1, compute: { _, _ in
+            DenoiseCache485Tests.fakeImage()
+        })
         let asset = try XCTUnwrap(assets.first)
         session.selectOnly(asset.id)
+        let before = (try FileManager.default.contentsOfDirectory(atPath: src.path)).sorted()
 
         XCTAssertEqual(session.denoiseSelection(engine: .builtin), [asset.id])
         waitForDenoise()
 
-        let report = try XCTUnwrap(session.lastDenoiseReport,
-                                   "失败：\(session.lastDenoiseError ?? "nil")")
-        print("480 单张 output=\(report.output.lastPathComponent) "
-              + "stack=\(report.stackCount) engine=\(String(describing: session.lastDenoiseEngine))")
+        print("485 单张 error=\(session.lastDenoiseError ?? "none") "
+              + "progress=\(session.lastDenoiseProgress ?? "nil") "
+              + "engine=\(String(describing: session.lastDenoiseEngine))")
         XCTAssertNil(session.lastDenoiseError)
         XCTAssertEqual(session.lastDenoiseEngine, .builtin)
-        XCTAssertEqual(report.output.lastPathComponent, "IMG_0000-denoised.dng")
-        XCTAssertEqual(report.output.deletingLastPathComponent().standardizedFileURL,
-                       src.standardizedFileURL)
-        XCTAssertEqual(report.stackCount, 2)
-        XCTAssertEqual(report.stackTopID, report.assetID, "产物必须是堆叠置顶")
-        XCTAssertEqual(session.selection, [report.assetID], "完成后选中产物")
-        XCTAssertTrue(session.lastDenoiseProgress?.contains("内置") == true,
-                      "后台进度行要能看出引擎：\(session.lastDenoiseProgress ?? "nil")")
+        // 485: the interactive entry is a cache fill, not a second RAW.
+        XCTAssertNil(session.lastDenoiseReport)
+        XCTAssertEqual(session.selection, [asset.id], "缓存填充不改选中")
+        XCTAssertEqual(session.denoiseStats.computes, 1)
+        let after = (try FileManager.default.contentsOfDirectory(atPath: src.path)).sorted()
+        XCTAssertEqual(before, after, "照片目录零新文件")
+        XCTAssertFalse(after.contains { $0.contains("denoised") })
+        XCTAssertTrue(session.lastDenoiseProgress?.contains("降噪缓存") == true,
+                      "进度行要看得出是缓存：\(session.lastDenoiseProgress ?? "nil")")
     }
 
     func testTheBuiltinBatchRowRunsTwoPhotosUnderOneTask() throws {
-        let assets = try makeSession(dngCount: 2)
-        installBody()
+        let assets = try makeSession(dngCount: 2, compute: { _, _ in
+            DenoiseCache485Tests.fakeImage()
+        })
         session.setSelection(Set(assets.map(\.id)), anchor: assets[0].id)
+        let before = (try FileManager.default.contentsOfDirectory(atPath: src.path)).sorted()
 
         let menu = NSMenu()
         let target = DenoiseMenuTarget(session: session)
@@ -217,5 +219,14 @@ final class BuiltinDenoiseEntry480Tests: XCTestCase {
         XCTAssertEqual(task.completed, 2)
         XCTAssertEqual(task.state, .finished)
         XCTAssertEqual(session.lastDenoiseEngine, .builtin)
+        // 485 — each photo went through the cache, not the DNG writer.
+        XCTAssertEqual(session.denoiseStats.computes, 2)
+        XCTAssertEqual(session.denoiseStats.computesFailed, 0)
+        XCTAssertNil(session.lastDenoiseReport)
+        let after = (try FileManager.default.contentsOfDirectory(atPath: src.path)).sorted()
+        XCTAssertEqual(before, after, "批量降噪也不许往照片目录写文件")
+        XCTAssertFalse(after.contains { $0.contains("denoised") })
+        XCTAssertTrue(session.lastDenoiseProgress?.contains("降噪缓存") == true,
+                      "批量进度要看得出是缓存：\(session.lastDenoiseProgress ?? "nil")")
     }
 }
