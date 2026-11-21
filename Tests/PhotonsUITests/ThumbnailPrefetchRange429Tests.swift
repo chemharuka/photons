@@ -19,9 +19,8 @@ import PhotonsCore
 ///
 /// * **A④** the band's size: grid = visible + `AssetGridController.coreSlackRows` rows, filmstrip =
 ///   visible + 10 cells, list = visible + 10 rows;
-/// * **A①/A②/A③** a one-screen scroll on each surface is served from a cache: `memoryHits` grows
-///   and `generated` stays at 0. (469 — the larger grid core pre-renders more of the library, so
-///   the strip/list may take a shared disk-cache hit; no surface may render.)
+/// * **A①/A②/A③** a one-screen scroll on each surface is served from a cache: `memoryHits` grows,
+///   `diskHits`/`generated` stay at 0;
 /// * **A⑤** dragging to the bottom cancels what left the band: `pendingThumbnailRequests` is bounded
 ///   by the band, never by the library, and nothing outside the window is ever left queued;
 /// * **A⑥** the three bands together fit the provider's 256 MB LRU (same `w · h · 8` cost the
@@ -315,12 +314,7 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
               + " generated +\(stripAfter.generated - stripBefore.generated)"
               + " drawing \(h.strip.visibleThumbnailCount)/\(stripVisible)")
         XCTAssertGreaterThan(stripAfter.memoryHits, stripBefore.memoryHits)
-        // 469 — the ±10-row grid core now renders more of the library to the shared thumbnail
-        // cache, so the strip's own newly-entered band can be a *disk* hit rather than memory.
-        // What must hold is "served from a cache, never a render".
-        XCTAssertGreaterThan((stripAfter.memoryHits - stripBefore.memoryHits)
-                                + (stripAfter.diskHits - stripBefore.diskHits), 0,
-                             "the scrolled-in strip cells come from a cache")
+        XCTAssertEqual(stripAfter.diskHits - stripBefore.diskHits, 0, "no file I/O for a warmed band")
         XCTAssertEqual(stripAfter.generated - stripBefore.generated, 0)
         XCTAssertEqual(h.strip.visibleThumbnailCount, stripVisible,
                        "every visible strip cell draws a real bitmap")
@@ -339,10 +333,7 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
               + " generated +\(paneAfter.generated - paneBefore.generated)"
               + " drawing \(h.pane.visibleThumbnailCount)/\(paneVisible)")
         XCTAssertGreaterThan(paneAfter.memoryHits, paneBefore.memoryHits)
-        // 469 — same shared-cache note as the strip above.
-        XCTAssertGreaterThan((paneAfter.memoryHits - paneBefore.memoryHits)
-                                + (paneAfter.diskHits - paneBefore.diskHits), 0,
-                             "the scrolled-in list rows come from a cache")
+        XCTAssertEqual(paneAfter.diskHits - paneBefore.diskHits, 0, "no file I/O for a warmed band")
         XCTAssertEqual(paneAfter.generated - paneBefore.generated, 0)
         XCTAssertEqual(h.pane.visibleThumbnailCount, paneVisible,
                        "every visible list row draws a real bitmap")
@@ -388,11 +379,13 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
                        "the rebuild must leave nothing queued outside its own band")
         // 429 — the ceiling is the **widest** band seen during the drag, not the band at the end:
         // `band` is read after the last jump, and a drag through 400 photos passes through positions
-        // whose band is wider than the bottom one's. Measured (469, ±10 core): peak 81 against an
-        // end band of 40, with `peakOutside == 0` and 312 cancellations — i.e. the invariant that
-        // matters ("nothing outside the band is queued") holds; this one only bounds the *transient*.
-        // The real claim is "bounded by a band, not by the library": 400 photos must never queue
-        // anywhere near 400.
+        // whose band is wider than the bottom one's. The bound is derived from the geometry, not a
+        // literal: the outer ring is ±`warmSlackRows` (12) ⇒ 2×12 = 24 rows either side; this
+        // fixture's 620 pt viewport shows at most 4 rows ⇒ (2·12 + 4) rows × 3 columns = 84 cells.
+        // Measured (469, ±10 core): peak 81 against that 84 ceiling, with `peakOutside == 0` and 312
+        // cancellations — i.e. the invariant that matters ("nothing outside the band is queued")
+        // holds; this one only bounds the *transient*. The real claim is "bounded by a band, not by
+        // the library": 400 photos must never queue anywhere near 400.
         XCTAssertLessThanOrEqual(peakPending,
                                  (2 * Int(AssetGridController.warmSlackRows) + 4) * columns,
                                  "pending is bounded by a band, not by the library (\(Self.dragRowCount) rows)")

@@ -403,8 +403,9 @@ final class ThumbnailWarm437Tests: XCTestCase {
         // been seen, so the visible cells there must be asked for as **onScreen** while the cached
         // rows past the new core band are the warm work. Rows 28–39 are cold; rows 28–29 fall in
         // the wide ring but are not cached, so only the two warm-margin rows below the core (56–57)
-        // are eligible. 469 — with a ±10 core the warm ring is only two rows wide, so a jump can no
-        // longer fill a 32-item warm budget; the budget stays as an upper bound.
+        // are eligible. 469 — the warm ring is `warmSlackRows − coreSlackRows` = 2 rows wide, so
+        // those two rows hold 2 × 9 = 18 eligible cells; that is below `warmBudgetPerPass` (32), so
+        // the pass must issue exactly 18, not merely "more than zero".
         let session = try makeSession(rows: 60, name: "-budget")
         try seedHD(session, rows: 0..<19)
         try seedHD(session, rows: 40..<60)
@@ -425,8 +426,15 @@ final class ThumbnailWarm437Tests: XCTestCase {
 
         XCTAssertLessThanOrEqual(issued, AssetGridController.warmBudgetPerPass,
                                  "one pass may issue at most warmBudget")
-        XCTAssertGreaterThan(issued, 0,
-                             "the cached two-row warm margin still produces asks")
+        let core = h.grid.coreWantedIndexes()
+        let seeded = h.indices(0..<19).union(h.indices(40..<60))
+        let eligible = h.grid.wideWantedIndexes().intersection(seeded).subtracting(core)
+        let expected = min(AssetGridController.warmBudgetPerPass, eligible.count)
+        print("437 A⑤ warm: issued \(issued) expected \(expected) "
+              + "(ring cells \(eligible.count) of budget \(AssetGridController.warmBudgetPerPass), "
+              + "core \(core.count), wide \(h.grid.wideWantedIndexes().count))")
+        XCTAssertEqual(issued, expected,
+                       "one pass issues min(warmBudgetPerPass, cached cells in the two warm-only rows)")
         XCTAssertFalse(priorities.isEmpty)
         XCTAssertEqual(priorities.first, .onScreen,
                        "the visible cells are asked for before the prefetch work")
