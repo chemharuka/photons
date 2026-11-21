@@ -48,14 +48,18 @@ import PhotonsCore
 // slider moves and posts nothing at all. A measurement's own headroom is only the fallback for a card
 // with no source. On an SDR screen the tick sits exactly on the SDR/tail boundary, which is the honest
 // picture: no headroom at all. The row's clipping ink uses the same number (`effectiveHeadroom`), so
-// "the tick is here" and "this `+x.x` is lost" are one statement.
+// "the tick is here" and "this `+x.x` is lost" are one statement — and since 464 the 削顶 percentage is
+// derived from the bins for that same live number, so a brightness change moves the tick, the chip and
+// the percentage together without re-measuring.
 //
 // Decisions worth writing down:
 //
 //   · **The numbers come from `Histogram`, never from a second measurement.** The card formats
-//     `HistogramChannel.clippedHDR` / `clippedScreen` / `clippedBlack` — the same values the CLI
-//     prints and the tests assert — so "what the card says" and "what Core measured" cannot drift,
-//     and `--ui-smoke` checks the identity by reformatting the measurement.
+//     `HistogramChannel.clippedHDR` / `clippedBlack` — the same values the CLI prints and the tests
+//     assert — so "what the card says" and "what Core measured" cannot drift, and `--ui-smoke` checks
+//     the identity by reformatting the measurement. 削顶 is the exception by design (464): its *bins*
+//     are Core's, but the fraction is `clippedFraction(atOrAbove: effectiveHeadroom)` because the
+//     screen is a query, not a measurement input. `clippedScreen` stays as the frozen diagnostic.
 //   · **The histogram is of the picture, not of the frame** (005, 2026-10-26). `LoupeController`
 //     measures the whole photo once per edit (`RenderGraph.measureHistogram`: a whole-picture render
 //     at thumbnail scale, counted before S4) and hands the payload to the session; a frame render no
@@ -1262,10 +1266,11 @@ public final class HistogramCardView: NSView {
     ///
     /// 过白 (>SDR white) doubles as the highlight-warning switch, and it says so (an orange dot when
     /// the overlay is on). 削顶 is the *other* number now that the plot has a tail: it counts pixels
-    /// at or above the ceiling the measurement was taken for, i.e. the detail *this* screen would
-    /// throw away (with `headroom = 1` that is light above white, so an SDR screen sees the familiar
-    /// pair of numbers). The bins themselves do not depend on the panel — that is the whole point of
-    /// measuring before S4 — so 削顶 is the one number that moves when the display does.
+    /// at or above the ceiling **this screen has right now**, i.e. the detail it would throw away.
+    /// The bins themselves do not depend on the panel — that is the whole point of measuring before
+    /// S4 — so 削顶 is derived from them with `effectiveHeadroom`, the same number as the chip and
+    /// the ceiling tick (464). The stored `clippedScreen` is frozen at measurement time and is not
+    /// painted.
     private func drawClipRows(below plot: NSRect, histogram: Histogram?, in bounds: NSRect) {
         let y = plot.maxY + 5
         let labelFont = Self.clipLabelFont
@@ -1276,7 +1281,11 @@ public final class HistogramCardView: NSView {
         readoutColumnStarts = starts
 
         clipHighText = HistogramCardFormat.clipHigh(histogram, .luma)
-        clipCeilingText = HistogramCardFormat.clipCeiling(histogram, .luma)
+        // **The same headroom the chip and the tick use** (464): `max(effectiveHeadroom, 1)` is what
+        // `drawCeilingTick` passes to `DisplayHeadroom.ceilingLabel`, so 「屏 4.08×」 and the number
+        // under 削顶 cannot describe two different screens.
+        clipCeilingText = HistogramCardFormat.clipCeiling(histogram, .luma,
+                                                          headroom: max(effectiveHeadroom, 1))
         clipLowText = HistogramCardFormat.clipLow(histogram, .luma)
         clipHighTextByChannel = [Histogram.Channel.red, .green, .blue, .luma].map {
             HistogramCardFormat.clipHigh(histogram, $0)

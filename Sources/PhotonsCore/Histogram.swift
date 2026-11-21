@@ -154,6 +154,13 @@ public struct HistogramChannel: Sendable, Equatable {
     /// headroom would clamp. With `headroom = 1` it is the fraction above white that an SDR panel
     /// cannot show — the number the old `clippedScreen` reported, now for a stated screen instead of
     /// for whichever panel happened to render the frame.
+    ///
+    /// ⚠ **464 — this is a *diagnostic* value, frozen at measurement time.** The card does not paint
+    /// it: 削顶 is `clippedFraction(atOrAbove:)`, derived from the bins for the screen that is asking
+    /// *now*. A brightness change cannot move this field, because `Histogram.cacheKey` deliberately
+    /// contains no headroom — the same measurement is served and its stored ratio stands still — while
+    /// `clippedFraction` follows the live headroom without a re-measure. Keep the field for the disk
+    /// format, the CLI and the tests; draw from the derived number.
     public let clippedScreen: Double
     /// Fraction of sampled pixels **below** `Histogram.clipLowThreshold` (0.001) — 削底（死黑）。
     /// Linear values are negative sometimes (a curve can undershoot); those count as below black.
@@ -173,6 +180,54 @@ public struct HistogramChannel: Sendable, Equatable {
 
     /// Samples that landed above white (the tail's own subtotal).
     public var hdrTotal: Int { hdrBins.reduce(0, +) }
+
+    /// The 削顶 fraction for a screen with `headroom`, **derived from the bins at read time**.
+    ///
+    /// `bins` / `hdrBins` are panel-independent (the point of measuring before S4); the ceiling is
+    /// only a query parameter. The threshold is the *same* expression the counting loop used for
+    /// `clippedScreen` — `Histogram.screenCeilingFloor(headroom:encoded:false)`, one definition for
+    /// both callers — and the samples at or above it are the bin it lands in plus every bin after:
+    ///
+    ///   · at or below white the SDR bins are uniform in **code**, so the linear threshold is encoded
+    ///     with `srgbEncode` and scaled by `bins.count`;
+    ///   · above white the tail is 1/64 stop of linear light, so the index is
+    ///     `floor(log2(threshold) × 64)`.
+    ///
+    /// **Precision.** The bin the threshold falls in is counted whole, so the located threshold is off
+    /// by at most one bin: ≤ 1/256 of a code below white, and ≤ 1/64 stop above it — ≲ 1.1 % relative
+    /// on the tail, invisible at the 「百分之几」 scale these readouts are read at. That is why the bins
+    /// are not made finer for this: the panel query does not deserve a second measurement.
+    ///
+    /// This is what makes 削顶 follow screen brightness: a headroom change re-derives this from the
+    /// same cached `Histogram` instead of re-measuring (which would never happen anyway — no headroom
+    /// in `Histogram.cacheKey`).
+    public func clippedFraction(atOrAbove headroom: Double) -> Double {
+        let total = total
+        guard total > 0 else {
+            // Nothing counted to derive from (a hand-built channel, or a fixture whose bins were
+            // zeroed to isolate the painted curve). The stored diagnostic is the only ratio such a
+            // channel carries, so report it — a real measurement always has `total == sampleCount`.
+            return clippedScreen
+        }
+        let threshold = Double(Histogram.screenCeilingFloor(headroom: headroom, encoded: false))
+        var atOrAbove = 0
+        if threshold <= 1 {
+            if !bins.isEmpty {
+                let code = Double(Histogram.srgbEncode(Float(threshold)))
+                let scaled = code * Double(bins.count)
+                let index = code >= 1 ? bins.count - 1
+                    : (scaled > 0 ? min(Int(scaled), bins.count - 1) : 0)
+                atOrAbove += bins[index...].reduce(0, +)
+            }
+            atOrAbove += hdrBins.reduce(0, +)
+        } else if !hdrBins.isEmpty {
+            let stop = log2(threshold) * Double(Histogram.hdrBinsPerStop)
+            let index = stop >= Double(hdrBins.count) ? hdrBins.count - 1
+                : (stop > 0 ? Int(stop) : 0)
+            atOrAbove += hdrBins[index...].reduce(0, +)
+        }
+        return Double(atOrAbove) / Double(total)
+    }
 
     /// The bin with the most samples (`nil` for an empty channel — an empty sample has no peak).
     public var peakBin: Int? {
@@ -205,6 +260,25 @@ public struct Histogram: Sendable, Equatable {
     public static let clipHighThreshold: Double = 0.999
     /// Gates `clippedBlack` = 削底（死黑）: at or below 0.001 of code.
     public static let clipLowThreshold: Double = 0.001
+
+    /// The 削顶 threshold for a stated screen: `max(headroom, 1) × (1 − 1/2048)`, expressed in the
+    /// sample space `encoded` names (linear light for a scene-linear sample, code for a display-encoded
+    /// one, where the OETF is applied before the slack — exactly the arithmetic the counting loop has
+    /// always used).
+    ///
+    /// **This is the only copy of that expression in production code (464).** The measurement calls it
+    /// to decide which samples `clippedScreen` counted; `HistogramChannel.clippedFraction(atOrAbove:)`
+    /// calls it to re-derive the number from the bins for whatever screen is asking *now*. A second
+    /// copy would let the frozen and the live number disagree by a threshold — the 464 bug in
+    /// miniature.
+    ///
+    /// The slack is half a float16 step (2^-11 relative): the quantisation of the texture the samples
+    /// came from. Without it a value exactly at the ceiling could land one ULP below and never count.
+    @inline(__always)
+    public static func screenCeilingFloor(headroom: Double, encoded: Bool) -> Float {
+        let ceiling = Float(max(headroom, 1))
+        return (encoded ? srgbEncode(ceiling) : ceiling) * (1 - 1.0 / 2048)
+    }
     /// **Rec.709** weights, applied to the components as they arrive (`measure`), which since 385 are
     /// the **working primaries'** (Rec.2020) components rather than sRGB's. Kept at 709 because the
     /// histogram's luma series is a display-luma reading of a code axis and because this constant is
@@ -538,11 +612,10 @@ extension Histogram {
         // was never converted (`mix` was 0 for it), so this changes the scene-linear path only — and
         // removes nine multiplies per pixel with it.
         // The ceiling is a *value* now, not a clamp whose output we read back: a sample at or above it
-        // is light this screen would throw away. Slack by half a float16 step (2^-11 relative) — that
-        // is the quantisation of the texture the samples came from, and without it a value that is
-        // exactly the ceiling could land one ULP below and never be counted.
-        let ceilingFloor = (encoded ? srgbEncode(Float(max(headroom, 1))) : Float(max(headroom, 1)))
-            * (1 - 1.0 / 2048)
+        // is light this screen would throw away. `screenCeilingFloor` is the one definition of the
+        // threshold (464): `clippedFraction(atOrAbove:)` calls the same function at read time, so the
+        // stored ratio and the live card number cannot use two different ceilings.
+        let ceilingFloor = Histogram.screenCeilingFloor(headroom: headroom, encoded: encoded)
         // ⚠ 2026-11-19 — the threshold above is `max(headroom, 1)`, **not** `HighlightCeiling`.
         // `clippedScreen` therefore means "at or above this screen's headroom", and with the default
         // `headroom == 1` (`RenderGraph.measureHistogram`, `photonsctl histogram`) it collapses onto
