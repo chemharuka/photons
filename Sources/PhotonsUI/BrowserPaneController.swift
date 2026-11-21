@@ -735,6 +735,15 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         if centerAnchor() { centredAnchorID = id }
     }
 
+    /// 471 — 浏览器面切换（网格界面）时把锚点那一行带进视口即可，**不要求居中**：两面位置
+    /// 大致匹配就行。锚点已经可见时 `scrollRowToVisible` 是 no-op，所以来回切换不会抖。
+    public func revealAnchor() {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let row = session.assets.firstIndex(where: { $0.id == id }),
+              row < photosTable.numberOfRows else { return }
+        photosTable.scrollRowToVisible(row)
+    }
+
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
 
