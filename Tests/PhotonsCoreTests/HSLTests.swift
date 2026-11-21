@@ -138,6 +138,21 @@ final class HSLTests: XCTestCase {
         return edit
     }
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
+    private func unsharpenedDocument(_ band: Int, hue: Double = 0, saturation: Double = 0,
+                                     luminance: Double = 0) -> EditModel {
+        var edit = Self.unsharpened
+        edit.color.bands[band] = HSLBand(hue: hue, saturation: saturation, luminance: luminance)
+        return edit
+    }
+
     // MARK: - ① the space
 
     /// OKLab is the graph's own fold (075's Rec.2020 derivation), so the published sRGB values are the
@@ -457,8 +472,10 @@ final class HSLTests: XCTestCase {
         // Left half red, right half blue.
         let image = picture(64, 32) { x, _ in x < 32 ? (red.x, red.y, red.z) : (blue.x, blue.y, blue.z) }
         let graph = try makeGraph(image, identity: "076-isolation")
-        let neutral = try display(graph, EditModel.neutral)
-        let moved = try display(graph, document(0, hue: 100, saturation: 60, luminance: 30))
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        let neutral = try display(graph, Self.unsharpened)
+        let moved = try display(graph, unsharpenedDocument(0, hue: 100, saturation: 60, luminance: 30))
 
         func codes(_ img: DisplayImage, x: Int, y: Int) -> (Int, Int, Int) {
             let o = (y * img.width + x) * 4

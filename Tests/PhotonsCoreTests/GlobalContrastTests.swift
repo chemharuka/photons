@@ -25,8 +25,9 @@ final class GlobalContrastTests: XCTestCase {
     }
 
     private func render(_ graph: RenderGraph, _ edit: EditModel,
-                        headroom: Double = 8) throws -> DisplayImage {
-        var display = DisplayOptions(headroom: headroom)
+                        headroom: Double = 8,
+                        ceiling: Double = HighlightCeiling.defaultLinear) throws -> DisplayImage {
+        var display = DisplayOptions(headroom: headroom, highlightCeiling: ceiling)
         display.linearOutput = true
         let result = try graph.render(edit, options: RenderOptions(scale: 1, display: display,
                                                                  useCache: false, wantsPixels: true))
@@ -149,7 +150,11 @@ final class GlobalContrastTests: XCTestCase {
     func testSDRAndHDRBothMoveAndNothingClampsAtOne() throws {
         let image = rampImage()
         let g = try graph(image, identity: "gc-ramp")
-        let base = try render(g, .neutral)
+        // 320：画面顶默认 4.9246，而这条要量的正是顶上的 +2.303 EV 段；显式把顶抬到 256 才
+        // 测得到 contrast 的幂，而不是 ceiling 的钳位。先例见 `ExposureEquivarianceTests`
+        // 的 mask 法（`linearRender(..., ceiling: 16)`）。
+        let ceiling = 256.0
+        let base = try render(g, .neutral, ceiling: ceiling)
         let cell = 40
         let h = image.height
 
@@ -160,7 +165,7 @@ final class GlobalContrastTests: XCTestCase {
         let input = samples.map { i in luma(base, i * cell + cell / 2, h / 2) }
 
         for c in [100.0, -100.0] {
-            let out = try render(g, contrast(c))
+            let out = try render(g, contrast(c), ceiling: ceiling)
             let ratios = samples.map { i -> Double in
                 let v = luma(out, i * cell + cell / 2, h / 2)
                 return v / input[samples.firstIndex(of: i)!]
@@ -219,11 +224,15 @@ final class GlobalContrastTests: XCTestCase {
         let w = image.width, h = image.height
         var worstCode = 0.0
         var worstRelative = 0.0
+        // 320：默认画面顶 4.9246 会在 E=+1、contrast=+50 的高光上单侧钳掉正向增益，使
+        // 「曝光 × 对比度可交换」在钳位处为假。显式抬顶，量的才是幂本身（先例见
+        // `ExposureEquivarianceTests` 的 mask 法：`linearRender(..., ceiling: 16)`）。
+        let ceiling = 256.0
 
         for c in [-50.0, 50.0] {
-            let zero = try render(g, contrast(c, exposure: 0))
+            let zero = try render(g, contrast(c, exposure: 0), ceiling: ceiling)
             for ev in [1.0, -1.0] {
-                let exposed = try render(g, contrast(c, exposure: ev))
+                let exposed = try render(g, contrast(c, exposure: ev), ceiling: ceiling)
                 let gain = pow(2.0, ev)
                 var code = 0.0, rel = 0.0
                 for y in stride(from: 0, to: h, by: 2) {

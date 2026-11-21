@@ -53,6 +53,14 @@ final class PointColorTests: XCTestCase {
                                                              to: ColorPrimaries.working)
     private static let toSRGB = ColorPrimaries.conversion(from: ColorPrimaries.working, to: .sRGB)
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
     /// Three blocks, left red-orange / centre grey / right blue, in decoded **linear** sRGB. The two
     /// colours are built at a modest OKLCh chroma (0.08) so a +30° rotation stays inside the gamut and
     /// the hue assertion is about the operator, not about clipping.
@@ -456,7 +464,9 @@ final class PointColorTests: XCTestCase {
         swatch.saturation = 40
         swatch.luminance = 20
         let set = PointColorSet(swatches: [swatch], active: 0)
-        var edit = EditModel.neutral
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        var edit = Self.unsharpened
         edit.color.point = set
         let actual = try display(graph, edit)
 

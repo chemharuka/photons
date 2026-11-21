@@ -220,10 +220,14 @@ final class ExposureEquivarianceTests: XCTestCase {
             }
             available += 1
             let graph = try makeGraph(try decode(path), identity: "eq-whites-\(name)")
+            // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档 —— 这里由
+            // `edit()` 的 `algebraOnly` 承担（先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+            // 320：白点 +100 抬起的基帧在 E=0 就会撞上 4.9246 的画面顶，E=+2 的比较因此不是
+            // 同一条曲线。按本文件 mask 法的先例（见下方 `ceiling: 16`）显式把顶抬到 64。
             for w in [-100.0, 100.0] {
-                let base = try linearRender(graph, edit(whites: w))
+                let base = try linearRender(graph, edit(whites: w), ceiling: 64)
                 for k in [-2.0, 1.0, 2.0] {
-                    let exposed = try linearRender(graph, edit(exposure: k, whites: w))
+                    let exposed = try linearRender(graph, edit(exposure: k, whites: w), ceiling: 64)
                     assertCommutes(base, exposed, gain: Float(pow(2.0, k)),
                                    "\(name) whites=\(Int(w)) E=\(Int(k))")
                 }

@@ -124,6 +124,26 @@ final class BlackAndWhiteTests: XCTestCase {
         return edit
     }
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
+    private func unsharpenedDocument(blackAndWhite: Bool = true) -> EditModel {
+        var edit = Self.unsharpened
+        edit.color.blackAndWhite = blackAndWhite
+        return edit
+    }
+
+    private func unsharpenedDocument(mix band: Int, _ value: Double) -> EditModel {
+        var edit = unsharpenedDocument()
+        edit.color.bands[band].mix = value
+        return edit
+    }
+
     /// Mean code of one block of a three-block frame.
     private func blockMean(_ image: DisplayImage, _ block: Int) -> Double {
         let third = image.width / 3
@@ -299,13 +319,15 @@ final class BlackAndWhiteTests: XCTestCase {
         let graph = try makeGraph(image, identity: "bw-mix")
         // headroom 4 so the slider's whole travel stays measurable: +100 on a bright primary is above
         // white, and a frame that clipped at 1.0 could only be shown to be monotone up to the white point.
-        let base = try display(graph, document(), headroom: 4)
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        let base = try display(graph, unsharpenedDocument(), headroom: 4)
         let blocks = [0, 3, 5]                              // the bands red/green/blue sit on
         var report: [String] = []
         for (block, band) in blocks.enumerated() {
             var codes: [Int] = []
             for value in [-100.0, -50, 0, 50, 100] {
-                let out = try display(graph, document(mix: band, value), headroom: 4)
+                let out = try display(graph, unsharpenedDocument(mix: band, value), headroom: 4)
                 codes.append(Self.code(Float16(blockMean(out, block))))
                 // The two blocks that are not this band's colour must be untouched — bit-exact.
                 for other in 0..<3 where other != block {
@@ -355,7 +377,9 @@ final class BlackAndWhiteTests: XCTestCase {
     func testTheKernelAgreesWithTheCPUReference() throws {
         let image = hueWheel(height: 6, L: 0.52, C: 0.11)
         let graph = try makeGraph(image, identity: "bw-cpu")
-        var edit = document()
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        var edit = unsharpenedDocument()
         edit.color.bands = (0..<8).map { HSLBand(mix: Double(40 - $0 * 6)) }
         let actual = try display(graph, edit)
 

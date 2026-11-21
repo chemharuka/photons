@@ -163,6 +163,26 @@ final class ColorGradingTests: XCTestCase {
         return edit
     }
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
+    private func unsharpenedDocument(_ direction: Int, hue: Double = 0, saturation: Double = 0,
+                                     lightness: Double = 0) -> EditModel {
+        var edit = Self.unsharpened
+        let wheel = GradeWheel(hue: hue, saturation: saturation, lightness: lightness)
+        switch direction {
+        case 0: edit.colorGrading.shadows = wheel
+        case 1: edit.colorGrading.midtones = wheel
+        default: edit.colorGrading.highlights = wheel
+        }
+        return edit
+    }
+
     private static let directionNames = ["阴影", "中间调", "高光"]
 
     // MARK: - ① the windows
@@ -363,8 +383,10 @@ final class ColorGradingTests: XCTestCase {
     func testAShadowOnlyDocumentLeavesTheHighlightZoneUntouched() throws {
         let image = Self.bands()
         let graph = try makeGraph(image, identity: "grade-isolation")
-        let neutral = try display(graph, EditModel.neutral)
-        let moved = try display(graph, document(0, hue: -70, saturation: 80, lightness: 50))
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        let neutral = try display(graph, Self.unsharpened)
+        let moved = try display(graph, unsharpenedDocument(0, hue: -70, saturation: 80, lightness: 50))
         let (changed, total) = Self.changedPixels(neutral, moved, rows: 64..<96)
         let (shadowChanged, _) = Self.changedPixels(neutral, moved, rows: 0..<32)
         let (midChanged, midTotal) = Self.changedPixels(neutral, moved, rows: 32..<64)
@@ -610,7 +632,9 @@ final class ColorGradingTests: XCTestCase {
     func testTheKernelAgreesWithTheCPUReference() throws {
         let image = Self.bands(width: 24, bandHeight: 8)
         let graph = try makeGraph(image, identity: "grade-cpu")
-        var edit = EditModel.neutral
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        var edit = Self.unsharpened
         edit.colorGrading.shadows = GradeWheel(hue: -35, saturation: 60, lightness: 20)
         edit.colorGrading.midtones = GradeWheel(hue: 15, saturation: -30, lightness: -10)
         edit.colorGrading.highlights = GradeWheel(hue: 70, saturation: 20, lightness: 5)

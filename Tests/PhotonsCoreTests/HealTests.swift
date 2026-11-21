@@ -77,6 +77,14 @@ final class HealTests: XCTestCase {
 
     private static func code(_ v: Float16) -> Int { Int((Double(v) * 255).rounded()) }
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
     /// SHA-256 of a byte slice — the same digest `DisplayImage.sha256()` computes over a whole frame,
     /// so a **crop's** hash is comparable with a frame's rather than a second, test-only spelling.
     private static func sha256(_ bytes: [UInt8]) -> String {
@@ -188,11 +196,13 @@ final class HealTests: XCTestCase {
 
     func testCloneCopiesTheSourceDiskByteForByte() throws {
         let graph = try makeGraph(clonePicture(), identity: "heal-clone")
-        var doc = EditModel.neutral
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        var doc = Self.unsharpened
         doc.healSpots = [cloneSpot()]
 
         let healed = try display(graph, doc)
-        let untouched = try display(graph, EditModel.neutral)
+        let untouched = try display(graph, Self.unsharpened)
 
         // The target disk and the source disk, both as **interiors** (t ≤ 0.85), so the comparison is
         // not about the rim's one-pixel boundary.
