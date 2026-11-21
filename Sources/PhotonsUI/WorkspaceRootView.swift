@@ -29,29 +29,26 @@ public enum ForwardCompatNotice {
 // MARK: - tool button (§2b: 28 pt hit box, 26 pt paint, radius 7 continuous, 9 pt side padding)
 
 public final class ToolButton: NSButton {
-    /// 438 / 442 —— 顶栏所有按钮的图标用**同一个** symbol 配置：SF Symbols 的自然尺寸随字形变
-    /// （folder 18×14、square.and.arrow.down 15×17、square.and.arrow.up 15×18），不统一就会出现
-    /// 「按钮一样高、图标看着不一样大」。12.25 / .regular 是唯一能让排序那个双向箭头正好落在
-    /// 18×14 的档位（见 `PhotoSortOrder.symbolConfiguration` 的注释），其余字形套同一档就一致了。
-    public static let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12.25, weight: .regular)
+    /// 438 / 442 / 465 —— 顶栏所有按钮的图标用**同一个** symbol 配置：**12 pt / .regular**，
+    /// 之后**不再做任何归一化**。
+    ///
+    /// 历史：442 为了「一排图标看着一样大」把每个字形的高度都缩放到 14 pt。这个基准选错了 ——
+    /// 人眼判大小看的是外接足迹，不是高度。实测（12.25 pt 自然尺寸 → 高度归一 14）：
+    /// `folder` 从 17×13 放大到 18×14（252 pt²），而 `square.stack.3d.down.right` 从 15×19
+    /// 压到 11×14（154 pt²）、两个 `square.and.arrow.*` 压到 12×14（161–172 pt²）—— 高度齐了，
+    /// 足迹反而差 1.6 倍，用户看到的就是「打开最大、导入/导出/后台小」。
+    ///
+    /// 现在回到 SF Symbols 自己的光学尺寸：同一 pointSize 下每个字形都是苹果设计的大小。
+    /// 12 pt 下实测 footprint 182–285 pt²（打开 17×13、导入 14×16、导出 14×17、后台 15×19），
+    /// 宽度差 14–17 pt，比高度归一后的 11–18 pt 收窄一半。
+    public static let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
 
-    /// 442 —— 图标的高度基准。同一个 pointSize 不等于同一个像素框：`folder` 是 17×13、
-    /// `square.and.arrow.down` 是 14×16 —— 字形本身宽高比就不同。所以统一「**高度** = 14 pt，
-    /// 宽度按比例」，这样一排按钮的图标看起来一样大（这是人眼判等高的实际依据）。
-    public static let symbolBoxHeight: CGFloat = 14
-
-    /// 顶栏图标的唯一入口：配置 + 归一化到 `symbolBoxHeight`，模板化（跟随 labelColor）。
+    /// 顶栏图标的唯一入口：只套配置（不缩放），模板化（跟随 labelColor）。
     public static func icon(_ symbol: String, accessibility: String) -> NSImage? {
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility) else {
             return nil
         }
         let configured = base.withSymbolConfiguration(symbolConfiguration) ?? base
-        let natural = configured.size
-        if natural.height > 0 {
-            let scale = symbolBoxHeight / natural.height
-            configured.size = NSSize(width: max(1, (natural.width * scale).rounded()),
-                                     height: symbolBoxHeight)
-        }
         configured.isTemplate = true
         return configured
     }
@@ -80,9 +77,10 @@ public final class ToolButton: NSButton {
 
     public override var intrinsicContentSize: NSSize {
         let text = (title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 10.5)])
-        // 442 —— 图标盒仍是**固定 14 pt**（布局契约，`SortOrderUITests` 按这个算式断言）；
-        // 归一化后实际字形宽 12–18 不等，但按钮宽度不跟着抖。
-        let imageWidth: CGFloat = image == nil ? 0 : 14
+        // 465 —— 图标宽**按字形实测**（12 pt 下 14–17 pt 不等）。以前这里是写死的 14，
+        // 因为 442 的高度归一把所有图标都缩到 14 高；现在不归一化，写死 14 会让最宽的那颗
+        // （导出/导入 17 pt）压进文字间距、末位内边距被吃掉。
+        let imageWidth: CGFloat = image.map { $0.size.width.rounded() } ?? 0
         return NSSize(width: WorkspaceLayout.toolButtonPaddingH * 2 + imageWidth + text.width + 6,
                       height: WorkspaceLayout.toolButtonHit)
     }
@@ -276,7 +274,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         exportButton.isEnabled = false
         sortButton.target = self
         sortButton.action = #selector(sortTapped)
-        // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
+        // 图标与邻居同一个配置（12 pt，不缩放），见 `ToolButton.symbolConfiguration`。
         sortButton.image = PhotoSortOrder.icon()
 
         backgroundButton.target = self

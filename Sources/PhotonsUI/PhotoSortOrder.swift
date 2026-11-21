@@ -36,20 +36,19 @@ public enum PhotoSortOrder: String, CaseIterable, Sendable {
     /// The generic sort glyph. Static on purpose — see the note at the top of this file.
     public static let symbol = "arrow.up.arrow.down"
 
-    /// The neighbour buttons' icon box, measured on this machine: `folder` and
-    /// `rectangle.split.1x2` are **18 × 14 pt** at AppKit's default symbol configuration, while
-    /// `arrow.up.arrow.down` is **18 × 15** unscaled — 1 pt taller than the family it has to sit in.
-    /// `pointSize 12.25 / .regular` is the smallest step that lands the arrow on exactly 18 × 14
-    /// without changing its weight (`.regular` is AppKit's default, i.e. the neighbours' weight).
-    /// 442 —— 现在全顶栏共用一份（`ToolButton.symbolConfiguration`）：导入/导出那两个
-    /// `square.and.arrow.*` 不套配置时是 15×17 / 15×18，和这一行按钮的 18×14 不是一套。
+    /// The icon is drawn through the toolbar's single entry (`ToolButton.icon`), so it shares the
+    /// row's configuration: **12 pt / .regular**, no per-glyph scaling (465). At 12 pt this glyph is
+    /// 17 × 14 — the same width as `folder` / `rectangle.split.1x2` and 2 pt wider than
+    /// `square.and.arrow.*`, which is the family it sits in. 442 used to rescale every glyph to a
+    /// 14 pt *height*; that made the wide `folder` 18 pt wide and the tall glyphs 11–12 pt, so the
+    /// row read as three different sizes (see the note in `ToolButton.symbolConfiguration`).
     public static let symbolConfiguration = ToolButton.symbolConfiguration
 
     /// The icon as the toolbar draws it: a **template** image (SF Symbols already are, and this is
     /// asserted) so the glyph is tinted by `contentTintColor`/`labelColor` and therefore follows the
     /// light/dark appearance instead of being baked into one colour.
     public static func icon() -> NSImage? {
-        // 442 —— 与顶栏其它按钮同一条图标入口（配置 + 归一化高度），不再各写一份。
+        // 442 / 465 —— 与顶栏其它按钮同一条图标入口（同一个配置，不做归一化），不再各写一份。
         ToolButton.icon(symbol, accessibility: Loc.t("按拍摄时间排序"))
     }
 

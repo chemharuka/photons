@@ -458,15 +458,17 @@ final class SortOrderUITests: XCTestCase {
 
         // 宽 = 图标 + 间距 + 文本 + 左右内边距（`ToolButton.intrinsicContentSize` 的算式，
         // 用两个按钮的实测值验证）。
+        // 465 —— 图标宽按字形实测（12 pt 下不再是写死的 14）。
         let textWidth = ("新→旧" as NSString).size(withAttributes: [.font: sort.font!]).width
-        let expectedWidth = WorkspaceLayout.toolButtonPaddingH * 2 + 14 + textWidth + 6
+        let iconWidth = (sort.image?.size.width ?? 0).rounded()
+        let expectedWidth = WorkspaceLayout.toolButtonPaddingH * 2 + iconWidth + textWidth + 6
         XCTAssertEqual(sort.intrinsicContentSize.width, expectedWidth, accuracy: 0.51)
 
         print("排序按钮 frame \(rect(sort.frame)) · 邻居(胶片条) frame \(rect(neighbour.frame)) · "
               + "间距 \(String(format: "%.2f", sort.frame.minX - neighbour.frame.maxX)) pt")
         print("字体 \(sort.font?.fontName ?? "?") \(sort.font?.pointSize ?? 0) / 邻居 \(neighbour.font?.fontName ?? "?") "
               + "\(neighbour.font?.pointSize ?? 0) · 图标盒 \(sort.image?.size ?? .zero) / 邻居 \(neighbour.image?.size ?? .zero)")
-        print("按钮宽 \(String(format: "%.2f", sort.frame.width)) = 内边距 \(WorkspaceLayout.toolButtonPaddingH)×2 + 图标 14 + 文本 "
+        print("按钮宽 \(String(format: "%.2f", sort.frame.width)) = 内边距 \(WorkspaceLayout.toolButtonPaddingH)×2 + 图标 \(sort.image?.size.width ?? 0) + 文本 "
               + "\(String(format: "%.2f", textWidth)) + 6 = \(String(format: "%.2f", expectedWidth)) · "
               + "tooltip「\(sort.toolTip ?? "")」")
     }
