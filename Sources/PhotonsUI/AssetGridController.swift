@@ -604,10 +604,23 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     // MARK: 437 — the warm band
 
+    /// 469 — how far past the viewport the **core** band reaches, in rows. This is the band that is
+    /// asked for unconditionally and may render; the user asked for ±10 on 2026-11-21.
+    ///
+    /// The tests derive their expected band from this value instead of repeating `4`, so tuning the
+    /// number again does not touch three test files. `wantedIndexes()`, `coreWantedIndexes()` and
+    /// `reconcileThumbnails` all read it — it is the single source of truth.
+    static let coreSlackRows: CGFloat = 10
+
     /// 437 — how far past the viewport the **warm** band reaches, in rows. A photo in this extra
     /// ring is only asked for if its 1920 px JPEG is already on disk (or in the memory LRU), so the
     /// ask costs a file decode, never a render. Twelve rows is symmetric and was chosen from the
     /// A⑨ measurement, not from the old ±4 arithmetic.
+    ///
+    /// 469 — with the core at ±10 this ring is only **two rows** wider on each side, so the
+    /// "warm but do not render" margin shrank from eight rows to two. That is the intended cost of
+    /// a larger core: most of what used to be warm-only work is now simply core work. The
+    /// `warmBudgetPerPass` budget stays 32; it is almost never the limiting factor any more.
     static let warmSlackRows: CGFloat = 12
 
     /// 437 — the most **new** warm asks one reconcile pass may issue. A fast jump can put a hundred
@@ -1160,8 +1173,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
-    /// 429 — visible items plus **four rows** either side (computed from the layout function, not
-    /// guessed in pixels). Everything outside the band is cancelled.
+    /// 429 — visible items plus **`coreSlackRows`** rows either side (computed from the layout
+    /// function, not guessed in pixels). Everything outside the band is cancelled.
     /// Re-apply the snapshot's thumbnails to whatever cells the diffable pass reused. Same key +
     /// same bitmap is a no-op inside the card, so this is cheap for an unchanged list.
     private func refreshVisibleThumbnails() {
@@ -1252,7 +1265,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
 
         let display = displayPixels
-        let core = bandIndexes(rows: 4)
+        let core = bandIndexes(rows: Self.coreSlackRows)
         let wide = bandIndexes(rows: Self.warmSlackRows)
         let warm = warmEligibleIndexes(in: wide.subtracting(core), provider: provider, display: display)
         let wanted = core.union(warm)
@@ -1265,9 +1278,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         lastReconcilePriorities.removeAll(keepingCapacity: true)
 
         let visible = Set(collectionView.indexPathsForVisibleItems().map { $0.item })
-        // 437 — issue in priority order: what is on screen, then the ±4-row core slack, then the
-        // warm ring under this pass's budget. A `Set` has no order, so each stage is sorted; the
-        // resulting request order is the thing A⑤ asserts (visible before prefetch).
+        // 437 — issue in priority order: what is on screen, then the ±`coreSlackRows`-row core
+        // slack, then the warm ring under this pass's budget. A `Set` has no order, so each stage
+        // is sorted; the resulting request order is the thing A⑤ asserts (visible before prefetch).
         requestBand(visible.sorted(), priority: .onScreen, session: session, provider: provider,
                     display: display)
         requestBand(core.subtracting(visible).sorted(), priority: .prefetch, session: session,
@@ -1295,9 +1308,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // between: this whole function runs synchronously on the main actor.)
         //
         // 449 — condemn only what left the **outer ring** (±`warmSlackRows` = ±12 rows), not the
-        // narrow core (±4): a continuous scroll moves by a few rows, and cancelling those asks
-        // dropped bytes that had just been produced (`ThumbnailService.suppressWrite`). §3 fixes
-        // this value at `warmSlackRows`; the request band itself is unchanged.
+        // narrow core (±`coreSlackRows` = ±10): a continuous scroll moves by a few rows, and
+        // cancelling those asks dropped bytes that had just been produced
+        // (`ThumbnailService.suppressWrite`). §3 fixes this value at `warmSlackRows`; the request
+        // band itself is unchanged.
         for (index, token) in thumbRequests where !wide.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
@@ -1343,13 +1357,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     /// 437 — the warm ring's membership rule: a **cached** photo (1920 px JPEG on disk, or a bitmap
     /// already in the memory LRU) may be asked for out to ±`warmSlackRows`; a photo that has never
-    /// been rendered stays exactly where it was, in the ±4-row core band. That is what keeps the
-    /// wide band from turning a first visit into a render storm (A③).
+    /// been rendered stays exactly where it was, in the ±`coreSlackRows`-row core band. That is what
+    /// keeps the wide band from turning a first visit into a render storm (A③).
     ///
     /// `peek` is one `fileExists` (no decode, no ImageIO); the count and wall time of the calls are
     /// kept on `lastWarmPeekCount` / `lastWarmPeekMilliseconds` so A⑧ can state the cost instead of
-    /// guessing. The ring minus the ±4-row core is 16 rows; at nine columns that is 144 probes on
-    /// the first pass and none once the answers are cached.
+    /// guessing. 469 — the ring minus the core is now only **two rows** per side; at nine columns
+    /// that is 36 probes on the first pass and none once the answers are cached.
     private func warmEligibleIndexes(in candidates: Set<Int>, provider: ThumbnailProvider,
                                      display: ImageSize) -> Set<Int> {
         let start = CACurrentMediaTime()
@@ -1432,21 +1446,21 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// rebuild's `wanted` set. Must be 0; read by the 429 gate (`⑧d`).
     public private(set) var lastRebuildOutsideCount = 0
 
-    /// 429 — visible + **four rows** of slack above and below (`rowHeight` already includes the
-    /// caption strip). The user's ask is "预加载缓存，这样滚动时不会出现占位纯色图": one screen of
-    /// slack (±1 row) meant the next screen still had to decode while the eye watched. Everything
-    /// outside the band is cancelled in `reconcileThumbnails`, so a fast drag does not accumulate
-    /// work; the wanted set is the only thing that got bigger.
+    /// 429 — visible + **`coreSlackRows`** rows of slack above and below (`rowHeight` already
+    /// includes the caption strip). The user's ask is "预加载缓存，这样滚动时不会出现占位纯色图":
+    /// one screen of slack (±1 row) meant the next screen still had to decode while the eye
+    /// watched. Everything outside the band is cancelled in `reconcileThumbnails`, so a fast drag
+    /// does not accumulate work; the wanted set is the only thing that got bigger.
     ///
-    /// 437 — this is the **effective** set: the ±4-row core band for every photo, plus the warm ring
-    /// (±`warmSlackRows`) restricted to photos whose HD JPEG is already on disk or in memory. It is
-    /// still **one** set feeding both the request loop and the cancellation loop, so 429's "outside
-    /// the band ⇒ cancelled" has not been forked into a second queue.
+    /// 437 — this is the **effective** set: the `coreSlackRows`-row core band for every photo, plus
+    /// the warm ring (±`warmSlackRows`) restricted to photos whose HD JPEG is already on disk or in
+    /// memory. It is still **one** set feeding both the request loop and the cancellation loop, so
+    /// 429's "outside the band ⇒ cancelled" has not been forked into a second queue.
     ///
     /// Internal, not private, so the 429 acceptance can read the band's size off the live view
     /// (`wantedIndexes().count`) instead of recomputing the arithmetic in a test.
     func wantedIndexes() -> Set<Int> {
-        let core = bandIndexes(rows: 4)
+        let core = bandIndexes(rows: Self.coreSlackRows)
         guard let provider = provider(), !core.isEmpty else { return core }
         let display = displayPixels
         let wide = bandIndexes(rows: Self.warmSlackRows)
@@ -1456,7 +1470,7 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
 
     /// 437 — the widest band this controller may hold, **without** the cache filter. This is the
     /// new meaning of "outside the window": the reverse gate (429 ⑧d) and `--ui-smoke` ask "is
-    /// anything queued beyond ±`warmSlackRows`?", not "beyond the ±4-row core?".
+    /// anything queued beyond ±`warmSlackRows`?", not "beyond the ±`coreSlackRows`-row core?".
     func wideWantedIndexes() -> Set<Int> { bandIndexes(rows: Self.warmSlackRows) }
 
     /// 429 — the geometry half of `wantedIndexes()`, shared by both bands.
@@ -1487,9 +1501,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Outstanding requests for item indices that are no longer visible or prefetched. Must be 0
     /// once the scroll handler has run: "cancel what scrolled away" is an invariant, not a hope.
     ///
-    /// 437 — "the window" is now the **wide** band (±`warmSlackRows`), not the ±4-row core: the warm
-    /// ring is legitimately allowed to hold requests, so subtracting the core would report it as a
-    /// leak. This is a re-definition, not a relaxation — anything past ±12 rows is still a bug.
+    /// 437 — "the window" is now the **wide** band (±`warmSlackRows`), not the
+    /// ±`coreSlackRows`-row core: the warm ring is legitimately allowed to hold requests, so
+    /// subtracting the core would report it as a leak. This is a re-definition, not a relaxation —
+    /// anything past ±12 rows is still a bug.
     public var pendingThumbnailIndexesOutsideWindow: Int {
         Set(thumbRequests.keys).subtracting(wideWantedIndexes()).count
     }
@@ -1527,9 +1542,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Start a fresh request-order reading. The acceptance calls this after the bands settle.
     func resetRequestLogForTesting() { requestLog.removeAll() }
 
-    /// The **core** band (±4 rows) without the warm filter — the set a library with an empty disk
-    /// cache must degrade to.
-    func coreWantedIndexes() -> Set<Int> { bandIndexes(rows: 4) }
+    /// The **core** band (±`coreSlackRows` rows) without the warm filter — the set a library with
+    /// an empty disk cache must degrade to.
+    func coreWantedIndexes() -> Set<Int> { bandIndexes(rows: Self.coreSlackRows) }
 
     /// The provider this grid draws from — `--ui-smoke` asserts it is the filmstrip's too.
     public var thumbnailProviderForSmoke: ThumbnailProvider? { provider() }

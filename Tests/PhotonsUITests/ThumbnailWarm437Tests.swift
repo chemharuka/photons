@@ -13,7 +13,8 @@ import PhotonsCore
 ///
 /// The mechanism is the 429 band, split by cost instead of forked into a second queue:
 ///
-/// * the **core** band is unchanged (±4 rows) and still accepts every photo;
+/// * the **core** band (`AssetGridController.coreSlackRows`, currently ±10 rows) accepts every
+///   photo;
 /// * the **warm** band (±12 rows) only accepts a photo whose 1920 px JPEG is already on disk
 ///   (`ThumbnailCache.peek` = one `fileExists`) or already in the memory LRU.
 ///
@@ -198,9 +199,10 @@ final class ThumbnailWarm437Tests: XCTestCase {
 
     func testWarmBandOnlyTakesCachedRowsAndNeverRenders() throws {
         let session = try makeSession(rows: 30)
-        // Seed rows 0–21: at row 10 the whole core band (6–19) is on disk, so A③'s
-        // "generated == 0" is about the warm ring and not about a core row that had no file.
-        try seedHD(session, rows: 0..<22)
+        // Seed rows 0–26: at row 10 the whole core band (0–25) is on disk, the cached warm margin
+        // is row 26 and row 27 is deliberately cold inside the wide ring. That keeps A③'s
+        // "generated == 0" about the warm ring and still proves a cold wide-ring row is not asked.
+        try seedHD(session, rows: 0..<27)
         let h = try makeHarness(session)
         XCTAssertEqual(h.columns, 9)
 
@@ -219,12 +221,13 @@ final class ThumbnailWarm437Tests: XCTestCase {
         print("437 A① queued \(queued.count) core \(core.count) wide \(wide.count) "
               + "warm \(warmQueued.count) warm rows \(warmRows.sorted())")
 
-        XCTAssertFalse(warmQueued.isEmpty, "cached rows past ±4 must be asked for")
+        XCTAssertFalse(warmQueued.isEmpty,
+                       "cached rows past the ±\(AssetGridController.coreSlackRows) core must be asked for")
         XCTAssertTrue(warmQueued.isSubset(of: wide), "warm requests live inside ±12 rows")
-        XCTAssertTrue(warmQueued.isSubset(of: h.indices(0..<22)),
+        XCTAssertTrue(warmQueued.isSubset(of: h.indices(0..<27)),
                       "only rows with an HD JPEG on disk may be warmed")
-        XCTAssertTrue(queued.intersection(h.indices(22..<30)).isEmpty,
-                      "rows 22–29 have no cache file and must not be asked for")
+        XCTAssertTrue(queued.intersection(h.indices(27..<30)).isEmpty,
+                      "rows 27–29 have no cache file and must not be asked for")
         // A⑥ (re-defined): nothing queued beyond ±12 rows.
         XCTAssertEqual(h.grid.pendingThumbnailIndexesOutsideWindow, 0)
         XCTAssertEqual(h.grid.lastRebuildOutsideCount, 0)
@@ -277,7 +280,10 @@ final class ThumbnailWarm437Tests: XCTestCase {
         let wanted = h.grid.wantedIndexes()
         print("437 A② empty cache: wanted \(wanted.count) core \(core.count) "
               + "queued \(queued.count) warm asks \(h.grid.lastReconcileWarmRequests) peeks \(peeks)")
-        XCTAssertEqual(wanted, core, "no disk cache ⇒ the band is exactly ±4 rows")
+        XCTAssertEqual(wanted, core,
+                       "no disk cache ⇒ the band is exactly the ±\(AssetGridController.coreSlackRows)-row core")
+        XCTAssertEqual(h.rows(of: h.grid.wideWantedIndexes()).count - h.rows(of: core).count, 2,
+                       "469: the ±12 outer ring leaves exactly two warm-only rows beyond the core")
         // 449 — the *request* band is still core, but cancellation now stops at the outer ring
         // (±`warmSlackRows` = ±12 rows), so asks from the band before a small scroll may still be
         // in flight. That is intended (it is what keeps a continuous scroll from discarding bytes);
@@ -289,8 +295,65 @@ final class ThumbnailWarm437Tests: XCTestCase {
         XCTAssertGreaterThan(peeks, 0, "the filter still peeks and finds nothing")
     }
 
-    // MARK: - A④ — one look per newly-entered index
+    // MARK: - 469 — the core band is visible ± coreSlackRows, not a literal
 
+    /// Three visible rows, no disk cache: the requested set must be exactly the visible rows plus
+    /// `AssetGridController.coreSlackRows` above and below. The expectation is derived from the
+    /// constant and from `wideWantedIndexes()`, never from `10` or the old `4`; the ring relation
+    /// (outer − core = two rows) is the reverse gate that catches the constant drifting back to 4.
+    func testRequestedBandIsVisiblePlusCoreSlackRows() throws {
+        let session = try makeSession(rows: 40, name: "-boundary")
+        let cache = try XCTUnwrap(session.thumbnailCache)
+        let provider = ThumbnailProvider.shared(for: cache)
+        provider.service.isPaused = true
+        defer { provider.service.isPaused = false }
+
+        let width: CGFloat = 520
+        let metrics = GridLayout.metrics(forWidth: width)
+        let height = metrics.rowHeight * 2.5
+        let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        windows.append(window)
+        let h = Harness(session: session, window: window, width: width, height: height)
+        XCTAssertEqual(h.columns, 3)
+
+        h.scrollRows(10)
+        // Land just past row 9's bottom edge (the grid's content inset puts row 10 at
+        // `10 * rowPitch + inset`), so the fixture is exactly three visible rows.
+        let scroll = h.grid.scrollView
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 10 * h.rowPitch + metrics.inset + 1))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        h.grid.view.layoutSubtreeIfNeeded()
+        h.grid.collectionView.layoutSubtreeIfNeeded()
+        h.grid.reconcileThumbnailsForTesting()
+
+        let visibleRows = h.rows(of: h.grid.visibleIndexes())
+        let queued = h.grid.queuedThumbnailIndexes
+        let queuedRows = h.rows(of: queued)
+        let core = h.grid.coreWantedIndexes()
+        let coreRows = h.rows(of: core)
+        let wideRows = h.rows(of: h.grid.wideWantedIndexes())
+        let slack = Int(AssetGridController.coreSlackRows)
+        let visibleTop = try XCTUnwrap(visibleRows.min())
+        let visibleBottom = try XCTUnwrap(visibleRows.max())
+        let expectedRows = Set(max(0, visibleTop - slack)...(visibleBottom + slack))
+
+        print("469 boundary: visible rows \(visibleRows.sorted()), queued rows "
+              + "\(queuedRows.min() ?? -1)–\(queuedRows.max() ?? -1), core \(core.count), "
+              + "slack \(slack), wide \(wideRows.count) rows")
+
+        XCTAssertEqual(visibleRows.count, 3, "fixture: exactly three visible rows")
+        XCTAssertEqual(queuedRows, expectedRows,
+                       "the request band is visible ± coreSlackRows rows")
+        XCTAssertEqual(queued, core, "no disk cache ⇒ the core band is the whole ask")
+        XCTAssertEqual(wideRows.count - coreRows.count, 2,
+                       "469: the ±12 outer ring leaves exactly two warm-only rows beyond the core")
+        XCTAssertEqual(h.grid.warmRequests, 0)
+    }
+
+    // MARK: - A④ — one look per newly-entered index
     func testWarmAskFiresOnlyForNewlyEnteredIndexes() throws {
         let session = try makeSession(rows: 30, name: "-step")
         try seedHD(session, rows: 0..<30)
@@ -338,7 +401,10 @@ final class ThumbnailWarm437Tests: XCTestCase {
     func testWarmBudgetAndVisibleFirstOrdering() throws {
         // The top block is warm before the jump; the far block (rows 40–59) is cached but has never
         // been seen, so the visible cells there must be asked for as **onScreen** while the cached
-        // rows past the new ±4 core band are the warm work. Rows 19–39 are cold and stay core-only.
+        // rows past the new core band are the warm work. Rows 28–39 are cold; rows 28–29 fall in
+        // the wide ring but are not cached, so only the two warm-margin rows below the core (56–57)
+        // are eligible. 469 — with a ±10 core the warm ring is only two rows wide, so a jump can no
+        // longer fill a 32-item warm budget; the budget stays as an upper bound.
         let session = try makeSession(rows: 60, name: "-budget")
         try seedHD(session, rows: 0..<19)
         try seedHD(session, rows: 40..<60)
@@ -357,8 +423,10 @@ final class ThumbnailWarm437Tests: XCTestCase {
               + "onScreen \(priorities.filter { $0 == .onScreen }.count), "
               + "visible rows \(visibleRows.sorted())")
 
-        XCTAssertLessThanOrEqual(issued, 32, "one pass may issue at most warmBudget")
-        XCTAssertEqual(issued, 32, "the jump has more than one budget of new cached rows")
+        XCTAssertLessThanOrEqual(issued, AssetGridController.warmBudgetPerPass,
+                                 "one pass may issue at most warmBudget")
+        XCTAssertGreaterThan(issued, 0,
+                             "the cached two-row warm margin still produces asks")
         XCTAssertFalse(priorities.isEmpty)
         XCTAssertEqual(priorities.first, .onScreen,
                        "the visible cells are asked for before the prefetch work")
