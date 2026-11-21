@@ -566,10 +566,11 @@ final class StackVisibility382Tests: XCTestCase {
                            "⑨ 列表 \(asset.filename) 无 stack:")
             XCTAssertFalse(row.layoutProbe.nameDrawnText.hasPrefix("堆叠 "),
                            "⑨ 列表 \(asset.filename) 无前缀")
-            XCTAssertTrue(row.stackLabelIsHidden, "⑨ 列表 \(asset.filename) 右标签隐藏")
-            XCTAssertEqual(row.stackLabelText, "")
+            // 465 —— 侧栏行的右标签「堆叠N张」已从产品里整个删掉（第二行整列归 meta），所以
+            // `PhotoRowCell` 不再有 `stackLabelIsHidden` / `stackLabelText`；读它们的两条断言随之一并删除。
+            // 仍然必须成立的就在上面：未堆叠的照片没有 `stack:` 徽标、也没有「堆叠 」名字前缀。
         }
-        print("⑨ 6 张独立照片：三面都无 stack: / 无「堆叠 」/ 列表右标签隐藏")
+        print("⑨ 6 张独立照片：三面都无 stack: / 无「堆叠 」/ 列表无堆叠前缀")
     }
 
     // MARK: - ⑦ --ui-smoke 的色点像素探针仍然指得准
