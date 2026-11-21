@@ -601,6 +601,11 @@ public final class WorkspaceRootView: NSView {
     /// follows a loupe visit is the only one allowed to centre the anchor and rematerialise cells.
     /// A plain `grid → grid` (⌘1) or a metadata tick never moves this.
     private var pendingGridEntry = false
+    /// 471 — 浏览器面切换后，等新出现那一面的几何落地（`layout()` 设完 frame）再把锚点那张
+    /// 露出来 / 居中。`setBrowserMode` 的 `applyBrowserMode()` 跑在 `layout()` 之前，当时
+    /// `filmstripController.view.bounds` 还是切换前的旧值（列表模式下甚至是零），所以这里只
+    /// 记一个一次性的旗标。
+    private var pendingBrowserReveal = false
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
     private let inspectorBackdrop = NSVisualEffectView()
@@ -1033,6 +1038,29 @@ public final class WorkspaceRootView: NSView {
         filmstripController.view.isHidden = browserMode != .filmstrip
         browserPane.showsPhotoList = browserMode == .list
         browserPane.refresh()
+        // 471 — 新出现那一面要落在**当前锚点**上，而不是它自己上一次的旧偏移。几何在
+        // `layout()` 里才更新，所以这里只登记，等这一轮布局结束再做（启动时那一次同样允许：
+        // 锚点通常就是第一张，等价于 no-op）。
+        pendingBrowserReveal = true
+    }
+
+    /// 471 — 把刚变可见的那一面带到锚点照片：
+    ///
+    /// - 网格（`session.mode != .loupe`）：只要**可见**即可（`scrollRowToVisible` /
+    ///   `scrollToItems(.centeredHorizontally)` 仅在锚点不可见时用），两面位置大致匹配，不要求居中；
+    /// - 单图（`.loupe`）：锚点那张在这面里**居中**，复用既有 `centreForLoupeEntry()`（≤ 2 pt
+    ///   幂等）。383 的「单击不居中」不受影响：这条只由模式切换触发，不接选择变化。
+    ///
+    /// 相机与缩放**不动**（用户口径：居中的是浏览面里的照片，不是画布）。
+    private func revealAnchorInVisibleBrowser() {
+        guard session.anchorID != nil else { return }
+        if session.mode == .loupe {
+            if browserMode == .filmstrip { filmstripController.centreForLoupeEntry() }
+            else { browserPane.centreForLoupeEntry() }
+        } else {
+            if browserMode == .filmstrip { filmstripController.revealAnchor() }
+            else { browserPane.revealAnchor() }
+        }
     }
 
     // MARK: layout
@@ -1093,6 +1121,16 @@ public final class WorkspaceRootView: NSView {
                                            height: ForwardCompatNotice.lineHeight)
         topBar.needsLayout = true
         topBar.needsDisplay = true
+        // 471 — 布局已经把这轮浏览器面的最终几何写下去了，现在才轮到「把锚点带进新出现的一面」。
+        // 一次性：消费掉旗标，后续任何布局（拖动分隔条、缩略图落地）都不会再把用户滚走的视口拽回来。
+        if pendingBrowserReveal {
+            pendingBrowserReveal = false
+            // The surface's own frame just changed in this pass; let it lay its scroll view out before
+            // reading a viewport rect, otherwise the reveal would use the previous width/height.
+            if browserMode == .filmstrip { filmstripController.view.layoutSubtreeIfNeeded() }
+            else { browserPane.view.layoutSubtreeIfNeeded() }
+            revealAnchorInVisibleBrowser()
+        }
     }
 
     /// Distance from the window's top edge to the traffic-light centre, measured live (§2b item 1).

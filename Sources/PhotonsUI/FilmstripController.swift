@@ -1035,6 +1035,24 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         if centerAnchor() { centredAnchorID = id }
     }
 
+    /// 471 — 浏览器面切换（网格界面）时把锚点那张带进视口即可，**不要求居中**：用户口径是
+    /// 「两者的位置大致匹配」，不是「恢复各自的旧偏移」。已经可见时是 no-op，所以来回切换不会抖。
+    public func revealAnchor() {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let index = session.assets.firstIndex(where: { $0.id == id }),
+              collectionView.numberOfItems(inSection: 0) > index else { return }
+        collectionView.layoutSubtreeIfNeeded()
+        let path = IndexPath(item: index, section: 0)
+        guard let item = collectionView.layoutAttributesForItem(at: path),
+              let scroll = collectionView.enclosingScrollView,
+              scroll.contentView.bounds.width > 0 else { return }
+        // 已经可见就不动 —— 这是「保留位置」而不是「每次都摆中间」。
+        if scroll.documentVisibleRect.intersects(item.frame) { return }
+        // `.nearestHorizontalEdge` 在 AppKit 里实测是 no-op（第 20 格仍在 x≈1976，视口 0…1270），
+        // 所以不可见时直接把它摆到中间：仍然只是「落在锚点」，且第二次调用会走上面的提前返回。
+        collectionView.scrollToItems(at: [path], scrollPosition: .centeredHorizontally)
+    }
+
     /// 332b — 快照还没落地时（`viewDidLoad` 第一次调用），把这次居中推迟到下一个 runloop，
     /// 并且**只推一次**，避免条目永远为 0 时无限排队。
     private func deferCenterOnce() {
