@@ -332,8 +332,9 @@ final class PointColorPanelTests: XCTestCase {
                       "标题双击必须走 group(.pointColor)（一行快照）")
         XCTAssertTrue(card.contains("resets.pointColorField(axis)"),
                       "每行的双击复位必须走 PanelResets")
-        XCTAssertTrue(card.contains("if !editing { session.commitEdit(label: \"点颜色 \\(axis.title)\") }"),
-                      "拖动结束必须提交一行")
+        // b50188b 把标签换成了 `Loc.t`；断言它的键，而不是旧的字面量（产品不回退）。
+        XCTAssertTrue(card.contains("if !editing { session.commitEdit(label: Loc.t(\"点颜色 {0}\""),
+                      "拖动结束必须提交一行（标签走 Loc.t）")
         XCTAssertTrue(card.contains("PointColorSwatchStrip"), "色框条")
         XCTAssertFalse(card.contains("先吸取一个颜色"), "158: 删掉旧的说明文字")
         XCTAssertFalse(card.contains("PointColorSwatchView(point:"), "大色块移进色框条")

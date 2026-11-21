@@ -55,6 +55,15 @@ final class RedEyeTests: XCTestCase {
         return (dx * dx + dy * dy).squareRoot() <= circle.r
     }
 
+    /// 314：neutral 现在真的过 S2.9（483 之后），圆外 1–2 码是 USM halo。
+    /// 逐码断言改用显式 `sharpen.amount = 0` 的文档
+    /// （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
     private func display(_ graph: RenderGraph, _ edit: EditModel) throws -> DisplayImage {
         let options = RenderOptions(scale: 1,
                                     display: DisplayOptions(primaries: .sRGB, bitDepth: 8,
@@ -169,11 +178,11 @@ final class RedEyeTests: XCTestCase {
     func testRedEyeRemovesTheRedAndLeavesEveryOutsideByteAlone() throws {
         let image = face(identity: "repair")
         let graph = try makeGraph(image, identity: "redeye-repair")
-        let cleaned = try display(graph, .neutral)
+        let cleaned = try display(graph, Self.unsharpened)
 
         let click = NormalizedPoint(Self.bigCircle.x / 512, Self.bigCircle.y / 512)
         let detection = try XCTUnwrap(RedEye.detect(in: image, near: click, searchRadius: 0.06))
-        var doc = EditModel.neutral
+        var doc = Self.unsharpened
         doc.healSpots = [spot(for: detection, image: image)]
         let repaired = try display(graph, doc)
 

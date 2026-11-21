@@ -239,7 +239,8 @@ final class RevertMapCoverageTests: XCTestCase {
             flat("effects.nonBayerColorNR") { $0.effects.nonBayerColorNR = 45 },
             flat("effects.dehaze") { $0.effects.dehaze = 20 },
             flat("sharpen.amount") { $0.sharpen.amount = 80 },
-            flat("sharpen.radius") { $0.sharpen.radius = 2 },
+            // 314：锐化默认半径是 2.0，「设成 2」已经是 no-op；3.5 才重新可观测「改过 / 回退」。
+            flat("sharpen.radius") { $0.sharpen.radius = 3.5 },
             flat("sharpen.detail") { $0.sharpen.detail = 50 },
             flat("sharpen.masking") { $0.sharpen.masking = 20 },
 

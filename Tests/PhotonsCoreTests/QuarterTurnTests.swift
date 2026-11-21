@@ -67,6 +67,14 @@ final class QuarterTurnTests: XCTestCase {
         return try XCTUnwrap(result.display, "the render came back without pixels")
     }
 
+    /// 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档。
+    /// 先例见 `LocalColorStageTests` 475 的 `unsharpened`：`amount = 0` 是「S3.10 不存在」的写法。
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
     private static let repoRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
@@ -195,10 +203,12 @@ final class QuarterTurnTests: XCTestCase {
         try requireMetal()
         let image = patternImage(width: 200, height: 120)
         let g = try graph(image, "quarter-permutation")
-        let upright = try render(g, EditModel.neutral)
+        // 314：neutral 现在真的过 S3.10，恒等类断言必须用 amount = 0 的文档
+        // （先例：`LocalColorStageTests` 475 的 `unsharpened`）。
+        let upright = try render(g, Self.unsharpened)
 
         for turns in 1...3 {
-            var document = EditModel.neutral
+            var document = Self.unsharpened
             document.geometry.quarterTurns = turns
             let turned = try render(g, document)
             XCTAssertEqual(turned.size, turns % 2 == 1 ? upright.size.swapped : upright.size,
