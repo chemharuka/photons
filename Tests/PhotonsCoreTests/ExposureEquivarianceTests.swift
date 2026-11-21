@@ -659,7 +659,9 @@ final class ExposureEquivarianceTests: XCTestCase {
             XCTAssertEqual(sha, Self.e0SHASHA[key],
                            "159 换域后 E = 0 的 contrast 重钉；whites/atlas 仍是 147 的逐字节值")
         }
-        var maskEdit = EditModel.neutral
+        // 483 把锐化从 S3.10 移到 S2.9（mask 之前）⇒ 蒙版谓词会读到锐化后的像素；本用例只钉
+        // 曝光不变量，故显式关锐化（本套件的 `algebraOnly` 就是「锐化不存在」的文档）。
+        var maskEdit = Self.algebraOnly
         maskEdit.masks = [
             Mask(id: "luma-147", opacity: 1, invert: false,
                  components: [MaskComponent(id: "c", feather: 0.2,
