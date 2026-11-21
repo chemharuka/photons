@@ -155,31 +155,132 @@ final class QuarterTurnTests: XCTestCase {
         let image = patternImage()
         let g = try graph(image, "quarter-injective")
 
-        var seen: [String: String] = [:]
-        var collisions: [String] = []
+        // ① The control number: the **raw** triples, before normalisation. Sixteen triples spell only
+        // eight D4 pictures, and the equivalent pair that used to differ by 1–2 Float16 ulp is the
+        // one the ticket measured. This half is deliberately kept as `63` so a later change that
+        // merely widens a tolerance cannot pass for the fix.
+        var rawSeen: [String: String] = [:]
+        var rawCollisions: [String] = []
         for turns in 0..<4 {
             for flips in 0..<2 {
                 for vertical in 0..<2 {
                     for (index, angle) in [0.0, 0.7, 1.9, -3.3].enumerated() {
                         var document = EditModel.neutral
+                        // 484b/489: the spatial sharpen pass is not rotation-invariant at the canvas
+                        // edge, so the orientation comparison runs with it off (§2.15's rule).
+                        document.sharpen.amount = 0
                         document.geometry.quarterTurns = turns
                         document.geometry.flipHorizontal = flips == 1
                         document.geometry.flipVertical = vertical == 1
                         document.geometry.rotationDegrees = angle
                         let sha = try render(g, document).sha256()
                         let name = "q\(turns)·H\(flips)·V\(vertical)·a\(index)"
-                        if let other = seen[sha] {
-                            collisions.append("\(name) == \(other)")
+                        if let other = rawSeen[sha] {
+                            rawCollisions.append("\(name) == \(other)")
                         }
-                        seen[sha] = name
+                        rawSeen[sha] = name
                     }
                 }
             }
         }
-        print("INJECTIVE · 64 combinations → \(seen.count) distinct frames"
-              + (collisions.isEmpty ? "" : " · collisions \(collisions)"))
-        XCTAssertEqual(seen.count, 64, "64 个 orientation 组合只产生 \(seen.count) 个不同的帧")
-        XCTAssertTrue(collisions.isEmpty, "帧碰撞：\(collisions)")
+        print("INJECTIVE · raw 64 combinations → \(rawSeen.count) distinct frames"
+              + (rawCollisions.isEmpty ? "" : " · collisions \(rawCollisions)"))
+        XCTAssertEqual(rawSeen.count, 63,
+                       "the un-normalised control must stay 63 (the defect the ticket measured)")
+        XCTAssertEqual(rawCollisions.count, 1)
+
+        // ② The fix: `canonicalized` folds every equivalent triple to one spelling, so equivalent
+        // pictures take the same geometry arithmetic. Eight D4 elements × four angles = 32 frames.
+        var groups: [String: [(name: String, sha: String)]] = [:]
+        var seen: Set<String> = []
+        for turns in 0..<4 {
+            for flips in 0..<2 {
+                for vertical in 0..<2 {
+                    for (index, angle) in [0.0, 0.7, 1.9, -3.3].enumerated() {
+                        var document = EditModel.neutral
+                        // 484b/489: the spatial sharpen pass is not rotation-invariant at the canvas
+                        // edge, so the orientation comparison runs with it off (§2.15's rule).
+                        document.sharpen.amount = 0
+                        document.geometry.quarterTurns = turns
+                        document.geometry.flipHorizontal = flips == 1
+                        document.geometry.flipVertical = vertical == 1
+                        document.geometry.rotationDegrees = angle
+                        document.geometry = document.geometry.canonicalized
+                        let sha = try render(g, document).sha256()
+                        seen.insert(sha)
+                        let key = "q\(document.geometry.quarterTurns)"
+                            + "·H\(document.geometry.flipHorizontal ? 1 : 0)"
+                            + "·V\(document.geometry.flipVertical ? 1 : 0)·a\(index)"
+                        groups[key, default: []].append(
+                            ("q\(turns)·H\(flips)·V\(vertical)·a\(index)", sha))
+                    }
+                }
+            }
+        }
+        print("INJECTIVE · canonical 64 combinations → \(seen.count) distinct frames")
+        XCTAssertEqual(seen.count, 32, "normalised: D4 8 × 4 angles = 32 distinct frames")
+        XCTAssertEqual(groups.count, 32)
+        for (key, members) in groups {
+            XCTAssertEqual(members.count, 2, "\(key): one D4 element must have exactly two raw spellings")
+            XCTAssertEqual(Set(members.map(\.sha)).count, 1,
+                           "\(key): equivalent spellings must be byte-identical — "
+                           + members.map { "\($0.name)=\($0.sha.prefix(12))" }.joined(separator: " / "))
+        }
+    }
+
+    // MARK: - 2b. 489 §2.15: a pre-turned source and a turned document are the same pixels
+
+    /// The document says `quarterTurns = 1`; the other graph is handed the source pixels **already
+    /// turned** and says `quarterTurns = 0`. Same guide lines (which never render); sharpen is
+    /// neutral. The frames must be equal **byte for byte** — the pure-turn path in S0 is an exact
+    /// texel permutation, which is the part of §2.15 the code can make true without touching the
+    /// resampling kernels. The crop/keystone variant is measured in the report: its two S0 entry
+    /// points still differ by one Float16 ulp (the same sampling-order root as the 63-frame control,
+    /// outside this task's allowed files).
+    func testAPreTurnedSourceAndATurnedDocumentAreTheSameFrame() throws {
+        try requireMetal()
+        let image = patternImage(width: 200, height: 120)
+        let turned = QuarterTurnTests.turnedClockwise(image)
+        let graphA = try graph(image, "489-a")
+        let graphB = try graph(turned, "489-b")
+
+        var a = EditModel.neutral
+        a.sharpen.amount = 0
+        a.geometry.quarterTurns = 1
+        a.geometry.guideLines = [StoredGuideLine(ax: 0.25, ay: 0.3, bx: 0.75, by: 0.7,
+                                                 vertical: true)]
+
+        var b = a
+        b.geometry.quarterTurns = 0
+
+        let frameA = try render(graphA, a)
+        let frameB = try render(graphB, b)
+        XCTAssertEqual(frameA.size, frameB.size)
+        var mismatches = 0
+        var worst: Float16 = 0
+        for i in stride(from: 0, to: min(frameA.rgba.count, frameB.rgba.count), by: 1)
+        where frameA.rgba[i] != frameB.rgba[i] {
+            mismatches += 1
+            worst = max(worst, abs(frameA.rgba[i] - frameB.rgba[i]))
+        }
+        print("489 §2.15 · turned document vs pre-turned source · \(frameA.size) · "
+              + "mismatched channels \(mismatches) · worst Δ \(worst)")
+        XCTAssertEqual(mismatches, 0, "same document, two source orientations: not byte-identical")
+    }
+
+    private static func turnedClockwise(_ image: LinearImage) -> LinearImage {
+        let w = image.width, h = image.height
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let dx = h - 1 - y, dy = x
+                let src = (y * w + x) * 4
+                let dst = (dy * h + dx) * 4
+                for c in 0..<4 { rgba[dst + c] = image.rgba[src + c] }
+            }
+        }
+        return LinearImage(width: h, height: w, rgba: rgba,
+                           colorSpace: image.colorSpace, decoderVersion: image.decoderVersion)
     }
 
     // MARK: - 3. a quarter turn is a permutation, not a resample
@@ -195,10 +296,12 @@ final class QuarterTurnTests: XCTestCase {
         try requireMetal()
         let image = patternImage(width: 200, height: 120)
         let g = try graph(image, "quarter-permutation")
-        let upright = try render(g, EditModel.neutral)
+        var neutral = EditModel.neutral
+        neutral.sharpen.amount = 0
+        let upright = try render(g, neutral)
 
         for turns in 1...3 {
-            var document = EditModel.neutral
+            var document = neutral
             document.geometry.quarterTurns = turns
             let turned = try render(g, document)
             XCTAssertEqual(turned.size, turns % 2 == 1 ? upright.size.swapped : upright.size,

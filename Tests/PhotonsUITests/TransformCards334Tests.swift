@@ -108,7 +108,8 @@ final class TransformCards334Tests: XCTestCase {
                                          CropAspectRow.probeID, CropAspectRow.extrasProbeID,
                                          CropAspectRow.customProbeID, CropAspectRow.swapProbeID,
                                          CropCardID.staysInsidePixels,
-                                         CropCardID.grid]
+                                         CropCardID.grid,
+                                         CropCardID.autoCrop]
         XCTAssertEqual(rows, expectedRows,
                        "334/336: 裁切卡的行应正好是 \(expectedRows)（多 \(rows.subtracting(expectedRows).sorted())"
                        + " · 少 \(expectedRows.subtracting(rows).sorted())）")

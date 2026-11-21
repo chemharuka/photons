@@ -201,10 +201,10 @@ final class TransformMenuTests: XCTestCase {
                                     encoding: .utf8)
         let loupeSource = try String(contentsOf: sources.appendingPathComponent("LoupeController.swift"),
                                      encoding: .utf8)
-        XCTAssertTrue(toolSource.contains("model.geometry.flipHorizontal.toggle()"))
-        XCTAssertTrue(loupeSource.contains("model.geometry.flipHorizontal.toggle()"))
+        XCTAssertTrue(toolSource.contains("remapped(for:"))
+        XCTAssertTrue(loupeSource.contains("remapped(for:"))
         XCTAssertFalse(toolSource.contains("draft.flipHorizontal"), "§F: no draft copy of the flip")
-        print("F · one field: CropToolController + LoupeController both toggle geometry.flipHorizontal")
+        print("F · one field: CropToolController + LoupeController both call GeometryGroup.remapped(for:)")
 
         // A draft begin/apply cycle cannot resurrect a stale flip: the draft has no flip field at all.
         loupe.cropTool.toggleFlipVertical()

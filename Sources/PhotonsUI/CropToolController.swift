@@ -2189,12 +2189,15 @@ public final class CropToolController {
         // depended on whether the history happened to hold a session.
         closeToolSession(label: Loc.t("裁切与旋转"))
 
-        let before = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
-        session.applyEdit { model in
-            if horizontal { model.geometry.flipHorizontal.toggle() }
-            else { model.geometry.flipVertical.toggle() }
-        }
-        let after = horizontal ? session.edit.geometry.flipHorizontal : session.edit.geometry.flipVertical
+        let before = session.edit.geometry
+        // 489 — the draft carries the same fields the document does; remapping it with the same pure
+        // function keeps an uncommitted crop box on the same image features instead of letting the
+        // next 应用 write the un-mirrored rect back.
+        let remapped = draft.geometry(flipsOf: session.edit.geometry)
+            .remapped(for: horizontal ? .mirrorH : .mirrorV)
+        session.applyEdit { model in model.geometry = remapped }
+        draft = Draft(geometry: remapped)
+        let after = session.edit.geometry
         // A flip is discrete (072 §F): never fold it into the drag before it.
         session.commitEdit(label: horizontal ? Loc.t("水平翻转") : Loc.t("垂直翻转"), coalesce: false)
         // The answer the bar needs is "did the document move", not "was a row written".
@@ -2216,11 +2219,81 @@ public final class CropToolController {
         // crop-so-far, or nothing) and write the turn's own row. No reopen, so a second press cannot
         // take a different door because of what the first one left behind.
         closeToolSession(label: Loc.t("裁切与旋转"))
-        var turned = false
-        session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
-        guard turned else { return false }
+        // 489 — one pure remap for both the draft and the document, so the frame keeps covering the
+        // same pixels and the guides/perspective move with it.
+        let before = session.edit.geometry
+        let remapped = draft.geometry(flipsOf: before)
+            .remapped(for: clockwise ? .rotateCW : .rotateCCW)
+        session.applyEdit { model in model.geometry = remapped }
+        guard session.edit.geometry != before else { return false }
+        draft = Draft(geometry: remapped)
         session.commitEdit(label: clockwise ? Loc.t("顺时针旋转 90°") : Loc.t("逆时针旋转 90°"), coalesce: false)
         return true
+    }
+
+    // MARK: - 489 · 自动裁剪
+
+    /// The card's 「自动裁剪」: the largest axis-aligned rectangle that introduces **no black
+    /// corner**. It runs in the space the frame is edited in (the document canvas for a keystoned
+    /// document, the turned photograph otherwise) and writes once — one apply, one history row,
+    /// one render — so ⌘Z is the whole action.
+    ///
+    /// A picture that is already level (no straighten, no keystone) is left **byte-identical**: the
+    /// largest rectangle is the whole picture, but the user's crop is their composition, and the
+    /// ticket's own boundary case says so. Returning `false` writes nothing and mints no row.
+    @discardableResult
+    public func autoCrop() -> Bool {
+        guard isActive, let session else { return false }
+        let angle = CropTool.clampStraighten(draft.straighten)
+        let perspective = livePerspective
+        guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return false }
+        let space = liveCropSpace
+        let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
+        guard let rect = AutoCropSolver.maximumRectangle(in: polygon) else { return false }
+        var group = draft.geometry(flipsOf: session.edit.geometry)
+        group.crop = rect
+        group.cropSpace = space
+        closeToolSession(label: Loc.t("裁切与旋转"))
+        session.applyEdit { $0.geometry = group }
+        let committed = session.commitEdit(label: Loc.t("自动裁剪"), coalesce: false)
+        draft = Draft(geometry: group)
+        draftPhotoID = session.anchorID
+        if committed { appliedCount += 1 }
+        return committed
+    }
+
+    /// The picture's valid region in the crop's own normalized coordinates. `.canvas` walks the
+    /// document map (`P → R → AABB`, the same matrix the exporter uses); `.source` applies `P` and
+    /// then the straighten about the photograph's centre, in the turned frame's pixels.
+    private func autoCropPolygon(space: CropSpace, angle: Double,
+                                 perspective: PerspectiveMap?) -> [NormalizedPoint] {
+        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        if space == .canvas {
+            let document = CropMath.documentCanvas(source: sourceSize,
+                                                   straightenDegrees: angle,
+                                                   perspective: perspective)
+            return corners.map { corner in
+                let p = PerspectiveMap.apply(document.forward, x: corner.0, y: corner.1)
+                return NormalizedPoint(p.x, p.y)
+            }
+        }
+        let w = Double(max(sourceSize.width, 1)), h = Double(max(sourceSize.height, 1))
+        let rotation = CropGeometry.RotationMatrix(degrees: angle)
+        return corners.map { corner in
+            var p = (x: corner.0, y: corner.1)
+            if let perspective { p = perspective.forward(x: p.x, y: p.y) }
+            let turned = rotation.apply(x: (p.x - 0.5) * w, y: (p.y - 0.5) * h)
+            return NormalizedPoint(0.5 + turned.x / w, 0.5 + turned.y / h)
+        }
+    }
+
+    /// 489 — keep an open draft on the same pixels when the **menu** performs a discrete orientation
+    /// action (the card and the crop bar already go through `flip` / `rotateQuarter` above). `document`
+    /// is the pre-action geometry; the draft's own crop/guides/perspective are remapped by the same
+    /// pure function, so a later 应用 cannot write the un-turned rect back.
+    func remapDraft(for operation: GeometryGroup.QuarterTurnOperation, from document: GeometryGroup) {
+        guard isActive else { return }
+        draft = Draft(geometry: draft.geometry(flipsOf: document).remapped(for: operation))
     }
 
     /// The document's quarter turn — what the card's badge prints.

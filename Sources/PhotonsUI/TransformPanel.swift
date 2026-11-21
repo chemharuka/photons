@@ -164,6 +164,12 @@ extension InspectorView {
                      help: Loc.t("裁切框上的三分线（视图态，不进文档）"),
                      action: { loupe?.cropTool.toggleGrid() })
                 .background(CropRowProbeHost(rowID: CropCardID.grid))
+            // 489 — 自动裁剪 sits at the right of 九宫格, which moves one button left. Same row,
+            // same `CropChip` height and gap, as the user asked.
+            CropChip(title: Loc.t("自动裁剪"), on: false,
+                     help: Loc.t("在当前旋转/透视之后选出不出像素且面积最大的矩形（一次可撤销的文档写入）"),
+                     action: { _ = loupe?.autoCrop() })
+                .background(CropRowProbeHost(rowID: CropCardID.autoCrop))
         }
     }
 
@@ -1986,6 +1992,8 @@ enum CropCardID {
     static let apply = CropApplyRow.probeID
     /// 086: the bottom row's 九宫格 half (the apply probe is the other half's frame).
     static let grid = "grid"
+    /// 489: 自动裁剪, to the right of 九宫格.
+    static let autoCrop = "autoCrop"
     /// 317: the 「不出像素」 checkbox, in the same bottom row, left of 九宫格.
     static let staysInsidePixels = "staysInsidePixels"
 

@@ -120,13 +120,14 @@ final class CropToolTests: XCTestCase {
                                          mapping: f.mapping(of: state))
             let corner = layout.grips.first { $0.kind == .topLeft }!.point
 
-            // 10 pt away is inside the 12 pt target, 14 pt is outside it, at every zoom.
-            let near = CGPoint(x: corner.x + 10, y: corner.y)
-            let far = CGPoint(x: corner.x + 14, y: corner.y)
-            XCTAssertEqual(CropTool.hit(near, in: layout), .topLeft, "10 pt at \(zoom)× is a hit")
+            // 489 — the target is the visual 12 pt doubled (24 pt), still in screen points at every
+            // zoom. 23 pt is inside, 25 pt is outside.
+            let near = CGPoint(x: corner.x + 23, y: corner.y)
+            let far = CGPoint(x: corner.x + 25, y: corner.y)
+            XCTAssertEqual(CropTool.hit(near, in: layout), .topLeft, "23 pt at \(zoom)× is a hit")
             XCTAssertNotEqual(CropTool.hit(far, in: layout), .topLeft,
-                              "14 pt at \(zoom)× must not be a hit")
-            print(String(format: "035 hit radius: zoom %.2f, corner (%.1f, %.1f), 10 pt → hit, 14 pt → miss",
+                              "25 pt at \(zoom)× must not be a hit")
+            print(String(format: "489 hit radius: zoom %.2f, corner (%.1f, %.1f), 23 pt → hit, 25 pt → miss",
                          zoom, corner.x, corner.y))
         }
     }

@@ -1385,6 +1385,144 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         }
     }
 
+    // MARK: 489 — rotation / mirror as one pure remap
+
+    // The document's orientation is a D4 element. `quarterTurns`, `flipHorizontal` and
+    // `flipVertical` spell it with **sixteen** triples for eight pictures (a 180° rotation is both
+    // `q + 2` and `H + V`), which is harmless until two spellings of one picture have to render
+    // byte-identically. `canonicalized` picks one spelling per element; `remapped(for:)` is the
+    // action of a quarter turn / mirror on every geometry field, applied **first** (to the source),
+    // so perspective, crop and guide lines are all recomputed in the new frame rather than being
+    // rotated later by four separate consumers.
+    //
+    // Field rules (each is pinned by `GeometryRemap489Tests`):
+    //   · quarterTurns       (q ± 1) mod 4 for a rotation; a mirror leaves q alone;
+    //   · flipH / flipV      one bit toggled by the matching mirror, both kept as pressed;
+    //   · crop               CW  (x,y,w,h) → (1−y−h, x, h, w)
+    //                        CCW (x,y,w,h) → (y, 1−x−w, h, w)
+    //                        H   (x,y,w,h) → (1−x−w, y, w, h)
+    //                        V   (x,y,w,h) → (x, 1−y−h, w, h);
+    //   · straightenDegrees   unchanged (a rotation commutes with the angle; a mirror is a reflection
+    //                        in the same picture space, so it keeps the stored dial angle);
+    //   · perspectiveV/H      a rotation swaps them and negates both; H negates the horizontal one,
+    //                        V the vertical one;
+    //   · perspectiveShear    negated by a rotation and by either mirror;
+    //   · perspectiveAspect   reciprocal on a rotation, unchanged on a mirror;
+    //   · guideLines          endpoints transformed by the same point map; the axis (which end is the
+    //                        start, and 横/竖 intent) is untouched — it is the user's intent, not a
+    //                        coordinate.
+
+    /// One of the four discrete orientation operations the 变换 card offers.
+    public enum QuarterTurnOperation: String, Sendable, Equatable, CaseIterable {
+        case rotateCW
+        case rotateCCW
+        case mirrorH
+        case mirrorV
+
+        /// `true` for the two rotations (the operations that change `quarterTurns` and reciprocate
+        /// `perspectiveAspect`).
+        public var isRotation: Bool { self == .rotateCW || self == .rotateCCW }
+    }
+
+    /// One spelling per D4 element: `(q, H, V)` collapses `H+V` into a 180° rotation and `V` into
+    /// `H` plus a 180° rotation. That is the identity `V = H · T²` — in this file's coordinates both
+    /// are `(x, y) ↦ (1−x, 1−y)` — so no picture moves and every equivalent triple now takes the
+    /// same arithmetic path (and therefore the same bytes).
+    public var canonicalized: GeometryGroup {
+        var g = self
+        g.quarterTurns = GeometryGroup.normalizedQuarterTurns(g.quarterTurns)
+        if g.flipHorizontal && g.flipVertical {
+            g.quarterTurns = GeometryGroup.normalizedQuarterTurns(g.quarterTurns + 2)
+            g.flipHorizontal = false
+            g.flipVertical = false
+        } else if g.flipVertical {
+            g.quarterTurns = GeometryGroup.normalizedQuarterTurns(g.quarterTurns + 2)
+            g.flipVertical = false
+            g.flipHorizontal = true
+        }
+        return g
+    }
+
+    /// The geometry after `operation` has been applied **to the source picture**, with every field
+    /// rewritten so the document describes the same picture in the new frame. This is the one
+    /// implementation behind the card's 左转/右转/水平镜像/垂直镜像, the menu rows and the crop bar's
+    /// two flips; a second mapping is forbidden (489 §2.13).
+    public func remapped(for operation: QuarterTurnOperation) -> GeometryGroup {
+        var g = self
+        let q = GeometryGroup.normalizedQuarterTurns(quarterTurns)
+
+        switch operation {
+        case .rotateCW:
+            g.quarterTurns = GeometryGroup.normalizedQuarterTurns(q + 1)
+            g.crop = GeometryGroup.rotatedCrop(crop, clockwise: true)
+            g.perspectiveVertical = -perspectiveHorizontal
+            g.perspectiveHorizontal = -perspectiveVertical
+            g.perspectiveShear = -perspectiveShear
+            if perspectiveAspect.isFinite, perspectiveAspect != 0 {
+                g.perspectiveAspect = 1 / perspectiveAspect
+            }
+        case .rotateCCW:
+            g.quarterTurns = GeometryGroup.normalizedQuarterTurns(q + 3)
+            g.crop = GeometryGroup.rotatedCrop(crop, clockwise: false)
+            g.perspectiveVertical = -perspectiveHorizontal
+            g.perspectiveHorizontal = -perspectiveVertical
+            g.perspectiveShear = -perspectiveShear
+            if perspectiveAspect.isFinite, perspectiveAspect != 0 {
+                g.perspectiveAspect = 1 / perspectiveAspect
+            }
+        case .mirrorH:
+            g.crop = GeometryGroup.mirroredCrop(crop, horizontal: true)
+            g.flipHorizontal.toggle()
+            g.perspectiveHorizontal = -perspectiveHorizontal
+            g.perspectiveShear = -perspectiveShear
+        case .mirrorV:
+            g.crop = GeometryGroup.mirroredCrop(crop, horizontal: false)
+            g.flipVertical.toggle()
+            g.perspectiveVertical = -perspectiveVertical
+            g.perspectiveShear = -perspectiveShear
+        }
+
+        if operation == .rotateCW {
+            g.guideLines = guideLines.map { $0.remapped { GeometryGroup.point($0, turnedClockwise: true) } }
+        } else if operation == .rotateCCW {
+            g.guideLines = guideLines.map { $0.remapped { GeometryGroup.point($0, turnedClockwise: false) } }
+        } else if operation == .mirrorH {
+            g.guideLines = guideLines.map { $0.remapped { NormalizedPoint(1 - $0.x, $0.y) } }
+        } else {
+            g.guideLines = guideLines.map { $0.remapped { NormalizedPoint($0.x, 1 - $0.y) } }
+        }
+
+        // The lock's ratio is in pixels: a quarter turn swaps the axes, so the rect's ratio is the
+        // reciprocal. A mirror does not change a pixel ratio.
+        if operation.isRotation, let ratio = aspectLock.ratio {
+            g.aspectLock = .matching(ratio: 1 / ratio)
+        }
+        // The stored triple keeps the flags the user pressed (`flipVertical` stays the vertical
+        // switch's state); `canonicalized` is the separate D4 spelling used where equivalent triples
+        // must render byte-identically (489's 64-orientation acceptance).
+        return g
+    }
+
+    private static func rotatedCrop(_ rect: NormalizedRect, clockwise: Bool) -> NormalizedRect {
+        let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height)
+        // The ticket's formulas, spelled on the four stored numbers rather than re-derived from
+        // edges, so the two dimensions that do not move keep their exact values.
+        return clockwise
+            ? NormalizedRect(x: 1 - y - h, y: x, width: h, height: w)
+            : NormalizedRect(x: y, y: 1 - x - w, width: h, height: w)
+    }
+
+    private static func mirroredCrop(_ rect: NormalizedRect, horizontal: Bool) -> NormalizedRect {
+        let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height)
+        return horizontal
+            ? NormalizedRect(x: 1 - x - w, y: y, width: w, height: h)
+            : NormalizedRect(x: x, y: 1 - y - h, width: w, height: h)
+    }
+
+    private static func point(_ p: NormalizedPoint, turnedClockwise: Bool) -> NormalizedPoint {
+        turnedClockwise ? NormalizedPoint(1 - p.y, p.x) : NormalizedPoint(p.y, 1 - p.x)
+    }
+
     // MARK: explicit crop / straighten semantics
 
     /// The source's pixel dimensions **as the turned frame sees them**: swapped when the quarter
@@ -1428,13 +1566,7 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     /// 3:2 would let `renderCrop` reshape the rect and the "same pixels" promise would be gone at
     /// the very next render, which is the same bug class as not turning the rect at all.
     public mutating func turn(clockwise: Bool) {
-        quarterTurns = GeometryGroup.normalizedQuarterTurns(quarterTurns + (clockwise ? 1 : 3))
-        let turned = clockwise ? CropMath.turnedClockwise(cropRect)
-                                : CropMath.turnedCounterClockwise(cropRect)
-        crop = turned.normalizedRect
-        if let ratio = aspectLock.ratio {
-            aspectLock = AspectLock.matching(ratio: 1 / ratio)
-        }
+        self = remapped(for: clockwise ? .rotateCW : .rotateCCW)
     }
 
     /// `turn(clockwise:)` `quarterTurns` times, clockwise — the export side's door to the same
