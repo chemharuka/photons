@@ -643,9 +643,15 @@ public final class WorkspaceRootView: NSView {
     /// 只在 `setBrowserMode` 的 `guard mode != browserMode` 之后置位；启动路径与任何不是由
     /// `setBrowserMode` 触发的 `applyBrowserMode()` 一律不置。
     private var pendingBrowserReveal = false
+    /// 471r §1.1 — 单元测试读取「同一模式重复 set 不会置旗」的唯一接缝。
+    var pendingBrowserRevealForTesting: Bool { pendingBrowserReveal }
     /// 471 — 真正进入 reveal 动作的次数（旗标被消费且没有被「编辑窗口 / 用户滚动」跳过）。
     /// `SingleClickNoCenter383Tests.testFive` 要求编辑提交前后增量为 0。
     public private(set) var browserRevealCount = 0
+    /// 471r §1.3 — 测试可直接模拟「这一轮布局由编辑落地带出」，不必等 0.25 s 定时器。
+    func layoutForTesting(isMergingEdit: Bool) {
+        layout(isMergingEdit: isMergingEdit)
+    }
     private let browserDivider = WorkspaceDivider()
     private let inspectorDivider = WorkspaceDivider()
     private let inspectorBackdrop = NSVisualEffectView()
@@ -1102,6 +1108,15 @@ public final class WorkspaceRootView: NSView {
 
     public override func layout() {
         super.layout()
+        // §1.3 — 「这次布局可能正落在编辑落地的合并窗口里」是一件显式的事实，不是时间窗：
+        // `EditThumbnailRefresher.pendingAssetID` 就是 0.25 s 合并窗口的唯一状态，这里把它作为
+        // 参数传给布局体，消费 reveal 时按参数跳过，不再在消费点自己猜。
+        layout(isMergingEdit: editThumbnailRefresher.pendingAssetID != nil)
+    }
+
+    /// 471r — 布局的实体。`isMergingEdit` 由唯一的 `layout()` 入口显式传入；测试若需要模拟
+    /// 「这一轮布局是编辑落地带出来的」，走 `layoutForTesting(isMergingEdit:)`。
+    private func layout(isMergingEdit: Bool) {
         let centre = trafficLightCentreY()
         let g = WorkspaceLayout.resolve(window: bounds.size,
                                         mode: browserMode,
@@ -1158,9 +1173,11 @@ public final class WorkspaceRootView: NSView {
         topBar.needsDisplay = true
         // 471 — 布局已经把这轮浏览器面的最终几何写下去了，现在才轮到「把锚点带进新出现的一面」。
         // 一次性：消费掉旗标，后续任何布局（拖动分隔条、缩略图落地）都不会再把用户滚走的视口拽回来。
+        // §1.3 — 合并窗口内的这一轮布局不消费：旗标直接丢弃（「跳过」不是「延后」），
+        // 所以编辑落地不会借模式切换的 reveal 把 383 的 0.25 s 预算拖长。
         if pendingBrowserReveal {
             pendingBrowserReveal = false
-            consumeBrowserReveal()
+            if !isMergingEdit { consumeBrowserReveal() }
         }
     }
 
@@ -1171,11 +1188,10 @@ public final class WorkspaceRootView: NSView {
     ///
     /// 383 的「单击不居中」不受影响：这条只由模式切换触发，不接选择变化。相机与缩放不动。
     ///
-    /// §6.3 — 这是「跳过」而不是「延后」：编辑的 0.25 s 合并窗口还没关（这一刻的布局可能正是
-    /// 编辑落地带出来的），或者用户正在驱动目标面的滚动条，就直接丢弃这次 reveal。
+    /// §6.3 — 这是「跳过」而不是「延后」：用户正在驱动目标面的滚动条就直接丢弃这次 reveal；
+    /// 「编辑合并窗口还没关」由 `layout(isMergingEdit:)` 在调用之前显式拦下。
     private func consumeBrowserReveal() {
-        guard session.anchorID != nil,
-              editThumbnailRefresher.pendingAssetID == nil else { return }
+        guard session.anchorID != nil else { return }
         let targetIsFilmstrip = browserMode == .filmstrip
         if targetIsFilmstrip {
             guard !filmstripController.isUserScrolling else { return }

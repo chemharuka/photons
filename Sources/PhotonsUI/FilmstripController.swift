@@ -1067,7 +1067,12 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     /// 「两者的位置大致匹配」。直接置 clip，不调 `scrollToItems(at:scrollPosition:)` ——
     /// 那个 API 会 invalidate layout 并重摆格子，正好把 383 的编辑落地预算拖爆。
     /// 已经可见 / 用户正在滚动时是 no-op。
+    /// 471r §1.4 — 真正的 `revealAnchor()` 调用次数（含被幂等 / 用户滚动提前返回的那些）。
+    /// `SingleClickNoCenter383Tests.testFive` 要求一次编辑提交前后增量为 0。
+    public private(set) var revealAnchorCallCount = 0
+
     public func revealAnchor() {
+        revealAnchorCallCount += 1
         guard isViewLoaded, let session, let id = session.anchorID,
               let index = session.assets.firstIndex(where: { $0.id == id }),
               collectionView.numberOfItems(inSection: 0) > index,

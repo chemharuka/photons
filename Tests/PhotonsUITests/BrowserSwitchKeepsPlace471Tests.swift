@@ -165,6 +165,71 @@ final class BrowserSwitchKeepsPlace471Tests: XCTestCase {
         settle(2)
     }
 
+    // MARK: - ⓪ §1.1 — 同一模式重复 set 不置旗（启动 / 重布局 / 重复 set 都不许登记 reveal）
+
+    func testZero_settingTheSameBrowserModeThreeTimesNeverArmsTheReveal() throws {
+        let library = try makeLibrary(count: 24)
+        let session = try makeSession(library)
+        let root = try makeRoot(session, mode: .list)
+        let anchor = 20
+        session.selectOnly(library.ids[anchor])
+        root.layoutSubtreeIfNeeded()
+        settle(2)
+
+        XCTAssertFalse(root.pendingBrowserRevealForTesting,
+                       "启动与首次布局之后旗标必须是 false")
+        let countBefore = root.browserRevealCount
+
+        for round in 1...3 {
+            root.setBrowserMode(.list)
+            XCTAssertFalse(root.pendingBrowserRevealForTesting,
+                           "第 \(round) 次 set 相同模式不得置位 pendingBrowserReveal")
+        }
+        root.layoutSubtreeIfNeeded()
+        settle(2)
+
+        XCTAssertFalse(root.pendingBrowserRevealForTesting,
+                       "三次相同模式 set 之后旗标仍为 false")
+        XCTAssertEqual(root.browserRevealCount, countBefore,
+                       "相同模式重复 set 不得消费 reveal（\(countBefore) → \(root.browserRevealCount)）")
+    }
+
+    // MARK: - ⓪' §1.3 — 显式告知「本轮布局正在合并编辑」时丢弃旗标，不调 revealAnchor
+
+    func testZeroB_aMergingEditLayoutDiscardsTheRevealWithoutCallingRevealAnchor() throws {
+        let library = try makeLibrary(count: 24)
+        let session = try makeSession(library)
+        let root = try makeRoot(session, mode: .filmstrip)
+        let anchor = 20
+        session.selectOnly(library.ids[anchor])
+        settle(2)
+
+        // 把胶片条停在开头，让锚点必须靠 reveal 才能进视口。
+        let strip = try stripScroll(root)
+        place(strip, origin: .zero, activity: root.filmstripController.scrollActivity)
+        let paneCallsBefore = root.browserPane.revealAnchorCallCount
+        let stripCallsBefore = root.filmstripController.revealAnchorCallCount
+        let countBefore = root.browserRevealCount
+
+        root.setBrowserMode(.list)
+        XCTAssertTrue(root.pendingBrowserRevealForTesting,
+                      "真的换面时旗标应置位（这才是 reveal 的触发条件）")
+        root.layoutForTesting(isMergingEdit: true)
+
+        XCTAssertFalse(root.pendingBrowserRevealForTesting, "合并窗口内的布局消费后应丢弃旗标")
+        XCTAssertEqual(root.browserRevealCount, countBefore,
+                       "编辑合并窗口内不得消费 reveal（\(countBefore) → \(root.browserRevealCount)）")
+        XCTAssertEqual(root.browserPane.revealAnchorCallCount, paneCallsBefore,
+                       "合并窗口内不得调用侧栏 revealAnchor")
+        XCTAssertEqual(root.filmstripController.revealAnchorCallCount, stripCallsBefore,
+                       "合并窗口内不得调用胶片条 revealAnchor")
+
+        // 「跳过」不是「延后」：窗口关掉之后的普通布局也不许补做。
+        root.layoutForTesting(isMergingEdit: false)
+        settle(2)
+        XCTAssertEqual(root.browserRevealCount, countBefore, "窗口关闭后不许补做 reveal")
+    }
+
     // MARK: - ① 网格：胶片条 → 侧栏，目标面露出锚点；计数器 +1
 
     func testOne_gridFilmstripToListRevealsTheAnchor() throws {
@@ -191,6 +256,7 @@ final class BrowserSwitchKeepsPlace471Tests: XCTestCase {
                        "precondition：胶片条模式下侧栏没有照片行")
         let pane = try paneScroll(root)
         let countBefore = root.browserRevealCount
+        let callsBefore = root.browserPane.revealAnchorCallCount
 
         root.setBrowserMode(.list)
         root.layoutSubtreeIfNeeded()
@@ -198,6 +264,8 @@ final class BrowserSwitchKeepsPlace471Tests: XCTestCase {
 
         XCTAssertEqual(root.browserRevealCount, countBefore + 1,
                        "网格切换应真正走一次 reveal（\(countBefore) → \(root.browserRevealCount)）")
+        XCTAssertEqual(root.browserPane.revealAnchorCallCount, callsBefore + 1,
+                       "网格切换应真正调用一次侧栏 revealAnchor（\(callsBefore) → \(root.browserPane.revealAnchorCallCount)）")
         XCTAssertEqual(root.browserPane.photoListForTesting.numberOfRows, library.ids.count,
                        "侧栏应重新有全部照片行")
         let rowRect = paneRowRect(root, row: anchor)
@@ -237,6 +305,7 @@ final class BrowserSwitchKeepsPlace471Tests: XCTestCase {
         let strip = try stripScroll(root)
         place(strip, origin: .zero, activity: root.filmstripController.scrollActivity)
         let countBefore = root.browserRevealCount
+        let callsBefore = root.filmstripController.revealAnchorCallCount
 
         root.setBrowserMode(.filmstrip)
         root.layoutSubtreeIfNeeded()
@@ -244,6 +313,8 @@ final class BrowserSwitchKeepsPlace471Tests: XCTestCase {
 
         XCTAssertEqual(root.browserRevealCount, countBefore + 1,
                        "网格切换应真正走一次 reveal（\(countBefore) → \(root.browserRevealCount)）")
+        XCTAssertEqual(root.filmstripController.revealAnchorCallCount, callsBefore + 1,
+                       "网格切换应真正调用一次胶片条 revealAnchor（\(callsBefore) → \(root.filmstripController.revealAnchorCallCount)）")
         let stripVisible = strip.documentVisibleRect
         let itemAfter = try stripItemRect(root, item: anchor)
         XCTAssertTrue(stripVisible.intersects(itemAfter),
