@@ -2052,28 +2052,12 @@ public final class DenoiseMenuTarget: NSObject {
         session?.denoiseSelection(engine: .nonlocal)
     }
 
-    @objc func builtinPressed(_ sender: Any?) {
-        session?.denoiseSelection(engine: .builtin)
-    }
-
     @objc func batchDenoisePressed(_ sender: Any?) {
         // 478 — the two batch rows carry their engine on the item (`tag`), so the click decides which
         // path runs. The fallback keeps the programmatic `batchEngine` call used by older tests.
         let engine = (sender as? NSMenuItem)
             .flatMap { DenoiseMenuBuilder.engine(forTag: $0.tag) } ?? batchEngine
         session?.denoiseBatchSelection(engine: engine) { [weak self] message in
-            if let present = self?.presentBatchSkipNotice {
-                present(message)
-            } else {
-                DenoiseMenuBuilder.presentBatchSkipAlert(message)
-            }
-        }
-    }
-
-    /// §480 — the built-in engine's own batch row. It is a separate selector rather than a second
-    /// `batchEngine` so the two rows cannot disagree about which engine the click started.
-    @objc func builtinBatchPressed(_ sender: Any?) {
-        session?.denoiseBatchSelection(engine: .builtin) { [weak self] message in
             if let present = self?.presentBatchSkipNotice {
                 present(message)
             } else {
@@ -2093,7 +2077,6 @@ public enum DenoiseMenuBuilder {
         switch engine {
         case .ansel: return Loc.t("模型降噪（Ansel）…")
         case .nonlocal: return Loc.t("模型降噪（Nonlocal）…")
-        case .builtin: return Loc.t("模型降噪（内置）…")
         }
     }
 
@@ -2109,27 +2092,13 @@ public enum DenoiseMenuBuilder {
         Loc.t("降噪 {0} 张（{1}）…", String(describing: (count)), engine.displayName)
     }
 
-    /// §480 — the built-in batch row's title. Deliberately *not* a change to `batchTitle`: the
-    /// existing row is Ansel/NLMF's, and 474's tests (and users' muscle memory) pin that sentence.
-    public static func builtinBatchTitle(count: Int) -> String {
-        // 480 × 478 合并后：内置只是第三个引擎，标题走同一句模板（「降噪 N 张（内置）…」），
-        // 保留这个符号只是为了 480 的用例能引用它。
-        batchTitle(count: count, engine: .builtin)
-    }
-
     public static var batchAction: Selector { #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
-    /// 480 × 478 — 批量行**不再有专用 selector**：三行共用 `batchAction`，引擎由 `tag` 携带。
-    public static var builtinBatchAction: Selector { batchAction }
 
     /// 478 — `NSMenuItem.tag` is the engine carrier for the batch rows. Two values, stable across
     /// both menus; `nil` means "not one of ours" (the single rows use their own selectors, so they
     /// never reach this lookup).
     public static func tag(for engine: DenoiseEngine) -> Int {
-        switch engine {
-        case .ansel: return 0
-        case .nonlocal: return 1
-        case .builtin: return 2
-        }
+        engine == .ansel ? 0 : 1
     }
 
     public static func engine(forTag tag: Int) -> DenoiseEngine? {
@@ -2158,9 +2127,6 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
-        case .builtin:
-            // §480 — no model, no executable, no network. Nothing to check.
-            break
         }
         return nil
     }
@@ -2222,9 +2188,6 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
-        case .builtin:
-            // §480 — no model, no executable, no network. Nothing to check.
-            break
         }
         return nil
     }
@@ -2233,12 +2196,9 @@ public enum DenoiseMenuBuilder {
     /// 时才可点。
     public static func item(session: CatalogSession?, target: DenoiseMenuTarget,
                             selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
-        let action: Selector
-        switch engine {
-        case .ansel: action = #selector(DenoiseMenuTarget.denoisePressed(_:))
-        case .nonlocal: action = #selector(DenoiseMenuTarget.nonlocalPressed(_:))
-        case .builtin: action = #selector(DenoiseMenuTarget.builtinPressed(_:))
-        }
+        let action: Selector = engine == .ansel
+            ? #selector(DenoiseMenuTarget.denoisePressed(_:))
+            : #selector(DenoiseMenuTarget.nonlocalPressed(_:))
         let entry = NSMenuItem(title: title(for: engine), action: action, keyEquivalent: "")
         entry.target = target
         if let reason = unavailableReason(session: session, selectedIDs: selectedIDs,
@@ -2265,8 +2225,7 @@ public enum DenoiseMenuBuilder {
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
                               selectedIDs: [String]) {
         for (index, existing) in menu.items.enumerated().reversed()
-            where titles.contains(existing.title) || existing.action == batchAction
-                || existing.action == builtinBatchAction {
+            where titles.contains(existing.title) || existing.action == batchAction {
             menu.removeItem(at: index)
             // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
             // one after its own row, and the previous open may have put one after ours.

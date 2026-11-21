@@ -204,11 +204,9 @@ final class DenoiseTwoEntries432Tests: XCTestCase {
         for name in ["grid", "filmstrip", "browser"] {
             let menu = try XCTUnwrap(menus[name])
             let entries = rows(in: menu)
-            // §480 added a third, dependency-free engine. The original two keep their order.
-            XCTAssertEqual(entries.count, 3, "\(name)：三条并列行（不是子菜单）")
-            XCTAssertEqual(entries.map(\.title),
-                           ["模型降噪（Ansel）…", "模型降噪（Nonlocal）…", "模型降噪（内置）…"],
-                           "\(name)：三项的顺序与文案")
+            XCTAssertEqual(entries.count, 2, "\(name)：必须两行（不是子菜单、不是一行）")
+            XCTAssertEqual(entries.map(\.title), ["模型降噪（Ansel）…", "模型降噪（Nonlocal）…"],
+                           "\(name)：两项的顺序与文案")
             for row in entries {
                 XCTAssertTrue(row.isEnabled, "\(name)：两条依赖都在时可点（行=\(row.title)）")
             }
