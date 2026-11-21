@@ -355,55 +355,10 @@ public final class AssetCardView: NSView {
         return NSRect(x: ((full.width - w) / 2).rounded(), y: 0, width: w, height: full.height)
     }
 
-    /// 436 — is the **document's output** taller than wide? The record's `width/height` are display
-    /// pixels (import and the v7 migration apply EXIF orientation), and the user's crop can turn a
-    /// landscape frame into a portrait output, so the crop is laid over those pixels here. Only the
-    /// row is read: no decode, no file IO.
-    ///
-    /// `nil` means "no answer from the document" — unreadable JSON, no crop, or a zero-sized output —
-    /// and the caller falls back to the record's own pair. **Unknown is landscape** (see `swatchRect`).
-    static func isPortrait(_ asset: Asset) -> Bool {
-        let key = portraitKey(asset)
-        if let cached = portraitAnswers.object(forKey: key) { return cached.boolValue }
-        let answer: Bool
-        if let fromDocument = documentIsPortrait(asset) {
-            answer = fromDocument
-        } else if let w = asset.width, let h = asset.height, w > 0, h > 0 {
-            answer = h > w
-        } else {
-            answer = false
-        }
-        portraitAnswers.setObject(NSNumber(value: answer), forKey: key)
-        return answer
-    }
-
-    /// 436 — one `Bool` per row version, never an `EditModel`. Measured at **~0.8 ms/cell** cold for a
-    /// cropped document (A⑦), over 40 cells on one screen; a warm answer is a dictionary lookup.
-    /// The key carries the row's own version stamp, so a crop edit invalidates it: same id, same
-    /// `develop_version`/`edit_time` and same pixels is the same document.
-    private static let portraitAnswers: NSCache<NSString, NSNumber> = {
-        let cache = NSCache<NSString, NSNumber>()
-        cache.countLimit = 4096
-        return cache
-    }()
-
-    private static func portraitKey(_ asset: Asset) -> NSString {
-        "\(asset.id)#\(asset.developVersion)#\(asset.editTime ?? "")#"
-            + "\(asset.width ?? -1)x\(asset.height ?? -1)#\(asset.developJson.hashValue)"
-            as NSString
-    }
-
-    /// The document crop over the row's pixels, or nil when there is nothing to add to the record.
-    private static func documentIsPortrait(_ asset: Asset) -> Bool? {
-        guard let w = asset.width, let h = asset.height, w > 0, h > 0 else { return nil }
-        guard let data = asset.developJson.data(using: .utf8),
-              let edit = try? JSONDecoder().decode(EditModel.self, from: data) else { return nil }
-        // A full-frame crop outputs exactly the row's pixels — the fallback already answers that.
-        guard !edit.geometry.cropRect.coversFrame else { return nil }
-        let output = edit.geometry.outputPixels(in: ImageSize(width: w, height: h))
-        guard output.width > 0, output.height > 0 else { return nil }
-        return output.height > output.width
-    }
+    /// 472 — the grid's orientation rule now lives in `AssetPortrait`, shared with the filmstrip so
+    /// the two surfaces cannot disagree about which photos are portrait. The name is kept for the
+    /// 431/436 call sites and tests.
+    static func isPortrait(_ asset: Asset) -> Bool { AssetPortrait.isPortrait(asset) }
 
     public override func draw(_ dirtyRect: NSRect) {
         guard let asset else { return }
