@@ -24,6 +24,16 @@ public final class UISmokeRunner {
     public let screenshotDirectory: URL
     public var widths: [CGFloat] = [1200, 1600, 2400]
 
+    /// 466 — the smoke harness never shares the user's preferences domain. The export sheet is opened
+    /// by the shipped app binary, so its default store is `UserDefaults.standard`; installing this
+    /// suite before the first `showExportSheet()` keeps `Smoke Thumb` / `photons.export.section.*`
+    /// out of the real domain. `finish()` removes it.
+    private let isolatedDefaults: UserDefaults?
+    /// 466 — the rest of the harness (browser width/mode, filter bar, sort order…) writes through
+    /// stores this lane does not own. Snapshot every `photons.*` key in the real domain and put it
+    /// back in `finish()`, so a smoke run cannot leave the app looking like the fixture either.
+    private let savedRealPreferences: [String: Any]
+
     private var lines: [String] = []
     private var failures: [String] = []
 
@@ -33,6 +43,13 @@ public final class UISmokeRunner {
         self.libraryURL = libraryURL
         self.expectedRows = expectedRows
         self.screenshotDirectory = screenshotDirectory
+        // 466 — start every run from an empty suite, and point the export defaults at it.
+        let suite = UserDefaults(suiteName: ExportDefaults.smokeSuiteName)
+        suite?.removePersistentDomain(forName: ExportDefaults.smokeSuiteName)
+        ExportDefaults.install(suite)
+        self.isolatedDefaults = suite
+        self.savedRealPreferences = UserDefaults.standard.dictionaryRepresentation()
+            .filter { $0.key.hasPrefix("photons.") }
         // The smoke library is a temporary fixture. Opening it must not become the user's
         // 「上次打开的库」 — this harness runs in the real app process, with the real defaults.
         windowController.session.remembersRecentLibrary = false
@@ -3712,7 +3729,27 @@ public final class UISmokeRunner {
         failures.append(what)
     }
 
+    /// 466 — undo any `photons.*` preference the run left behind (keys that did not exist before are
+    /// removed; keys that did are put back byte-for-byte). This is the harness-side half of "a
+    /// harness is not the user"; the export stores themselves go to the isolated suite above.
+    private func restoreRealPreferences() {
+        let standard = UserDefaults.standard
+        let current = standard.dictionaryRepresentation().filter { $0.key.hasPrefix("photons.") }
+        for key in current.keys where savedRealPreferences[key] == nil {
+            standard.removeObject(forKey: key)
+        }
+        for (key, value) in savedRealPreferences {
+            let unchanged = (current[key] as? NSObject)?.isEqual(value) ?? false
+            if !unchanged { standard.set(value, forKey: key) }
+        }
+    }
+
     private func finish() -> Int32 {
+        // 466 — the run's export preferences are a fixture, not the user's. Drop the whole suite and
+        // the override so a later sheet in this process (there is none in practice) cannot write it.
+        ExportDefaults.install(nil)
+        isolatedDefaults?.removePersistentDomain(forName: ExportDefaults.smokeSuiteName)
+        restoreRealPreferences()
         if failures.isEmpty {
             log("SMOKE PASS (\(lines.filter { $0.contains("PASS") }.count) checks)")
             return 0

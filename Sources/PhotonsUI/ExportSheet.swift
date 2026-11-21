@@ -373,7 +373,9 @@ public final class ExportSheetModel {
                 writableUTIs: Set<String>? = nil,
                 draftStore: ExportDraftPersistence.Store? = nil,
                 backgroundTasks: BackgroundTaskStore? = nil) {
-        let draftStore = draftStore ?? UserDefaults.standard
+        // 466 —— 默认库由 `ExportDefaults` 决定（app = standard、`--ui-smoke` = 自己的域、测试进程 =
+        // 内存库）；显式传进来的 store 优先，P3 的 `backgroundTasks` 保持可选。
+        let draftStore = draftStore ?? ExportDefaults.draftStore
         self.draftStore = draftStore
         self.backgroundTasks = backgroundTasks
 
@@ -1105,13 +1107,27 @@ public struct ExportSectionCollapseStore {
         self.write = write
     }
 
+    public init(store: UserDefaults) {
+        self.init(read: { store.object(forKey: ExportSectionCollapseStore.key($0)) as? Bool },
+                  write: { title, expanded in
+                      store.set(expanded, forKey: ExportSectionCollapseStore.key(title))
+                  })
+    }
+
     static func key(_ title: String) -> String { "photons.export.section.\(title)" }
 
-    public static let userDefaults = ExportSectionCollapseStore(
-        read: { UserDefaults.standard.object(forKey: ExportSectionCollapseStore.key($0)) as? Bool },
-        write: { title, expanded in
-            UserDefaults.standard.set(expanded, forKey: ExportSectionCollapseStore.key(title))
-        })
+    /// The app's real store, unless a harness installed its own suite (466). In a test process a
+    /// fresh in-memory store is used, so constructing a sheet without an explicit store cannot write
+    /// `photons.export.section.*` into the developer's domain.
+    public static var userDefaults: ExportSectionCollapseStore {
+        if let suite = ExportDefaults.overrideSuite {
+            return ExportSectionCollapseStore(store: suite)
+        }
+        if ExportDefaults.isRunningTests {
+            return .memory()
+        }
+        return ExportSectionCollapseStore(store: .standard)
+    }
 
     static func memory(_ seed: [String: Bool] = [:]) -> ExportSectionCollapseStore {
         final class Box { var values: [String: Bool] = [:] }
@@ -2288,14 +2304,18 @@ public final class ExportSheetController: NSObject {
     /// background-export test asserts that pressing 导出 dismisses exactly once.
     public private(set) var dismissCount = 0
 
-    public init(session: CatalogSession, outputDirectory: URL? = nil) {
+    public init(session: CatalogSession, outputDirectory: URL? = nil,
+                draftStore: ExportDraftPersistence.Store = ExportDefaults.draftStore,
+                sectionStore: ExportSectionCollapseStore = .userDefaults) {
         self.session = session
         // `nil` lets the model use 161 §5's remembered directory (or the factory default). An
         // explicit directory still wins — that is the caller asking for this run's destination.
         let model = ExportSheetModel(outputDirectory: outputDirectory,
+                                     draftStore: draftStore,
                                      backgroundTasks: session.backgroundTasks)
         self.model = model
-        self.hosting = NSHostingController(rootView: ExportSheetView(model: model))
+        self.hosting = NSHostingController(rootView: ExportSheetView(model: model,
+                                                                     sectionStore: sectionStore))
         super.init()
 
         model.onClose = { [weak self] in self?.dismiss() }

@@ -36,10 +36,6 @@ final class ExportSheetScrollerGutter388Tests: XCTestCase {
             window.contentView = nil
         }
         windows = []
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            UserDefaults.standard.removeObject(forKey: "photons.export.section.\(title)")
-        }
     }
 
     // MARK: - 读取手段
@@ -64,19 +60,23 @@ final class ExportSheetScrollerGutter388Tests: XCTestCase {
     }
 
     /// 真路径：与 文件 ▸ 导出… 同一个入口；三段全展开（`form` 才会长到要滚，才有指示条）。
+    /// 466 —— 用注入的内存 section store，不写真实 `UserDefaults`。
     private func presentSheet() throws -> Presented {
         NSApplication.shared.setActivationPolicy(.accessory)
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            UserDefaults.standard.set(true, forKey: "photons.export.section.\(title)")
-        }
+        let sectionStore = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: true,
+            ExportSheetView.hdrSection: true,
+            ExportSheetView.afterSection: true
+        ])
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                                       styleMask: [.titled, .closable, .resizable],
                                       backing: .buffered, defer: false)
         TestWindows.show(parent, key: true)
         windows.append(parent)
 
-        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false))
+        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false),
+                                               draftStore: InMemoryDraftStore(),
+                                               sectionStore: sectionStore)
         controller.present(in: parent)
         let window = try XCTUnwrap(controller.sheetWindow, "present(in:) 没有开 sheet 窗口")
         windows.append(window)

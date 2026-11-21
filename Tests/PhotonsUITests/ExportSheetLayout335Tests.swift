@@ -33,12 +33,6 @@ final class ExportSheetLayout335Tests: XCTestCase {
             window.contentView = nil
         }
         windows = []
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
-            // （以前 removeObject 等于折叠，现在等于展开）。
-            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
-        }
     }
 
     private func descendants(of root: NSView) -> [NSView] {
@@ -73,20 +67,24 @@ final class ExportSheetLayout335Tests: XCTestCase {
         sliderProbes(kind, rowID: rowID, in: content).map { frame(of: $0, in: content) }
     }
 
-    /// 真路径：与 文件 ▸ 导出… 同一个入口；三段靠 `UserDefaults` 的 section 键展开。
+    /// 真路径：与 文件 ▸ 导出… 同一个入口；三段靠注入的内存 section store 展开（466：测试不写
+    /// 真实 `UserDefaults`，否则跑完就把用户的导出面板打开成夹具的样子）。
     private func presentSheet(sdr: Bool = false) throws -> (ExportSheetController, NSWindow, NSView) {
         NSApplication.shared.setActivationPolicy(.accessory)
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            UserDefaults.standard.set(true, forKey: "photons.export.section.\(title)")
-        }
+        let sectionStore = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: true,
+            ExportSheetView.hdrSection: true,
+            ExportSheetView.afterSection: true
+        ])
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                                       styleMask: [.titled, .closable, .resizable],
                                       backing: .buffered, defer: false)
         TestWindows.show(parent, key: true)
         windows.append(parent)
 
-        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false))
+        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false),
+                                               draftStore: InMemoryDraftStore(),
+                                               sectionStore: sectionStore)
         controller.present(in: parent)
         let window = try XCTUnwrap(controller.sheetWindow, "present(in:) 没有开 sheet 窗口")
         windows.append(window)
@@ -453,19 +451,21 @@ final class ExportSheetLayout335Tests: XCTestCase {
         print("335 pitch · \(pitches.count) 组 32 的 pitch · \(bands.count) band")
 
         // 默认折叠：6 个常驻行 + 3 个折叠标题 = 9 band ≤ 10。
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
-            // （以前 removeObject 等于折叠，现在等于展开）。
-            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
-        }
+        // 466 —— 折叠状态走注入的内存 store（全部 false），不再写真实 `UserDefaults`。
+        let collapsed = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: false,
+            ExportSheetView.hdrSection: false,
+            ExportSheetView.afterSection: false
+        ])
         NSApplication.shared.setActivationPolicy(.accessory)
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                                       styleMask: [.titled, .closable, .resizable],
                                       backing: .buffered, defer: false)
         TestWindows.show(parent, key: true)
         windows.append(parent)
-        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false))
+        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false),
+                                               draftStore: InMemoryDraftStore(),
+                                               sectionStore: collapsed)
         controller.present(in: parent)
         let window = try XCTUnwrap(controller.sheetWindow)
         windows.append(window)
