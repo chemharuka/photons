@@ -447,7 +447,8 @@ final class HealTests: XCTestCase {
                                         edit: EditModel(), display: DisplayOptions())
         XCTAssertNil(links.heal, "无 spot 时 S1.9 在链里不存在（不是一个中性段）")
         XCTAssertFalse(links.pipeline.contains(.heal))
-        XCTAssertEqual(links.pipeline, RenderStage.allCases, "无 spot 的文档走的仍是七段链")
+        XCTAssertEqual(links.pipeline, StageChainShape.resting(),
+                       "无 spot 的文档走的是无条件链 + 314 的 S3.10")
 
         var doc = EditModel.neutral
         doc.healSpots = [cloneSpot()]
@@ -465,7 +466,10 @@ final class HealTests: XCTestCase {
         XCTAssertNotEqual(withSpot.curve, links.curve,
                           "geometry key moved, so every downstream link (curve included) moves")
         XCTAssertEqual(withSpot.toneMap, KeyBuilder(KeyBuilder.digest(of: withSpot.curve))
-            .add(doc.keyMaterial(.toneMap)).canonical)
+            .add(doc.keyMaterial(.toneMap))
+            .add(DisplayOptions().ceilingKeyString)
+            .canonical,
+                       "323: the picture's ceiling is tone-map key material")
 
         let result = try graph.render(doc, options: RenderOptions(scale: 1, useCache: false))
         XCTAssertTrue(result.trace.executed.contains(.heal), "有 spot 时 S1.9 必须真的跑")

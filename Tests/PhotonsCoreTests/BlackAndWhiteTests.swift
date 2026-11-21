@@ -422,8 +422,8 @@ final class BlackAndWhiteTests: XCTestCase {
                                              display: DisplayOptions())
             XCTAssertNil(links.bw)
             XCTAssertEqual(links.pipeline.filter { $0 == .bw }, [])
-            XCTAssertEqual(links.pipeline, RenderStage.allCases,
-                           "a colour document's chain is exactly the unconditional stages")
+            XCTAssertEqual(links.pipeline, StageChainShape.resting(),
+                           "a colour document's chain is the unconditional stages + 314's S3.10")
             // `RenderInputs.key` must not grow a segment — otherwise every cached thumbnail misses once
             // (the 076/派单-042 rule).
             XCTAssertFalse(RenderInputs(edit).key.contains("s3.4-bw"),
@@ -461,8 +461,10 @@ final class BlackAndWhiteTests: XCTestCase {
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("bw").add(document().keyMaterial(.bw)).canonical,
                        "S3.4 is seeded by S3's key, not by the vignette's")
+        XCTAssertEqual(bw.pipeline, StageChainShape.resting([.bw]))
         XCTAssertEqual(Array(bw.pipeline.dropFirst(4).prefix(2)), [.toneMap, .color])
-        XCTAssertEqual(Array(bw.pipeline.suffix(3)), [.color, .bw, .display])
+        XCTAssertEqual(Array(bw.pipeline.suffix(3)), [.bw, .sharpen, .display],
+                       "314: S3.10 排在 S3.4 之后；S3.4 仍在 S3 与 S4 之间")
         XCTAssertEqual(bw.pipeline.count, plain.pipeline.count + 1)
         XCTAssertNotEqual(bw.vignette, plain.vignette, "the vignette reads the grey, so its key must move")
 

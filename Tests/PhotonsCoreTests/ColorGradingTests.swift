@@ -466,7 +466,7 @@ final class ColorGradingTests: XCTestCase {
                                          canvas: dims, content: dims,
                                          edit: EditModel.neutral, display: DisplayOptions())
         XCTAssertNil(links.grade, "中性文档的键链不得长出新段")
-        XCTAssertEqual(links.pipeline, RenderStage.allCases)
+        XCTAssertEqual(links.pipeline, StageChainShape.resting())
         print("GRADE NEUTRAL · trace \(plain.trace.csv) · sha \(pixels.sha256().prefix(12))…")
     }
 
@@ -482,8 +482,9 @@ final class ColorGradingTests: XCTestCase {
                                          canvas: dims, content: dims,
                                          edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.grade)
-        XCTAssertEqual(links.pipeline, RenderStage.pipeline(hasMasks: false, hasGrade: true))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.color, .grade, .display])
+        XCTAssertEqual(links.pipeline, StageChainShape.resting([.grade]))
+        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.grade, .sharpen, .display],
+                       "314: S3.10 排在 S3.8 之后；S3.8 仍在 S3 与 S4 之间")
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("grade").add(graded.keyMaterial(.grade)).canonical,
                        "S3.8 必须由 S3 的键种下（没有 HSL/黑白/局部色时）")
@@ -500,7 +501,8 @@ final class ColorGradingTests: XCTestCase {
         let links = RenderKeyChain.links(identity: "grade-both", sourceSize: dims,
                                          canvas: dims, content: dims,
                                          edit: edit, display: DisplayOptions())
-        XCTAssertEqual(Array(links.pipeline.suffix(4)), [.color, .hsl, .grade, .display])
+        XCTAssertEqual(links.pipeline, StageChainShape.resting([.hsl, .grade]))
+        XCTAssertEqual(Array(links.pipeline.suffix(4)), [.hsl, .grade, .sharpen, .display])
         XCTAssertEqual(try XCTUnwrap(links.grade),
                        KeyBuilder(KeyBuilder.digest(of: try XCTUnwrap(links.hsl)))
                         .add("grade").add(edit.keyMaterial(.grade)).canonical)
