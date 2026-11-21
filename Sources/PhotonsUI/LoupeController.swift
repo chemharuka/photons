@@ -1884,6 +1884,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             guard let self else { return }
             _ = self.session?.isDenoiseRunning
             _ = self.session?.denoiseAssetID
+            _ = self.session?.denoiseQueuedAssetIDs
+            _ = self.session?.denoiseBatchIsActive
             _ = self.session?.anchorID
         }, { [weak self] in
             self?.refreshDenoiseHUD()
@@ -5515,6 +5517,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     /// 正在降噪的那一次从什么时候开始。`nil` = 没有在跑。
     private var denoiseStartedAt: Date?
+    /// 这个开始时间属于**哪一张**。479：批量推进到下一张时 id 变了，计时必须从 0 重新开始。
+    private var denoiseClockAssetID: String?
     /// 0.5 s 的**已用时间**驱动器。`nil` = 没有在跑（结束后必须回到 `nil`，⑧/⑫）。
     private var denoiseTicker: Timer?
     /// 这一轮创建过的 ticker **对象**本身。
@@ -5567,19 +5571,48 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// hidden card must cost zero.
     private func refreshDenoiseHUD() {
         let running = session?.isDenoiseRunning ?? false
-        syncDenoiseClock(running: running)
-        // Three conditions, **all** required (§2.3). The last one is this ticket's core: the photo the
-        // single-photo view is showing right now has to be the photo being denoised.
-        guard running,
-              let denoisingID = session?.denoiseAssetID,
-              session?.anchorID == denoisingID else {
-            denoiseHUD.state = .hidden
-            denoiseHUD.lastLaydown = nil
+        let denoisingID = running ? session?.denoiseAssetID : nil
+        let anchorID = session?.anchorID
+
+        // 479 §2.3 — three states, in this order:
+        //   · the anchor **is** the photo being denoised ⇒ 「降噪中」 with a live clock (387's rule);
+        //   · the anchor is still **waiting** in the batch  ⇒ 「等待降噪」, elapsed `0:00`, ticker dead;
+        //   · anything else                                     ⇒ hidden (387's resting state).
+        if let denoisingID, anchorID == denoisingID {
+            syncDenoiseClock(running: running, assetID: denoisingID, ticking: true)
+            let asset = session?.assets.first { $0.id == denoisingID }
+            let lines = DenoiseProgressOverlay.lines(state: .running,
+                                                     width: asset?.width, height: asset?.height,
+                                                     elapsed: denoiseElapsed())
+            layDownDenoiseHUD(lines: lines, state: .running)
             return
         }
-        let asset = session?.assets.first { $0.id == denoisingID }
-        let lines = DenoiseProgressOverlay.lines(width: asset?.width, height: asset?.height,
-                                                 elapsed: denoiseElapsed())
+        if running, let anchorID, session?.denoiseQueuedAssetIDs.contains(anchorID) == true {
+            // 479 ② — a queued photo is not ticking. The timer is invalidated **here**, not left to a
+            // ticker nobody draws: 「0:00 一直是 0:00」 is measured by the absence of that timer.
+            syncDenoiseClock(running: true, assetID: denoisingID, ticking: false)
+            let asset = session?.assets.first { $0.id == anchorID }
+            let lines = DenoiseProgressOverlay.lines(state: .queued,
+                                                     width: asset?.width, height: asset?.height,
+                                                     elapsed: 0)
+            layDownDenoiseHUD(lines: lines, state: .queued)
+            return
+        }
+        // Hidden. A live run keeps its start time (switching away and back does not restart the clock),
+        // but no card ⇒ no ticker: the queued/hidden spell is exactly zero timer.
+        if running {
+            syncDenoiseClock(running: true, assetID: denoisingID, ticking: false)
+        } else {
+            syncDenoiseClock(running: false, assetID: nil, ticking: false)
+        }
+        denoiseHUD.state = .hidden
+        denoiseHUD.lastLaydown = nil
+    }
+
+    /// The one place a visible card is built: centre it on the canvas, clamp it inside the container,
+    /// then hand the frame to the view. Size and position are 387's, unchanged — only the strings and
+    /// the state differ between 「降噪中」 and 「等待降噪」.
+    private func layDownDenoiseHUD(lines: [String], state: DenoiseProgressOverlay.State) {
         // The overlay is pinned to `container.bounds` (same origin, same size, `autoresizingMask`), so
         // the clamp host is the container's own rect — the same one every other canvas overlay is laid
         // out in, and the rect §2.5 names.
@@ -5587,22 +5620,41 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                                    center: canvasBoxCenter(),
                                                    containerBounds: container.bounds)
         denoiseHUD.lastLaydown = laydown
-        denoiseHUD.state = .running
+        denoiseHUD.state = state
         denoiseLaydownCount += 1
         denoiseLaydownTimes.append(Date())
     }
 
-    /// Start / stop the clock and the ticker with the run itself.
-    private func syncDenoiseClock(running: Bool) {
-        guard running else {
+    /// Start / stop the clock and the ticker.
+    ///
+    /// 479 — `assetID` is part of the clock's identity now: when a batch advances, the next item has a
+    /// different id and its clock must start at `0:00`, not inherit the previous photo's seconds. A
+    /// change of id invalidates the old ticker and re-seeds `denoiseStartedAt`.
+    ///
+    /// `ticking` is the card's visibility: only a `.running` card needs the 0.5 s timer. A queued or
+    /// hidden card keeps `denoiseStartedAt` (so returning to the running photo resumes the real elapsed
+    /// time) but has **no** live timer.
+    private func syncDenoiseClock(running: Bool, assetID: String?, ticking: Bool) {
+        guard running, let assetID else {
             denoiseStartedAt = nil
+            denoiseClockAssetID = nil
             // ⑧ reverse gate ⑲: a hidden card is not enough — the timer has to die, or a 0.5 s
             // closure keeps a dead run alive.
             denoiseTicker?.invalidate()
             denoiseTicker = nil
             return
         }
-        if denoiseStartedAt == nil { denoiseStartedAt = Date() }
+        if denoiseClockAssetID != assetID || denoiseStartedAt == nil {
+            denoiseStartedAt = Date()
+            denoiseClockAssetID = assetID
+            denoiseTicker?.invalidate()
+            denoiseTicker = nil
+        }
+        guard ticking else {
+            denoiseTicker?.invalidate()
+            denoiseTicker = nil
+            return
+        }
         guard denoiseTicker == nil else { return }
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.refreshDenoiseHUD()
