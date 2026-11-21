@@ -89,7 +89,10 @@ public final class BackgroundTaskStore {
     /// Instance spelling of the same limit, so callers can ask the store without naming the type.
     public var retainedFinishedLimit: Int { Self.retainedFinishedLimit }
 
-    public init() {}
+    /// `nonisolated` so a view can default-construct the store in its own initialiser
+    /// (`TopBarView(store:)` keeps a zero-argument spelling for tests); the store only starts
+    /// touching main-actor state when a caller uses it.
+    public nonisolated init() {}
 
     /// Append a new task and return its id. The caller owns the id for the rest of the run.
     @discardableResult

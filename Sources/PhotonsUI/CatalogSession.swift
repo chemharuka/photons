@@ -198,6 +198,13 @@ public final class CatalogSession {
         case loupe
     }
 
+    /// 454 P2a — the one task store, owned by the model rather than a view.
+    ///
+    /// The producers (denoise / HDR now, export in P3) all live on `CatalogSession`, so a
+    /// view-private store could never be written by them. The workspace only reads this instance;
+    /// the HUDs still read their own `last…Progress` fields (P2b is the phase that changes them).
+    public let backgroundTasks = BackgroundTaskStore()
+
     // MARK: library
 
     public private(set) var libraryURL: URL?
@@ -1104,15 +1111,28 @@ public final class CatalogSession {
         // 只是活到运行结束。
         hdrMergeParticipantIDs = participants
         lastHDRMergeProgress = Loc.t("准备合成…")
+        // 454 P2a — every gate above returns *before* a task exists: a refused start is a validation
+        // error, not work in flight, and `lastHDRMergeError` already carries the notice. From here on
+        // the task is the record of this run; the progress callback advances it and `finishHDRMerge`
+        // closes it on **both** outcomes, so it can never be left `running`.
+        let taskID = backgroundTasks.begin(BackgroundTask(kind: .hdrMerge,
+                                                           title: Loc.t("HDR 合成"),
+                                                           total: participants.count,
+                                                           currentAssetID: participants.first))
         let report: @Sendable (String) -> Void = { [weak self] text in
-            Task { @MainActor in self?.lastHDRMergeProgress = text }
+            Task { @MainActor in
+                self?.lastHDRMergeProgress = text
+                if let completed = Self.decodedFrameCount(fromProgress: text) {
+                    self?.backgroundTasks.advance(id: taskID, completed: completed)
+                }
+            }
         }
         queue.async { [weak self] in
             let run = Self.runHDRMerge(service: service, importService: importService,
                                        catalog: catalog, frames: frames,
                                        participantIDs: participants,
                                        rootID: rootID, progress: report)
-            Task { @MainActor in self?.finishHDRMerge(run) }
+            Task { @MainActor in self?.finishHDRMerge(run, taskID: taskID) }
         }
         return participants
     }
@@ -1200,14 +1220,20 @@ public final class CatalogSession {
     }
 
     /// Back on the main actor: publish the outcome, bump the projection, select the result.
-    private func finishHDRMerge(_ run: HDRMergeRun) {
+    private func finishHDRMerge(_ run: HDRMergeRun, taskID: UUID) {
         isHDRMergeRunning = false
         hdrMergeParticipantIDs = []                  // 392 — no run, no participants; the card goes away
         hdrMergeCompletionCount += 1
         hdrMergeRanOffMain = run.ranOffMain
         lastHDRMergeError = run.failure
         lastHDRMergeReport = nil
-        guard run.failure == nil, let assetID = run.assetID else {
+        let succeeded = run.failure == nil && run.assetID != nil
+        // 454 P2a — the task closes on every way out of the run. `finish` also fills `completed` to
+        // `total` on success, so a successful merge reads `N/N` without a separate last advance.
+        backgroundTasks.finish(id: taskID,
+                               state: succeeded ? .finished : .failed,
+                               failureCount: succeeded ? 0 : 1)
+        guard succeeded, let assetID = run.assetID else {
             lastHDRMergeProgress = nil
             return
         }
@@ -1229,6 +1255,23 @@ public final class CatalogSession {
                                                 stackCount: run.stackCount)
         }
         lastHDRMergeProgress = Loc.t("合成完成：{0}×{1}，{2} 帧", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.frameCount)))
+    }
+
+    /// 454 P2a — `解码 1/3…` → `1`. `HDRMergeService` turns the tool's structured event into that
+    /// one sentence, so the background-task store has to read the count back out of the line the HUD
+    /// already shows. A line that does not match leaves the count where it was; `finish` still lands
+    /// on `total` for a successful merge.
+    nonisolated static func decodedFrameCount(fromProgress text: String) -> Int? {
+        let prefix = Loc.t("解码 ")
+        guard text.hasPrefix(prefix) else { return nil }
+        let rest = text.dropFirst(prefix.count)
+        let parts = rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let index = Int(String(parts[0]).trimmingCharacters(in: .whitespaces)),
+              let total = Int(parts[1].prefix(while: { $0.isNumber })),
+              total > 0
+        else { return nil }
+        return min(max(0, index), total)
     }
 
     // MARK: 模型降噪 (§386) — 右键菜单两个动词，不弹窗口    //
@@ -1469,14 +1512,24 @@ public final class CatalogSession {
         denoiseAssetID = participantID
         lastDenoiseEngine = engine
         lastDenoiseProgress = Loc.t("准备降噪…")
+        // 454 P2a — same cutoff as HDR: every `guard … return []` above refused before work began,
+        // so it creates no task and keeps its notice in `lastDenoiseError`. From here the task is the
+        // record of the run; one photograph is one item, so `completed` reaches 1 only in `finish`.
+        let taskID = backgroundTasks.begin(BackgroundTask(kind: .denoise,
+                                                           title: asset.filename,
+                                                           total: 1,
+                                                           currentAssetID: participantID))
         let report: @Sendable (String) -> Void = { [weak self] text in
-            Task { @MainActor in self?.lastDenoiseProgress = text }
+            Task { @MainActor in
+                self?.lastDenoiseProgress = text
+                self?.backgroundTasks.advance(id: taskID, currentAssetID: participantID)
+            }
         }
         queue.async { [weak self] in
             let run = Self.runDenoise(job: job, importService: importService, catalog: catalog,
                                       source: url, participantID: participantID, rootID: rootID,
                                       progress: report)
-            Task { @MainActor in self?.finishDenoise(run) }
+            Task { @MainActor in self?.finishDenoise(run, taskID: taskID) }
         }
         return [participantID]
     }
@@ -1630,7 +1683,7 @@ public final class CatalogSession {
     }
 
     /// 回到主 actor：发布结果、推进投影、选中产物。
-    private func finishDenoise(_ run: DenoiseRun) {
+    private func finishDenoise(_ run: DenoiseRun, taskID: UUID) {
         isDenoiseRunning = false
         // §387 — one line beside the flag it belongs to: the success path, the failure path and the
         // "already in the library" path all land here, so the box cannot outlive the run.
@@ -1641,7 +1694,14 @@ public final class CatalogSession {
         // §395 — 继承失败是**降噪成功**的附注：它单独一行，不影响 `lastDenoiseError` / 报告的有无。
         lastDenoiseInheritError = run.inheritFailure
         lastDenoiseReport = nil
-        guard run.failure == nil, let assetID = run.assetID else {
+        let succeeded = run.failure == nil && run.assetID != nil
+        // 454 P2a — task closes on success and every failure return inside `runDenoise`. Success
+        // fills `completed` to the single item's total here, which is why the progress callback only
+        // refreshes `currentAssetID`.
+        backgroundTasks.finish(id: taskID,
+                               state: succeeded ? .finished : .failed,
+                               failureCount: succeeded ? 0 : 1)
+        guard succeeded, let assetID = run.assetID else {
             lastDenoiseProgress = nil
             return
         }
