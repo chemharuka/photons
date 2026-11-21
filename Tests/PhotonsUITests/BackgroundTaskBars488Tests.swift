@@ -69,10 +69,12 @@ final class BackgroundTaskBars488Tests: XCTestCase {
         let bars = bar.backgroundTaskBars
         let buttonWidth = bar.backgroundButtonView.intrinsicContentSize.width
 
+        // 481 —— 槽位从「后台」右边缘再让 6 pt，宽度跟着少 6 pt（右边缘不动）。
+        let gap = BackgroundTaskBars.Metrics.gapFromButton
         XCTAssertGreaterThan(bars.frame.width, 0, "没有后台任务也要留出空间")
-        XCTAssertEqual(bars.frame.width, buttonWidth, accuracy: 0.001, "槽宽 = 后台按钮宽")
-        XCTAssertEqual(bars.frame.minX, bar.backgroundButtonView.frame.maxX, accuracy: 0.001,
-                       "槽位从「后台」右边缘开始")
+        XCTAssertEqual(bars.frame.width, buttonWidth - gap, accuracy: 0.001, "槽宽 = 后台按钮宽 − 间隙")
+        XCTAssertEqual(bars.frame.minX, bar.backgroundButtonView.frame.maxX + gap, accuracy: 0.001,
+                       "槽位从「后台」右边缘再让 \(gap) pt")
         XCTAssertEqual(bars.visibleTasks.count, 0, "0 个任务 ⇒ 0 条")
         XCTAssertEqual(bars.barFramesForTesting.count, 0)
         XCTAssertGreaterThanOrEqual(bar.statusCluster.frame.minX, bars.frame.maxX + 16 - 0.001,
@@ -92,8 +94,8 @@ final class BackgroundTaskBars488Tests: XCTestCase {
 
         XCTAssertEqual(bars.visibleTasks.count, 1)
         XCTAssertEqual(bars.barFramesForTesting.count, 1)
-        XCTAssertEqual(bars.barFramesForTesting[0].width, buttonWidth, accuracy: 0.001,
-                       "1 条任务时线宽 = 按钮宽")
+        XCTAssertEqual(bars.barFramesForTesting[0].width, buttonWidth - BackgroundTaskBars.Metrics.gapFromButton,
+                       accuracy: 0.001, "1 条任务时线宽 = 按钮宽 − 间隙（481）")
         XCTAssertEqual(bars.blueFractionsForTesting[0], 1, accuracy: 0.0001,
                        "40/40 必须全蓝")
         XCTAssertEqual(bars.barFramesForTesting[0].midX, bars.bounds.midX, accuracy: 0.5)

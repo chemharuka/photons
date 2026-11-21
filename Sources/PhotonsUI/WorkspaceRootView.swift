@@ -498,8 +498,11 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         // 488 — the bar slot sits immediately right of 后台 and is **always** reserved, even with
         // zero tasks. Width = the button's own width (owner: 「宽度和现在的七个按钮保持差不多一致」),
         // height = the whole top-bar row so the group can centre in it.
-        let barsX = backgroundButton.frame.maxX
-        let barsWidth = backgroundButton.intrinsicContentSize.width
+        // 481 —— 左边缘再让 6 pt（用户：进度条不要贴着「后台」按钮），右边缘不动：
+        // 线整体右移一点点、长度少一点点，状态簇从条区右边缘算起的预算完全不变。
+        let barsGap = BackgroundTaskBars.Metrics.gapFromButton
+        let barsX = backgroundButton.frame.maxX + barsGap
+        let barsWidth = backgroundButton.intrinsicContentSize.width - barsGap
         backgroundTaskBars.frame = NSRect(x: barsX, y: 0,
                                           width: max(0, barsWidth), height: h)
         backgroundTaskBars.needsLayout = true

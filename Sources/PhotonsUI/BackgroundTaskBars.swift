@@ -18,6 +18,10 @@ public final class BackgroundTaskBars: NSView {
         /// 488 — 「顶栏的指示条最多展示4条」. The fifth/sixth task still exists in the store; only
         /// the newest four are drawn.
         public static let maximumVisibleBars = 4
+        /// 481（用户 2026-11-21「进度条往右边再移动一点点，现在是贴着后台按钮的」）——
+        /// 槽位左边缘从「后台」按钮右边缘再让出 **6 pt**，右边缘不动：进度线整体右移一点点、
+        /// 长度跟着少一点点，状态簇的宽度预算（从条区右边缘算）不变。
+        public static let gapFromButton: CGFloat = 6
         public static let fillColor: NSColor = .systemBlue
         /// `tertiaryLabelColor` at 0.35: dark mode's tertiary label is already a low-contrast grey,
         /// so 0.35 of it stays visible against the header glass without competing with the blue
