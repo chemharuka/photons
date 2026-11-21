@@ -75,8 +75,13 @@ public enum NLMFStrength {
 
     public static let sigmaLow = 0.00355
     public static let sigmaHigh = 0.00680
+    /// Range the anchors map to. 0.70 keeps texture on a quiet frame; 0.85 is the
+    /// "grain is real, take more of the answer" end. The ceiling came down from
+    /// 0.90 when the curve itself got stronger (15 % envelope, doubled read floor):
+    /// the same frame now measures ~10 % more sigma and filters harder at a given
+    /// strength, so 0.90 started to over-smooth.
     public static let strengthLow = 0.70
-    public static let strengthHigh = 0.90
+    public static let strengthHigh = 0.85
 
     /// Linear in log σ between the anchors, clamped outside them.
     ///
@@ -84,7 +89,7 @@ public enum NLMFStrength {
     /// grain by ratio, so a fixed σ step should move strength by a fixed amount.
     /// Keying on σ rather than on the ISO tag is deliberate: a bright ISO 3200
     /// frame measures less noise than a dark ISO 800 one, and it should be treated
-    /// as the quieter frame it is. The ceiling stays at 0.90 — 1.0 plastifies.
+    /// as the quieter frame it is. The ceiling stays at 0.85 — 1.0 plastifies.
     public static func strength(forSigma sigma: Double) -> Double {
         guard sigma > 0, sigma.isFinite else { return strengthLow }
         let t = (log(sigma) - log(sigmaLow)) / (log(sigmaHigh) - log(sigmaLow))

@@ -1,41 +1,36 @@
-# nonlocal-matchfilter-swift — vendored
+# nonlocal-matchfilter-swift - vendored
 
 Source copy of https://github.com/chemharuka/nonlocal-matchfilter-swift at commit
-`cff6244` ("noise: measure the envelope at 15 %, and double the read floor").
+`120aca2` ("package: declare the test target only when Tests/ is present").
 
-Photons builds it as a **local SwiftPM package** (`Package.swift` →
+Photons builds it as a **local SwiftPM package** (`Package.swift` ->
 `.package(path: "Vendor/nonlocal-matchfilter-swift")`) so a checkout needs no
-sibling clone: building Photons builds the plugin too. Same arrangement as
-`Vendor/ansel-denoise-swift`.
+sibling clone: building Photons builds the plugin too.
 
-## What is here, and what is not
+## What is here
 
-Everything the library target needs: `Package.swift`, `Sources/`, `Tests/`,
-`docs/`, `Scripts/`, `README.md`, `LICENSE`.
+Only what the build needs:
 
-`Models/` is **not** vendored — it is 330 MB (two `.mlpackage` plus the `.pt`
-weights and compiled caches) and Photons already ships the one model it uses at
-`Sources/PhotonsExtensions/Denoise/Models/v_matmul_256.mlpackage`. Consequence:
-`swift test` inside this directory cannot run `BundledModelTests` (it looks for
-`Models/`); the Photons test suite does not build this package's tests, and the
-`nlmf-denoise` executable works as long as a model is passed explicitly.
+    Package.swift
+    Sources/NonlocalMatchFilter/    the library
+    Sources/nlmf-denoise/           its CLI (kept: the manifest declares it)
+    LICENSE
+
+`Tests/`, `docs/`, `Scripts/` and `Models/` are **not** copied.
+`Models/` alone is 330 MB, and Photons already ships the one weight it uses at
+`Sources/PhotonsExtensions/Denoise/Models/v_matmul_256.mlpackage`.
+
+The library's manifest declares its test target only when `Tests/` exists, which
+is what lets this tree build without carrying the tests.
 
 ## Syncing
 
-From the library checkout, with the commit you want to vendor:
-
 ```sh
-rsync -a --delete --exclude .build --exclude .git --exclude Models \
-  --exclude .DS_Store \
-  ~/Documents/GitHub/nonlocal-matchfilter-swift/ \
-  ~/Documents/GitHub/photons/Vendor/nonlocal-matchfilter-swift/
+V=~/Documents/GitHub/photons/Vendor/nonlocal-matchfilter-swift
+rm -rf "$V"/Package.swift "$V"/Sources "$V"/LICENSE
+cp   ~/Documents/GitHub/nonlocal-matchfilter-swift/Package.swift "$V"/
+cp -R ~/Documents/GitHub/nonlocal-matchfilter-swift/Sources "$V"/
+cp   ~/Documents/GitHub/nonlocal-matchfilter-swift/LICENSE "$V"/
 ```
 
-`--delete` removes this file (it only exists here), so restore it afterwards and
-update the commit hash above, then commit the diff in Photons.
-
-## Why a copy at all
-
-The denoiser is MIT, so it links in-process; vendoring keeps the build
-reproducible and offline. A remote `.package(url:)` requirement would need a
-published version tag, and this library is not released yet.
+Then update the commit hash above and commit the diff in Photons.

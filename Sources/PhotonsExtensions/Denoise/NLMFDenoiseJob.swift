@@ -128,7 +128,7 @@ public struct NLMFDenoiseJob: Sendable {
     ///   the visible artefact.
     /// - `strength`: left `nil` — the library derives it from the frame's measured
     ///   noise (`NLMFStrength`), because one value cannot suit ISO 800 and ISO 3200.
-    ///   1.0 plastifies fine texture; the derived value never goes above 0.90.
+    ///   1.0 plastifies fine texture; the derived value never goes above 0.85.
     public func options(modelURL: URL) -> NLMFDenoiseOptions {
         var o = NLMFDenoiseOptions(modelURL: modelURL)
         o.strength = nil
