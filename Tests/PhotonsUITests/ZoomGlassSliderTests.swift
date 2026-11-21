@@ -486,9 +486,9 @@ final class ZoomGlassSliderTests: XCTestCase {
 
     // MARK: - 3. the controller wiring
 
-    /// The control exists, is the topmost subview of the canvas, and is pinned 16 pt into the
-    /// **top-right** corner with the autoresizing mask that keeps it there — in ordinary mode, with no
-    /// crop tool anywhere near it (2026-10-27 用户要求普通模式也放上方).
+    /// The control exists, is the topmost *interactive* subview of the canvas, and is pinned 16 pt into
+    /// the **top-right** corner with the autoresizing mask that keeps it there — in ordinary mode, with
+    /// no crop tool anywhere near it (2026-10-27 用户要求普通模式也放上方).
     func testTheControlIsPinnedToTheCanvasTopRight() {
         let controller = LoupeController(session: CatalogSession())
         let root = controller.view
@@ -499,7 +499,27 @@ final class ZoomGlassSliderTests: XCTestCase {
 
         let slider = controller.zoomSlider
         XCTAssertNotNil(slider.superview)
-        XCTAssertTrue(slider.superview?.subviews.last === slider, "the control is the topmost chrome")
+        // 488c: `subviews` 的顺序是 z 序，但**不是**控件序——装饰视图（488 的
+        // `BackgroundTaskBars`、隐藏的 `MissingFileBannerView` 等）照样排在里面。和 488b 的
+        // 顶栏用例同一套分类：自身中心的 `hitTest` 回到自己/后代才算可交互控件，装饰视图
+        // （`hitTest` 为 nil 或 `isHidden`）不参与「最上层」的排序。
+        if let siblings = slider.superview?.subviews {
+            let ownCentre = NSPoint(x: slider.bounds.midX, y: slider.bounds.midY)
+            let ownParentPoint = slider.convert(ownCentre, to: slider.superview)
+            let interactive = siblings.filter { view in
+                let centre = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
+                // `hitTest` 的入参在**父视图**坐标里，不是视图自己的坐标系。
+                return view.hitTest(view.convert(centre, to: view.superview)) != nil
+            }
+            XCTAssertTrue(interactive.last === slider, "the control is the topmost interactive chrome")
+
+            // And nothing above it may eat a click inside its frame: decoration above the slider is
+            // fine (488: it does not take the mouse), an interactive blocker is a product bug.
+            for sibling in siblings.drop(while: { $0 !== slider }).dropFirst() {
+                XCTAssertNil(sibling.hitTest(ownParentPoint),
+                             "a sibling above the slider must not take the slider's clicks")
+            }
+        }
         XCTAssertEqual(slider.frame.width, 210, accuracy: 0.01)
         XCTAssertEqual(slider.frame.height, 30, accuracy: 0.01)
         XCTAssertEqual(slider.frame.maxX, 1000 - 16, accuracy: 0.01)
