@@ -44,7 +44,15 @@ public final class FilmstripCell: NSCollectionViewItem {
 }
 
 public final class FilmstripCard: NSView {
-    public var asset: Asset? { didSet { needsDisplay = true; overlay.needsDisplay = true } }
+    public var asset: Asset? {
+        didSet {
+            // 472 — the picture box depends on orientation, so a recycled cell re-places its thumbnail
+            // view when the new photo is portrait (or the old one was), exactly like the grid's 431.
+            needsLayout = true
+            needsDisplay = true
+            overlay.needsDisplay = true
+        }
+    }
     public var isActive = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     public var isPicked = false { didSet { needsDisplay = true; overlay.needsDisplay = true } }
     /// §378 — member count of the stack this cell represents (0/1 = not a stack). Set by the
@@ -132,10 +140,22 @@ public final class FilmstripCard: NSView {
 
     public override var isFlipped: Bool { true }
 
+    /// 472 — a portrait photo is shown at **1:1**: a square whose side is the effective height, centred
+    /// horizontally in the cell. Landscape (and unknown orientation) keeps the whole cell width, exactly
+    /// as before. The slot stays 3:2 (`WorkspaceLayout.filmstripCell`); only the picture box narrows,
+    /// and `ThumbnailMetal`'s `.resizeAspectFill` does the crop — no decode change, no request-size
+    /// change. Everything that shapes the picture (`layout()`, the rounded background, the ring, the
+    /// badges) reads this rect, so they all follow.
     private var thumbRect: NSRect {
-        NSRect(x: 0, y: 0, width: bounds.width,
-               height: max(1, bounds.height - WorkspaceLayout.filmstripCaptionHeight))
+        let h = max(1, bounds.height - WorkspaceLayout.filmstripCaptionHeight)
+        guard let asset, AssetPortrait.isPortrait(asset) else {
+            return NSRect(x: 0, y: 0, width: bounds.width, height: h)
+        }
+        return NSRect(x: ((bounds.width - h) / 2).rounded(), y: 0, width: h, height: h)
     }
+
+    /// 472 — read-only seam for the acceptance test; the production shape is `thumbRect`.
+    public var thumbRectForTesting: NSRect { thumbRect }
 
     public override func layout() {
         super.layout()
