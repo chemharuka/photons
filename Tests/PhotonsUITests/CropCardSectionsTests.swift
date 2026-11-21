@@ -121,7 +121,7 @@ final class CropCardSectionsTests: XCTestCase {
         //   校正 = 拉直 · 画线拉直 · 垂直透视 · 水平透视
         //   变换 = 旋转 · 镜像
         let owners: [(CGRect, [String], [CropSection])] = [
-            (cropCard, [CropCardID.aspect, CropCardID.staysInsidePixels, CropCardID.grid],
+            (cropCard, [CropCardID.aspect, CropCardID.staysInsidePixels, CropCardID.grid, CropCardID.autoCrop],
              [.crop]),
             (correctionCard, CorrectionCardRow.allCases.map(\.probeID),
              [.angle, .perspective]),
@@ -139,7 +139,7 @@ final class CropCardSectionsTests: XCTestCase {
                 rows.append((id, rect))
                 // 343: 「九宫格」与「不出像素」并成一行，它的探针只包住那枚 chip（不再跨整行），
                 // 所以宽度门槛对它不适用 —— 换下面那条「同一行、贴右沿」的断言。
-                if id != CropCardID.grid {
+                if id != CropCardID.grid && id != CropCardID.autoCrop {
                     XCTAssertGreaterThan(rect.width, 60, "082 §4: \(id) 只剩 \(rect.width) pt 宽")
                 }
                 XCTAssertLessThanOrEqual(rect.width, contentWidth + 0.5,
@@ -154,12 +154,16 @@ final class CropCardSectionsTests: XCTestCase {
             // 343 (user): 「九宫格和不出像素做到同一行内，不出像素左对齐，九宫格右对齐」。
             if card == cropCard,
                let box = rows.first(where: { $0.id == CropCardID.staysInsidePixels })?.rect,
-               let grid = rows.first(where: { $0.id == CropCardID.grid })?.rect {
+               let grid = rows.first(where: { $0.id == CropCardID.grid })?.rect,
+               let auto = rows.first(where: { $0.id == CropCardID.autoCrop })?.rect {
                 XCTAssertLessThanOrEqual(abs(box.midY - grid.midY), 1.0,
                                          "343: 九宫格与不出像素必须在同一行")
+                XCTAssertLessThanOrEqual(abs(grid.midY - auto.midY), 1.0,
+                                         "489: 自动裁剪与九宫格必须在同一行")
                 XCTAssertGreaterThan(grid.minX, box.maxX, "343: 九宫格在不出像素右边")
-                XCTAssertEqual(grid.maxX, card.maxX - WorkspaceLayout.cardInsetH, accuracy: 1.0,
-                               "343: 九宫格贴右沿")
+                XCTAssertGreaterThan(auto.minX, grid.maxX, "489: 自动裁剪在九宫格右边")
+                XCTAssertEqual(auto.maxX, card.maxX - WorkspaceLayout.cardInsetH, accuracy: 1.0,
+                               "489: 自动裁剪贴右沿（九宫格因此左移一个按钮宽）")
             }
 
             var headers: [(id: String, rect: CGRect)] = []

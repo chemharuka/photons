@@ -72,10 +72,22 @@ final class CropToolOverlayView: NSView {
         didSet { if oldValue != rejectedGuideLineAlpha { needsDisplay = true } }
     }
 
-    /// 337 — the accepted lines' standing opacity: dim enough that the picture still shows through,
-    /// bright enough to read against both a sky and a shadow. 367 raised it from 0.55 to
-    /// `GuideLineChrome.acceptedAlpha` (0.9): 55 % white was the 「灰白不明显」 the user reported.
-    static let appliedGuideLineAlpha: Double = GuideLineChrome.acceptedAlpha
+    /// 337 — the accepted lines' standing opacity. 367 raised it from 0.55 to
+    /// `GuideLineChrome.acceptedAlpha` (0.9); **489** makes it a state of the tool: 100 % while the
+    /// guide-line switch is armed (the lines are the thing being drawn), 50 % after it is turned off
+    /// (the frame is the thing being grabbed, and the lines are reference). View state only — this
+    /// number never enters the document or the history.
+    var appliedGuideLineAlpha: Double = 0.5 {
+        didSet { if oldValue != appliedGuideLineAlpha { needsDisplay = true } }
+    }
+
+    /// **489** — while 引导线 is armed the crop frame is *not drawn at all* (no stroke, no grips, no
+    /// dimmed outside), because the canvas belongs to the line gesture. Turning the switch off puts
+    /// it back **above** the lines (`draw` paints the lines first), and narrows the lines to
+    /// `appliedGuideLineAlpha`.
+    var guideLinesArmed = false {
+        didSet { if oldValue != guideLinesArmed { needsDisplay = true } }
+    }
 
     /// §2's two numbers, re-exported so the acceptance can name what is drawn: 1.5 pt white,
     /// 1 px black shadow.
@@ -101,34 +113,12 @@ final class CropToolOverlayView: NSView {
             if let stroke = straightenStroke {
                 CropStraightenLinePainter.draw(stroke, alpha: straightenStrokeAlpha)
             }
-            // 337 — the accepted guide lines under the live stroke, the refused one in red: the same
-            // painter, so the two tools' strokes look like one tool. 367 — the guide lines carry
-            // their own chrome (青蓝 2.5 pt + endpoint dots); 328's line above keeps its defaults.
-            for line in guideLines {
-                CropStraightenLinePainter.draw(line, alpha: Self.appliedGuideLineAlpha,
-                                               colour: GuideLineChrome.acceptedColour,
-                                               width: GuideLineChrome.lineWidth,
-                                               shadowWidth: GuideLineChrome.shadowWidth,
-                                               dotRadius: GuideLineChrome.dotRadius,
-                                               dotRingWidth: GuideLineChrome.dotRingWidth)
-            }
-            if let rejected = rejectedGuideLine {
-                CropStraightenLinePainter.draw(rejected, alpha: rejectedGuideLineAlpha,
-                                               colour: .systemRed,
-                                               width: GuideLineChrome.lineWidth,
-                                               shadowWidth: GuideLineChrome.shadowWidth,
-                                               dotRadius: GuideLineChrome.dotRadius,
-                                               dotRingWidth: GuideLineChrome.dotRingWidth)
-            }
-            if let stroke = guideLineStroke {
-                CropStraightenLinePainter.draw(stroke, alpha: guideLineStrokeAlpha,
-                                               colour: GuideLineChrome.acceptedColour,
-                                               width: GuideLineChrome.lineWidth,
-                                               shadowWidth: GuideLineChrome.shadowWidth,
-                                               dotRadius: GuideLineChrome.dotRadius,
-                                               dotRingWidth: GuideLineChrome.dotRingWidth)
-            }
         }
+        // 489 — the guide lines go **under** the frame when the switch is off, and the frame is not
+        // drawn at all when it is on. Painting them here (before the dim/frame block) is what makes
+        // the overlapping corner grip win both the eye and the hit test.
+        drawGuideLineChrome()
+        if guideLinesArmed { return }
         guard let layout, layout.corners.count == 4, bounds.width > 1, bounds.height > 1 else {
             return
         }
@@ -160,6 +150,36 @@ final class CropToolOverlayView: NSView {
         // 4. The grips.
         for grip in layout.grips {
             draw(grip: grip, in: layout)
+        }
+    }
+
+    /// 337/367/489 — the accepted lines (at `appliedGuideLineAlpha`), the refused one in red and the
+    /// live stroke. One painter, so the two tools' strokes cannot look like two tools; drawn before
+    /// the frame so the frame is on top.
+    private func drawGuideLineChrome() {
+        for line in guideLines {
+            CropStraightenLinePainter.draw(line, alpha: appliedGuideLineAlpha,
+                                           colour: GuideLineChrome.acceptedColour,
+                                           width: GuideLineChrome.lineWidth,
+                                           shadowWidth: GuideLineChrome.shadowWidth,
+                                           dotRadius: GuideLineChrome.dotRadius,
+                                           dotRingWidth: GuideLineChrome.dotRingWidth)
+        }
+        if let rejected = rejectedGuideLine {
+            CropStraightenLinePainter.draw(rejected, alpha: rejectedGuideLineAlpha,
+                                           colour: .systemRed,
+                                           width: GuideLineChrome.lineWidth,
+                                           shadowWidth: GuideLineChrome.shadowWidth,
+                                           dotRadius: GuideLineChrome.dotRadius,
+                                           dotRingWidth: GuideLineChrome.dotRingWidth)
+        }
+        if let stroke = guideLineStroke {
+            CropStraightenLinePainter.draw(stroke, alpha: guideLineStrokeAlpha,
+                                           colour: GuideLineChrome.acceptedColour,
+                                           width: GuideLineChrome.lineWidth,
+                                           shadowWidth: GuideLineChrome.shadowWidth,
+                                           dotRadius: GuideLineChrome.dotRadius,
+                                           dotRingWidth: GuideLineChrome.dotRingWidth)
         }
     }
 

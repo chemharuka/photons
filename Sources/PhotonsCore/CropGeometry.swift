@@ -275,7 +275,7 @@ public struct TransformSession: Sendable, Equatable {
     }
 
     public mutating func flip(horizontal: Bool) {
-        if horizontal { draft.flipHorizontal.toggle() } else { draft.flipVertical.toggle() }
+        draft = draft.remapped(for: horizontal ? .mirrorH : .mirrorV)
     }
 
     public mutating func rotate90(clockwise: Bool) {

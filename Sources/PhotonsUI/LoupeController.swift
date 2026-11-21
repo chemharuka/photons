@@ -4645,10 +4645,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
             NSSound.beep()          // nothing to flip: say so instead of a silent no-op
             return false
         }
+        let before = session.edit.geometry
+        let operation: GeometryGroup.QuarterTurnOperation = horizontal ? .mirrorH : .mirrorV
         session.applyEdit { model in
-            if horizontal { model.geometry.flipHorizontal.toggle() }
-            else { model.geometry.flipVertical.toggle() }
+            model.geometry = model.geometry.remapped(for: operation)
         }
+        cropTool.remapDraft(for: operation, from: before)
         // The picture changed, so the frame the crop tool draws must follow it (the overlay is built
         // from the same flips) — and a mode that is on gets one render.
         if cropTool.isActive { refreshCropTool() }
@@ -4707,9 +4709,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let framingBeforeTurn = framing()
         let frameBeforeTurn = ImageSize(width: Int((framingBeforeTurn?.sourceWidth ?? 1).rounded()),
                                         height: Int((framingBeforeTurn?.sourceHeight ?? 1).rounded()))
+        let beforeTurn = session.edit.geometry
         var turned = false
         session.applyEdit { model in turned = model.turn(clockwise: clockwise) }
         guard turned else { return false }
+        cropTool.remapDraft(for: clockwise ? .rotateCW : .rotateCCW, from: beforeTurn)
         // **The row is committed here, before anything else can be.** `commitEdit` answers `nil`
         // inside a tool session (the session owns the next snapshot), and a turn that lived only in
         // memory until 应用 is the 「点了一下没反应」 a crop session showed (082 measured it:
@@ -4741,6 +4745,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if cropTool.isActive { refreshCropTool() }
         requestEditRender()
         return committed
+    }
+
+    // MARK: 489 — 自动裁剪
+
+    /// The 裁切 card's 「自动裁剪」 button. One document write (inside `CropToolController.autoCrop`),
+    /// then the overlay and the picture are refreshed — the frame the user sees is the box the write
+    /// stored, not a draft waiting for 应用.
+    @discardableResult
+    public func autoCrop() -> Bool {
+        guard let session, session.mode == .loupe, session.anchorID != nil else {
+            NSSound.beep()
+            return false
+        }
+        guard cropTool.autoCrop() else { return false }
+        refreshCropTool()
+        requestEditRender()
+        return true
     }
 
     /// The document's quarter turn and the badge the 变换 card prints for it.
@@ -5192,8 +5213,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// The grip under `point` (view points): corner, edge, `.inside` or `.outside`. `nil` only when
     /// the tool is off.
     public func cropHit(atViewPoint point: CGPoint) -> CropToolHandle? {
-        guard let layout = cropToolLayout() else { return nil }
-        return CropTool.hit(point, in: layout)
+        // 489 — while 引导线 is armed the frame is not drawn and does not take a press: the whole
+        // canvas belongs to the line gesture (`beginCropDrag`'s guide branch).
+        guard !cropTool.isGuideLinesArmed, let layout = cropToolLayout() else { return nil }
+        return CropHitTester.hit(at: point, in: layout)
     }
 
     /// The layout the overlay view is **drawing** at this instant (`nil` when the tool is off).
@@ -5263,6 +5286,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // two stroke branches below, unchanged.
         let devicePoint = CGPoint(x: Double(point.x) * scale, y: Double(point.y) * scale)
         let guideMapping = framing.mapping(of: viewState)
+        // 489 — **the frame's resize grips win an overlap.** While 引导线 is armed the whole canvas
+        // is the line tool (the branch below); with it off the frame is on top both in `draw` and
+        // here, so a press that lands on a corner/edge handle drags the frame even if a guide line's
+        // endpoint or body is under the same pixel. Inside/outside still fall through to the line:
+        // the request was about the controls, not about swallowing the whole frame interior.
+        if !cropTool.isGuideLinesArmed, !cropTool.isDrawStraightenArmed {
+            let layout = cropTool.layout(mapping: guideMapping, source: cropSourceSize,
+                                         pointScale: scale)
+            if CropHitTester.hit(at: point, in: layout).isResizing {
+                let started = cropTool.beginDrag(atViewPoint: point,
+                                                 mapping: guideMapping,
+                                                 source: cropSourceSize, pointScale: scale,
+                                                 rotate: rotate)
+                refreshCropTool()
+                return started
+            }
+        }
         if !cropTool.isDrawStraightenArmed {
             if clickCount >= 2 {
                 if cropTool.deleteGuideLine(atViewPoint: devicePoint, mapping: guideMapping) {
@@ -5488,6 +5528,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         cropOverlay.guideLineStroke = cropTool.guideLineStroke
         cropOverlay.guideLineStrokeAlpha = cropTool.guideLineStrokeAlpha
         cropOverlay.rejectedGuideLineAlpha = cropTool.rejectedGuideLineAlpha
+        // 489 — the two view-state facts the user asked for: the frame is hidden while the line
+        // tool is armed, and the lines drop to 50 % once it is off. Both ride every sync, so a
+        // switch, a zoom, a pan and a draft tick all keep them in step.
+        cropOverlay.guideLinesArmed = cropTool.isGuideLinesArmed
+        cropOverlay.appliedGuideLineAlpha = cropTool.isGuideLinesArmed ? 1 : 0.5
     }
 
     /// Rebuild the overlay and the bar from the live draft. Cheap (a dozen points) and idempotent.

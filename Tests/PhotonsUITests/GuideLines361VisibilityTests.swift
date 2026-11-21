@@ -357,7 +357,7 @@ final class GuideLines361VisibilityTests: XCTestCase {
               + " bounds=\(Int(overlay.bounds.width))×\(Int(overlay.bounds.height))"
               + " hidden=\(overlay.isHidden) alpha=\(overlay.alphaValue) wantsLayer=\(overlay.wantsLayer)"
               + " masksToBounds=\(overlay.layer?.masksToBounds ?? false)"
-              + " 画线透明度=\(CropToolOverlayView.appliedGuideLineAlpha)"
+              + " 画线透明度=\((overlay as? CropToolOverlayView)?.appliedGuideLineAlpha ?? -1)"
               + " · 端点在 bounds 外的个数 \(outside)/\(segments.count * 2) \(corners.joined(separator: " "))")
         note("361 §B 兄弟层: " + layers.joined(separator: " | "))
         note("361 §B 画面子层: " + canvasLayers.joined(separator: " | "))
@@ -370,7 +370,7 @@ final class GuideLines361VisibilityTests: XCTestCase {
                        "overlay 没有盖住画布（宽）")
         XCTAssertEqual(overlay.frame.size.height, loupe.view.bounds.height, accuracy: 1,
                        "overlay 没有盖住画布（高）")
-        XCTAssertGreaterThan(CropToolOverlayView.appliedGuideLineAlpha, 0.2,
+        XCTAssertGreaterThan((overlay as? CropToolOverlayView)?.appliedGuideLineAlpha ?? -1, 0.2,
                              "线的透明度太低，等于看不见")
         XCTAssertEqual(outside, 0, "有端点落在 overlay 的 bounds 之外 —— 被裁掉的那种「看不见」")
         XCTAssertEqual(segments.count, 2)

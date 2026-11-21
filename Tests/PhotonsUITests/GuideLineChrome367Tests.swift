@@ -166,10 +166,12 @@ final class GuideLineChrome367Tests: XCTestCase {
         XCTAssertEqual(CropDrawStraighten.shadowWidth, 1)
         XCTAssertEqual(CropToolOverlayView.straightenLineWidth, 1.5)
         XCTAssertEqual(CropToolOverlayView.straightenShadowWidth, 1)
-        XCTAssertGreaterThan(CropToolOverlayView.appliedGuideLineAlpha, 0.2)
+        // 489 turned the standing alpha into view state (100 % armed / 50 % off); the default is the
+        // off state, and it is still readable rather than invisible.
+        let alpha = CropToolOverlayView().appliedGuideLineAlpha
+        XCTAssertGreaterThan(alpha, 0.2)
         print("367 ⑪ 328 线仍 \(CropToolOverlayView.straightenLineWidth) pt / "
-              + "\(CropToolOverlayView.straightenShadowWidth) px · 引导线透明度 "
-              + "\(CropToolOverlayView.appliedGuideLineAlpha)")
+              + "\(CropToolOverlayView.straightenShadowWidth) px · 引导线透明度 \(alpha)")
     }
 
     // MARK: - CIEDE2000

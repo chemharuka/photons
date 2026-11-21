@@ -662,21 +662,11 @@ public enum CropTool {
                            in layout: CropToolLayout,
                            cornerRadius: Double = cornerHitRadiusPoints,
                            edgeRadius: Double = edgeHitRadiusPoints) -> CropToolHandle {
-        var best: (kind: CropToolHandle, distance: Double)?
-        for grip in layout.grips {
-            let distance = hypot(Double(viewPoint.x - grip.point.x),
-                                 Double(viewPoint.y - grip.point.y))
-            let radius = grip.kind.isCorner ? cornerRadius : edgeRadius
-            guard distance <= radius else { continue }
-            // A corner beats an edge at equal distance, and the nearer grip always wins.
-            if let current = best {
-                if current.kind.isCorner && !grip.kind.isCorner { continue }
-                if current.kind.isCorner == grip.kind.isCorner, current.distance <= distance { continue }
-            }
-            best = (grip.kind, distance)
-        }
-        if let best { return best.kind }
-        return contains(viewPoint, in: layout) ? .inside : .outside
+        // 489 — the one hit decision now lives in `CropHitTester`; the two radius arguments are kept
+        // for source compatibility with the 035 acceptance, which names the old numbers.
+        _ = cornerRadius
+        _ = edgeRadius
+        return CropHitTester.hit(at: viewPoint, in: layout)
     }
 
     /// Point-in-quad (the quad is convex unless the mapping is degenerate, which it never is:

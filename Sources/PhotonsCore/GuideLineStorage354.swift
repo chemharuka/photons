@@ -26,4 +26,14 @@ public struct StoredGuideLine: Sendable, Equatable, Codable {
         self.by = by
         self.vertical = vertical
     }
+
+    /// **489** — the same line after a point map (a quarter turn or a mirror). The endpoints are
+    /// normalized source coordinates, so the map is the same four arithmetic lines the crop uses;
+    /// the `vertical` intent is deliberately **not** transformed: it says which way the line should
+    /// end up pointing, which a coordinate change cannot know.
+    public func remapped(_ map: (NormalizedPoint) -> NormalizedPoint) -> StoredGuideLine {
+        let a = map(NormalizedPoint(ax, ay))
+        let b = map(NormalizedPoint(bx, by))
+        return StoredGuideLine(ax: a.x, ay: a.y, bx: b.x, by: b.y, vertical: vertical)
+    }
 }
