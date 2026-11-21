@@ -367,8 +367,8 @@ final class HSLTests: XCTestCase {
         XCTAssertEqual(both, [.localColor, .hsl], "S3.5 then S3.6, in `RenderStage.order`'s order")
         XCTAssertNotNil(result.keys.localColor)
         let hslLink = try XCTUnwrap(result.keys.hsl)
-        XCTAssertEqual(Array(result.keys.pipeline.suffix(4)),
-                       [.color, .localColor, .hsl, .display])
+        XCTAssertEqual(result.keys.pipeline,
+                       StageChainShape.resting([.maskAtlas, .localApply, .localColor, .hsl]))
         XCTAssertNotEqual(result.keys.vignette, KeyBuilder.digest(of: hslLink),
                           "the vignette link is H(hsl | effects), so it cannot be the hsl link itself")
         print("HSL BOTH · " + result.keys.shortTrace)
@@ -395,7 +395,7 @@ final class HSLTests: XCTestCase {
                                          canvas: dims, content: dims,
                                          edit: allBands(0, 0, 0), display: DisplayOptions())
         XCTAssertNil(links.hsl, "no hsl link without a band value")
-        XCTAssertEqual(links.pipeline, RenderStage.allCases)
+        XCTAssertEqual(links.pipeline, StageChainShape.resting())
         print("HSL NEUTRAL · trace \(result.trace.csv) · sha \(pixels.sha256().prefix(12))… = neutral")
     }
 
@@ -414,8 +414,9 @@ final class HSLTests: XCTestCase {
                                           content: ImageSize(width: 64, height: 64),
                                           edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.hsl)
-        XCTAssertEqual(links.pipeline, RenderStage.pipeline(hasMasks: false, hasHSL: true))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.color, .hsl, .display])
+        XCTAssertEqual(links.pipeline, StageChainShape.resting([.hsl]))
+        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.hsl, .sharpen, .display],
+                       "314: S3.10 排在 S3.6 之后；S3.6 仍在 S3 与 S4 之间")
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("hsl").add(withBand.keyMaterial(.hsl)).canonical,
                        "S3.6 must be seeded by S3's key, not by the vignette's")
