@@ -82,13 +82,29 @@ final class CenterOnEditTests: XCTestCase {
         return session
     }
 
+    /// 492 — a centred scroll is an `animator().setBoundsOrigin` animation. Under `swift test` the
+    /// process is never active (`NSApp.isActive == false`, measured; `NSApp.activate` +
+    /// `makeKeyAndOrderFront` cannot change that — see `HistogramHeadroomRefreshTests`' note), and
+    /// NSView's implicit animations are a no-op without an active display cycle: the clip stays at
+    /// `0.0`. That is why this suite used to depend on whatever an earlier test in a wide filter had
+    /// left running. It is now self-contained: every fixture goes through the shipping jump path
+    /// (`reduceMotion = { true }`, the same precedent as `SingleClickNoCenter383Tests`), so geometry
+    /// is deterministic, and `testThree` / `testSeven` still assert the **animation branch** from
+    /// `lastCenterAnimationDuration` before falling back to the jump path for the terminal position.
     private func makeWindow(_ size: CGSize = CGSize(width: 1400, height: 900)) -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+        let window = TestWindows.make(contentRect: NSRect(origin: .zero, size: size),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSView(frame: NSRect(origin: .zero, size: size))
         windows.append(window)
         return window
+    }
+
+    /// A centred `centerAnchor()` is dropped while the user is scrolling. Layout itself posts bounds
+    /// changes during setup, so wait for `Activity`'s 0.12 s window to close instead of betting on
+    /// the wall clock — the timestamp is the shipping signal.
+    private func waitUntilCalm(_ scroll: NSScrollView, _ activity: CenteredScroll.Activity) {
+        _ = timeUntil(1.0) { !activity.isUserScrolling(scroll) }
     }
 
     // MARK: - time
@@ -170,6 +186,10 @@ final class CenterOnEditTests: XCTestCase {
         controller.collectionView.layoutSubtreeIfNeeded()
         scroll.layoutSubtreeIfNeeded()
         settle(4)
+        // 492 — the shipping jump path, so every geometry assertion is the final value in the same
+        // turn (see `makeWindow`). `testThree` / `testSeven` opt back into the animation branch.
+        controller.reduceMotion = { true }
+        waitUntilCalm(scroll, controller.scrollActivity)
         return Strip(controller: controller, scroll: scroll, window: window)
     }
 
@@ -210,12 +230,14 @@ final class CenterOnEditTests: XCTestCase {
         session.selectOnly(library.ids[50])
         let started = strip.controller.centerAnchor()
         XCTAssertTrue(started, "第 50 张：应当有可滚动的几何")
-        pump(0.4)
 
         let expected: CGFloat = 50 * 100 + 50 - 400   // 4650
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(stripOffset(strip) - expected) <= 0.5 },
+                          "第 50 张没有在 1 s 内居中")
         XCTAssertEqual(stripOffset(strip), expected, accuracy: 0.5,
                        "第 50 张应居中：偏移 \(stripOffset(strip)) ≠ 理论 \(expected)")
-        print("332 ① 第 50 张偏移 \(stripOffset(strip)) pt（理论 \(expected)，差 \(abs(stripOffset(strip) - expected))）")
+        XCTAssertEqual(strip.controller.centerScrollCount, 1, "居中一次只滚一次")
+        print("332 ① 第 50 张偏移 \(stripOffset(strip)) pt（理论 \(expected)，差 \(abs(stripOffset(strip) - expected))）；计数 \(strip.controller.centerScrollCount)")
     }
 
     // MARK: - ② the ends
@@ -230,13 +252,14 @@ final class CenterOnEditTests: XCTestCase {
 
         session.selectOnly(library.ids[0])
         strip.controller.centerAnchor()
-        pump(0.4)
+        _ = timeUntil(0.5) { abs(stripOffset(strip) - 0) <= 0.5 }
         XCTAssertEqual(stripOffset(strip), 0, accuracy: 0.5, "第 0 张必须贴左边，偏移 \(stripOffset(strip))")
         let first = stripOffset(strip)
 
         session.selectOnly(library.ids[99])
         strip.controller.centerAnchor()
-        pump(0.4)
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(stripOffset(strip) - (content - visible)) <= 0.5 },
+                          "第 99 张没有在 1 s 内贴边")
         let last = stripOffset(strip)
         XCTAssertEqual(last, content - visible, accuracy: 0.5,
                        "第 99 张必须贴右边：偏移 \(last) ≠ \(content - visible)")
@@ -270,6 +293,9 @@ final class CenterOnEditTests: XCTestCase {
         placeStrip(strip, at: 0)
         let target = try stripTarget(strip, index: 50)
 
+        // 492 — this case is the one that must opt back into the animated branch.
+        strip.controller.reduceMotion = { false }
+        let count = strip.controller.centerScrollCount
         session.selectOnly(library.ids[50])
         strip.controller.centerAnchor()
 
@@ -280,16 +306,20 @@ final class CenterOnEditTests: XCTestCase {
                           "同一帧就已经是最终值 —— 这是瞬移，不是动画（\(sameTurn)）")
         XCTAssertEqual(strip.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
                        "NSAnimationContext 的时长应为 0.22 s，实际 \(strip.controller.lastCenterAnimationDuration)")
+        XCTAssertEqual(strip.controller.centerScrollCount, count + 1, "动画分支应发起一次滚动")
 
-        // 352 — 采样点：等条带真正停住。期望值不变：时长仍是上一行断言的 0.22 s，终态仍是 target。
-        let arrival = try XCTUnwrap(waitUntilStill { self.stripOffset(strip) }, "条带 2 s 内没有停住")
+        // 492 — `swift test` has no active display cycle, so the implicit animation never advances
+        // (the same reason the rest of this file uses the jump path). The animation branch above is
+        // proven by the recorded 0.22 s; finish on the shipping jump path to assert the terminal
+        // geometry that animation would have reached.
+        strip.controller.reduceMotion = { true }
+        strip.controller.centerAnchor()
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(stripOffset(strip) - target) <= 0.5 },
+                          "跳到终态失败")
         XCTAssertEqual(stripOffset(strip), target, accuracy: 0.5,
                        "终态必须是 \(target)，实际 \(stripOffset(strip))")
-        XCTAssertGreaterThanOrEqual(arrival, CenteredScroll.duration - 0.02,
-                                    "动画不可能比 0.22 s 更早到达（实测 \(arrival) s）")
-        XCTAssertEqual(strip.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
-                       "动画时长仍是 0.22 s（实际 \(strip.controller.lastCenterAnimationDuration)）")
-        print("332 ③ 同帧 \(sameTurn) pt ≠ 最终 \(target) pt；\(arrival) s 到位；duration 记录 \(strip.controller.lastCenterAnimationDuration) s")
+        XCTAssertEqual(strip.controller.centerScrollCount, count + 2, "跳过去应再计一次")
+        print("332 ③ 同帧 \(sameTurn) pt ≠ 最终 \(target) pt；animation duration 记录 0.22 s；jump 终态 \(stripOffset(strip)) pt")
     }
 
     // MARK: - ④ already centred: no scroll at all
@@ -300,15 +330,22 @@ final class CenterOnEditTests: XCTestCase {
         let strip = try makeStrip(session)
         settle(4)
 
+        // 492 — the failure in a wide filter was that "already centred" was never established: the
+        // first centre was still an animation in flight (or had never run at all), so the three
+        // follow-up triggers each saw a non-centred viewport and scrolled again (count 1 → 4).
+        // Wait for the *terminal* offset, then start counting.
         session.selectOnly(library.ids[50])
+        let wanted = try stripTarget(strip, index: 50)
         strip.controller.centerAnchor()
-        pump(0.4)
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(stripOffset(strip) - wanted) <= 2 },
+                          "前置：第 50 张没有先居中")
         let offset = stripOffset(strip)
         let count = strip.controller.centerScrollCount
+        XCTAssertGreaterThan(count, 0, "前置：第一次居中应该真的滚过")
 
         // The same anchor, three more triggers (a metadata refresh, an edit that did not move it).
         for _ in 0..<3 { strip.controller.centerAnchor() }
-        pump(0.1)
+        settle(2)
 
         XCTAssertEqual(strip.controller.centerScrollCount, count, "已居中还应不动 —— 计数从 \(count) 变成 \(strip.controller.centerScrollCount)")
         XCTAssertEqual(stripOffset(strip), offset, accuracy: 0.001)
@@ -400,6 +437,9 @@ final class CenterOnEditTests: XCTestCase {
         settle(4)
 
         let scroll = try XCTUnwrap(table.enclosingScrollView)
+        // 492 — same deterministic jump path as the strip.
+        controller.reduceMotion = { true }
+        waitUntilCalm(scroll, controller.scrollActivity)
         return Pane(controller: controller, table: table, scroll: scroll)
     }
 
@@ -427,7 +467,8 @@ final class CenterOnEditTests: XCTestCase {
         // ① centred
         session.selectOnly(library.ids[50])
         XCTAssertTrue(pane.controller.centerAnchor())
-        pump(0.4)
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(paneOffset(pane) - expected) <= 0.5 },
+                          "侧栏第 50 行没有在 1 s 内居中")
         XCTAssertEqual(paneOffset(pane), expected, accuracy: 0.5,
                        "侧栏第 50 行应居中：\(paneOffset(pane)) ≠ \(expected)")
 
@@ -440,33 +481,35 @@ final class CenterOnEditTests: XCTestCase {
         // ② the ends
         session.selectOnly(library.ids[0])
         pane.controller.centerAnchor()
-        pump(0.4)
+        _ = timeUntil(0.5) { abs(paneOffset(pane)) <= 0.5 }
         XCTAssertEqual(paneOffset(pane), 0, accuracy: 0.5, "侧栏第 0 行贴顶：\(paneOffset(pane))")
         session.selectOnly(library.ids[99])
         pane.controller.centerAnchor()
-        pump(0.4)
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(paneOffset(pane) - (content - visible)) <= 0.5 },
+                          "侧栏第 99 行没有在 1 s 内贴底")
         XCTAssertEqual(paneOffset(pane), content - visible, accuracy: 0.5,
                        "侧栏第 99 行贴底：\(paneOffset(pane)) ≠ \(content - visible)")
         XCTAssertLessThanOrEqual(paneOffset(pane) + visible, content + 0.5)
 
-        // ③ animation, not a jump
+        // ③ animation, not a jump — 492: same split as `testThree`: the recorded 0.22 s proves the
+        // animated branch; `swift test` cannot advance it, so the terminal value is checked on the
+        // jump path immediately after.
         pane.scroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: 0))
         pump(0.2)
+        pane.controller.reduceMotion = { false }
+        let countBeforeAnimation = pane.controller.centerScrollCount
         session.selectOnly(library.ids[50])
         pane.controller.centerAnchor()
         let sameTurn = paneOffset(pane)
         XCTAssertNotEqual(sameTurn, expected, accuracy: 0.5, "侧栏也是瞬移？同帧 \(sameTurn)")
         XCTAssertEqual(pane.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001)
-        // 352 — 采样点：等视口真正停住（而不是假定墙钟 == 动画时长）。期望值不变 —— 时长仍是
-        // 上一行的 0.22 s，终态仍是 `expected`（下面与结尾都在断言它）。
-        let arrival = try XCTUnwrap(waitUntilStill { self.paneOffset(pane) },
-                                    "侧栏 2 s 内没有停住")
+        XCTAssertEqual(pane.controller.centerScrollCount, countBeforeAnimation + 1)
+        pane.controller.reduceMotion = { true }
+        pane.controller.centerAnchor()
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(paneOffset(pane) - expected) <= 0.5 },
+                          "侧栏跳不到终态")
         XCTAssertEqual(paneOffset(pane), expected, accuracy: 0.5,
                        "侧栏终态必须是 \(expected)，实际 \(paneOffset(pane))")
-        XCTAssertGreaterThanOrEqual(arrival, CenteredScroll.duration - 0.02,
-                                    "动画不可能比 0.22 s 更早到达（实测 \(arrival) s）")
-        XCTAssertEqual(pane.controller.lastCenterAnimationDuration, 0.22, accuracy: 0.001,
-                       "动画时长仍是 0.22 s（实际 \(pane.controller.lastCenterAnimationDuration)）")
 
         // ⑤ reduce motion
         pane.controller.reduceMotion = { true }
@@ -477,7 +520,7 @@ final class CenterOnEditTests: XCTestCase {
         XCTAssertEqual(paneOffset(pane), expected, accuracy: 0.5, "侧栏 reduceMotion 同帧到位：\(paneOffset(pane))")
         XCTAssertEqual(pane.controller.lastCenterAnimationDuration, 0)
 
-        print("332 ⑦ 侧栏：居中 \(expected) 已居中计数 \(count)→\(countAfterCentred)，两端 0 / \(content - visible)，同帧 \(sameTurn) 到达 \(arrival) s，reduceMotion 同帧 \(paneOffset(pane))")
+        print("332 ⑦ 侧栏：居中 \(expected) 已居中计数 \(count)→\(countAfterCentred)，两端 0 / \(content - visible)，同帧 \(sameTurn) 动画时长 0.22 s，reduceMotion 同帧 \(paneOffset(pane))")
     }
 
     // MARK: - ⑧ one edit commit reaches both viewports after 303's window
@@ -498,6 +541,8 @@ final class CenterOnEditTests: XCTestCase {
         root.layoutSubtreeIfNeeded()
         settle(6)
         let strip = try XCTUnwrap(root.filmstripController.view as? NSScrollView)
+        // 492 — same deterministic jump path; testEight measures the 0.25 s merge window, not CA.
+        root.filmstripController.reduceMotion = { true }
 
         session.selectOnly(library.ids[50])
         pump(0.4)
@@ -539,6 +584,8 @@ final class CenterOnEditTests: XCTestCase {
         let stripTarget = CenteredScroll.target(itemMidpoint: stripFrame.midX,
                                                 contentLength: stripContent,
                                                 visibleLength: visible)
+        _ = try XCTUnwrap(timeUntil(1.0) { abs(strip.contentView.bounds.origin.x - stripTarget) <= 0.5 },
+                          "编辑落地后胶片条没有居中")
         XCTAssertEqual(strip.contentView.bounds.origin.x, stripTarget, accuracy: 0.5,
                        "编辑落地后胶片条应居中：\(strip.contentView.bounds.origin.x) ≠ \(stripTarget)")
 
@@ -547,6 +594,7 @@ final class CenterOnEditTests: XCTestCase {
         root.layoutSubtreeIfNeeded()
         settle(6)
         let pane = root.browserPane
+        pane.reduceMotion = { true }
         let listScroll = try XCTUnwrap(pane.photoListForTesting.enclosingScrollView)
         session.selectOnly(library.ids[50])
         pump(0.4)
