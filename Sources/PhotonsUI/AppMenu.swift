@@ -61,6 +61,10 @@ public enum MainMenu {
                                     action: #selector(EditorWindowController.saveAction(_:)),
                                     keyEquivalent: "s")
         saveItem.keyEquivalentModifierMask = [.command]
+        // 更新缩略图 is the slow, separate verb (decode + render + JPEG + IFD).
+        file.addItem(withTitle: Loc.t("更新缩略图"),
+                     action: #selector(EditorWindowController.updateThumbnailAction(_:)),
+                     keyEquivalent: "")
 
         // Edit
         let editItem = NSMenuItem()

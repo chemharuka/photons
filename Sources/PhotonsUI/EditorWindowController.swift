@@ -544,6 +544,11 @@ public final class EditorWindowController: NSWindowController {
         session.saveEditsToFiles()
     }
 
+    /// 右键 ▸ 更新缩略图 — the slow, separate verb: decode + render + JPEG + IFD.
+    @objc public func updateThumbnailAction(_ sender: Any?) {
+        session.updateThumbnailsForSelection()
+    }
+
     /// 撤销 DNG 里的上次写入 — kept as a responder-chain verb (not a main-menu row; it is not a
     /// daily action).
     @objc public func undoDNGWriteAction(_ sender: Any?) {
@@ -745,6 +750,14 @@ public final class EditorWindowController: NSWindowController {
             // 477 — 保存 works for every source (DNG tag 700, others a sidecar). Title stays exactly
             // 「保存」 (the user's contract); grey only with nothing selected.
             return !session.dngTargetAssets.isEmpty
+        case #selector(updateThumbnailAction(_:)):
+            // 477 — only DNG can carry an embedded preview. A JPEG/CR3 original is grey with the
+            // reason on the row/tooltip.
+            if let reason = session.thumbnailUnavailableReason {
+                item.toolTip = reason
+                return false
+            }
+            return true
         case #selector(undoDNGWriteAction(_:)):
             return session.hasDNGTarget
         case #selector(readEditsFromDNGAction(_:)):

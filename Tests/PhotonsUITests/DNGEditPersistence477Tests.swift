@@ -201,6 +201,59 @@ final class DNGEditPersistence477Tests: XCTestCase {
         XCTAssertEqual(try DNGXMP.documentString(at: asset.url), text1)
     }
 
+    // MARK: - group ②: update thumbnail
+
+    func testCroppedThumbnailIs1920LongEdgeAndTheRawPixelsDoNotMove() throws {
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            throw XCTSkip("no test RAW at \(source.path)")
+        }
+        let library = try openEmptyLibrary()
+        let asset = try insertAsset(library)
+        load(asset.id, in: library.session)
+
+        // 9520×6336 → crop 3000×2000 → 750 → raised to 1920×1280.
+        library.session.applyEdit { model in
+            model.geometry.crop = NormalizedRect(x: 0, y: 0,
+                                                 width: 3000.0 / 9520.0,
+                                                 height: 2000.0 / 6336.0)
+        }
+        XCTAssertTrue(library.session.commitEdit(label: "裁切"))
+        let cropCanvas = CropGeometry(geometry: library.session.edit.geometry,
+                                      source: ImageSize(width: 9520, height: 6336)).canvas
+        XCTAssertEqual(cropCanvas.width, 3000)
+        XCTAssertEqual(cropCanvas.height, 2000)
+        let expected = DNGThumbnail.targetSize(forCrop: cropCanvas)
+        XCTAssertEqual(expected, ImageSize(width: 1920, height: 1280))
+
+        let before = try decodedSHA(asset.url)
+        let mainBefore = try XCTUnwrap(DNGThumbnail.mainImagePixelSize(at: asset.url))
+        XCTAssertTrue(library.session.updateThumbnailNow(assetID: asset.id),
+                      library.session.lastDNGError ?? "")
+        XCTAssertEqual(library.session.dngWriteStats.thumbnailWrites, 1)
+
+        let embedded = try XCTUnwrap(DNGThumbnail.embeddedPreviewSize(at: asset.url))
+        XCTAssertEqual(embedded, expected)
+        let preview = try XCTUnwrap(CIRAWFilter(imageURL: asset.url)?.previewImage)
+        XCTAssertEqual(Int(preview.extent.width), expected.width)
+        XCTAssertEqual(Int(preview.extent.height), expected.height)
+        XCTAssertEqual(DNGThumbnail.mainImagePixelSize(at: asset.url), mainBefore)
+
+        let after = try decodedSHA(asset.url)
+        XCTAssertEqual(before, after, "替换内嵌缩略图后解码像素必须一样")
+        print("477 缩略图：裁切 \(cropCanvas.width)×\(cropCanvas.height) ⇒ 内嵌 \(embedded.width)×\(embedded.height) · 主图 \(mainBefore.width)×\(mainBefore.height) · SHA \(before.prefix(16))… = \(after.prefix(16))…")
+    }
+
+    func testUpdateThumbnailOnNonDNGIsGreyWithAReason() throws {
+        let library = try openEmptyLibrary()
+        let asset = try insertAsset(library, filename: "IMG_9.JPG", ext: "jpg",
+                                    kind: .jpeg, copyRAW: false)
+        load(asset.id, in: library.session)
+        XCTAssertFalse(library.session.updateThumbnailNow(assetID: asset.id))
+        let reason = try XCTUnwrap(library.session.lastDNGError)
+        XCTAssertTrue(reason.contains("不是 DNG"), reason)
+        XCTAssertEqual(library.session.dngWriteStats.skipped, 1)
+    }
+
     // MARK: - DB is the only truth / backfill / read
 
     func testDBDocumentWinsOverXMPAndIsNeverOverwritten() throws {
@@ -350,22 +403,23 @@ final class DNGEditPersistence477Tests: XCTestCase {
 
     // MARK: - menus
 
-    func testFileMenuHasSaveWithCommandS() {
+    func testFileMenuHasSaveWithCommandSAndUpdateThumbnail() {
         let menu = MainMenu.build()
         let file = menu.items.first { $0.submenu?.title == Loc.t("文件") }?.submenu
         let save = file?.items.first { $0.title == Loc.t("保存") }
         XCTAssertNotNil(save, "文件菜单缺「保存」")
         XCTAssertEqual(save?.keyEquivalent, "s")
         XCTAssertEqual(save?.keyEquivalentModifierMask, [.command])
+        XCTAssertNotNil(file?.items.first { $0.title == Loc.t("更新缩略图") })
     }
 
-    func testRightClickMenuPutsSaveBelowExport() throws {
+    func testRightClickMenuPutsSaveAndUpdateBelowExport() throws {
         let library = try openEmptyLibrary()
         let asset = try insertAsset(library)
         load(asset.id, in: library.session)
         let menu = NSMenu()
         ExportMenuBuilder.attach(to: menu, session: library.session, selectedIDs: [asset.id])
         let titles = menu.items.map(\.title)
-        XCTAssertEqual(Array(titles.prefix(2)), [Loc.t("导出…"), Loc.t("保存")])
+        XCTAssertEqual(Array(titles.prefix(3)), [Loc.t("导出…"), Loc.t("保存"), Loc.t("更新缩略图")])
     }
 }

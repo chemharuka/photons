@@ -1892,12 +1892,14 @@ public enum ExportMenuBuilder {
 
     public static let title = Loc.t("导出…")
     public static let saveTitle = Loc.t("保存")
+    public static let thumbnailTitle = Loc.t("更新缩略图")
 
     private static var action: Selector { #selector(EditorWindowController.exportAction(_:)) }
     private static var saveAction: Selector { #selector(EditorWindowController.saveAction(_:)) }
-    private static let actions: Set<Selector> = [action, saveAction]
+    private static var thumbnailAction: Selector { #selector(EditorWindowController.updateThumbnailAction(_:)) }
+    private static let actions: Set<Selector> = [action, saveAction, thumbnailAction]
 
-    /// 把「导出…」插到菜单最上面（一条分隔线收尾），并在它下面放 477 的「保存」。
+    /// 把「导出…」插到菜单最上面（一条分隔线收尾），并在它下面放 477 的「保存」与「更新缩略图」。
     /// 重复打开时按 **action** 清掉上一轮那几行 —— 导出标题会随张数变，不能按标题认。
     public static func attach(to menu: NSMenu, session: CatalogSession?, selectedIDs: [String]) {
         var index = menu.items.count - 1
@@ -1913,9 +1915,12 @@ public enum ExportMenuBuilder {
         export.target = nil
         let save = NSMenuItem(title: saveTitle, action: saveAction, keyEquivalent: "")
         save.target = nil
+        let thumbnail = NSMenuItem(title: thumbnailTitle, action: thumbnailAction, keyEquivalent: "")
+        thumbnail.target = nil
         menu.insertItem(export, at: 0)
         menu.insertItem(save, at: 1)
-        menu.insertItem(.separator(), at: 2)
+        menu.insertItem(thumbnail, at: 2)
+        menu.insertItem(.separator(), at: 3)
     }
 }
 
