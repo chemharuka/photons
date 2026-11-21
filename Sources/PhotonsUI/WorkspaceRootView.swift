@@ -235,9 +235,10 @@ public final class TopBarView: NSView, NSPopoverDelegate {
     public let statusCluster = TopBarStatusCluster()
     private var separators: [NSView] = []
 
-    /// 454 P1 — the model the future panel and the two background queues share. P1 has no producer,
-    /// so it stays empty; the top bar aliases it through `WorkspaceRootView.backgroundTaskStore`.
-    public let backgroundTaskStore = BackgroundTaskStore()
+    /// 454 P1 — the panel's model. P2a moved the single instance to `CatalogSession`; the workspace
+    /// hands that same object in (`TopBarView(store:)`), and tests that build a bare bar get a fresh
+    /// one by default. The popover and the header therefore cannot drift apart.
+    public let backgroundTaskStore: BackgroundTaskStore
     private lazy var backgroundTasksPopoverController = BackgroundTasksPopover(store: backgroundTaskStore)
     private let backgroundTasksPopover = NSPopover()
     /// Test/`--ui-smoke` read: whether the popover was opened. Mirrors `isShown` whenever there is a
@@ -258,7 +259,8 @@ public final class TopBarView: NSView, NSPopoverDelegate {
 
     public override var isFlipped: Bool { true }
 
-    public init() {
+    public init(store: BackgroundTaskStore = BackgroundTaskStore()) {
+        backgroundTaskStore = store
         super.init(frame: .zero)
         wantsLayer = true
 
@@ -564,11 +566,10 @@ final class WorkspaceDivider: NSView {
 public final class WorkspaceRootView: NSView {
 
     public let session: CatalogSession
-    public let topBar = TopBarView()
-    /// 454 P1 —— the one store for background tasks. P1 has no producer (export/HDR/denoise paths are
-    /// untouched); P2/P3 will call `begin` / `advance` / `finish` from here. The top bar owns the
-    /// object so the popover and this alias cannot drift apart.
-    public var backgroundTaskStore: BackgroundTaskStore { topBar.backgroundTaskStore }
+    public let topBar: TopBarView
+    /// 454 P2a —— the one store lives on the model (`session.backgroundTasks`); the top bar's popover
+    /// is handed the same instance. P1 的面板外观与行为不变，视图只是读它。
+    public var backgroundTaskStore: BackgroundTaskStore { session.backgroundTasks }
     public let browserPane: BrowserPaneController
     public let gridController: AssetGridController
     public let loupeController: LoupeController
@@ -661,6 +662,8 @@ public final class WorkspaceRootView: NSView {
         let gridController = AssetGridController(session: session)
         let filmstripController = FilmstripController(session: session)
         self.session = session
+        // 454 P2a — the bar's popover reads the model-owned store, exactly as the header does.
+        self.topBar = TopBarView(store: session.backgroundTasks)
         self.browserPane = browserPane
         self.gridController = gridController
         self.loupeController = LoupeController(session: session)
