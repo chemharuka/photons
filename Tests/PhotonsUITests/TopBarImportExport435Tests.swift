@@ -236,11 +236,13 @@ final class TopBarImportExport435Tests: XCTestCase {
     func testA4_controlsTrailingEdgeIsTheRightmostButtonAndTheClusterStaysClear() {
         let bar = makeBar()
         let sort = bar.sortButtonView
+        let background = bar.backgroundButtonView
         let imp = bar.importButtonView
         let exp = bar.exportButtonView
 
-        // 这一行最右的控件是排序按钮（§3 的固定顺序），所以预算线就是它的右边缘。
-        XCTAssertEqual(bar.controlsTrailingEdge, sort.frame.maxX, accuracy: 0.001)
+        // 454 P1 —— 这一行最右的控件是「后台」按钮，所以预算线就是它的右边缘。
+        XCTAssertEqual(bar.controlsTrailingEdge, background.frame.maxX, accuracy: 0.001)
+        XCTAssertLessThan(sort.frame.maxX, background.frame.minX, "排序必须在后台按钮左边")
         XCTAssertLessThan(exp.frame.maxX, sort.frame.minX, "导出必须在排序按钮左边")
 
         // 两个新按钮把后面的控件整体右移了「导入宽 + 导出宽 + 两条 10 pt」。
