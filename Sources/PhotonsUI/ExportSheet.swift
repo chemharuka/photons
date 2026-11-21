@@ -343,8 +343,7 @@ public final class ExportSheetModel {
                 outputDirectory: URL? = nil,
                 presetStore: ExportPresetStore? = nil,
                 writableUTIs: Set<String>? = nil,
-                draftStore: ExportDraftPersistence.Store? = nil) {
-        let draftStore = draftStore ?? UserDefaults.standard
+                draftStore: ExportDraftPersistence.Store = ExportDefaults.draftStore) {
         self.draftStore = draftStore
 
         let recalled = ExportDraftPersistence.recall(from: draftStore)
@@ -1034,13 +1033,27 @@ public struct ExportSectionCollapseStore {
         self.write = write
     }
 
+    public init(store: UserDefaults) {
+        self.init(read: { store.object(forKey: ExportSectionCollapseStore.key($0)) as? Bool },
+                  write: { title, expanded in
+                      store.set(expanded, forKey: ExportSectionCollapseStore.key(title))
+                  })
+    }
+
     static func key(_ title: String) -> String { "photons.export.section.\(title)" }
 
-    public static let userDefaults = ExportSectionCollapseStore(
-        read: { UserDefaults.standard.object(forKey: ExportSectionCollapseStore.key($0)) as? Bool },
-        write: { title, expanded in
-            UserDefaults.standard.set(expanded, forKey: ExportSectionCollapseStore.key(title))
-        })
+    /// The app's real store, unless a harness installed its own suite (466). In a test process a
+    /// fresh in-memory store is used, so constructing a sheet without an explicit store cannot write
+    /// `photons.export.section.*` into the developer's domain.
+    public static var userDefaults: ExportSectionCollapseStore {
+        if let suite = ExportDefaults.overrideSuite {
+            return ExportSectionCollapseStore(store: suite)
+        }
+        if ExportDefaults.isRunningTests {
+            return .memory()
+        }
+        return ExportSectionCollapseStore(store: .standard)
+    }
 
     static func memory(_ seed: [String: Bool] = [:]) -> ExportSectionCollapseStore {
         final class Box { var values: [String: Bool] = [:] }
@@ -2212,13 +2225,16 @@ public final class ExportSheetController: NSObject {
     public private(set) var items: [ExportItem] = []
     private var natives: [String: ImageSize] = [:]
 
-    public init(session: CatalogSession, outputDirectory: URL? = nil) {
+    public init(session: CatalogSession, outputDirectory: URL? = nil,
+                draftStore: ExportDraftPersistence.Store = ExportDefaults.draftStore,
+                sectionStore: ExportSectionCollapseStore = .userDefaults) {
         self.session = session
         // `nil` lets the model use 161 §5's remembered directory (or the factory default). An
         // explicit directory still wins — that is the caller asking for this run's destination.
-        let model = ExportSheetModel(outputDirectory: outputDirectory)
+        let model = ExportSheetModel(outputDirectory: outputDirectory, draftStore: draftStore)
         self.model = model
-        self.hosting = NSHostingController(rootView: ExportSheetView(model: model))
+        self.hosting = NSHostingController(rootView: ExportSheetView(model: model,
+                                                                     sectionStore: sectionStore))
         super.init()
 
         model.onClose = { [weak self] in self?.dismiss() }

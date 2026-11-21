@@ -137,12 +137,6 @@ final class ExportSheetTruncationTests: XCTestCase {
             window.contentView = nil
         }
         windows = []
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
-            // （以前 removeObject 等于折叠，现在等于展开）。
-            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
-        }
     }
 
     private func descendants(of root: NSView) -> [NSView] {
@@ -168,14 +162,14 @@ final class ExportSheetTruncationTests: XCTestCase {
     }
 
     /// 真路径：和 文件 ▸ 导出… 一样，`ExportSheetController.present(in:)` 开它自己的 sheet。
-    /// 三段展开靠的是控制器读的那一对象（`UserDefaults` 的 `photons.export.section.*`），
-    /// 不是测试自己搭的视图。
+    /// 三段展开靠注入的内存 section store（466：不再写真实 `UserDefaults`）。
     private func presentSheet(sdr: Bool = false) throws -> (ExportSheetController, NSWindow, NSView) {
         NSApplication.shared.setActivationPolicy(.accessory)
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            UserDefaults.standard.set(true, forKey: "photons.export.section.\(title)")
-        }
+        let sectionStore = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: true,
+            ExportSheetView.hdrSection: true,
+            ExportSheetView.afterSection: true
+        ])
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
@@ -183,7 +177,9 @@ final class ExportSheetTruncationTests: XCTestCase {
         windows.append(parent)
 
         let session = CatalogSession(remembersRecentLibrary: false)
-        let controller = ExportSheetController(session: session)
+        let controller = ExportSheetController(session: session,
+                                               draftStore: InMemoryDraftStore(),
+                                               sectionStore: sectionStore)
         controller.present(in: parent)
         let window = try XCTUnwrap(controller.sheetWindow, "present(in:) 没有开 sheet 窗口")
         windows.append(window)
@@ -431,18 +427,20 @@ final class ExportSheetTruncationTests: XCTestCase {
 
     func testTheFirstScreenShowsSixResidentRowsAndTenBandsAtMost() throws {
         NSApplication.shared.setActivationPolicy(.accessory)
-        for title in [ExportSheetView.colourSection, ExportSheetView.hdrSection,
-                      ExportSheetView.afterSection] {
-            // 438 —— 折叠段默认改成展开，所以「首屏/折叠」这类断言必须显式写 false
-            // （以前 removeObject 等于折叠，现在等于展开）。
-            UserDefaults.standard.set(false, forKey: "photons.export.section.\(title)")
-        }
+        // 466 —— 折叠状态走注入的内存 store（全部 false），不再写真实 `UserDefaults`。
+        let collapsed = ExportSectionCollapseStore.memory([
+            ExportSheetView.colourSection: false,
+            ExportSheetView.hdrSection: false,
+            ExportSheetView.afterSection: false
+        ])
         let parent = TestWindows.make(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 900),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
         TestWindows.show(parent, key: true)
         windows.append(parent)
-        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false))
+        let controller = ExportSheetController(session: CatalogSession(remembersRecentLibrary: false),
+                                               draftStore: InMemoryDraftStore(),
+                                               sectionStore: collapsed)
         controller.present(in: parent)
         let window = try XCTUnwrap(controller.sheetWindow)
         windows.append(window)

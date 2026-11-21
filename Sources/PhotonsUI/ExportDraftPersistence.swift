@@ -15,6 +15,58 @@ import PhotonsExport
 //     the preset file. The two lists coexist and cannot overwrite each other.
 //   · when to write — the model saves after a successful export and on close (see
 //     `ExportSheetModel.saveDraftOnClose`), never on every slider tick.
+/// Where the export surface gets its `UserDefaults`-shaped store (466).
+///
+/// The app must keep remembering the user's draft in `UserDefaults.standard`, but a harness is not
+/// the user: `--ui-smoke` runs the shipped app binary, and any test process that touched the sheet
+/// used to write the fixture (`Smoke Thumb`, 2401 px, 240 PPI…) straight into the real domain.
+///
+/// So the store is resolved here instead of at each call site:
+///
+///   · `--ui-smoke` installs its own suite before opening the sheet;
+///   · a test process gets a fresh in-memory store (never `UserDefaults.standard`);
+///   · the app gets `UserDefaults.standard`.
+public enum ExportDefaults {
+
+    /// The smoke harness' own domain. It is removed both before and after a run.
+    public static let smokeSuiteName = "com.nousresearch.photons.uismoke"
+
+    /// Set by the smoke runner (same process, before any export sheet exists).
+    public private(set) static var overrideSuite: UserDefaults?
+
+    /// XCTest is loaded in this process. Used only to keep the default store off the real domain;
+    /// production never links XCTest.
+    public static var isRunningTests: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
+
+    public static func install(_ suite: UserDefaults?) {
+        overrideSuite = suite
+    }
+
+    /// The store the defaulted entry points resolve to. A test gets a fresh in-memory store on every
+    /// call, so an omission cannot leak into the developer's preferences (466).
+    public static var draftStore: ExportDraftPersistence.Store {
+        if let overrideSuite { return overrideSuite }
+        if isRunningTests { return InMemoryDraftStore() }
+        return UserDefaults.standard
+    }
+}
+
+/// A small in-memory `ExportDraftPersistence.Store` for the test-isolated default and for tests that
+/// want the production write path without a domain. (The persistence tests keep their own counters.)
+public final class InMemoryDraftStore: ExportDraftPersistence.Store {
+    public private(set) var values: [String: Data] = [:]
+
+    public init() {}
+
+    public func exportDraftData(forKey key: String) -> Data? { values[key] }
+
+    public func setExportDraftData(_ data: Data?, forKey key: String) {
+        if let data { values[key] = data } else { values.removeValue(forKey: key) }
+    }
+}
+
 public enum ExportDraftPersistence {
 
     /// Bumped only when the stored shape is incompatible. A blob from another version is treated as
@@ -62,7 +114,7 @@ public enum ExportDraftPersistence {
 
     // MARK: read / write
 
-    public static func recall(from store: Store = UserDefaults.standard,
+    public static func recall(from store: Store = ExportDefaults.draftStore,
                               key: String = storageKey) -> Recall {
         guard let data = store.exportDraftData(forKey: key) else { return .missing }
         guard let draft = try? JSONDecoder().decode(Draft.self, from: data),
@@ -74,7 +126,7 @@ public enum ExportDraftPersistence {
     /// trick `FilterPersistence.save` uses), so "save on close" cannot bounce back into another write.
     @discardableResult
     public static func save(preset: ExportPreset, outputDirectory: URL,
-                            to store: Store = UserDefaults.standard,
+                            to store: Store = ExportDefaults.draftStore,
                             key: String = storageKey) -> Bool {
         let draft = Draft(preset: preset, outputDirectory: outputDirectory)
         guard let data = encoded(draft) else { return false }
@@ -83,7 +135,7 @@ public enum ExportDraftPersistence {
         return true
     }
 
-    public static func clear(in store: Store = UserDefaults.standard,
+    public static func clear(in store: Store = ExportDefaults.draftStore,
                              key: String = storageKey) {
         store.setExportDraftData(nil, forKey: key)
     }
