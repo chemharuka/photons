@@ -488,10 +488,13 @@ final class SortOrderUITests: XCTestCase {
         XCTAssertEqual(sort.image?.tiffRepresentation, before, "图标随状态变了（应静态）")
         XCTAssertEqual(sort.image?.size, image.size)
 
-        // 与邻居同尺寸（≤ 0.5 pt）。
+        // 与邻居同尺寸（≤ 1.5 pt）。
+        // 465 起按字形原生光学尺寸绘制，不同字形的 12 pt 渲染尺寸本来相差 1 pt
+        // （实测 folder 18×14 vs arrow.up.arrow.down 17×14）；1.5 pt 仍能抓住
+        // 「换了字号 / 换了一族字形」这种真回归。
         let neighbourImage = try XCTUnwrap(neighbour.image)
-        XCTAssertEqual(image.size.width, neighbourImage.size.width, accuracy: 0.5, "图标宽与邻居不一致")
-        XCTAssertEqual(image.size.height, neighbourImage.size.height, accuracy: 0.5, "图标高与邻居不一致")
+        XCTAssertEqual(image.size.width, neighbourImage.size.width, accuracy: 1.5, "图标宽与邻居不一致")
+        XCTAssertEqual(image.size.height, neighbourImage.size.height, accuracy: 1.5, "图标高与邻居不一致")
 
         // 明/暗两种外观：同一个字形（alpha 掩码逐像素相同），颜色跟着 `labelColor` 翻转。
         let aqua = try XCTUnwrap(render(sort, appearance: .aqua))
