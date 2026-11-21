@@ -7,7 +7,7 @@ import PhotonsExtensions
 
 /// 485 — the edit-time clean cache seen through `CatalogSession`: hits across a re-open, a stable
 /// key across edits, rebuilding after deletion, failure hygiene, and "no new file in the photo
-/// directory". The algorithm itself is tested in `BuiltinDenoiseClean485Tests` / `BuiltinDenoiseTests`.
+/// directory". The algorithm itself is tested in `BuiltinDenoiseClean485Tests`.
 @MainActor
 final class DenoiseCache485Tests: XCTestCase {
 
@@ -186,44 +186,71 @@ final class DenoiseCache485Tests: XCTestCase {
         let probe = ComputeProbe()
         await probe.configure(fail: true)
         let asset = try makeSession(probe: probe)
-        session.selectOnly(asset.id)
         let before = sourceFiles
 
-        XCTAssertEqual(session.denoiseSelection(engine: .builtin), [asset.id])
-        let deadline = Date().addingTimeInterval(20)
-        while session.denoiseCompletionCount == 0 && Date() < deadline {
-            try await Task.sleep(nanoseconds: 10_000_000)
+        // 480's menu row is gone: P1 drives the cleaner through the service door directly.
+        let result = await session.cleanDenoiseIfNeeded(assetID: asset.id)
+        guard case .failure = result else {
+            return XCTFail("计算失败时服务必须返回 failure")
         }
 
-        XCTAssertNotNil(session.lastDenoiseError)
-        XCTAssertNil(session.lastDenoiseReport, "失败也不该凭空生出 DNG")
         XCTAssertEqual(session.denoiseStats.computesFailed, 1)
         XCTAssertEqual(cacheFiles.count, 0, "失败不许留半成品缓存")
         XCTAssertEqual(sourceFiles, before, "照片目录零新文件")
     }
 
-    func testTheBuiltinEntryWritesNoDNGAndLeavesSelectionAlone() async throws {
+    func testTheServiceWritesNoDNGAndLeavesSelectionAlone() async throws {
         let probe = ComputeProbe()
         let asset = try makeSession(probe: probe)
         session.selectOnly(asset.id)
         let before = sourceFiles
 
-        XCTAssertEqual(session.denoiseSelection(engine: .builtin), [asset.id])
-        let deadline = Date().addingTimeInterval(20)
-        while session.denoiseCompletionCount == 0 && Date() < deadline {
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
+        let result = await session.cleanDenoiseIfNeeded(assetID: asset.id)
+        _ = try result.get()
 
         let calls = await probe.count
-        print("485 entry: error=\(session.lastDenoiseError ?? "none") "
-              + "progress=\(session.lastDenoiseProgress ?? "nil") files=\(sourceFiles)")
-        XCTAssertNil(session.lastDenoiseError)
-        XCTAssertNil(session.lastDenoiseReport)
-        XCTAssertEqual(session.selection, [asset.id])
+        print("485 service: calls=\(calls) computes=\(session.denoiseStats.computes) "
+              + "files=\(sourceFiles)")
+        XCTAssertEqual(session.selection, [asset.id], "缓存填充不改选中")
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(session.denoiseStats.computes, 1)
         XCTAssertEqual(sourceFiles, before)
-        XCTAssertTrue(session.lastDenoiseProgress?.contains("降噪缓存") == true)
         XCTAssertEqual(cacheFiles.count, 1)
+    }
+
+    /// 485 × 480 — the batch row is gone, but serial cache filling is still a service contract.
+    func testPrecomputeFillsTwoPhotosSeriallyAndWritesNoDNG() async throws {
+        let probe = ComputeProbe()
+        let first = try makeSession(probe: probe)
+        // A second asset in the same library, reusing the fixture with a different hash.
+        var data = try Data(contentsOf: Self.fixtureURL)
+        data.append(contentsOf: Array("cache485-b".utf8))
+        let name = "IMG_0001.dng"
+        try data.write(to: src.appendingPathComponent(name))
+        let catalog = try Catalog.open(at: library)
+        let root = try XCTUnwrap(try catalog.roots().first)
+        let second = Asset(sourceRootId: root.id, relPath: name, filename: name,
+                           ext: "dng", kind: .raw, size: data.count, mtime: 0,
+                           contentHash: "cache485-content-b",
+                           width: 1024, height: 1024,
+                           captureTime: "2026-05-01T10:01:00Z",
+                           captureLocalDate: "2026-05-01",
+                           cameraModel: "LEICA SL3", cameraKey: "leica|sl3")
+        try await catalog.dbQueue.write { db in try second.insert(db) }
+        try session.open(library)
+        let before = sourceFiles
+
+        let failures = await session.precomputeDenoiseCache(assetIDs: [first.id, second.id])
+
+        let calls = await probe.count
+        print("485 precompute: calls=\(calls) computes=\(session.denoiseStats.computes) "
+              + "failed=\(failures.count) files=\(sourceFiles)")
+        XCTAssertTrue(failures.isEmpty)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(session.denoiseStats.computes, 2)
+        XCTAssertEqual(session.denoiseStats.computesFailed, 0)
+        XCTAssertEqual(cacheFiles.count, 2)
+        XCTAssertEqual(sourceFiles, before, "批量填充也不许往照片目录写文件")
+        XCTAssertFalse(sourceFiles.contains { $0.contains("denoised") })
     }
 }

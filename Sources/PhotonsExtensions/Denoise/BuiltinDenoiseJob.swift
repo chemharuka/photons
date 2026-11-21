@@ -465,3 +465,34 @@ public struct BuiltinDenoiseJob: Sendable {
         return max(0, min(w, 1))
     }
 }
+
+/// 485 — the UI's **only** door to the built-in NLM. 480's engine/menu is gone; the algorithm stays
+/// as `DenoiseCleaner`'s fallback backend, so `PhotonsUI` never names `BuiltinDenoise*` directly.
+/// The cache's own `compute` closure still owns the Core types (`LinearImage`, `RAWDecoder`), which
+/// is why this wrapper deals only in planes.
+public enum DenoiseNLMBackend {
+    /// DNG mosaic → cleaned four CFA planes. No output file, no DNG writer.
+    public static func cleanDNG(input: URL,
+                                progress: (@Sendable (String) -> Void)? = nil)
+        throws -> BuiltinDenoiseJob.Clean {
+        try BuiltinDenoiseJob(options: BuiltinDenoiseJob.Options(amount: 100))
+            .clean(input: input, progress: progress)
+    }
+
+    /// RGB → LightCraft's four pseudo-planes (`Y/C1/C2/C3`).
+    public static func fourPlanesFromRGB(_ rgb: [[Float]]) -> [[Float]] {
+        BuiltinDenoise.fourPlanesFromRGB(rgb)
+    }
+
+    /// RGB → cleaned four planes, through the same filter the DNG path uses.
+    public static func cleanRGB(_ rgb: [[Float]],
+                                width: Int,
+                                height: Int,
+                                progress: (@Sendable (String) -> Void)? = nil)
+        -> BuiltinDenoiseJob.PlaneResult {
+        let planes = BuiltinDenoise.fourPlanesFromRGB(rgb)
+        return BuiltinDenoiseJob.cleanPlanes(
+            planes: planes, width: width, height: height,
+            options: BuiltinDenoiseJob.Options(amount: 100), progress: progress)
+    }
+}

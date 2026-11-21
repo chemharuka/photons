@@ -2013,10 +2013,8 @@ public enum HDRMenuBuilder {
 
 /// 右键 ▸「模型降噪（Ansel）…」/「模型降噪（Nonlocal）…」 — §386 的一项，§432 拆成两项。
 ///
-/// 480 × 485：**内置行只填缓存**（「预计算降噪并写入缓存（不再生成新文件）」），它不再有
-/// 「产物 + 堆叠」这一步。模型两行仍是 §386 的用户契约（2026-11-11）：「选择单个照片，右键-
-/// "模型降噪"，会自动在原文件的同位置生成 XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的
-/// 放在顶部」，以及「不弹窗口」。
+/// 用户的契约（2026-11-11）：「选择单个照片，右键-"模型降噪"，会自动在原文件的同位置生成
+/// XXX-denoised.dng，并且对两个照片进行堆叠，降噪后的放在顶部」，以及「不弹窗口」。
 /// 所以每一项只有一个动词和一个决定：*这一张能不能降噪*，不能的时候原因就写在行上。
 ///
 /// §432（用户口径 2026-11-19「模型降噪(AI denoise)要设置两个入口」）：两条网络并存 ——
@@ -2054,28 +2052,12 @@ public final class DenoiseMenuTarget: NSObject {
         session?.denoiseSelection(engine: .nonlocal)
     }
 
-    @objc func builtinPressed(_ sender: Any?) {
-        session?.denoiseSelection(engine: .builtin)
-    }
-
     @objc func batchDenoisePressed(_ sender: Any?) {
         // 478 — the two batch rows carry their engine on the item (`tag`), so the click decides which
         // path runs. The fallback keeps the programmatic `batchEngine` call used by older tests.
         let engine = (sender as? NSMenuItem)
             .flatMap { DenoiseMenuBuilder.engine(forTag: $0.tag) } ?? batchEngine
         session?.denoiseBatchSelection(engine: engine) { [weak self] message in
-            if let present = self?.presentBatchSkipNotice {
-                present(message)
-            } else {
-                DenoiseMenuBuilder.presentBatchSkipAlert(message)
-            }
-        }
-    }
-
-    /// §480 — the built-in engine's own batch row. It is a separate selector rather than a second
-    /// `batchEngine` so the two rows cannot disagree about which engine the click started.
-    @objc func builtinBatchPressed(_ sender: Any?) {
-        session?.denoiseBatchSelection(engine: .builtin) { [weak self] message in
             if let present = self?.presentBatchSkipNotice {
                 present(message)
             } else {
@@ -2095,7 +2077,6 @@ public enum DenoiseMenuBuilder {
         switch engine {
         case .ansel: return Loc.t("模型降噪（Ansel）…")
         case .nonlocal: return Loc.t("模型降噪（Nonlocal）…")
-        case .builtin: return Loc.t("模型降噪（内置）…")
         }
     }
 
@@ -2111,27 +2092,13 @@ public enum DenoiseMenuBuilder {
         Loc.t("降噪 {0} 张（{1}）…", String(describing: (count)), engine.displayName)
     }
 
-    /// §480 — the built-in batch row's title. Deliberately *not* a change to `batchTitle`: the
-    /// existing row is Ansel/NLMF's, and 474's tests (and users' muscle memory) pin that sentence.
-    public static func builtinBatchTitle(count: Int) -> String {
-        // 480 × 478 合并后：内置只是第三个引擎，标题走同一句模板（「降噪 N 张（内置）…」），
-        // 保留这个符号只是为了 480 的用例能引用它。
-        batchTitle(count: count, engine: .builtin)
-    }
-
     public static var batchAction: Selector { #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
-    /// 480 × 478 — 批量行**不再有专用 selector**：三行共用 `batchAction`，引擎由 `tag` 携带。
-    public static var builtinBatchAction: Selector { batchAction }
 
     /// 478 — `NSMenuItem.tag` is the engine carrier for the batch rows. Two values, stable across
     /// both menus; `nil` means "not one of ours" (the single rows use their own selectors, so they
     /// never reach this lookup).
     public static func tag(for engine: DenoiseEngine) -> Int {
-        switch engine {
-        case .ansel: return 0
-        case .nonlocal: return 1
-        case .builtin: return 2
-        }
+        engine == .ansel ? 0 : 1
     }
 
     public static func engine(forTag tag: Int) -> DenoiseEngine? {
@@ -2146,10 +2113,8 @@ public enum DenoiseMenuBuilder {
         guard let session else { return DenoiseNotices.noLibrary }
         guard selectedIDs.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
-        // 485 — the built-in row fills the cache and accepts any decodable source; the model rows
-        // still need a DNG because their engines write a DNG internally.
         let usable = session.selectedAssets.filter {
-            (engine == .builtin || $0.ext.lowercased() == "dng") && session.fileURL(for: $0) != nil
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
         }
         guard usable.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         switch engine {
@@ -2162,9 +2127,6 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
-        case .builtin:
-            // §480 — no model, no executable, no network. Nothing to check.
-            break
         }
         return nil
     }
@@ -2182,14 +2144,10 @@ public enum DenoiseMenuBuilder {
         } else {
             entry.isEnabled = true
             let usable = session?.selectedAssets.filter {
-                (engine == .builtin || $0.ext.lowercased() == "dng")
-                    && session?.fileURL(for: $0) != nil
+                $0.ext.lowercased() == "dng" && session?.fileURL(for: $0) != nil
             }.count ?? selectedIDs.count
-            entry.toolTip = engine == .builtin
-                ? Loc.t("依次为可用的 {0} 张照片预计算降噪缓存（不再生成新文件）",
-                        String(describing: (usable)))
-                : Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
-                        String(describing: (usable)))
+            entry.toolTip = Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
+                                  String(describing: (usable)))
         }
         return entry
     }
@@ -2215,8 +2173,7 @@ public enum DenoiseMenuBuilder {
         guard let asset = session.selectedAssets.first else {
             return DenoiseNotices.singlePhotoOnly
         }
-        // 485 — only the model engines are DNG-only; the built-in row cleans any decodable source.
-        guard engine == .builtin || asset.ext.lowercased() == "dng" else {
+        guard asset.ext.lowercased() == "dng" else {
             return DenoiseNotices.onlyDNG(asset.filename)
         }
         // 「正在跑」在依赖之前：跑着的时候再说「缺模型」是假消息，而它其实什么都不缺。
@@ -2231,9 +2188,6 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
-        case .builtin:
-            // §480 — no model, no executable, no network. Nothing to check.
-            break
         }
         return nil
     }
@@ -2242,12 +2196,9 @@ public enum DenoiseMenuBuilder {
     /// 时才可点。
     public static func item(session: CatalogSession?, target: DenoiseMenuTarget,
                             selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
-        let action: Selector
-        switch engine {
-        case .ansel: action = #selector(DenoiseMenuTarget.denoisePressed(_:))
-        case .nonlocal: action = #selector(DenoiseMenuTarget.nonlocalPressed(_:))
-        case .builtin: action = #selector(DenoiseMenuTarget.builtinPressed(_:))
-        }
+        let action: Selector = engine == .ansel
+            ? #selector(DenoiseMenuTarget.denoisePressed(_:))
+            : #selector(DenoiseMenuTarget.nonlocalPressed(_:))
         let entry = NSMenuItem(title: title(for: engine), action: action, keyEquivalent: "")
         entry.target = target
         if let reason = unavailableReason(session: session, selectedIDs: selectedIDs,
@@ -2256,12 +2207,7 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            // 485 — the built-in row no longer produces a second RAW; it only fills the cache. The
-            // model rows keep their existing product (they are §432's separate engines).
-            entry.toolTip = engine == .builtin
-                ? Loc.t("预计算降噪并写入缓存（不再生成新文件）")
-                : Loc.t("在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）",
-                        String(describing: (denoisedFileNameHint(session: session))))
+            entry.toolTip = Loc.t("在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）", String(describing: (denoisedFileNameHint(session: session))))
         }
         return entry
     }
@@ -2279,8 +2225,7 @@ public enum DenoiseMenuBuilder {
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
                               selectedIDs: [String]) {
         for (index, existing) in menu.items.enumerated().reversed()
-            where titles.contains(existing.title) || existing.action == batchAction
-                || existing.action == builtinBatchAction {
+            where titles.contains(existing.title) || existing.action == batchAction {
             menu.removeItem(at: index)
             // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
             // one after its own row, and the previous open may have put one after ours.
@@ -2299,9 +2244,11 @@ public enum DenoiseMenuBuilder {
             if insertAt < menu.items.count, menu.items[insertAt].isSeparatorItem { insertAt += 1 }
         }
         var row = insertAt
-        // 474/478 — only a real multi-selection gets the batch rows. A single photo keeps exactly
-        // the two existing entries ("降噪" behaviour unchanged). Two rows, one per engine, so the
-        // title itself says which path the click will take.
+        // 474/478/480 — **一共只有两行**，一行一个引擎；选中几张就只给那一种行：
+        //   · 单选（0 或 1 张）⇒ 「模型降噪（Ansel）…」/「（Nonlocal）…」，不可用时灰并写原因；
+        //   · 多选（≥ 2 张）⇒ 「降噪 N 张（Ansel）…」/「…（Nonlocal）…」。
+        // 以前多选时把四行都插进去（两行批量 + 两行单选，后者灰着说「只处理单张照片」），
+        // 同一个动作在菜单里出现两遍，用户看到的是四个入口。
         if selectedIDs.count >= 2 {
             for engine in DenoiseEngine.allCases {
                 menu.insertItem(batchItem(session: session, target: target,
@@ -2309,13 +2256,13 @@ public enum DenoiseMenuBuilder {
                                 at: row)
                 row += 1
             }
-        }
-        // 两项挨着插：Ansel 在上，Nonlocal 在下，读完一行再读一行是同一个决定。
-        for engine in DenoiseEngine.allCases {
-            menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
-                                 engine: engine),
-                            at: row)
-            row += 1
+        } else {
+            for engine in DenoiseEngine.allCases {
+                menu.insertItem(item(session: session, target: target, selectedIDs: selectedIDs,
+                                     engine: engine),
+                                at: row)
+                row += 1
+            }
         }
         let after = row
         let alreadySeparated = after < menu.items.count && menu.items[after].isSeparatorItem

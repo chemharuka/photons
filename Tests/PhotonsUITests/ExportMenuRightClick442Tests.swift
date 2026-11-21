@@ -25,7 +25,15 @@ final class ExportMenuRightClick442Tests: XCTestCase {
         XCTAssertEqual(first.action, #selector(EditorWindowController.exportAction(_:)),
                        "右键这一行必须与文件菜单同一个 selector")
         XCTAssertNil(first.target, "target 必须是 nil：可用性与标题交给 validateMenuItem")
-        XCTAssertTrue(m.items.count >= 2 && m.items[1].isSeparatorItem, "导出行下面要有一条分隔线")
+        // 477 —— 「保存」与「更新缩略图」按用户口径插在「导出…」**下面**，分隔线随之退到它们之后。
+        XCTAssertEqual(m.items.count >= 3 ? m.items[1].title : "", ExportMenuBuilder.saveTitle)
+        XCTAssertEqual(m.items.count >= 3 ? m.items[1].action : nil,
+                       #selector(EditorWindowController.saveAction(_:)))
+        XCTAssertEqual(m.items.count >= 3 ? m.items[2].title : "", ExportMenuBuilder.thumbnailTitle)
+        XCTAssertEqual(m.items.count >= 3 ? m.items[2].action : nil,
+                       #selector(EditorWindowController.updateThumbnailAction(_:)))
+        XCTAssertTrue(m.items.count >= 4 && m.items[3].isSeparatorItem,
+                      "「更新缩略图」下面才是那条分隔线（477 起保存插在导出行下面）")
     }
 
     func testAttachingTwiceLeavesExactlyOneRow() throws {

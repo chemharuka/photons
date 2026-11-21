@@ -35,21 +35,15 @@ public enum MissingMarkText {
 /// 两条路的**唯一**架构差别是许可边界：`ansel` 的权重是 GPL-3.0，必须走子进程；
 /// `nonlocal` 的代码与权重都是 MIT，所以是进程内的一次普通调用。产品行为（命名、落盘、
 /// 入库、继承编辑、堆叠、选中）完全相同，因此两者共用 `CatalogSession.denoiseSelection(engine:)`。
-///
-/// §480 加了第三条 `builtin`：不带模型、不带权重、不联网，进程内 CPU 上的一次普通计算
-/// （LightCraft 的噪声估计 + Anscombe + 四平面 NLM）。它同样只是 `DenoiseEngine` 的一个值，
-/// 所以命名/落盘/堆叠仍然只有一条路径。
 public enum DenoiseEngine: String, Sendable, CaseIterable {
     case ansel
     case nonlocal
-    case builtin
 
     /// 菜单项里那个括号里的词，也用于日志。刻意不翻译：它是产品的专名。
     public var displayName: String {
         switch self {
         case .ansel: return "Ansel"
         case .nonlocal: return "Nonlocal"
-        case .builtin: return "内置"
         }
     }
 }
@@ -169,65 +163,13 @@ struct NLMFDenoiseExecutor: DenoiseExecuting {
     }
 }
 
-/// §480 — 进程内的内置降噪（CPU，LightCraft 端口）。与 NLMF 那一层同形：命名/临时名/改名
-/// 仍复用 `AnselDenoiseJob.outputURL`，`body` 只替换「真的算一遍」。
-struct BuiltinDenoiseExecutor: DenoiseExecuting {
-    struct Report: Sendable {
-        var width: Int
-        var height: Int
-        var cfa: String
-        var tiles: Int
-        var seconds: Double
-        var byteCount: Int
-    }
-
-    typealias Body = @Sendable (URL, URL, @escaping @Sendable (String) -> Void) throws -> Report
-
-    let job: BuiltinDenoiseJob
-    var body: Body?
-
-    init(job: BuiltinDenoiseJob, body: Body? = nil) {
-        self.job = job
-        self.body = body
-    }
-
-    func denoise(source: URL, progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
-        let fm = FileManager.default
-        let finalURL = AnselDenoiseJob.outputURL(for: source, fileManager: fm)
-        let temp = finalURL.deletingLastPathComponent()
-            .appendingPathComponent(".builtin-\(UUID().uuidString).dng")
-        defer { try? fm.removeItem(at: temp) }
-
-        let report: Report
-        if let body {
-            report = try body(source, temp, progress)
-        } else {
-            let real = try job.denoise(input: source, output: temp, progress: progress)
-            report = Report(width: real.width, height: real.height, cfa: real.cfa,
-                            tiles: real.tiles, seconds: real.seconds,
-                            byteCount: real.byteCount)
-        }
-        do {
-            try? fm.removeItem(at: finalURL)
-            try fm.moveItem(at: temp, to: finalURL)
-        } catch {
-            throw AnselDenoiseJobError.move("\(error)")
-        }
-        return DenoiseOutcome(output: finalURL, width: report.width, height: report.height,
-                              cfa: report.cfa, tiles: report.tiles, seconds: report.seconds,
-                              byteCount: report.byteCount)
-    }
-}
-
 /// 一次运行要用的那个 job，按引擎选。
 struct DenoiseRunner: Sendable {
     var engine: DenoiseEngine
     var ansel: AnselDenoiseJob
     var nonlocal: NLMFDenoiseJob
-    var builtin: BuiltinDenoiseJob
     /// 只给测试：替换进程内那条路的**推理**，命名与临时名/改名仍是生产代码。
     var nonlocalBody: NLMFDenoiseExecutor.Body?
-    var builtinBody: BuiltinDenoiseExecutor.Body?
 
     func execute(source: URL,
                  progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
@@ -236,9 +178,6 @@ struct DenoiseRunner: Sendable {
             return try AnselDenoiseExecutor(job: ansel).denoise(source: source, progress: progress)
         case .nonlocal:
             return try NLMFDenoiseExecutor(job: nonlocal, body: nonlocalBody)
-                .denoise(source: source, progress: progress)
-        case .builtin:
-            return try BuiltinDenoiseExecutor(job: builtin, body: builtinBody)
                 .denoise(source: source, progress: progress)
         }
     }
@@ -1562,10 +1501,6 @@ public final class CatalogSession {
         NLMFDenoiseJob(modelURL: nlmfResolvedModelURL)
     }
 
-    /// §480 — 内置降噪没有模型、没有工具、没有网络：这个 job 永远是「可用」的。
-    /// 保留存储属性是为了让测试（和将来的 Amount 滑杆）可以换参数，不改变入口语义。
-    public var builtinDenoiseJob = BuiltinDenoiseJob()
-
     /// 工具**真的在**：`AnselDenoiseClient` 会把一条不存在的显式路径原样收下，
     /// 所以这里问的是那个文件本身（与 `isHDRMergeAvailable` 同一条规矩）。
     public var isDenoiseToolAvailable: Bool {
@@ -1588,9 +1523,6 @@ public final class CatalogSession {
     /// 这一段而不用等 ~90 s 的推理；命名与临时名/改名仍然是生产的 `NLMFDenoiseExecutor`。
     /// internal：它是模块内的接缝，不进公开 API。
     var nlmfDenoiseBody: NLMFDenoiseExecutor.Body?
-
-    /// §480 — 同一条接缝，给内置引擎。`nil` = 真跑 CPU NLM。
-    var builtinDenoiseBody: BuiltinDenoiseExecutor.Body?
 
     // MARK: 485 — edit-time clean + cache
 
@@ -1616,13 +1548,12 @@ public final class CatalogSession {
     public static let denoiseCleanerVersion = "builtin-nlm-v1"
 
     /// The DNG path feeds the cleaned CFA planes through the cell adapter; non-DNG files decode to
-    /// a linear buffer and use LightCraft's RGB adapter. Both end in `DenoiseLinearAdapter`, so the
-    /// cache only ever holds linear RGBA.
-    nonisolated static func builtinDenoiseCompute() -> DenoiseCleaner.Compute {
+    /// a linear buffer and use the NLM backend's RGB adapter. Both end in `DenoiseLinearAdapter`,
+    /// so the cache only ever holds linear RGBA. 480's menu/engine is gone; this is its only caller.
+    nonisolated static func nlmFallbackCompute() -> DenoiseCleaner.Compute {
         { source, progress in
             if source.url.pathExtension.lowercased() == "dng" {
-                let clean = try BuiltinDenoiseJob(options: BuiltinDenoiseJob.Options(amount: 100))
-                    .clean(input: source.url, progress: progress)
+                let clean = try DenoiseNLMBackend.cleanDNG(input: source.url, progress: progress)
                 return DenoiseLinearAdapter.linearImage(cfaPlanes: clean.planes,
                                                         width: clean.width / 2,
                                                         height: clean.height / 2,
@@ -1637,10 +1568,8 @@ public final class CatalogSession {
                 rgb[1][i] = Float(image.rgba[base + 1])
                 rgb[2][i] = Float(image.rgba[base + 2])
             }
-            let planes = BuiltinDenoise.fourPlanesFromRGB(rgb)
-            let cleaned = BuiltinDenoiseJob.cleanPlanes(
-                planes: planes, width: image.width, height: image.height,
-                options: BuiltinDenoiseJob.Options(amount: 100), progress: progress)
+            let cleaned = DenoiseNLMBackend.cleanRGB(rgb, width: image.width,
+                                                     height: image.height, progress: progress)
             return DenoiseLinearAdapter.linearImage(fourPlanes: cleaned.planes,
                                                     width: image.width, height: image.height)
         }
@@ -1658,7 +1587,7 @@ public final class CatalogSession {
     /// catalogue's content hash / size (asked on the main actor, never from the actor's worker).
     private func makeDenoiseCleaner() {
         let directory = denoiseCacheDirectory ?? Self.defaultDenoiseCacheDirectory()
-        let compute = denoiseComputeOverride ?? Self.builtinDenoiseCompute()
+        let compute = denoiseComputeOverride ?? Self.nlmFallbackCompute()
         denoiseCleaner = try? DenoiseCleaner(
             directory: directory,
             cleanerID: Self.denoiseCleanerID,
@@ -1699,6 +1628,23 @@ public final class CatalogSession {
         let result = await cleaner.cleanIfNeeded(assetID: assetID, progress: progress)
         denoiseStats = await cleaner.statsSnapshot()
         return result
+    }
+
+    /// 485 — fill the cache for several photos **serially** (one clean alive at a time). 480's batch
+    /// menu row is gone; this is the service entry a future multi-select action calls. Returns the
+    /// photos that failed, so a caller can report them without re-querying the cleaner.
+    @discardableResult
+    public func precomputeDenoiseCache(assetIDs: [String],
+                                       progress: (@Sendable (String) -> Void)? = nil)
+        async -> [String: DenoiseCleanerFailure] {
+        var failures: [String: DenoiseCleanerFailure] = [:]
+        for assetID in assetIDs {
+            if case .failure(let error) = await cleanDenoiseIfNeeded(assetID: assetID,
+                                                                    progress: progress) {
+                failures[assetID] = error
+            }
+        }
+        return failures
     }
 
     /// 对选中的**那一张**跑 Ansel 模型降噪（子进程，GPL 权重）。
@@ -1755,9 +1701,6 @@ public final class CatalogSession {
                 lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
                 return []
             }
-        case .builtin:
-            // §480 — 没有模型/工具可缺；能读 DNG 就能跑。
-            break
         }
         // 菜单已经拦过这几条；这里是第二次，因为一个过期的菜单行或键盘路径不该让任务白跑。
         let chosen = selectedAssets
@@ -1766,21 +1709,13 @@ public final class CatalogSession {
             return []
         }
         let asset = chosen[0]
-        // 485 — the built-in row is now the edit-time cache, not a DNG producer. It accepts any
-        // decodable source (DNG through the mosaic path, everything else through the linear
-        // buffer); only the model engines keep the DNG-only rule.
-        if engine != .builtin {
-            guard asset.ext.lowercased() == "dng" else {
-                lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
-                return []
-            }
+        guard asset.ext.lowercased() == "dng" else {
+            lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
+            return []
         }
         guard let url = fileURL(for: asset) else {
             lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
-        }
-        if engine == .builtin {
-            return startDenoisePrecompute(asset: asset)
         }
         // 451 — 上一次被杀留下的 `.denoise-*.dng` 先清掉，同一个目录里的残留不会越积越多。
         // 只碰这个操作自己的前缀：同目录里可能正有一次 HDR 在写 `.hdrmerge-*.dng`。
@@ -1793,9 +1728,7 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                builtin: builtinDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody,
-                                builtinBody: builtinDenoiseBody)
+                                nonlocalBody: nlmfDenoiseBody)
         let queue = denoiseQueue
         let participantID = asset.id
         let rootID = asset.sourceRootId
@@ -1823,173 +1756,6 @@ public final class CatalogSession {
             Task { @MainActor in self?.finishDenoise(run, taskID: taskID) }
         }
         return [participantID]
-    }
-
-    // MARK: - 485 · built-in entry fills the cache (no new RAW)
-
-    /// The interactive built-in row no longer writes `<原名>-denoised.dng` or stacks it. It asks the
-    /// cleaner for the photo's cleaned source pixels, which is the only input P2's Amount slider
-    /// needs; a cache hit returns without touching the photo directory.
-    @discardableResult
-    private func startDenoisePrecompute(asset: Asset) -> [String] {
-        let taskID = backgroundTasks.begin(BackgroundTask(kind: .denoise,
-                                                          title: asset.filename,
-                                                          total: 1,
-                                                          currentAssetID: asset.id))
-        isDenoiseRunning = true
-        denoiseAssetID = asset.id
-        lastDenoiseEngine = .builtin
-        lastDenoiseProgress = Loc.t("准备降噪…")
-        let report: @Sendable (String) -> Void = { [weak self] text in
-            Task { @MainActor in
-                guard let self, self.denoiseAssetID == asset.id else { return }
-                self.lastDenoiseProgress = text
-                self.backgroundTasks.advance(id: taskID, currentAssetID: asset.id)
-            }
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await self.cleanDenoiseIfNeeded(assetID: asset.id, progress: report)
-            self.finishDenoisePrecompute(result, taskID: taskID)
-        }
-        return [asset.id]
-    }
-
-    private func finishDenoisePrecompute(_ result: Result<LinearImage, DenoiseCleanerFailure>,
-                                         taskID: UUID) {
-        isDenoiseRunning = false
-        denoiseAssetID = nil
-        denoiseCompletionCount += 1
-        denoiseRanOffMain = true
-        switch result {
-        case .success(let image):
-            lastDenoiseError = nil
-            lastDenoiseReport = nil
-            lastDenoiseProgress = Loc.t("降噪缓存已就绪（内置）：{0}×{1}",
-                                        String(describing: (image.width)),
-                                        String(describing: (image.height)))
-            backgroundTasks.finish(id: taskID, state: .finished, failureCount: 0)
-        case .failure(let error):
-            lastDenoiseError = error.description
-            lastDenoiseProgress = nil
-            backgroundTasks.finish(id: taskID, state: .failed, failureCount: 1)
-        }
-    }
-
-    // MARK: - 485 · built-in batch fills the cache (no new RAW)
-
-    /// The built-in batch is the single-photo precompute run N times under one background task.
-    /// Items are dispatched from the previous item's completion, so at most one clean is alive at
-    /// a time; no temp DNG is written and the photo directory is never touched.
-    private struct DenoiseCacheBatchState {
-        let taskID: UUID
-        let items: [DenoiseBatchItem]
-        var nextIndex = 0
-        var completed = 0
-        var failures = 0
-        var successes = 0
-        var cancelled = false
-    }
-
-    private var denoiseCacheBatch: DenoiseCacheBatchState?
-
-    private func startDenoiseCacheBatch(items: [DenoiseBatchItem]) -> [String] {
-        let taskID = backgroundTasks.begin(BackgroundTask(
-            kind: .denoise,
-            title: Loc.t("降噪 {0} 张（{1}）", String(describing: (items.count)),
-                         DenoiseEngine.builtin.displayName),
-            total: items.count,
-            currentAssetID: items[0].assetID,
-            currentThumbKey: items[0].thumbKey))
-        backgroundTasks.registerCancel(id: taskID) { [weak self] in
-            // Same rule as 474: the item already running finishes, no new one starts.
-            self?.denoiseCacheBatch?.cancelled = true
-        }
-        denoiseCacheBatch = DenoiseCacheBatchState(taskID: taskID, items: items)
-        startNextDenoiseCacheBatchItem()
-        return items.map(\.assetID)
-    }
-
-    private func startNextDenoiseCacheBatchItem() {
-        guard var batch = denoiseCacheBatch else { return }
-        guard !batch.cancelled, batch.nextIndex < batch.items.count else {
-            finishDenoiseCacheBatch()
-            return
-        }
-        let itemIndex = batch.nextIndex
-        let item = batch.items[itemIndex]
-        batch.nextIndex += 1
-        denoiseCacheBatch = batch
-
-        isDenoiseRunning = true
-        denoiseAssetID = item.assetID
-        lastDenoiseEngine = .builtin
-        lastDenoiseProgress = Loc.t("准备降噪…")
-        backgroundTasks.advance(id: batch.taskID,
-                                currentAssetID: item.assetID,
-                                currentThumbKey: item.thumbKey)
-
-        let taskID = batch.taskID
-        let report: @Sendable (String) -> Void = { [weak self] text in
-            Task { @MainActor in
-                guard let self, self.denoiseCacheBatch?.taskID == taskID else { return }
-                self.lastDenoiseProgress = text
-                self.backgroundTasks.advance(id: taskID, currentAssetID: item.assetID)
-            }
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await self.cleanDenoiseIfNeeded(assetID: item.assetID, progress: report)
-            self.finishDenoiseCacheBatchItem(result, itemIndex: itemIndex, taskID: taskID)
-        }
-    }
-
-    private func finishDenoiseCacheBatchItem(_ result: Result<LinearImage, DenoiseCleanerFailure>,
-                                             itemIndex: Int, taskID: UUID) {
-        guard var batch = denoiseCacheBatch, batch.taskID == taskID,
-              itemIndex == batch.completed, itemIndex < batch.nextIndex else { return }
-        batch.completed += 1
-        denoiseCompletionCount += 1
-        denoiseRanOffMain = true
-        lastDenoiseReport = nil
-        switch result {
-        case .success:
-            batch.successes += 1
-            lastDenoiseError = nil
-            lastDenoiseProgress = Loc.t("降噪缓存已就绪（内置）：{0}/{1}",
-                                        String(describing: (batch.completed)),
-                                        String(describing: (batch.items.count)))
-        case .failure(let error):
-            batch.failures += 1
-            lastDenoiseError = error.description
-            lastDenoiseProgress = nil
-        }
-        denoiseCacheBatch = batch
-        backgroundTasks.advance(id: taskID, completed: batch.completed)
-
-        if batch.cancelled {
-            finishDenoiseCacheBatch()
-        } else {
-            startNextDenoiseCacheBatchItem()
-        }
-    }
-
-    private func finishDenoiseCacheBatch() {
-        guard let batch = denoiseCacheBatch else { return }
-        denoiseCacheBatch = nil
-        isDenoiseRunning = false
-        denoiseAssetID = nil
-        backgroundTasks.forgetCancel(id: batch.taskID)
-        backgroundTasks.clearCurrent(id: batch.taskID)
-        if batch.cancelled {
-            backgroundTasks.finish(id: batch.taskID, state: .cancelled,
-                                   failureCount: batch.failures)
-        } else {
-            backgroundTasks.finish(id: batch.taskID,
-                                   state: batch.successes > 0 ? .finished : .failed,
-                                   failureCount: batch.failures)
-        }
-        // Nothing was added to the library, so there is no reload and no selection change.
     }
 
     // MARK: - 474 · 批量降噪（一条任务，串行）
@@ -2029,10 +1795,6 @@ public final class CatalogSession {
     /// A cancelled batch has no queue any more: the one item already running is allowed to finish, but
     /// nothing after it will start, so those photos must not keep showing 「等待降噪」.
     public var denoiseQueuedAssetIDs: Set<String> {
-        if let batch = denoiseCacheBatch {
-            guard !batch.cancelled, batch.nextIndex < batch.items.count else { return [] }
-            return Set(batch.items[batch.nextIndex...].map(\.assetID))
-        }
         guard let batch = denoiseBatch, !batch.cancelled,
               batch.nextIndex < batch.items.count else { return [] }
         return Set(batch.items[batch.nextIndex...].map(\.assetID))
@@ -2041,7 +1803,6 @@ public final class CatalogSession {
     /// 479 — `true` while a batch exists that may still start more items (i.e. not cancelled and not
     /// finished). The running item is `denoiseAssetID`, which 387 already exposes.
     public var denoiseBatchIsActive: Bool {
-        if let batch = denoiseCacheBatch { return !batch.cancelled }
         guard let batch = denoiseBatch else { return false }
         return !batch.cancelled
     }
@@ -2093,8 +1854,6 @@ public final class CatalogSession {
                 lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
                 return []
             }
-        case .builtin:
-            break
         }
 
         let chosen = selectedAssets
@@ -2102,14 +1861,12 @@ public final class CatalogSession {
             lastDenoiseError = DenoiseNotices.batchNeedsTwo
             return []
         }
-        // Per-photo availability is the single-photo rule applied one photo at a time. 485: the
-        // built-in row fills the cache and accepts any decodable source, so only the model engines
-        // still require a DNG. Skipped photos are counted here and named before the first item starts.
+        // Per-photo availability is the single-photo rule (`dng` + a file URL), applied one photo at
+        // a time. Skipped photos are counted here and named to the user before the first item starts.
         var items: [DenoiseBatchItem] = []
         var skipped: [String] = []
         for asset in chosen {
-            let isDNG = asset.ext.lowercased() == "dng"
-            guard (isDNG || engine == .builtin), let url = fileURL(for: asset) else {
+            guard asset.ext.lowercased() == "dng", let url = fileURL(for: asset) else {
                 skipped.append(asset.filename)
                 continue
             }
@@ -2129,12 +1886,6 @@ public final class CatalogSession {
             beforeStart?(notice)
         }
 
-        // 485 — the built-in batch is the cache's serial filler: no temp DNG, so it does not sweep
-        // the photo directories and does not touch the source files at all.
-        if engine == .builtin {
-            return startDenoiseCacheBatch(items: items)
-        }
-
         // 451 — same per-operation cleanup as single denoise, once per directory in the batch.
         for directory in Set(items.map { $0.source.deletingLastPathComponent() }) {
             _ = InterruptedWorkSweep.removeLeftovers(in: directory, kinds: ["denoise"])
@@ -2147,9 +1898,7 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                builtin: builtinDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody,
-                                builtinBody: builtinDenoiseBody)
+                                nonlocalBody: nlmfDenoiseBody)
         let taskID = backgroundTasks.begin(BackgroundTask(
             kind: .denoise,
             title: Loc.t("降噪 {0} 张（{1}）", String(describing: (items.count)),
@@ -2245,7 +1994,7 @@ public final class CatalogSession {
                                                   assetID: assetID, stackTopID: run.stackTopID ?? "",
                                                   stackCount: run.stackCount)
             }
-            lastDenoiseProgress = Loc.t("降噪完成（{0}）：{1}×{2}，{3} 个 tile", lastDenoiseEngine?.displayName ?? "", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+            lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
         } else {
             lastDenoiseProgress = nil
         }
@@ -2428,7 +2177,6 @@ public final class CatalogSession {
     nonisolated static func denoiseFailureMessage(_ error: Error) -> String {
         if let ansel = error as? AnselDenoiseJobError { return ansel.description }
         if let nlmf = error as? NLMFDenoiseJobError { return nlmf.description }
-        if let builtin = error as? BuiltinDenoiseJob.Failure { return builtin.description }
         return error.localizedDescription
     }
 
@@ -2474,7 +2222,7 @@ public final class CatalogSession {
                                               assetID: assetID, stackTopID: run.stackTopID ?? "",
                                               stackCount: run.stackCount)
         }
-        lastDenoiseProgress = Loc.t("降噪完成（{0}）：{1}×{2}，{3} 个 tile", lastDenoiseEngine?.displayName ?? "", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+        lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
     }
 
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.

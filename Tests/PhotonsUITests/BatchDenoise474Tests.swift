@@ -516,13 +516,12 @@ final class BatchDenoise474Tests: XCTestCase {
 
         let (menu, _) = makeMenu(session: session, selectedIDs: ids)
         let rows = batchRows(in: menu)
-        print("⑧ 三条批次行：\(rows.map(\.title))")
-        XCTAssertEqual(rows.count, 3, "多选必须三条批次项（480 起内置是第三个引擎）：\(menu.items.map(\.title))")
-        XCTAssertEqual(rows.map(\.title),
-                       ["降噪 4 张（Ansel）…", "降噪 4 张（Nonlocal）…", "降噪 4 张（内置）…"],
+        print("⑧ 两条批次行：\(rows.map(\.title))")
+        XCTAssertEqual(rows.count, 2, "多选必须两条批次项：\(menu.items.map(\.title))")
+        XCTAssertEqual(rows.map(\.title), ["降噪 4 张（Ansel）…", "降噪 4 张（Nonlocal）…"],
                        "标题必须全文点名引擎")
-        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal, .builtin],
-                       "三行各自携带引擎")
+        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal],
+                       "两行各自携带引擎")
         XCTAssertTrue(rows.allSatisfy(\.isEnabled), "两条依赖都在时都可点")
 
         // 单选仍不出批次行。
@@ -659,36 +658,29 @@ final class BatchDenoise474Tests: XCTestCase {
         let rows = edit.items.filter {
             $0.action == #selector(EditorWindowController.batchDenoiseAction(_:))
         }
-        XCTAssertEqual(rows.count, 3, "编辑菜单必须三行（480 起内置是第三个引擎）：\(edit.items.map(\.title))")
+        XCTAssertEqual(rows.count, 2, "编辑菜单必须两行：\(edit.items.map(\.title))")
         XCTAssertEqual(rows.map(\.title),
                        [DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .ansel),
-                        DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .nonlocal),
-                        DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .builtin)])
-        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal, .builtin])
+                        DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .nonlocal)])
+        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal])
         let nlmfRow = try XCTUnwrap(rows.first { DenoiseMenuBuilder.engine(forTag: $0.tag) == .nonlocal })
-        let builtinRow = try XCTUnwrap(rows.first { DenoiseMenuBuilder.engine(forTag: $0.tag) == .builtin })
 
         session.selectOnly(try XCTUnwrap(session.assets.first).id)
         XCTAssertFalse(controller.validateMenuItem(anselRow), "单张不出现")
         XCTAssertTrue(anselRow.isHidden)
-        XCTAssertTrue(nlmfRow.isHidden, "三行一起隐藏")
-        XCTAssertTrue(builtinRow.isHidden)
+        XCTAssertTrue(nlmfRow.isHidden, "两行一起隐藏")
 
         let ids = session.assets.prefix(2).map(\.id)
         session.setSelection(Set(ids), anchor: ids.first)
         // 两行都先改成旧文案；只校验 Ansel 行也必须把 Nonlocal 行一起刷新。
         anselRow.title = "stale"
         nlmfRow.title = "stale"
-        builtinRow.title = "stale"
         XCTAssertTrue(controller.validateMenuItem(anselRow), "多选可点")
         XCTAssertFalse(anselRow.isHidden)
-        XCTAssertFalse(nlmfRow.isHidden, "三行一起出现")
-        XCTAssertFalse(builtinRow.isHidden)
+        XCTAssertFalse(nlmfRow.isHidden, "两行一起出现")
         XCTAssertEqual(anselRow.title, "降噪 2 张（Ansel）…")
-        XCTAssertEqual(nlmfRow.title, "降噪 2 张（Nonlocal）…", "校验任一行要同时刷新三行")
-        XCTAssertEqual(builtinRow.title, "降噪 2 张（内置）…")
+        XCTAssertEqual(nlmfRow.title, "降噪 2 张（Nonlocal）…", "校验任一行要同时刷新两行")
         XCTAssertEqual(anselRow.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
         XCTAssertEqual(nlmfRow.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
-        XCTAssertEqual(builtinRow.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
     }
 }
