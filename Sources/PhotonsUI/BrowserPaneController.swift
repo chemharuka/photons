@@ -455,7 +455,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                   let asset = session.assets.first(where: { $0.id == id }) else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
                            stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
-                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id),
+                           stackKind: session.stackSummary(forAssetID: id)?.kind ?? .plain)
         }
         footer.stringValue = session.selection.isEmpty
             ? Loc.t("未选择")
@@ -1218,7 +1219,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         let cell = PhotoRowCell.reuse(in: tableView, owner: self)
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
                        stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
-                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id),
+                       stackKind: session.stackSummary(forAssetID: asset.id)?.kind ?? .plain)
         applyThumbnail(to: cell, row: row, asset: asset)
         return cell
     }
@@ -1834,6 +1836,8 @@ final class PhotoRowCell: NSTableCellView {
 
     /// §378 — how many photos the stack this row stands for holds (0/1 = not a stack).
     private(set) var stackCount = 0
+    /// 487 — what kind of stack this row stands for; drives the name prefix and the glyph.
+    private(set) var stackKind: StackKind = .plain
     /// 465 — the badges this row is showing on its third line (what `lastDrawnBadges` reads back).
     private(set) var rowBadges = AssetBadges(rating: 0, flag: nil, colorLabel: nil, stackCount: 0)
 
@@ -1967,7 +1971,8 @@ final class PhotoRowCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
     func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
-                   stackHasMissingMember: Bool = false) {
+                   stackHasMissingMember: Bool = false,
+                   stackKind: StackKind = .plain) {
         // A recycled row must not show a *different* photo for one frame; the same asset keeps its
         // bitmap (a filter/metadata refresh is not a pixel change).
         if assetID != asset.id {
@@ -1976,22 +1981,26 @@ final class PhotoRowCell: NSTableCellView {
         }
         assetID = asset.id
         self.stackCount = stackCount
+        self.stackKind = stackKind
         // 465 — 三样徽标（星级 / 选取 / 色标）都搬到第三行，按用户给的行序：文件名、机型+日期、
         // 星级+选取+色标（空格分隔、有就占位）+ 右端堆叠指示。缩略图上不再画任何徽标。
-        rowBadges = AssetBadges(asset: asset, stackCount: stackCount)
+        rowBadges = AssetBadges(asset: asset, stackCount: stackCount, stackKind: stackKind)
         // The placeholder stays underneath the image (006 §2): a row is never a white hole, and a
         // failure looks like "not yet", not like "broken".
         swatch.layer?.backgroundColor = PlaceholderSwatch.color(for: asset.contentHash).cgColor
         filename = asset.filename
         // §382 — the 置顶 of a stack shows 「堆叠 XXX.dng」; `filename` above stays the real one (the
         // label is what is displayed, the model/disk never move).
-        name.stringValue = StackText.displayName(asset.filename, isStack: stackCount >= 2)
+        name.stringValue = StackText.displayName(asset.filename, isStack: stackCount >= 2,
+                                                 kind: stackKind)
         var bits: [String] = []
         if let m = asset.cameraModel { bits.append(m) }
         if let d = asset.captureLocalDate { bits.append(d) }
         meta.stringValue = bits.joined(separator: " · ")
         badges.attributedStringValue = RowBadgeLine.attributed(rowBadges, font: badges.font!)
-        let indicator = rowBadges.isStack ? RowBadgeLine.stackIndicator(rowBadges.stackCount) : ""
+        let indicator = rowBadges.isStack
+            ? RowBadgeLine.stackIndicator(rowBadges.stackCount, kind: stackKind)
+            : ""
         stackIndicator.stringValue = indicator
         stackIndicator.isHidden = indicator.isEmpty
         name.textColor = isActive ? .labelColor : .secondaryLabelColor
@@ -2060,7 +2069,7 @@ final class PhotoRowCell: NSTableCellView {
         guard let font = name.font else { return }
         let column = width ?? name.frame.width
         guard column > 0 else { return }
-        let display = StackText.displayName(filename, isStack: stackCount >= 2)
+        let display = StackText.displayName(filename, isStack: stackCount >= 2, kind: stackKind)
         let fitted = PlaceholderStyle.fitted(display, width: column, font: font)
         if name.stringValue != fitted { name.stringValue = fitted }
     }

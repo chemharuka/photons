@@ -27,7 +27,8 @@ public final class FilmstripCell: NSCollectionViewItem {
     public override var isSelected: Bool { didSet { card.isPicked = isSelected } }
 
     public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
-                          stackHasMissingMember: Bool = false) {
+                          stackHasMissingMember: Bool = false,
+                          stackKind: StackKind = .plain) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -38,6 +39,7 @@ public final class FilmstripCell: NSCollectionViewItem {
         card.isActive = isActive
         card.isPicked = isSelected
         card.stackCount = stackCount
+        card.stackKind = stackKind
         card.stackHasMissingMember = stackHasMissingMember
         view.toolTip = asset.filename
     }
@@ -58,6 +60,8 @@ public final class FilmstripCard: NSView {
     /// §378 — member count of the stack this cell represents (0/1 = not a stack). Set by the
     /// controller from `CatalogSession.stacksByTopID`.
     public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
+    /// 487 — kind of that stack; changes the glyph and the caption only.
+    public var stackKind: StackKind = .plain { didSet { overlay.needsDisplay = true } }
     /// 463 — a hidden stack member is missing, so this (the only drawn member) says so.
     public var stackHasMissingMember: Bool = false { didSet { overlay.needsDisplay = true } }
     /// The decoded thumbnail, or nil while the hash-derived placeholder is all we have.
@@ -135,7 +139,7 @@ public final class FilmstripCard: NSView {
 
     /// The badge this cell would draw — the same string the grid card reports.
     public var badgeSignature: String {
-        asset.map { AssetBadges(asset: $0, stackCount: stackCount).signature } ?? "—"
+        asset.map { AssetBadges(asset: $0, stackCount: stackCount, stackKind: stackKind).signature } ?? "—"
     }
 
     public override var isFlipped: Bool { true }
@@ -192,7 +196,7 @@ public final class FilmstripCard: NSView {
         // Stars / flag / colour label / stack indicator: the same `AssetBadges` the grid card draws,
         // so the two surfaces can never disagree about what a badge means. Drawn before the missing
         // scrim so 「原文件已移动」 stays on top of everything.
-        let badges = AssetBadges(asset: asset, stackCount: stackCount)
+        let badges = AssetBadges(asset: asset, stackCount: stackCount, stackKind: stackKind)
         lastBadgeLayout = badges.draw(in: thumb)
         lastDrawnBadges = missingLabel == nil ? badges.drawn : badges.drawn + ["missing"]
 
@@ -207,7 +211,8 @@ public final class FilmstripCard: NSView {
         // 377 — same one implementation as the grid: fit the head + `…` to the caption's width
         // instead of letting `NSString.draw(in:)` word-wrap at a space or `-` and clip the rest.
         // §382 — 「堆叠 XXX.dng」 is composed **before** the fit, exactly like the grid card.
-        let display = StackText.displayName(asset.filename, isStack: badges.isStack)
+        let display = StackText.displayName(asset.filename, isStack: badges.isStack,
+                                            kind: badges.stackKind)
         let drawnCaption = PlaceholderStyle.fitted(display, width: name.width,
                                                    font: PlaceholderStyle.captionFont)
         (drawnCaption as NSString).draw(in: name, withAttributes: PlaceholderStyle.captionAttributes)
@@ -377,7 +382,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                 guard let cell = item as? FilmstripCell else { return item }
                 cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
                                stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0,
-                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false)
+                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false,
+                               stackKind: self.session?.stackSummary(forAssetID: asset.id)?.kind ?? .plain)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -515,7 +521,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                   let asset = assetsByID[id] else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
                            stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
-                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id),
+                           stackKind: session.stackSummary(forAssetID: id)?.kind ?? .plain)
         }
     }
 
@@ -531,7 +538,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         }
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
                        stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
-                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id),
+                       stackKind: session.stackSummary(forAssetID: asset.id)?.kind ?? .plain)
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }

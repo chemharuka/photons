@@ -53,7 +53,7 @@ extension Catalog {
 
                 // 1. The named photos leave.
                 try db.execute(sql: """
-                    UPDATE assets SET stack_id = NULL, stack_rank = 0
+                    UPDATE assets SET stack_id = NULL, stack_rank = 0, stack_kind = 'plain'
                     WHERE stack_id = ? AND id IN (\(marks))
                     """, arguments: StatementArguments(args))
                 moved += db.changesCount
@@ -66,7 +66,8 @@ extension Catalog {
                     """, arguments: [stack])
                 if rows.count <= 1 {
                     try db.execute(sql: """
-                        UPDATE assets SET stack_id = NULL, stack_rank = 0 WHERE stack_id = ?
+                        UPDATE assets SET stack_id = NULL, stack_rank = 0, stack_kind = 'plain'
+                        WHERE stack_id = ?
                         """, arguments: [stack])
                     continue
                 }
@@ -108,6 +109,8 @@ extension Catalog {
     @discardableResult
     public func makeStack(resultAssetID: String, participantIDs: [String]) throws -> StackSummary? {
         try extractFromStacks(assetIDs: participantIDs)
-        return try makeStack(assetIDs: [resultAssetID] + participantIDs)
+        // 487: the product is not a user restack — its inherited document deliberately carries the
+        // decoder/NR overrides the original must not receive, so this entry point never aligns.
+        return try makeStack(assetIDs: [resultAssetID] + participantIDs, alignDenoiseEdits: false)
     }
 }

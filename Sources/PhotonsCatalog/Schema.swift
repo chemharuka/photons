@@ -13,6 +13,7 @@ import GRDB
 /// | v5 | `assets.missing` — the row whose original file moved away (reference roots only) |
 /// | v6 | `assets.stack_id` + `assets.stack_rank` — photo stacks (§378) |
 /// | v7 | backfill `assets.width/height` to display pixels for rows with orientation 5…8 (§436) |
+/// | v8 | `assets.stack_kind` — `plain` / `denoise` (487) |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -22,7 +23,7 @@ import GRDB
 /// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 7
+    public static let version = 8
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -49,6 +50,7 @@ public enum Schema {
         Step(name: "v5") { db in try addMissingColumnIfAbsent(db) },
         Step(name: "v6") { db in try addStackColumnsIfAbsent(db) },
         Step(name: "v7") { db in try uprightPixelDimensions(db) },
+        Step(name: "v8") { db in try addStackKindColumnIfAbsent(db) },
     ]
 
     static var migrator: DatabaseMigrator {
@@ -192,6 +194,28 @@ public enum Schema {
                             WHERE m.asset_id = assets.id
                               AND m.orientation BETWEEN 5 AND 8)
             """)
+    }
+
+    // MARK: - v8
+
+    /// `assets.stack_kind` — what a stack *is*, for the UI and for the editing linkage (487).
+    ///
+    /// The value is `plain` or `denoise`; an existing library reads every stack as `plain` because
+    /// the migration does not guess. It is a **library property**, exactly like `stack_id`: it never
+    /// enters `EditModel`, a history row or a cache key — it changes what a row is called and whether
+    /// an edit propagates, never a pixel.
+    ///
+    /// Kept on `assets` rather than in a new `stacks` table for the same reason v6 has no such table:
+    /// a stack's whole truth lives on its members, and the kind dies with the last member. Stale
+    /// values on rows that have left a stack are harmless — readers only trust `stack_kind` while
+    /// `stack_id` is non-NULL — but the explicit `stack_id = NULL` paths also reset it to `plain`.
+    ///
+    /// **Replayable**: guarded by `PRAGMA table_info`, so a lost `user_version` stamp re-runs as a
+    /// no-op instead of an "duplicate column" error.
+    private static func addStackKindColumnIfAbsent(_ db: Database) throws {
+        let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(assets)").map { $0["name"] as String }
+        guard !columns.contains("stack_kind") else { return }
+        try db.execute(sql: "ALTER TABLE assets ADD COLUMN stack_kind TEXT NOT NULL DEFAULT 'plain'")
     }
 
     private static let v1 = """

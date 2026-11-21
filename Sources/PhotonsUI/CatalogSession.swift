@@ -2238,12 +2238,14 @@ public final class CatalogSession {
         guard let members = try? catalog.stackMembers(stackIDs: Array(stackIDs)) else {
             return ([:], [])
         }
+        let kinds = (try? catalog.stackKinds(stackIDs: Array(stackIDs))) ?? [:]
         var out: [String: StackSummary] = [:]
         var missingTopIDs: Set<String> = []
         for (id, rows) in members {
             guard let top = rows.first(where: { $0.stackRank == 0 }) else { continue }
             guard visible.contains(where: { $0.id == top.id }) else { continue }
-            out[top.id] = StackSummary(id: id, memberIDs: rows.map(\.id), topID: top.id)
+            out[top.id] = StackSummary(id: id, memberIDs: rows.map(\.id), topID: top.id,
+                                       kind: kinds[id] ?? .plain)
             // 463: a missing **member** is just as real as a missing top, but only the top is drawn.
             // The row then says 「这一叠里有文件不在了」 instead of showing nothing.
             if rows.contains(where: \.isMissing) { missingTopIDs.insert(top.id) }
@@ -3048,6 +3050,16 @@ public final class CatalogSession {
             // and a refresh that runs before the row is updated would derive the pre-edit key again.
             adoptCommittedDocument(document, save: result)
             persistCount += 1
+            // 487 — a denoise stack is one document in two files: the same payload is written to the
+            // sibling, through the one catalog door that checks kind, member count and idempotency.
+            // A plain stack (HDR, manual merge) is untouched — `propagateDenoiseEdit` returns nil.
+            do {
+                if let linked = try catalog.propagateDenoiseEdit(document, fromAsset: id) {
+                    adoptCommittedDocument(document, save: linked)
+                }
+            } catch {
+                lastPersistError = "\(error)"
+            }
             // 477 — **no file write here.** The library is the real-time store; the DNG/XMP is written
             // only by the explicit 文件 ▸ 保存 (⌘S) / right-click 保存 command.
         } catch {
