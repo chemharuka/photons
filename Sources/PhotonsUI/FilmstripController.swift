@@ -1055,6 +1055,37 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         if centerAnchor() { centredAnchorID = id }
     }
 
+    /// 471 — 网格界面切换浏览器面时，把锚点那张带进视口即可，**不要求居中**：用户口径是
+    /// 「两者的位置大致匹配」。直接置 clip，不调 `scrollToItems(at:scrollPosition:)` ——
+    /// 那个 API 会 invalidate layout 并重摆格子，正好把 383 的编辑落地预算拖爆。
+    /// 已经可见 / 用户正在滚动时是 no-op。
+    public func revealAnchor() {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let index = session.assets.firstIndex(where: { $0.id == id }),
+              collectionView.numberOfItems(inSection: 0) > index,
+              let scroll = collectionView.enclosingScrollView else { return }
+        let clip = scroll.contentView
+        let visible = clip.bounds.width
+        let content = collectionView.collectionViewLayout?.collectionViewContentSize.width ?? 0
+        guard visible > 0, content > 0,
+              let item = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
+        else { return }
+        if scrollActivity.isUserScrolling(scroll) { return }
+        if clip.bounds.intersects(item.frame) { return }
+        let target = CenteredScroll.target(itemMidpoint: item.frame.midX,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        scrollActivity.beginOwnChange()
+        clip.scroll(to: NSPoint(x: target, y: 0))
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    /// 471 — reveal 消费前的只读接缝：用户正在驱动这一面的滚动条时不抢。
+    var isUserScrolling: Bool {
+        guard isViewLoaded, let scroll = collectionView.enclosingScrollView else { return false }
+        return scrollActivity.isUserScrolling(scroll)
+    }
+
     /// 332b — 快照还没落地时（`viewDidLoad` 第一次调用），把这次居中推迟到下一个 runloop，
     /// 并且**只推一次**，避免条目永远为 0 时无限排队。
     private func deferCenterOnce() {

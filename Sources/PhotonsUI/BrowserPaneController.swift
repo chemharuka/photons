@@ -735,6 +735,34 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         if centerAnchor() { centredAnchorID = id }
     }
 
+    /// 471 — 网格界面切换浏览器面时，把锚点那一行带进视口即可，**不要求居中**：用户口径是
+    /// 「两者的位置大致匹配」，不是「恢复各自的旧偏移」。直接置 clip，不走会失效布局的整表重排；
+    /// 切换可能正落在编辑落地那一轮布局里，任何失效布局的调用都会把 383 的合并窗口预算拖长。
+    /// 已经可见 / 用户正在滚动时是 no-op。
+    public func revealAnchor() {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let row = session.assets.firstIndex(where: { $0.id == id }),
+              row < photosTable.numberOfRows else { return }
+        let clip = photosScroll.contentView
+        let visible = clip.bounds.height
+        let content = photosTable.bounds.height
+        let item = photosTable.rect(ofRow: row)
+        guard visible > 0, content > 0, item.height > 0 else { return }
+        if scrollActivity.isUserScrolling(photosScroll) { return }
+        if clip.bounds.intersects(item) { return }
+        let target = CenteredScroll.target(itemMidpoint: item.midY,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        scrollActivity.beginOwnChange()
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+        photosScroll.reflectScrolledClipView(clip)
+    }
+
+    /// 471 — reveal 消费前的只读接缝：用户正在驱动这一面的滚动条时不抢。
+    var isUserScrolling: Bool {
+        isViewLoaded && scrollActivity.isUserScrolling(photosScroll)
+    }
+
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
 
