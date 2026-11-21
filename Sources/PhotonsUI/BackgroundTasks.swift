@@ -75,16 +75,36 @@ public struct BackgroundTask: Identifiable, Equatable, Sendable {
 /// which is the phase's acceptance criterion, not an unfinished bit.
 ///
 /// Ordering contract: `tasks` is append order (oldest first); an `advance`/`finish` by `id` updates
-/// the existing element in place rather than appending a second one. Only finished (terminal) tasks
-/// are retained, newest `retainedFinishedLimit` by `startedAt`; in-flight tasks are never evicted.
+/// the existing element in place rather than appending a second one. **Display order** is
+/// newest-first and has exactly one source of truth: `displayTasks`. The views (顶栏条 / 面板)
+/// must read that property and never reverse `tasks` themselves again.
+///
+/// 488 — retention is now a display policy of five rows total, not twenty finished rows:
+/// `finishedKeep = max(0, 5 − inFlight)`. In-flight tasks may exceed five; as soon as a terminal
+/// row would make the retained total larger than five, the oldest terminal row is dropped
+/// immediately (on `begin` and on `finish`). Six in-flight tasks therefore keep zero finished rows:
+/// completing any one deletes it in the same turn.
 @MainActor
 @Observable
 public final class BackgroundTaskStore {
 
-    /// Keep at most this many finished tasks. The owner-approved default from ADR §21.5.
-    public static let retainedFinishedLimit = 20
+    /// 488 — the owner's 2026-11-21 rule: at most five retained rows on screen **including** any
+    /// in-flight tasks. This is a presentation policy, not a change to `BackgroundTask` itself.
+    public static let retainedFinishedLimit = 5
 
     public private(set) var tasks: [BackgroundTask] = []
+
+    /// Newest-first view for every surface that draws a list (顶栏 1–4 条 and the panel table).
+    /// This is the **only** place the stored append order is flipped; reversing again in a view
+    /// would silently turn the list back into oldest-first.
+    public var displayTasks: [BackgroundTask] { Array(tasks.reversed()) }
+
+    /// How many terminal rows may stay: `max(0, 5 − in-flight)`, capped by the same five.
+    /// Six running tasks leave no room for finished rows (`max(0, 5 − 6) == 0`).
+    public var finishedKeep: Int {
+        let inFlight = tasks.lazy.filter { !$0.state.isTerminal }.count
+        return max(0, Self.retainedFinishedLimit - inFlight)
+    }
 
     /// 454 P3 — the cancel handle for a running task. It cannot live in `BackgroundTask`: the value
     /// type is `Sendable` and describes the row, while the action belongs to the producer's thread
@@ -210,7 +230,9 @@ public final class BackgroundTaskStore {
 
     private func pruneFinished() {
         let terminal = tasks.indices.filter { tasks[$0].state.isTerminal }
-        let excess = terminal.count - Self.retainedFinishedLimit
+        // 488 — the total retained rows (in-flight + terminal) may not exceed five. In-flight is
+        // counted first, so more than five running tasks legitimately keep no terminal rows.
+        let excess = terminal.count - finishedKeep
         guard excess > 0 else { return }
 
         // Oldest `startedAt` first; equal dates fall back to insertion order so a burst of tasks
