@@ -287,7 +287,7 @@ final class AutoLightSubject441Tests: XCTestCase {
     /// 24 张，覆盖派单 §5.3 要求的全部人群：
     /// - `boston` 那组（`L1030940`…`L1030944`，含 A④ 的五帧；0940/0943 兼作雪 / 大面积高光）；
     /// - 强天空：`austria/L1030857`；
-    /// - 夜景：`austria/L1030547-denoised`；
+    /// - 夜景：`austria/L1030547`（`-denoised` 变体已从磁盘移走，443 换成原始帧）；
     /// - US 两张：一张航拍大亮部（DJI）、一张暗主体（_1274394）；
     /// - 其余 15 张 = **步骤 1 之后主体仍然最低的 15 张奥地利照片**（这正是本单的用户口径：
     ///   「主体（去掉天空/灯光后）的曝光还缺一点」。选帧依据是 `subjectP50Before`（曝光后、中间调前），
@@ -315,7 +315,7 @@ final class AutoLightSubject441Tests: XCTestCase {
         ("austria", "L1030595.dng"),
         // 强天空 / 夜景 / 航拍 / 极暗主体
         ("austria", "L1030857.dng"),
-        ("austria", "L1030547-denoised.dng"),
+        ("austria", "L1030547.dng"),
         ("US", "DJI_air3_2250_D.dng"),
         ("US", "_1274394.dng"),
         // 四张主体明显偏暗的（subjectP50 < 0.06 的补足）
@@ -481,6 +481,7 @@ final class AutoLightSubject441Tests: XCTestCase {
         var confusion: [String: Int] = [:]
         var mismatches: [String] = []
         var seen = 0
+        var seenNames: Set<String> = []
         for name in Self.research60 {
             guard let row = byName[name] else { continue }
             let url = URL(fileURLWithPath: row.root).appendingPathComponent(row.filename)
@@ -501,14 +502,19 @@ final class AutoLightSubject441Tests: XCTestCase {
             confusion["\(expected.rawValue)->\(cls.rawValue)", default: 0] += 1
             if expected != cls { mismatches.append(name) }
             seen += 1
+            seenNames.insert(name)
         }
         guard seen >= 54 else { throw XCTSkip("only \(seen)/60 research frames available") }
         emit("441 A① CONFUSION \(confusion.sorted { $0.key < $1.key })")
         emit("441 A① MISMATCH \(mismatches.sorted())")
         XCTAssertLessThanOrEqual(mismatches.count, 2,
                                  "A①：错分 \(mismatches.count) 张（\(mismatches)），应 ≤ 2")
-        XCTAssertEqual(Set(mismatches), Set(["L1030479.dng", "L1030479-denoised.dng"]),
-                       "A①：点名的那两张之外不许有别的错分")
+        // 443：研究集里的 `-denoised` 变体可能已从磁盘/库里移走；期望的「点名错分」只能要求
+        // **本次真的跑到的帧**。缺少这两张时它们不会出现在 `mismatches` 里，不能因此判红。
+        let expectedMismatches = Set(["L1030479.dng", "L1030479-denoised.dng"])
+            .intersection(seenNames)
+        XCTAssertEqual(Set(mismatches), expectedMismatches,
+                       "A①：点名的那两张之外不许有别的错分（本次可用 \(expectedMismatches.sorted())）")
         // 10 张单标签 B 必须真的落在 B；0715 是双标签，A 优先。
         let bOnly = Self.researchB.filter { $0 != "L1030715.dng" }
         let expectedB = confusion["B->B"] ?? 0

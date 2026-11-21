@@ -268,6 +268,12 @@ public enum AutoLight {
         /// Step 1.
         public var baseP99: Double
         public var exposureEV: Double
+        /// **443** — 低信号帧判定（整帧没有可信内容），步骤 1 之前就在 base 上量出。
+        public var lowSignal: Bool
+        /// **443** — 曝光是否被上限截断（低信号 +3 EV / 全类 +4.5 EV）。
+        public var exposureCapped: Bool
+        /// **443** — 截断之前步骤 1 本来要多少 EV，让「本来要多少、封到多少」可读。
+        public var needEVBeforeCap: Double
         public var p99AfterExposure: Double
         /// **426d** — step 1 之后的大面积高光分位；曝光的锚点就是它（`broadHighlightTarget`）。
         public var p95AfterExposure: Double
@@ -365,6 +371,31 @@ public enum AutoLight {
     /// The old note read "0.98 rather than 1.0 so the p99−p99.9 tail is still below white": that tail is
     /// now the `p999OverP99Ceiling` guard's job, which is why this constant could move at all.
     public static let p99WhiteTarget: Double = 1.5
+
+    // MARK: - 443 — 低信号帧与曝光上限
+
+    /// **443 — 低信号判据：`base.p99` 在线性域低于它，或 90 % 以上的画面已经在黑位。**
+    ///
+    /// 低信号 ≠ 暗背景（B 类）：B 类是「背景暗、主体亮」，`brightFrac` 有几个百分点；低信号是
+    /// **整帧几乎没有可信内容**，p99 只是噪声。派单初值 0.05，但实测 L1030746 在出货测量口径下
+    /// （`measureAutoLightSample`，0.5 解码 + 256 网格）的 `base.p99 = 0.0607`，而下一档有内容的
+    /// 最暗帧（L1030730）是 0.0742 —— 0.07 落在两者之间，既不漏报这张，也不把「只是暗、仍有主体」
+    /// 的帧误判成无内容。
+    ///
+    /// `clippedBlack` 是 `≤ 0.001 线性` 的像素占比（`Metrics` 的定义），不是显示域的
+    /// 「clipping low」；这里用 0.90 作为「整帧已压到黑位」的兜底，与派单一致。
+    public static let lowSignalP99: Double = 0.07
+    public static let lowSignalClippedBlack: Double = 0.90
+
+    /// **443 — 低信号帧的曝光上限。** 用户对 L1030746 的选择是 +2.82 EV（全库 p99 +4.15），
+    /// 给到 +3 已经略高于他的习惯，但不再把噪声锚到 SDR 白（旧路径会要求 +5…+6 EV）。
+    public static let lowSignalExposureCap: Double = 3.0
+
+    /// **443 — 全类曝光上限（A/B/C 都生效）。**
+    ///
+    /// 用户全库 570 张成品的曝光 p99 是 +4.15、max +5.00；4.5 在 p99 之上留一点余量，
+    /// 只切掉他自己也极少/从未使用的 +4.5…+8 区间。低信号帧另有更紧的 +3。
+    public static let maxExposureEV: Double = 4.5
 
     /// Step 1's anchor: **the exposure that puts the picture's body where it belongs, not a fixed p99.**
     ///
@@ -737,6 +768,44 @@ public enum AutoLight {
     /// asserts that on the shipping pipeline rather than trusting this note.
     public static let sampleLongEdge: Int = 256
 
+    // MARK: - 443 — 步骤 1 的曝光裁决（先判低信号，再封顶）
+
+    /// 步骤 1 的一个完整裁决：本来要多少、是不是低信号、被哪个上限截断。
+    struct ExposureDecision: Sendable, Equatable {
+        var exposure: Double
+        var needEV: Double
+        var lowSignal: Bool
+        var capped: Bool
+    }
+
+    /// **443** — 把步骤 1 的曝光决策从 `solve` 里拆出来，让「低信号 / 上限」可以被单独断言，
+    /// 而不必为了看一个 EV 跑完整条流水线。
+    ///
+    /// 431/426d 的锚点不变：生产路径 `p95 → broadHighlightTarget`；⑧d 打开时才回到旧的
+    /// `p99 → p99WhiteTarget`。低信号判定只看 **base**（步骤 0 的 as-shot 测量）：
+    ///
+    ///     lowSignal = base.p99 < lowSignalP99 || base.clippedBlack >= lowSignalClippedBlack
+    ///
+    /// 低信号的曝光上限是 `lowSignalExposureCap`，其余帧是 `maxExposureEV`；⑧b 的
+    /// `ignoresExposureCap` 只去掉全类上限，不去掉低信号自己的 +3 封顶。
+    static func exposureDecision(base: Metrics, gates: Gates) -> ExposureDecision {
+        let needEV: Double
+        if gates.noExposureCeiling {
+            needEV = log2(p99WhiteTarget / max(base.p99, 1e-5))
+        } else {
+            needEV = log2(broadHighlightTarget / max(base.p95, 1e-5))
+        }
+        let lowSignal = !gates.ignoresLowSignal
+            && (base.p99 < lowSignalP99 || base.clippedBlack >= lowSignalClippedBlack)
+        let globalCap = gates.ignoresExposureCap ? Double.infinity : maxExposureEV
+        let cap = lowSignal ? min(lowSignalExposureCap, globalCap) : globalCap
+        let bounded = min(needEV, cap)
+        return ExposureDecision(exposure: snapExposure(bounded),
+                                needEV: needEV,
+                                lowSignal: lowSignal,
+                                capped: needEV > cap)
+    }
+
     // MARK: - the algorithm
 
     /// Solve 明暗 for `edit`, asking `measure` for one render per evaluation.
@@ -815,7 +884,7 @@ public enum AutoLight {
         let neutral = try measured(sample(document))
         // ⑧d: anchoring on p95 is "reach SDR white" *without* the p99 ceiling — the gate's mistake, and
         // it over-exposes every picture that has a tail.
-        let anchor = gates.noExposureCeiling ? neutral.p95 : neutral.p99
+        //
         // **426d — 曝光的唯一驱动量：大面积高光。**
         //
         // owner 的原话是「如果高光太亮就 EV 少一些，通过中间调和阴影拉高主体」——所以 EV 由**高光**
@@ -824,11 +893,13 @@ public enum AutoLight {
         // 标定：在 owner 自己的五帧 boston 成品上反推 `log2(target / baseP95)`，逐 target 比对手调 EV：
         //   target 0.9 → 中位差 0.29 | 1.0 → 0.32 | **1.1 → 0.21** | 1.2 → 0.24 | 1.4 → 0.35 | 1.6 → 0.54
         // 1.1 是最贴合的（逐帧 −0.36/+0.46/+0.11/−0.00/−0.21），也落在 owner 成品 p95 的中段。
-        var exposure = snapExposure(log2(broadHighlightTarget / max(neutral.p95, 1e-5)))
-        // ⚠ 旧的 `p99 → 1.5` 口径只在反向门 ⑧d 打开时复现，好让门能证明新规则确实换了驱动量。
-        if gates.noExposureCeiling {
-            exposure = snapExposure(log2(p99WhiteTarget / max(anchor, 1e-5)))
-        }
+        //
+        // **443** — 低信号先判、再封顶：`exposureDecision` 在 base 上判 `lowSignal`，
+        // 低信号帧只给 +3 EV，其余帧全类上限 +4.5；`needEVBeforeCap` 记下截断前的本来值。
+        // ⑧d 打开时复现旧的 `p99 → 1.5` 口径，好让门能证明新规则确实换了驱动量。
+        let decision = exposureDecision(base: neutral, gates: gates)
+        let lowSignal = decision.lowSignal
+        var exposure = decision.exposure
         document.light.exposure = exposure
         var afterExposure = try measured(sample(document))
         // **422's tail guard is retired by 426d.** It walked exposure *back* whenever `p99.9/p99`
@@ -881,6 +952,16 @@ public enum AutoLight {
         if gates.ignoresClippedHighCeiling { targets.clippedHighCeiling = 1.0 }
         if gates.ignoresWholeCeiling { targets.wholeCeiling = .infinity }
         if gates.liftsShadowsForB { targets.liftsShadows = true }
+        // **443 — 低信号优先：不进分类的 A/B/C 目标逻辑。**
+        //
+        // 一张「整帧没有内容」的片子里没有可信的主体，追 classTargets 的 0.12–0.24 只会把噪声
+        // 推成灰雾（用户对 L1030746 的选择就是 midtones = 0 / shadows = 0）。所以把主体地板压到 0、
+        // 阴影地板关掉；高光 / 白色 / 黑色三步照旧（它们只压顶、压黑位，不追主体）。
+        // `frameClass` 仍照常测量并写进报告，供人看这张本会被分到哪一类。
+        if lowSignal {
+            targets.subjectTarget = 0
+            targets.liftsShadows = false
+        }
         let subjectTarget = targets.subjectTarget
 
         // ── 步骤 2 — 中间调 / 阴影 ──────────────────────────────────────────────────────────────
@@ -1281,6 +1362,9 @@ public enum AutoLight {
         return Plan(exposure: exposure, contrast: contrast, highlights: highlights,
                     midtones: midtones, shadows: shadows, whites: whites, blacks: blacks,
                     report: Report(baseP99: neutral.p99, exposureEV: exposure,
+                                   lowSignal: lowSignal,
+                                   exposureCapped: decision.capped,
+                                   needEVBeforeCap: decision.needEV,
                                    p99AfterExposure: afterExposure.p99,
                                    p95AfterExposure: afterExposure.p95,
                                    p999OverP99AfterExposure: afterExposure.p999
@@ -1372,6 +1456,13 @@ public enum AutoLight {
         public var ignoresWholeCeiling = false
         /// **441 ⑧c** — 把 `subjectTarget` 压到 0.001（≈永不提主体）。打开后 A⑤ 的中位提升必须红。
         public var collapsesSubjectTarget = false
+
+        // MARK: 443 — 低信号 / 曝光上限的两道反向门
+
+        /// **443 ⑧a** — 关掉低信号判定。打开后 L1030746 退回锚点路径（曝光 > +3、主体地板重新参与）。
+        public var ignoresLowSignal = false
+        /// **443 ⑧b** — 去掉全类曝光上限 `maxExposureEV`。打开后 60 帧的曝光 p99 必须越 +4.5。
+        public var ignoresExposureCap = false
 
         // MARK: 441 §6 — 按类的四道反向门
 
