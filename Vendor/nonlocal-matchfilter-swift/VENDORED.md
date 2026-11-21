@@ -1,7 +1,7 @@
 # nonlocal-matchfilter-swift - vendored
 
 Source copy of https://github.com/chemharuka/nonlocal-matchfilter-swift at commit
-`120aca2` ("package: declare the test target only when Tests/ is present").
+`694d505` ("strength: re-anchor sigma to the current estimator (192-frame rescan)").
 
 Photons builds it as a **local SwiftPM package** (`Package.swift` ->
 `.package(path: "Vendor/nonlocal-matchfilter-swift")`) so a checkout needs no

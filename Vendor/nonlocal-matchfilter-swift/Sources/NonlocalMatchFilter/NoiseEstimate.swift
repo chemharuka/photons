@@ -73,8 +73,8 @@ public enum NLMFStrength {
     /// reports, so the anchors above are directly usable.
     public static let reference = 0.05
 
-    public static let sigmaLow = 0.00355
-    public static let sigmaHigh = 0.00680
+    public static let sigmaLow = 0.00369
+    public static let sigmaHigh = 0.00721
     /// Range the anchors map to. 0.70 keeps texture on a quiet frame; 0.85 is the
     /// "grain is real, take more of the answer" end. The ceiling came down from
     /// 0.90 when the curve itself got stronger (15 % envelope, doubled read floor):
