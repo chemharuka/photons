@@ -468,10 +468,9 @@ final class RenderTests: XCTestCase {
 
         XCTAssertTrue(b.trace.executed.contains(.hsl), "a band must run S3.6")
         XCTAssertNotNil(b.keys.hsl)
-        // 116 moved the vignette into the linear chain, so HSL is no longer two steps before the
-        // vignette; 314 then put S3.10 after it, so the tail is HSL → 锐化 → display (the sharpen
-        // pass is unconditional at the resting 50, which is why it is allowed to be spelled here).
-        XCTAssertEqual(Array(b.keys.pipeline.suffix(3)), [.hsl, .sharpen, .display])
+        // 116 moved the vignette into the linear chain, and 483 moved 锐化 to S2.9 (before the
+        // masks), so the tail is now HSL → display: S3.6 is the last arithmetic pass before S4.
+        XCTAssertEqual(Array(b.keys.pipeline.suffix(2)), [.hsl, .display])
         let vignetteIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .vignette))
         let toneMapIndex = try XCTUnwrap(b.keys.pipeline.firstIndex(of: .toneMap))
         XCTAssertEqual(toneMapIndex, vignetteIndex + 1,

@@ -196,9 +196,9 @@ public struct RenderInputs: Sendable, Equatable {
             // this key **byte for byte** — `s3.8-detail-fx=tx=0…` is not a key segment any cached
             // render was written against.
             .filter { $0 != .detailFX || edit.hasDetailFX }
-            // 185: and S3.10 is the seventh. A document at `sharpAmount == 0` keeps this key **byte
-            // for byte** — `s3.10-sharpen=sha=0…` is not a key segment any cached render was written
-            // against (the 纹理/清晰度 rule, read once more).
+            // 185: and S2.9 (483 moved it out of S3.10) is the seventh. A document at
+            // `sharpAmount == 0` keeps this key **byte for byte** — `s2.9-sharpen=sha=0…` is not a
+            // key segment any cached render was written against (the 纹理/清晰度 rule, read once more).
             .filter { $0 != .sharpen || edit.hasSharpen }
             // 117: and S1.9 (去雾) is the sixth. Its link lives in the linear chain and must not add a
             // segment to a document that has never touched the slider.

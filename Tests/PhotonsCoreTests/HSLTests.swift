@@ -430,8 +430,8 @@ final class HSLTests: XCTestCase {
                                           edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.hsl)
         XCTAssertEqual(links.pipeline, StageChainShape.resting([.hsl]))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.hsl, .sharpen, .display],
-                       "314: S3.10 排在 S3.6 之后；S3.6 仍在 S3 与 S4 之间")
+        XCTAssertEqual(Array(links.pipeline.suffix(2)), [.hsl, .display],
+                       "483: 锐化搬去 S2.9 之后，S3.6 仍是 S4 之前的最后一个算术 pass")
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("hsl").add(withBand.keyMaterial(.hsl)).canonical,
                        "S3.6 must be seeded by S3's key, not by the vignette's")

@@ -132,13 +132,21 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// is non-zero, so a document with all three at 0 keeps its pre-S3.9 trace, key chain and pixels
     /// byte for byte. Numbered after S3.8 (the grade) — merge order: grade took the 8.
     case detailFX = "s3.9-detail-fx"
-    /// 185 — **自研锐化**: 数量 / 半径 / 细节 / 蒙版, an unsharp mask on the display-referred pixels.
+    /// 185 — **自研锐化**: 数量 / 半径 / 细节 / 蒙版, an unsharp mask.
     ///
-    /// **S3.10, between S3.9 and S3c**, for the same reason S3.9 sits there: it shapes detail, and the
-    /// vignette then darkens the corners — putting it after S3c would let the vignette's own falloff be
-    /// read as detail by the blur (`s3_10_sharpen.metal`'s mask is a gradient of it). It is the last
-    /// *arithmetic* on detail before the two effect stages, and the last pass that can be described as
-    /// 「锐化」 without a re-decode.
+    /// **483 moved it from S3.10 (after S3.9, before S3c) to S2.9: immediately after S1 (`sceneLinear`)
+    /// and before the mask stages.** The reason is 475's measurement: a spatial kernel *after*
+    /// `localApply` / `localColor` reads the local edit's own boundary into its 1–2 px neighbourhood,
+    /// so a pixel the atlas says is outside the selection still moves by 1–2 display codes. Before the
+    /// mask stages, the local edit is the last thing that touches those pixels and the outside is
+    /// bit-identical again. The raw value keeps the new segment spelling (`s2.9-`), because it is no
+    /// longer part of S3.
+    ///
+    /// The A/B behind the move (483's probe on `edit-push` over the real fixture): the linear-light
+    /// appearance of the same 50 / 2.0 document *halo* is not harder — added halo area 0.87× the
+    /// display-referred position's, p95 peak 5.46 vs 9.23 codes — and edge acutance gain is 1.16–1.19×
+    /// vs 1.20–1.22×. The pipeline's remaining stages carry the sharpened light to S4 unchanged at
+    /// identity edits, which is why a neutral document's pixels do not move at all.
     ///
     /// Not to be confused with `DetailGroup.sharpening`, which is a decoder input (the body's own
     /// baseline sharpening, forwarded to `CIRAWFilter` and kept on the 开发 card). That one is a fact
@@ -147,7 +155,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     /// **Conditional** like S3.4/S3.5/S3.6/S3.7/S3.9: it exists only when `sharpAmount > 0`, so a
     /// document that never touched the card keeps its pre-185 trace, key chain and pixels byte for
     /// byte — and, at amount 0, so does one that *did* touch the other three numbers.
-    case sharpen = "s3.10-sharpen"
+    case sharpen = "s2.9-sharpen"
     /// S3c — **镜头暗角校正**. 116 moved it out of S3 into the linear chain (after S1.8): a vignette is
     /// compensating illumination falloff, so it belongs on light, not on tone-mapped codes. The raw
     /// value keeps its old spelling so recorded traces stay readable.
@@ -162,14 +170,30 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
     case grain = "s3.7-grain"
     case display = "s4-display"
 
-    /// The passes every document runs. Mask stages are excluded on purpose: `masks == []`
-    /// must be byte-for-byte the M1 graph, including the set of stages a cold render reports.
+    /// Stages that exist only when a document value says so — `pipeline`'s switch.
+    ///
+    /// `allCases` is derived from `order` by removing these, so the fallback chain and the key chain
+    /// cannot disagree about where an unconditional stage runs.
+    private static let conditionalStages: Set<RenderStage> = [
+        .heal, .maskAtlas, .localApply, .dehaze, .contrast, .bw, .localColor,
+        .hsl, .pointColour, .grade, .detailFX, .sharpen, .grain,
+    ]
+
+    /// The passes every document runs, in **`order`'s** sequence. Conditional stages are excluded on
+    /// purpose: `masks == []` must be byte-for-byte the M1 graph, including the set of stages a cold
+    /// render reports.
+    ///
+    /// 483 — this used to be a hand-written literal whose `vignette` sat after `color`, while
+    /// `order` (and the key chain) put it before `toneMap`. `pipeline` falls back here when every
+    /// conditional flag is false, so a document at `sharpAmount == 0` with nothing else conditional
+    /// ran the vignette after S2 — a different picture from the same document with 锐化 on. Deriving
+    /// the array from `order` makes that disagreement impossible.
     ///
     /// The curve is third among the unconditional passes (030): S1 → **curve** → S2. S2 must see
     /// what the curve produced, not the other way round, and `s2_tone_map`'s region weights are
     /// defined on display-referred values — which is what the curve hands it.
     public static var allCases: [RenderStage] {
-        [.geometry, .sceneLinear, .curve, .toneMap, .color, .vignette, .display]
+        order.filter { !conditionalStages.contains($0) }
     }
 
     /// Execution order including the conditional stages.
@@ -191,9 +215,12 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         // 249 — 修复 moved to **before S0**: it repairs S1 source pixels and only then does the
         // transform card (perspective → rotation → crop) see them. S3.4 (`bw`), S3.5 (`localColor`),
         // S3.6 (`hsl`) and S3.7 (`grain`) stay where they were.
-        [.heal, .geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .dehaze,
+        // 483 — 锐化 moved from S3.10 to **S2.9**, immediately after S1 and before the mask stages:
+        // a spatial kernel must not see the local edit's boundary (475). It is still before the
+        // vignette and grain, and conditional on `sharpAmount > 0` exactly as before.
+        [.heal, .geometry, .sceneLinear, .sharpen, .maskAtlas, .localApply, .curve, .dehaze,
          .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl, .pointColour, .grade,
-         .detailFX, .sharpen, .grain, .display]
+         .detailFX, .grain, .display]
     }
 
     /// The stages one render actually visits.
@@ -259,7 +286,7 @@ public enum RenderStage: String, CaseIterable, Sendable, Codable {
         case .pointColour: return "s3.6b"
         case .grade: return "s3.8"
         case .detailFX: return "s3.9"
-        case .sharpen: return "s3.10"
+        case .sharpen: return "s2.9"
         case .vignette: return "s3-vignette"
         case .grain: return "s3.7"
         case .display: return "s4"
@@ -552,9 +579,9 @@ public enum RenderKeyChain {
         /// when all three detail numbers are 0, in which case S3.9 does not exist for this render at all
         /// (2026-10-28, P0-6) and `vignette` is seeded exactly as before.
         public var detailFX: String?
-        /// `H(detailFX-or-grade-or-…-or-color key | "sharpen" | sharpenMaterial)`; `nil` when
-        /// `sharpAmount == 0` (185), in which case S3.10 does not exist for this render at all and
-        /// `vignette` is seeded exactly as before.
+        /// `H(sceneLinear key | "sharpen" | sharpenMaterial)`; `nil` when `sharpAmount == 0` (185),
+        /// in which case S2.9 does not exist for this render at all and the mask stages / curve are
+        /// seeded by S1 exactly as before. 483 moved this link from below S3.9 to just above S1.5.
         public var sharpen: String?
         public var vignette: String
         /// `H(vignetteKey | "grain" | grainMaterial)`; `nil` when the grain amount is 0, in which case
@@ -651,6 +678,23 @@ public enum RenderKeyChain {
             .add(mat(.sceneLinear))
             .canonical
 
+        // 483: S2.9 (自研锐化) sits **between S1 and the mask stages** and exists only when
+        // `sharpAmount > 0`. It seeds S1.5 (or the curve when there are no masks), so a 锐化 drag
+        // misses the guard-free stages below it and the mask stages it now precedes — which is also
+        // what makes 475's locality property true (the local edit is the last arithmetic on its own
+        // boundary). Neutral leaves the link `nil`, so a document that never touched the card — or
+        // one that moved 半径/细节/蒙版 with the amount at 0 — keeps its whole chain byte for byte.
+        var sharpen: String?
+        var linearSeed = sceneLinear
+        if edit.hasSharpen {
+            let link = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
+                .add("sharpen")
+                .add(mat(.sharpen))
+                .canonical
+            sharpen = link
+            linearSeed = link
+        }
+
         var maskAtlas: String?
         var localApply: String?
         var toneMap: String
@@ -660,7 +704,7 @@ public enum RenderKeyChain {
             // The explicit exception of §3.2: with masks the chain is nine links, and every link
             // below the atlas moves. Without masks the two lines below simply do not run and
             // `toneMap` is byte-identical to M1.
-            let atlas = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
+            let atlas = KeyBuilder(KeyBuilder.digest(of: linearSeed))
                 .add("masks")
                 .add(edit.maskSelectionMaterial)
                 .add(canvas)
@@ -673,7 +717,7 @@ public enum RenderKeyChain {
             localApply = local
             curveSeed = local
         } else {
-            curveSeed = sceneLinear
+            curveSeed = linearSeed
         }
         // 030: the curve reads whatever the stage above produced, and S2 reads the curve. A curve
         // drag therefore misses S1.7, S2, S3, S3c and S4 — and **hits** S0/S1/S1.5/S1.6, which is the
@@ -825,19 +869,6 @@ public enum RenderKeyChain {
                 .add(mat(.detailFX))
                 .canonical
             detailFX = link
-            vignetteSeed = link
-        }
-        // 185: S3.10 (自研锐化) sits between S3.9 and the vignette and exists **only** when
-        // `sharpAmount > 0`. Neutral leaves the link `nil` and the vignette seeded exactly as before,
-        // so a document that never touched the card — or one that moved 半径/细节/蒙版 with the amount
-        // at 0 — keeps its whole chain byte for byte (the seventh stage to use the §3.2 discipline).
-        var sharpen: String?
-        if edit.hasSharpen {
-            let link = KeyBuilder(KeyBuilder.digest(of: vignetteSeed))
-                .add("sharpen")
-                .add(mat(.sharpen))
-                .canonical
-            sharpen = link
             vignetteSeed = link
         }
         let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(mat(.vignette)).canonical

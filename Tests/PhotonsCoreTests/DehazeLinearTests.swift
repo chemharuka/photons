@@ -278,9 +278,8 @@ final class DehazeLinearTests: XCTestCase {
         XCTAssertNil(links.dehaze, "dehaze == 0 就没有 S1.9 链接 —— 不是「链接了但乘 0」")
         // 314: the resting document visits S3.10 (锐化 50) as well; what this file asserts is that
         // there is **no S1.9** in it, which the `dehaze` assertions above and below say.
-        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .vignette, .toneMap,
-                                        .color, .sharpen, .display])
-        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S3.10")
+        XCTAssertEqual(links.pipeline, StageChainShape.resting())
+        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S2.9")
 
         let (_, trace) = try renderWithTrace(graph, untouched)
         XCTAssertFalse(trace.executed.contains(.dehaze), "中性帧不许编码 S1.9")

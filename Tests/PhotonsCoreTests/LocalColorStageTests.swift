@@ -774,6 +774,76 @@ final class LocalColorStageTests: XCTestCase {
         }
     }
 
+    /// 483 — **475's locality claim must hold with 锐化 at its resting 50 / 2.0.**
+    ///
+    /// 475 measured the leak and pinned it at `Self.unsharpened`, because the blur came from S3.10
+    /// running *after* the local edits: a pixel the atlas calls outside still read a neighbour inside
+    /// the selection, so it moved by 1–2 codes. 483 moved 锐化 to S2.9 (before S1.5/S1.6/S3.5), so the
+    /// local edit is the last arithmetic on its own boundary and the outside must be within one code
+    /// of the neutral frame. Both local domains are covered: S1.6 (exposure) and S3.5 (saturation).
+    func test475LocalityHoldsWithTheRestingSharpen() throws {
+        XCTAssertEqual(EditModel.neutral.sharpen.amount, 50, "the document under test is the resting one")
+        XCTAssertEqual(EditModel.neutral.sharpen.radius, 2.0)
+
+        let landscape = picture(120, 80) { x, y in
+            Self.hslToRGB(h: Double(x) / 119, s: 0.72,
+                          l: 0.28 + 0.44 * Double(y) / 79)
+        }
+        let graph = try makeGraph(landscape, identity: "483-475-resting-sharpen")
+        let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
+                                    useCache: false, wantsPixels: true)
+        let plainResult = try graph.render(EditModel.neutral, options: options)
+        let plain = try XCTUnwrap(plainResult.display)
+        XCTAssertTrue(plainResult.trace.executed.contains(.sharpen),
+                      "the document must actually visit S2.9 for this claim to mean anything")
+
+        let radial = MaskComponent(id: "c", feather: 0,
+                                   shape: .radialGradient(RadialGradientShape(
+                                     center: NormalizedPoint(0.5, 0.35),
+                                     radius: NormalizedPoint(0.18, 0.18))))
+        let variants: [(label: String, stage: RenderStage, adjustments: LocalAdjustments)] = [
+            ("S1.6 exposure", .localApply, LocalAdjustments(exposure: 1.0)),
+            ("S3.5 saturation", .localColor, LocalAdjustments(saturation: 60)),
+        ]
+        for variant in variants {
+            var edit = EditModel.neutral
+            edit.masks = [Mask(id: "m-483", components: [radial],
+                               adjustments: variant.adjustments)]
+            let atlas = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
+            let result = try graph.render(edit, options: options)
+            let masked = try XCTUnwrap(result.display)
+            XCTAssertTrue(result.trace.executed.contains(variant.stage),
+                          "\(variant.label): the stage under test must have run")
+
+            var worstOutside = 0, outsideOverOne = 0
+            var covered = 0, coveredMoved = 0
+            for y in 0..<masked.height {
+                for x in 0..<masked.width {
+                    let i = y * masked.width + x
+                    let delta = (0..<3).reduce(0) { worst, channel in
+                        max(worst, abs(Self.code(masked.rgba[i * 4 + channel])
+                                       - Self.code(plain.rgba[i * 4 + channel])))
+                    }
+                    if atlas.slices[0][i] == 0 {
+                        worstOutside = max(worstOutside, delta)
+                        if delta > 1 { outsideOverOne += 1 }
+                    }
+                    if atlas.slices[0][i] > 0.99 {
+                        covered += 1
+                        if delta > 1 { coveredMoved += 1 }
+                    }
+                }
+            }
+            print("483 \(variant.label): outside max \(worstOutside) code "
+                  + "(\(outsideOverOne) over 1), covered moved \(coveredMoved)/\(covered)")
+            XCTAssertLessThanOrEqual(worstOutside, 1,
+                                     "\(variant.label): 选区外与中性帧的最大差必须 ≤ 1 code（475 的 1–2 code 晕染）")
+            XCTAssertGreaterThan(covered, 100, "\(variant.label): the mask must cover a measurable interior")
+            XCTAssertEqual(coveredMoved, covered,
+                           "\(variant.label): the local edit must reach every covered pixel")
+        }
+    }
+
     /// The inverse of `ImageOrientation.sourceCoordinate`, so the stored buffer is exactly what a
     /// camera wrote for that tag.
     private func storedPicture(_ upright: LinearImage, orientation: ImageOrientation) -> LinearImage {

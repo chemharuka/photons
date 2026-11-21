@@ -295,15 +295,17 @@ final class SharpenScaleTests: XCTestCase {
     /// bump that also moved something else is a bug in the bump: **变了** = sharpen, **没变** =
     /// everything else, asserted one stage at a time.
     func testTheSharpenGenerationMovedAndNoOtherStageDid() throws {
-        XCTAssertEqual(StageAlgorithmVersion.sharpen, 3, "192：σ 地板删除 + 基面 stride 随尺度")
-        XCTAssertEqual(StageAlgorithmVersion.version(of: .sharpen), 3)
+        // 483: S3.10 → S2.9 (before the mask stages). Same parameters, different input domain, so
+        // the generation moves 3 → 4 for exactly the reason 192 moved 2 → 3.
+        XCTAssertEqual(StageAlgorithmVersion.sharpen, 4, "483：S2.9 前移，输入域从显示参考变成线性光")
+        XCTAssertEqual(StageAlgorithmVersion.version(of: .sharpen), 4)
 
         // The `;alg=` token itself — the key text a cache entry is minted from.
         let edit = sharpen(150, radius: 1.0)
-        XCTAssertTrue(edit.keyMaterial(.sharpen).hasSuffix(";alg=3"),
-                      "锐化的键材质必须以 ;alg=3 收尾，实际 \(edit.keyMaterial(.sharpen))")
-        XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=3"))
-        XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=2"))
+        XCTAssertTrue(edit.keyMaterial(.sharpen).hasSuffix(";alg=4"),
+                      "锐化的键材质必须以 ;alg=4 收尾，实际 \(edit.keyMaterial(.sharpen))")
+        XCTAssertTrue(StageAlgorithmVersion.material.contains("sharpen=4"))
+        XCTAssertFalse(StageAlgorithmVersion.material.contains("sharpen=3"))
 
         // 301 bumped `geometry` 3 → 4 (canvas = crop frame); 307 bumped it 4 → 5 (two canvases, so
         // one crop/angle has two renders). It is pinned at 5 here so this sharpen test still proves

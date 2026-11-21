@@ -1588,7 +1588,13 @@ final class MaskTests: XCTestCase {
         }
         let image = LinearImage(width: stops.count * patch, height: height, rgba: rgba,
                                 colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
-        let dump = try atlas(doc(.luminanceRange(shape), feather: 0), image)
+        var edit = doc(.luminanceRange(shape), feather: 0)
+        // 483 — 锐化 now runs **before** S1.5, so a document at the resting 50 would clip the +4 EV
+        // patch at the picture ceiling before the predicate reads it. This test pins the mask's own
+        // default window on scene light, so the document names 锐化 at 0 — the same isolation the
+        // mask goldens use (329).
+        edit.sharpen = SharpenGroup(amount: 0)
+        let dump = try atlas(edit, image)
         let alphas = (0..<stops.count).map { sample(dump, 0, $0 * patch + patch / 2, height / 2) }
         print("V5′ default high \(shape.high) · "
               + zip(["0", "+1", "+2", "+3", "+4"], alphas)
@@ -1777,7 +1783,11 @@ final class MaskTests: XCTestCase {
         }
         let sdr = LinearImage(width: bands.count * band, height: height, rgba: rgba,
                               colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic")
-        let dump = try atlas(doc(.luminanceRange(narrowV1), feather: 0), sdr)
+        var v1Edit = doc(.luminanceRange(narrowV1), feather: 0)
+        // 483 — 锐化 is before S1.5 now; its halo on the band edges would move the quantised digest
+        // without changing the selection. The claim is about the predicate, so 锐化 is named at 0.
+        v1Edit.sharpen = SharpenGroup(amount: 0)
+        let dump = try atlas(v1Edit, sdr)
         var oldNarrow: [Float] = [], newNarrow: [Float] = []
         for i in 0..<(sdr.width * sdr.height) {
             let r = Double(sdr.rgba[i * 4])
