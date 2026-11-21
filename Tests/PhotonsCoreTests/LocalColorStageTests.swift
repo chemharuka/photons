@@ -653,7 +653,12 @@ final class LocalColorStageTests: XCTestCase {
         let stored = storedPicture(upright, orientation: .right)
         XCTAssertEqual(stored.orientation, .right)
 
-        var edit = EditModel.neutral
+        // 475 — 314 made 锐化 50 / 2.0 the resting document; S3.10 is a *spatial* kernel after
+        // S3.5, so its halo moves one or two display codes across the selection's boundary even
+        // when S3.5 itself writes the outside pixel back unchanged. The claim here is the atlas's
+        // locality, not the sharpener's, so the document is `Self.unsharpened` — the same pre-314
+        // resting document 0237994 used for the other pins (`amount = 0` = "S3.10 does not exist").
+        var edit = Self.unsharpened
         edit.masks = [Mask(id: "m-portrait",
                            components: [MaskComponent(id: "c", feather: 0,
                                                       shape: .radialGradient(RadialGradientShape(
@@ -672,7 +677,7 @@ final class LocalColorStageTests: XCTestCase {
                            accuracy: 1e-3, "the rotated decode must select the same pixels")
         }
 
-        let plain = try display(graphStored, EditModel.neutral)
+        let plain = try display(graphStored, Self.unsharpened)
         let masked = try display(graphStored, edit)
         let trace = try graphStored.render(edit, options: RenderOptions(scale: 1, useCache: false)).trace
         XCTAssertTrue(trace.executed.contains(.localColor), "the stage must have run on the portrait frame")
@@ -698,6 +703,75 @@ final class LocalColorStageTests: XCTestCase {
                      cx, cy, masked.width, masked.height))
         XCTAssertEqual(cx, 24.0, accuracy: 1.5, "the selection must land where it was drawn")
         XCTAssertEqual(cy, 18.0, accuracy: 1.5)
+    }
+
+    /// 475 — the same locality claim on every stored orientation, measured before S3.10 can blur it:
+    /// landscape (EXIF 1), EXIF 3, EXIF 6 in portrait, and EXIF 8. Outside the atlas coverage a
+    /// pixel must be bit-for-bit (≤ 1e-4) what the neutral frame was; inside full coverage the
+    /// saturation must move. This is the parameterisation the ticket asks for, and it runs on
+    /// `Self.unsharpened` for the reason given on `testCoverageIsTheAtlasOwnAndSurvivesPortraitOrientation`.
+    func testCoverageStaysLocalInEveryStoredOrientation() throws {
+        let portrait = picture(48, 72) { x, y in
+            Self.hslToRGB(h: 0.02 + 0.5 * Double(x) / 48, s: 0.62,
+                          l: 0.30 + 0.40 * Double(y) / 72)
+        }
+        let landscape = picture(72, 48) { x, y in
+            Self.hslToRGB(h: 0.02 + 0.5 * Double(x) / 72, s: 0.62,
+                          l: 0.30 + 0.40 * Double(y) / 48)
+        }
+        var edit = Self.unsharpened
+        edit.masks = [Mask(id: "m-475",
+                           components: [MaskComponent(id: "c", feather: 0,
+                                                      shape: .radialGradient(RadialGradientShape(
+                                                        center: NormalizedPoint(0.5, 0.25),
+                                                        radius: NormalizedPoint(0.2, 0.2))))],
+                           adjustments: LocalAdjustments(saturation: 60))]
+
+        let cases: [(label: String, upright: LinearImage, orientation: ImageOrientation)] = [
+            ("landscape", landscape, .up),
+            ("exif3", landscape, .down),
+            ("exif6-portrait", portrait, .right),
+            ("exif8", landscape, .left),
+        ]
+        for c in cases {
+            let stored = storedPicture(c.upright, orientation: c.orientation)
+            let graph = try makeGraph(stored, identity: "475-\(c.label)")
+            let atlas = try XCTUnwrap(graph.maskAtlas(edit, options: RenderOptions(scale: 1)))
+            let plain = try display(graph, Self.unsharpened)
+            let masked = try display(graph, edit)
+            XCTAssertEqual(masked.width, c.upright.width, "\(c.label): the frame is the upright width")
+            XCTAssertEqual(masked.height, c.upright.height, "\(c.label): the frame is the upright height")
+
+            var outsideMoved = 0
+            var firstOutside: (x: Int, y: Int)?
+            var covered = 0, coveredMoved = 0
+            for y in 0..<masked.height {
+                for x in 0..<masked.width {
+                    let i = y * masked.width + x
+                    let delta = (0..<3).reduce(0.0) { worst, channel in
+                        max(worst, abs(Double(masked.rgba[i * 4 + channel])
+                                       - Double(plain.rgba[i * 4 + channel])))
+                    }
+                    let coverage = atlas.slices[0][i]
+                    if coverage == 0 {
+                        if delta > 1e-4 {
+                            outsideMoved += 1
+                            if firstOutside == nil { firstOutside = (x, y) }
+                        }
+                    }
+                    if coverage > 0.99 {
+                        covered += 1
+                        if delta > 1e-4 { coveredMoved += 1 }
+                    }
+                }
+            }
+            print("475 \(c.label) EXIF \(c.orientation.rawValue): outside moved \(outsideMoved) "
+                  + "(first \(String(describing: firstOutside))), covered moved \(coveredMoved)/\(covered)")
+            XCTAssertEqual(outsideMoved, 0,
+                           "\(c.label): pixels outside the selection moved (first \(String(describing: firstOutside)))")
+            XCTAssertGreaterThan(covered, 50, "\(c.label): the mask must cover a measurable interior")
+            XCTAssertEqual(coveredMoved, covered, "\(c.label): saturation must reach every covered pixel")
+        }
     }
 
     /// The inverse of `ImageOrientation.sourceCoordinate`, so the stored buffer is exactly what a
