@@ -4795,7 +4795,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case light
         case black
         case whiteBalance
+        case color
         case all
+        case allAuto
     }
     public private(set) var pendingAuto: PendingAuto?
 
@@ -4877,8 +4879,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = autoBlackOffset()
         case .whiteBalance:
             _ = autoWhiteBalance()
+        case .color:
+            _ = autoColor()
         case .all:
             _ = autoDevelop()
+        case .allAuto:
+            _ = autoAll()
         }
     }
 
@@ -5083,7 +5089,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     func colorVibranceCandidate(from document: EditModel?) -> Double? {
         let frame = frameState
         guard let session, session.mode == .loupe else { return nil }
-        if autoAdjustMustWait() { return nil }
+        if autoAdjustMustWait() {
+            queuePendingAuto(.color)
+            return nil
+        }
         guard let graph = frame.graph else { return nil }
         let source = document ?? session.edit
         let sample: LinearSample
@@ -5098,7 +5107,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         lastAutoColorMetricsForTesting = metrics
         print(String(format: "AUTO COLOR · chroma p50 %.4f · coloured %.1f%% → vibrance %+.2f",
                      metrics.chromaP50, metrics.coloredFraction * 100, vibrance))
-        guard abs(vibrance - source.color.vibrance) >= 1e-9 else { return nil }
+        // 452's tool only raises: never lower a picture the owner already saturated, and never write
+        // a "plan" that is below the document. This is also what makes a second press on a settled
+        // document a true no-op (the measurement now includes the boost the first press wrote).
+        guard vibrance > source.color.vibrance + 1e-9 else { return nil }
         return vibrance
     }
 
@@ -5119,6 +5131,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 自动调整 — 复合动作 (453)
 
+    /// **490 — 自动颜色's own entry.** The same plan path the composite uses, but committed on its
+    /// own: one document write and one 「自动颜色」 history row. A press on a settled picture is a
+    /// no-op (`colorVibranceCandidate` returns `nil`), exactly like 自动黑电平 / 自动明暗.
+    @discardableResult
+    public func autoColor() -> Double? {
+        guard let session, let vibrance = colorVibranceCandidate() else { return nil }
+        session.applyEdit { $0.color.vibrance = vibrance }
+        requestEditRender()
+        session.commitEdit(label: Loc.t("自动颜色"), coalesce: false)
+        return vibrance
+    }
+
     /// **派单 453 — 自动调整.** 黑电平 → 明暗 → 自动颜色, **one** document write and **one** history row.
     ///
     /// The order is load-bearing: `AutoLight` step 4 reads `light.blackOffset` to cancel the lift, so
@@ -5130,40 +5154,69 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `false`; `runPendingAutoIfReady` calls this same verb when that frame lands.
     @discardableResult
     public func autoDevelop() -> Bool {
+        runAutoComposite(label: Loc.t("自动调整"), pending: .all, converge: false)
+    }
+
+    /// **490 — 「全部自动」.** The same one-write pipeline as `autoDevelop()`, under its own label and
+    /// its own pending intent. It is deliberately additive: `autoDevelop()` keeps its existing
+    /// behaviour (黑电平 → 明暗 → 颜色), so the 编辑 menu and the new top-bar button can never drift.
+    ///
+    /// Unlike `autoDevelop()`, it re-measures 明暗/颜色 on the document the previous pass produced
+    /// until that pair is a fixed point (at most four passes). Colour is written last and its vibrance
+    /// changes the picture `AutoLight` measures, so a single pass is not necessarily the state a
+    /// second press would leave; converging here is what makes 「连点两次」 the same one row.
+    @discardableResult
+    public func autoAll() -> Bool {
+        runAutoComposite(label: Loc.t("全部自动"), pending: .allAuto, converge: true)
+    }
+
+    /// The one pipeline behind both composite verbs. 黑电平 → 明暗 → 自动颜色, measured on staged
+    /// copies and written together; a converged step returns `nil` and is skipped, so a second press
+    /// on a settled picture adds neither a document change nor a history row.
+    private func runAutoComposite(label: String, pending: PendingAuto, converge: Bool) -> Bool {
         guard let session, session.mode == .loupe else { return false }
         if autoAdjustMustWait() {
-            queuePendingAuto(.all)
+            queuePendingAuto(pending)
             return false
         }
         var staged = session.edit
         var changed = false
-        // 1. 黑电平 — the floor the 明暗 measurement must see.
-        if let black = blackOffsetCandidate() {
+        // 1. 黑电平 — the floor the 明暗 measurement must see. It does not depend on the later steps,
+        // so it is measured once even when the light/colour pair is iterated.
+        if let black = blackOffsetCandidate(), black != staged.light.blackOffset {
             staged.light.blackOffset = black
             changed = true
         }
-        // 2. 明暗 — measured on the staged black level.
-        if let plan = lightPlanCandidate(from: staged) {
-            staged = plan.apply(to: staged)
-            changed = true
-        }
-        // 3. 自动颜色 — measured on the staged black level + 明暗.
-        if let vibrance = colorVibranceCandidate(from: staged) {
-            staged.color.vibrance = vibrance
-            changed = true
+        // 2/3. 明暗 → 自动颜色. 颜色 is last, and its vibrance changes what 明暗 measures, so a second
+        // press on the same picture would otherwise find a different plan. Iterate the pair (still
+        // before any write) to its fixed point; four passes bound the work if a picture oscillates.
+        let passes = converge ? 4 : 1
+        for _ in 0 ..< passes {
+            var passChanged = false
+            if let plan = lightPlanCandidate(from: staged) {
+                staged = plan.apply(to: staged)
+                passChanged = true
+            }
+            if let vibrance = colorVibranceCandidate(from: staged) {
+                staged.color.vibrance = vibrance
+                passChanged = true
+            }
+            changed = changed || passChanged
+            if !passChanged { break }
         }
         guard changed else { return false }
         session.applyEdit { $0 = staged }
         requestEditRender()
-        session.commitEdit(label: Loc.t("自动调整"), coalesce: false)
+        session.commitEdit(label: label, coalesce: false)
         return true
     }
 
     /// 453 — the loupe canvas' right-click menu. The canvas view forwards `menu(for:)` here; a photo
-    /// and the loupe are the only requirements, and the row calls this controller's own verb.
-    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(session: session) { [weak self] in
-        _ = self?.autoDevelop()
-    }
+    /// and the loupe are the only requirements, and the rows call this controller's own verbs.
+    private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(
+        session: session,
+        perform: { [weak self] in _ = self?.autoDevelop() },
+        performColor: { [weak self] in _ = self?.autoColor() })
 
     public func canvasContextMenu(for event: NSEvent) -> NSMenu? {
         _ = event

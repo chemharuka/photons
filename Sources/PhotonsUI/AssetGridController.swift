@@ -2280,7 +2280,7 @@ public enum DenoiseMenuBuilder {
     }
 }
 
-/// 右键 ▸「自动调整」 — 453's one verb: 黑电平 + 明暗 + 自动颜色, one history row.
+/// 右键 ▸「自动调整」/「自动颜色」 — 453's one verb plus 490's colour entry, one history row each.
 ///
 /// The row is present only for a **single** photo. 批量自动调整 is a background job (454) and does
 /// not belong to this ticket, so a multi-selection hides the row instead of promising a batch that
@@ -2290,12 +2290,16 @@ public enum DenoiseMenuBuilder {
 public final class AutoAdjustMenuTarget: NSObject {
     public weak var session: CatalogSession?
     /// The loupe supplies its own verb; the two browsers send the command through the responder chain
-    /// so `EditorWindowController` can open the photo first.
+    /// so `WorkspaceRootView` can open the photo first.
     public var perform: (() -> Void)?
+    /// 490 — 「自动颜色」's independent row, same grammar as `perform`.
+    public var performColor: (() -> Void)?
 
-    public init(session: CatalogSession?, perform: (() -> Void)? = nil) {
+    public init(session: CatalogSession?, perform: (() -> Void)? = nil,
+                performColor: (() -> Void)? = nil) {
         self.session = session
         self.perform = perform
+        self.performColor = performColor
         super.init()
     }
 
@@ -2306,21 +2310,34 @@ public final class AutoAdjustMenuTarget: NSObject {
         }
         NSApp.sendAction(#selector(EditorWindowController.autoDevelopAction(_:)), to: nil, from: sender)
     }
+
+    /// 490 — one row, the same `AutoColor.plan` path `autoColor()` owns in the loupe.
+    @objc func autoColorPressed(_ sender: Any?) {
+        if let performColor {
+            performColor()
+            return
+        }
+        NSApp.sendAction(#selector(WorkspaceRootView.autoColorAction(_:)), to: nil, from: sender)
+    }
 }
 
 @MainActor
 public enum AutoAdjustMenuBuilder {
 
     public static let title = Loc.t("自动调整")
+    /// 490 — the colour sibling, present on exactly the same single-photo menu.
+    public static let colorTitle = Loc.t("自动颜色")
 
     private static var action: Selector { #selector(AutoAdjustMenuTarget.autoDevelopPressed(_:)) }
+    private static var colorAction: Selector { #selector(AutoAdjustMenuTarget.autoColorPressed(_:)) }
 
-    /// Put the row at the top of a browser's shared context menu. Repeated opens remove the previous
-    /// row by **action** (the title is a sentinel, the action is the identity), then the single-photo
-    /// guard decides whether it comes back.
+    /// Put the two rows at the top of a browser's shared context menu. Repeated opens remove the
+    /// previous rows by **action** (the title is a sentinel, the action is the identity), then the
+    /// single-photo guard decides whether they come back.
     public static func attach(to menu: NSMenu, session: CatalogSession?,
                               target: AutoAdjustMenuTarget?) {
-        for (index, item) in menu.items.enumerated().reversed() where item.action == action {
+        for (index, item) in menu.items.enumerated().reversed()
+        where item.action == action || item.action == colorAction {
             menu.removeItem(at: index)
             if index < menu.items.count, menu.items[index].isSeparatorItem {
                 menu.removeItem(at: index)
@@ -2330,10 +2347,14 @@ public enum AutoAdjustMenuBuilder {
         // 454 owns batch auto; hide for a multi-selection rather than run N synchronous measurements.
         guard session.mode == .loupe || session.selectedAssets.count == 1 else { return }
         guard session.anchorID != nil || !session.selectedAssets.isEmpty else { return }
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = target
-        menu.insertItem(item, at: 0)
-        menu.insertItem(.separator(), at: 1)
+        // 490 — 自动调整 first (453's row keeps its place), 自动颜色 second, then one separator.
+        let auto = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        auto.target = target
+        menu.insertItem(auto, at: 0)
+        let color = NSMenuItem(title: colorTitle, action: colorAction, keyEquivalent: "")
+        color.target = target
+        menu.insertItem(color, at: 1)
+        menu.insertItem(.separator(), at: 2)
     }
 }
 

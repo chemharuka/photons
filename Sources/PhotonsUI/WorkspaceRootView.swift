@@ -198,6 +198,9 @@ public final class TopBarView: NSView, NSPopoverDelegate {
     public var onBrowserMode: ((BrowserMode) -> Void)?
     /// 排序按钮（`新→旧 / 旧→新`）。One click flips the order the grid, the browser and the strip read.
     public var onToggleSort: (() -> Void)?
+    /// 490 — 「全部自动」: 黑电平 + 明暗 + 自动颜色 in one write. The root supplies the verb so the bar
+    /// owns no document logic.
+    public var onAutoAll: (() -> Void)?
 
     private let openButton = ToolButton(title: Loc.t("打开"), symbol: "folder")
     /// 文件 ▸ 导入照片… 的顶栏入口。**与菜单项同一个 selector、同一个 nil target**：走响应链到
@@ -228,6 +231,10 @@ public final class TopBarView: NSView, NSPopoverDelegate {
     /// 454 P1 — 排序右侧的「后台」入口。它和排序之间还有一条分隔线（`排序 | 后台`）。
     private let backgroundButton = ToolButton(title: Loc.t("后台"),
                                                symbol: "square.stack.3d.down.right")
+    /// 490 — 「全部自动」sits beside 「后台」 in the same right-hand group. Its intrinsic icon footprint
+    /// is the same family as 后台's (`wand.and.stars` 16×14 vs `square.stack.3d.down.right` 15×19 at
+    /// 12 pt); the title is the user's four-character 「全部自动」, so the text run is wider.
+    private let autoAllButton = ToolButton(title: Loc.t("全部自动"), symbol: "wand.and.stars")
     /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
     /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
@@ -292,6 +299,10 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         backgroundButton.target = self
         backgroundButton.action = #selector(backgroundTapped)
 
+        autoAllButton.target = self
+        autoAllButton.action = #selector(autoAllTapped)
+        autoAllButton.toolTip = Loc.t("全部自动：黑电平、明暗与颜色一次完成")
+
         modeButton.target = self
         modeButton.action = #selector(modeTapped(_:))
         browserButton.target = self
@@ -303,7 +314,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         backgroundTasksPopover.contentViewController = backgroundTasksPopoverController
 
         for v: NSView in [openButton, importButton, exportButton, modeButton,
-                          browserButton, sortButton, backgroundButton,
+                          browserButton, sortButton, autoAllButton, backgroundButton,
                           backgroundTaskBars, statusCluster] {
             addSubview(v)
         }
@@ -393,6 +404,13 @@ public final class TopBarView: NSView, NSPopoverDelegate {
 
     /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
     public var sortButtonView: ToolButton { sortButton }
+    /// 490 —— 顶栏第 8 个按钮「全部自动」。
+    public var autoAllButtonView: ToolButton { autoAllButton }
+    /// 490 —— 一行里的全部按钮，按左到右的布局顺序（按钮计数器用）。
+    public var toolButtonsForTesting: [ToolButton] {
+        [openButton, importButton, exportButton, modeButton, browserButton, sortButton,
+         autoAllButton, backgroundButton]
+    }
     /// 454 P1 —— 顶栏最右的「后台」按钮（`controlsTrailingEdge` 就是它的右边缘）。
     public var backgroundButtonView: ToolButton { backgroundButton }
     /// 454 P1 —— 两条分隔线：`[0]` 在导出之后，`[1]` 在排序与后台之间。
@@ -472,6 +490,9 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         separators[1].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += Self.separatorGapOut
+        // 490 — 「全部自动」与「后台」并列，后台仍是最后一个按钮（预算线不变）。
+        place(autoAllButton, width: autoAllButton.intrinsicContentSize.width)
+        x += Self.itemGap
         place(backgroundButton, width: backgroundButton.intrinsicContentSize.width)
 
         // 488 — the bar slot sits immediately right of 后台 and is **always** reserved, even with
@@ -511,6 +532,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
 
     @objc private func openTapped() { onOpen?() }
     @objc private func sortTapped() { onToggleSort?() }
+    @objc private func autoAllTapped() { onAutoAll?() }
 
     /// 454 P1 —— 点「后台」开/关空面板。A click on the already-open popover's anchor closes it, the
     /// same toggle the two filter popovers use; `.transient` also closes it on any outside click.
@@ -864,6 +886,8 @@ public final class WorkspaceRootView: NSView {
             self.updateTopBar()
             self.beginSortSettling()
         }
+        // 490 —— 「全部自动」：一次文档写、一条历史行。与右键「自动调整」共用 loupe 的流水。
+        topBar.onAutoAll = { [weak self] in self?.autoAllAction(nil) }
 
         // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
         // One switch, published by the loupe when the mode actually changes (so a drag tick cannot
@@ -989,6 +1013,27 @@ public final class WorkspaceRootView: NSView {
             self.updateTopBar()
             self.updateForwardCompatNotice()
         })
+    }
+
+    /// 490 — the two entries that have no 编辑-menu item: the top bar's 「全部自动」 and the right-click
+    /// 「自动颜色」. Both need the loupe's frame graph; from a browser they open the single anchor first.
+    @objc public func autoAllAction(_ sender: Any?) {
+        guard prepareAutoAction() else { return }
+        _ = loupeController.autoAll()
+    }
+
+    @objc public func autoColorAction(_ sender: Any?) {
+        guard prepareAutoAction() else { return }
+        _ = loupeController.autoColor()
+    }
+
+    private func prepareAutoAction() -> Bool {
+        guard session.isOpen, session.anchorID != nil else { return false }
+        if session.mode != .loupe {
+            session.mode = .loupe
+            showModule(for: .loupe)
+        }
+        return true
     }
 
     func updateTopBar() {
