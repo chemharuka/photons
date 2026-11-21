@@ -6853,6 +6853,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func notePhotoIdentity(_ identity: String?) {
         guard identity != renderedPhoto else { return }
         renderedPhoto = identity
+        // 491 — "already presented this key from the cache" is a fact about **this** photo's stay,
+        // not about the session. Leaving it set when the photo changes made a return to a photo
+        // that had been a cache hit skip the lookup entirely: the canvas cache held the frame and
+        // `hits` did not move, so the user saw the previous photo until a fresh decode landed.
+        lastCanvasCachePresentedKey = nil
         // 258 — **the previous photo's pixels leave the layer at this instant.** The canvas is a
         // `CAMetalLayer`, so its last drawable keeps showing A until something replaces it, and the
         // new photo's first real frame is at least one development away. Clearing the controller's
@@ -7971,7 +7976,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// the two and misses (never approximates) when they moved.
     private func canvasFrameCacheKey(for job: RenderJob,
                                      decodeScale: Double) -> CanvasFrameCache.Key {
-        let edit = job.edit
+        // 491 — the digest names the pixels, not the UI's cursor in the document (see
+        // `CanvasFrameCache.pixelCanonicalEdit`). The same projection is used by the edit-landed hook.
+        let edit = CanvasFrameCache.pixelCanonicalEdit(job.edit)
         return CanvasFrameCache.Key(facts: LoupeFrameFacts(
             canvas: job.baseIdentity,
             edit: edit,
@@ -7986,7 +7993,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             decodeScale: decodeScale,
             primaries: currentCanvasPrimaries,
             ceiling: HighlightCeiling.current,
-            digestSuffix: ""))
+            digestSuffix: ""), quantizeCamera: true)
     }
 
     /// The presenter's storage decides the S4 matrix. One function, because the writer and the
@@ -8001,7 +8008,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func noteCanvasCacheDocument(photo: String, edit: EditModel) {
         // 440 复核修正：这里**不许**借 `cachedEditFacts`。`lastEditFacts` 是渲染队列独占的记忆
         //（无锁），而本函数从 `makeJob` 走主线程调用 —— 借它会多出一个跨线程写者。digest 一行就够。
-        let digest = Histogram.editDigest(edit)
+        // 491 — the same pixel-only projection the key spells: selecting another point-colour swatch
+        // moves `EditModel` but not a texel, and must not invalidate this photo's canvas.
+        let digest = CanvasFrameCache.pixelEditDigest(edit)
         if let seen = canvasCacheSeenDigest[photo], seen != digest {
             canvasFrameCache.noteEditLanded(photo: photo, digest: digest)
         }

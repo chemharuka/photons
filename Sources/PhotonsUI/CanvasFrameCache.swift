@@ -48,6 +48,13 @@ public final class CanvasFrameCache {
     public nonisolated(unsafe) static var invalidatesOnEdit = true
     /// ⑧d — the current photo's entry is protected from LRU eviction. Off makes A③ red.
     public nonisolated(unsafe) static var protectsCurrentPhoto = true
+    /// 491 — the camera is quantized before it enters the key (zoom 1e-3, centre 0.1 px). Off makes
+    /// 「同一视图两次构造键相等」red: two readings of one view can differ in the last ulp and would
+    /// otherwise be two keys and a guaranteed miss.
+    public nonisolated(unsafe) static var quantizesCanvasCamera = true
+    /// 491 — the document digest names only fields that reach the pixels. Off makes 「同一文档两次
+    /// 构造键相等」red for a document whose *selection cursor* moved (a point-colour swatch).
+    public nonisolated(unsafe) static var canonicalizesCanvasEditDigest = true
 
     public enum Regime: String, Sendable {
         case browsing
@@ -158,14 +165,48 @@ public final class CanvasFrameCache {
         }
 
         /// 439 — the same key, projected from the one place the identity facts are computed.
-        public init(facts: LoupeFrameFacts) {
+        ///
+        /// 491 — the camera is **quantized** on the way in. `LoupeViewState` is rebuilt while a photo
+        /// switches and two readings of "the same view" can differ in the last ulp; spelling that
+        /// difference with `%.17g` made two keys and a guaranteed miss even though the canvas was not
+        /// moved. 1e-3 of zoom and 0.1 source pixel are below anything the renderer can resolve.
+        ///
+        /// `quantizeCamera` is opt-in: the golden key test pins the literal spelling of the facts
+        /// path, and only the canvas cache wants the snap. `LoupeController.canvasFrameCacheKey` is
+        /// the one caller that turns it on.
+        public init(facts: LoupeFrameFacts, quantizeCamera: Bool = false) {
             self.init(photo: facts.photo, decodeInputs: facts.decodeInputs,
                       editDigest: facts.editDigest, geometry: facts.geometry,
-                      cameraState: facts.camera, viewport: facts.viewport, mode: facts.mode,
-                      fitScale: facts.fitScale, canvasRole: facts.canvasRole,
-                      cropIsActive: facts.cropIsActive, highlightWarning: facts.highlightWarning,
-                      headroom: facts.headroom, decodeScale: facts.decodeScale,
-                      primaries: facts.primaries, highlightCeiling: facts.ceiling)
+                      cameraState: quantizeCamera ? Self.quantizedCamera(facts.camera) : facts.camera,
+                      viewport: facts.viewport, mode: facts.mode, fitScale: facts.fitScale,
+                      canvasRole: facts.canvasRole, cropIsActive: facts.cropIsActive,
+                      highlightWarning: facts.highlightWarning, headroom: facts.headroom,
+                      decodeScale: facts.decodeScale, primaries: facts.primaries,
+                      highlightCeiling: facts.ceiling)
+        }
+
+        /// `mode|z=…|cx=…|cy=…` with the three numbers snapped: zoom to 1e-3, centre to 0.1 px.
+        /// Anything that does not have that exact shape is kept verbatim (a caller's own spelling).
+        static func quantizedCamera(_ token: String) -> String {
+            guard quantizesCanvasCamera else { return token }
+            let parts = token.split(separator: "|", omittingEmptySubsequences: false)
+            guard parts.count == 4 else { return token }
+            func value(_ part: Substring) -> Double? {
+                let pieces = part.split(separator: "=", maxSplits: 1,
+                                        omittingEmptySubsequences: false)
+                guard pieces.count == 2 else { return nil }
+                return Double(pieces[1])
+            }
+            guard let zoom = value(parts[1]), let cx = value(parts[2]), let cy = value(parts[3]),
+                  zoom.isFinite, cx.isFinite, cy.isFinite else { return token }
+            let z = (zoom / 0.001).rounded() * 0.001
+            // `-1e-12` snaps to `-0.0`, whose `%.1f` is `-0.0`: normalise both zeros to one spelling.
+            var x = (cx / 0.1).rounded() * 0.1
+            var y = (cy / 0.1).rounded() * 0.1
+            if x == 0 { x = 0 }
+            if y == 0 { y = 0 }
+            return "\(parts[0])|z=\(String(format: "%.3f", z))"
+                + "|cx=\(String(format: "%.1f", x))|cy=\(String(format: "%.1f", y))"
         }
 
         /// The whole identity in one string. Doubles use `%.17g`: a shortened format would let two
@@ -198,6 +239,29 @@ public final class CanvasFrameCache {
                 + "|crop=\(cropIsActive ? 1 : 0)|warn=\(highlightWarning ? 1 : 0)"
                 + "|ceil=\(Self.number(highlightCeiling))"
         }
+    }
+
+    /// 491 — the document with every field the renderer does not read at the pixels removed.
+    ///
+    /// `Histogram.editDigest` encodes the whole `EditModel`, including two things that never reach a
+    /// texel: `PointColorSet.active` (which swatch the sliders edit — 「选择不改变图像」, its own
+    /// documentation says so) and `forwardCompatVersion` (the notice's number). Spelling those in the
+    /// canvas key made "pick another swatch, switch away and back" a `.documentChanged` miss.
+    public static func pixelCanonicalEdit(_ edit: EditModel) -> EditModel {
+        guard canonicalizesCanvasEditDigest else { return edit }
+        var out = edit
+        out.forwardCompatVersion = nil
+        if var point = out.color.point {
+            point.active = nil
+            out.color.point = point
+        }
+        return out
+    }
+
+    /// `Histogram.editDigest(pixelCanonicalEdit(edit))` — one spelling, used by the writer, the
+    /// reader and the edit-landed hook so the three can never disagree.
+    public static func pixelEditDigest(_ edit: EditModel) -> String {
+        Histogram.editDigest(pixelCanonicalEdit(edit))
     }
 
     /// One cached canvas: the texture this type owns plus everything `present` needs to draw it.
@@ -374,6 +438,13 @@ public final class CanvasFrameCache {
     /// Store a frame. `frame` is only read: the pixels are blitted into a texture this type owns.
     @discardableResult
     func store(_ frame: LoupeController.FrameResult, key: Key) -> Bool {
+        // 491 — the real frame that follows a cache hit is the **same canvas**: the key already says
+        // every pixel input matched, so replacing the copy would only pay a second 32 MB blit and
+        // turn 「每张一次」into one store per visit. Keep the copy; the settled counter still advances.
+        if entries.contains(where: { $0.key == key }) {
+            displayChangePending = false
+            return true
+        }
         guard let copy = copyTexture(frame.texture) else { return false }
         let value = CachedCanvas(texture: copy, canvas: frame.canvas, content: frame.content,
                                  photoRect: frame.photoRect, presentRect: frame.presentRect,
