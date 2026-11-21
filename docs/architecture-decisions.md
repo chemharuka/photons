@@ -75,6 +75,10 @@ RawCamera.metallib (2.6MB)
 - 依赖清单不再是"只有 GRDB"；新增依赖须在此登记（名称 / 版本 / 许可证 / 用途 / 是否改动）。
 - **LightCraft 是 MIT**：`crates/pipeline/src/spots.rs`（heal = 频率分离、fill = PatchMatch、自动寻源 = 环带打分）
   现在**可以直接移植**（保留版权声明与出处），不必"只取思路"。
+- **LightCraft denoise-core（MIT/Apache-2.0，480）**：`crates/denoise-core/src/nlm.rs` 的 Anscombe
+  稳定化 + 四平面 Hadamard + 两趟 NLM，以及 `builtin.rs` 的噪声估计，已移植到
+  `Sources/PhotonsExtensions/Denoise/BuiltinDenoise.swift` / `BuiltinDenoiseJob.swift`；BM3D、
+  Bayer/demosaic 与 `lcdn` 缓存不在本期。`THIRD_PARTY_NOTICES.md` 保留 NOTICE 条目。
 - LibRaw（LGPL/CDDL）、Exiv2（GPL）、libheif（LGPL）、lensfun（LGPL）仍按 D1 拒绝。
 
 ## 3. 已定决策（含依据与代价）
