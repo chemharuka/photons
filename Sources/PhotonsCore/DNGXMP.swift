@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Edit settings embedded in a **DNG's own XMP** (`photons:document`), so a lost library is not a
 /// lost edit.
@@ -311,6 +314,121 @@ public struct DNGXMPJournal {
     }
 }
 
+// MARK: - file metadata
+
+/// What an **atomic replace** loses: a new inode means a fresh birth time, fresh permission bits, and
+/// no extended attributes or ACL. Captured before an atomic write and put back afterwards.
+///
+/// Date Added (`ATTR_CMN_ADDEDTIME`) is deliberately **not** here: it is a kernel/Spotlight property
+/// that has no public setter, so the only way to keep it is not to change the inode — which is exactly
+/// why the slot-reuse path writes in place.
+struct DNGFileMetadata {
+
+    var creationDate: Date?
+    var permissions: NSNumber?
+    var extendedAttributes: [String: Data]
+    var aclText: String?
+
+    static func capture(at url: URL) -> DNGFileMetadata {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return DNGFileMetadata(
+            creationDate: attributes?[.creationDate] as? Date,
+            permissions: attributes?[.posixPermissions] as? NSNumber,
+            extendedAttributes: captureExtendedAttributes(at: url.path),
+            aclText: captureACL(at: url.path))
+    }
+
+    /// Best effort, in the brief's order: creation date → permissions → extended attributes → ACL.
+    /// Returns the names that could not be put back; the caller logs them once and still reports the
+    /// save as successful (metadata restoration is not allowed to turn a good write into a failure).
+    func restore(to url: URL) -> [String] {
+        var failures: [String] = []
+
+        if let creationDate {
+            var values = URLResourceValues()
+            values.creationDate = creationDate
+            var mutable = url
+            do { try mutable.setResourceValues(values) } catch { failures.append("创建日期") }
+        }
+
+        if let permissions {
+            do {
+                try FileManager.default.setAttributes([.posixPermissions: permissions],
+                                                      ofItemAtPath: url.path)
+            } catch {
+                failures.append("权限位")
+            }
+        }
+
+        for (name, value) in extendedAttributes {
+            let result = value.withUnsafeBytes { bytes in
+                setxattr(url.path, name, bytes.baseAddress, value.count, 0, 0)
+            }
+            if result != 0 { failures.append("扩展属性 \(name)") }
+        }
+        // The fresh inode may have picked up a default attribute; "consistent" also means no extras.
+        for name in Self.extendedAttributeNames(at: url.path) where extendedAttributes[name] == nil {
+            if removexattr(url.path, name, 0) == 0 {
+                // removed
+            } else {
+                failures.append("多余扩展属性 \(name)")
+            }
+        }
+
+        if let aclText {
+            if let acl = acl_from_text(aclText) {
+                let result = acl_set_file(url.path, ACL_TYPE_EXTENDED, acl)
+                acl_free(UnsafeMutableRawPointer(acl))
+                if result != 0 { failures.append("ACL") }
+            } else {
+                failures.append("ACL")
+            }
+        }
+
+        return failures
+    }
+
+    private static func captureExtendedAttributes(at path: String) -> [String: Data] {
+        var values: [String: Data] = [:]
+        for name in extendedAttributeNames(at: path) {
+            let length = getxattr(path, name, nil, 0, 0, 0)
+            guard length >= 0 else { continue }
+            var bytes = [UInt8](repeating: 0, count: length)
+            let read = getxattr(path, name, &bytes, length, 0, 0)
+            guard read == length else { continue }
+            values[name] = Data(bytes)
+        }
+        return values
+    }
+
+    private static func extendedAttributeNames(at path: String) -> [String] {
+        let size = listxattr(path, nil, 0, 0)
+        guard size > 0 else { return [] }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard listxattr(path, &buffer, size, 0) == size else { return [] }
+
+        var names: [String] = []
+        var current = ""
+        for byte in buffer {
+            if byte == 0 {
+                if !current.isEmpty { names.append(current); current = "" }
+            } else {
+                current.append(Character(UnicodeScalar(UInt8(bitPattern: byte))))
+            }
+        }
+        return names
+    }
+
+    private static func captureACL(at path: String) -> String? {
+        guard let acl = acl_get_file(path, ACL_TYPE_EXTENDED) else { return nil }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        guard let text = acl_to_text(acl, nil) else { return nil }
+        defer { acl_free(UnsafeMutableRawPointer(text)) }
+        let value = String(cString: text)
+        return value.isEmpty ? nil : value
+    }
+}
+
 // MARK: - TIFF
 
 /// The minimum of TIFF that this job needs: header, IFD0's entries, and the bytes an entry points at.
@@ -329,6 +447,15 @@ struct TIFFFile {
     private(set) var littleEndian: Bool
     private(set) var ifd0: UInt32
     var headerBytes: Data { data.prefix(8) }
+
+    /// Byte ranges changed by the mutators. An in-place save writes only these — a slot-reuse save
+    /// touches the ~18 KB XMP packet, not the whole 68 MB DNG.
+    private(set) var dirtyRanges: [Range<Int>] = []
+
+    mutating func markDirty(_ range: Range<Int>) {
+        guard !range.isEmpty else { return }
+        dirtyRanges.append(range)
+    }
 
     init(_ data: Data) throws {
         self.data = data
@@ -363,6 +490,7 @@ struct TIFFFile {
         let i = data.startIndex + at
         if littleEndian { data[i] = UInt8(v & 0xff); data[i + 1] = UInt8(v >> 8) }
         else { data[i] = UInt8(v >> 8); data[i + 1] = UInt8(v & 0xff) }
+        markDirty(at..<(at + 2))
     }
 
     mutating func putU32(_ v: UInt32, at: Int) {
@@ -372,6 +500,7 @@ struct TIFFFile {
         } else {
             for k in 0..<4 { data[i + k] = UInt8((v >> (8 * UInt32(3 - k))) & 0xff) }
         }
+        markDirty(at..<(at + 4))
     }
 
     func u32Bytes(_ v: UInt32) -> [UInt8] {
@@ -541,6 +670,7 @@ struct TIFFFile {
         for k in 0..<total {
             data[base + k] = k < bytes.count ? bytes[bytes.startIndex + k] : 0
         }
+        markDirty(offset..<(offset + total))
     }
 
     /// Appends `block` at EOF, keeping the file even-aligned. Returns the byte offset it landed at.
@@ -562,6 +692,7 @@ struct TIFFFile {
             }
             // Inline: value bytes then the new count, both in IFD0 itself.
             for k in 0..<4 { data[data.startIndex + position + 8 + k] = k < packet.count ? packet[packet.startIndex + k] : 0 }
+            markDirty((position + 8)..<(position + 12))
             putU32(UInt32(packet.count), at: position + 4)
             return
         }
@@ -569,6 +700,7 @@ struct TIFFFile {
         for k in 0..<size {
             data[data.startIndex + offset + k] = k < packet.count ? packet[packet.startIndex + k] : 0x20
         }
+        markDirty(offset..<(offset + size))
         // **Do not shrink the entry.** Writing the new length back would throw away the packet's
         // padding, so the very next edit that grows the document by one byte would need a fresh
         // append (~18 KB) instead of using the room it already had. Keeping the count is what makes
@@ -628,9 +760,17 @@ struct TIFFFile {
     mutating func restoreHeader(_ header: Data) {
         guard header.count == 8 else { return }
         for k in 0..<8 { data[data.startIndex + k] = header[header.startIndex + k] }
+        markDirty(0..<8)
         ifd0 = u32(4)
     }
 
+    /// Two write strategies, chosen by whether the bytes grew:
+    ///
+    /// - **Same length** (slot reuse, thumbnail replacement, undo): write only the changed ranges
+    ///   straight into the existing file. The inode does not move, so birth time, Date Added, extended
+    ///   attributes and ACL are untouched — and a 68 MB DNG gets a few KB of writes, not a full copy.
+    /// - **Grew** (packet/thumbnail appended): keep `.atomic`. The inode necessarily changes; birth
+    ///   time, permissions, extended attributes and ACL are then restored. Date Added cannot be.
     func persist(to url: URL) throws {
         // A read-only original must fail with one sentence and leave zero bytes changed. `.atomic`
         // would happily replace a writable-directory file even when the file itself is read-only, so
@@ -638,10 +778,60 @@ struct TIFFFile {
         guard FileManager.default.isWritableFile(atPath: url.path) else {
             throw DNGXMP.Failure.writeFailed("\(url.lastPathComponent) 是只读文件，未写入")
         }
+
+        let onDiskSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
+        if let onDiskSize, onDiskSize == data.count {
+            try writeInPlace(to: url)
+            return
+        }
+
+        let metadata = DNGFileMetadata.capture(at: url)
         do {
             try data.write(to: url, options: .atomic)
         } catch {
             throw DNGXMP.Failure.writeFailed("\(url.lastPathComponent): \(error.localizedDescription)")
         }
+
+        let failures = metadata.restore(to: url)
+        if !failures.isEmpty {
+            // One warning, not one per attribute, and never a thrown error: the image and the XMP are
+            // already written; a metadata restore is best effort.
+            NSLog("photons: 保存已成功，但元数据未能全部还原（\(url.lastPathComponent)）：\(failures.joined(separator: "、"))")
+        }
+    }
+
+    private func writeInPlace(to url: URL) throws {
+        let ranges = Self.coalesced(dirtyRanges, within: 0..<data.count)
+        guard !ranges.isEmpty else { return }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            for range in ranges {
+                let lower = data.startIndex + range.lowerBound
+                let upper = data.startIndex + range.upperBound
+                try handle.seek(toOffset: UInt64(range.lowerBound))
+                try handle.write(contentsOf: Data(data[lower..<upper]))
+            }
+            try handle.synchronize()
+        } catch {
+            throw DNGXMP.Failure.writeFailed("\(url.lastPathComponent): \(error.localizedDescription)")
+        }
+    }
+
+    /// Sorts and merges overlapping/adjacent ranges so a save is a handful of writes.
+    static func coalesced(_ ranges: [Range<Int>], within bounds: Range<Int>) -> [Range<Int>] {
+        let clipped = ranges
+            .map { max($0.lowerBound, bounds.lowerBound)..<min($0.upperBound, bounds.upperBound) }
+            .filter { !$0.isEmpty }
+            .sorted { $0.lowerBound < $1.lowerBound }
+        var out: [Range<Int>] = []
+        for range in clipped {
+            if let last = out.last, range.lowerBound <= last.upperBound {
+                out[out.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                out.append(range)
+            }
+        }
+        return out
     }
 }
