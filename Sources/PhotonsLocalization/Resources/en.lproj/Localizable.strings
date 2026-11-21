@@ -674,6 +674,7 @@
 "竖" = "Vertical";
 "第 %d 条线与其它线矛盾，已忽略" = "Line %d conflicts with the others and was ignored";
 "等待" = "Waiting";
+"等待降噪" = "Waiting to denoise";
 "类型" = "Type";
 "类型 / 增益图 / 半尺寸" = "Type / Gain map / Half size";
 "粘贴" = "Paste";

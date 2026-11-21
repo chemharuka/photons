@@ -36,11 +36,14 @@ class ProgressCardOverlay: NSView {
 
     // MARK: what is on screen
 
-    /// `hidden` is the resting state: nothing drawn, nothing to read. `running` means the box is up.
-    /// The decision is the **controller's**, not this view's, because only the controller knows which
-    /// photo the single-photo view is showing (387) or whether a merge is in flight (392).
+    /// `hidden` is the resting state: nothing drawn, nothing to read. `running` means the box is up
+    /// with a live clock; `queued` (479) means the box is up but the photo is still waiting in a batch
+    /// — title 「等待降噪」, elapsed stays `0:00`. The decision is the **controller's**, not this view's,
+    /// because only the controller knows which photo the single-photo view is showing (387) or whether
+    /// a merge is in flight (392).
     enum State: Equatable {
         case hidden
+        case queued
         case running
     }
 
@@ -138,7 +141,7 @@ class ProgressCardOverlay: NSView {
     // MARK: drawing
 
     override func draw(_ dirtyRect: NSRect) {
-        guard state == .running, let laydown = lastLaydown,
+        guard state != .hidden, let laydown = lastLaydown,
               bounds.width > 1, bounds.height > 1, laydown.lines.count == 3 else { return }
 
         // Semantic colours only: this card is chrome, not a document fact, so it follows the
@@ -189,10 +192,23 @@ final class DenoiseProgressOverlay: ProgressCardOverlay {
 
     /// The three lines, in the user's order. One function so the order cannot drift between the
     /// drawing and the acceptance.
-    static func lines(width: Int?, height: Int?, elapsed: Double) -> [String] {
-        [title, pixelText(width: width, height: height), elapsedText(elapsed)]
+    ///
+    /// 479 — the title follows the card's state: a photo still waiting in the batch is 「等待降噪」
+    /// and keeps `0:00`; once its turn comes it becomes 「降噪中」 and the controller's clock starts.
+    /// `state` defaults to `.running` so the single-photo path (387) reads exactly as it did.
+    static func lines(state: State = .running,
+                      width: Int?, height: Int?, elapsed: Double) -> [String] {
+        [title(for: state), pixelText(width: width, height: height), elapsedText(elapsed)]
+    }
+
+    /// The title line for `state`. A visible card always has a title; `hidden` never draws one, so it
+    /// falls back to the running title rather than inventing a fourth string.
+    static func title(for state: State) -> String {
+        state == .queued ? queuedTitle : title
     }
 
     /// The title line. Exposed because ① asserts 「不带省略号」 on the literal.
     static let title = Loc.t("降噪中")
+    /// 479 — the queued title. `lines(state: .queued, …)` is the only producer of this string.
+    static let queuedTitle = Loc.t("等待降噪")
 }

@@ -1570,6 +1570,24 @@ public final class CatalogSession {
 
     private var denoiseBatch: DenoiseBatchState?
 
+    /// 479 — **read-only** view of the queue, for the loupe's 「等待降噪」 card. It reads the existing
+    /// bookkeeping only; the batch driver (`startNextDenoiseBatchItem` / cancel semantics) is untouched.
+    ///
+    /// A cancelled batch has no queue any more: the one item already running is allowed to finish, but
+    /// nothing after it will start, so those photos must not keep showing 「等待降噪」.
+    public var denoiseQueuedAssetIDs: Set<String> {
+        guard let batch = denoiseBatch, !batch.cancelled,
+              batch.nextIndex < batch.items.count else { return [] }
+        return Set(batch.items[batch.nextIndex...].map(\.assetID))
+    }
+
+    /// 479 — `true` while a batch exists that may still start more items (i.e. not cancelled and not
+    /// finished). The running item is `denoiseAssetID`, which 387 already exposes.
+    public var denoiseBatchIsActive: Bool {
+        guard let batch = denoiseBatch else { return false }
+        return !batch.cancelled
+    }
+
     /// 474 — how many selected photos the last batch had to skip (not DNG / no file URL).
     public private(set) var lastDenoiseBatchSkippedCount = 0
     /// 474 — one sentence for the caller to show before the batch starts. `nil` = nothing skipped.
