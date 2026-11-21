@@ -216,10 +216,17 @@ extension HistogramCardFormat {
 
 extension HistogramCardFormat {
 
-    /// The ceiling ratio for a channel (`HistogramChannel.clippedScreen`), formatted like the rest.
-    public static func clipCeiling(_ histogram: Histogram?, _ channel: Histogram.Channel) -> String {
+    /// The ceiling ratio for a channel, **derived at read time** from its bins and the screen asking.
+    ///
+    /// `headroom` is the live budget (`HistogramCard.effectiveHeadroom`); `nil` falls back to the
+    /// measurement's own, which is what the CLI and callers with no screen want. The stored
+    /// `HistogramChannel.clippedScreen` is *not* read here (464): it is the ratio frozen at
+    /// measurement time, and the whole point is that a brightness change moves this number while the
+    /// bins (and the stored diagnostic) stay put.
+    public static func clipCeiling(_ histogram: Histogram?, _ channel: Histogram.Channel,
+                                   headroom: Double? = nil) -> String {
         guard let histogram else { return "—" }
-        return percent(histogram[channel].clippedScreen)
+        return percent(histogram[channel].clippedFraction(atOrAbove: headroom ?? histogram.headroom))
     }
 
     /// The vertical scale for both segments: the largest count *between* each channel's drawn path's
