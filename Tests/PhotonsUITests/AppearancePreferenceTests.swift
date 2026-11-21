@@ -29,12 +29,17 @@ final class AppearancePreferenceTests: XCTestCase {
     }
 
     override func tearDown() {
+        // 顺序有讲究：`apply(_:)` 会**写**偏好，所以先把 store 落成 `.system`（清掉本用例写的值），
+        // 再把**原来的**原始值写回；最后只把 `NSApp.appearance` 设回去，不再碰偏好。
+        // （旧写法先还原、后 `apply(.system)`，结果还原被这一句覆盖成 `"system"`。）
+        AppearancePreference.apply(.system)
         if let savedAppearance {
             AppPreferences.store.set(savedAppearance, forKey: AppearancePreference.defaultsKey)
         } else {
             AppPreferences.store.removeObject(forKey: AppearancePreference.defaultsKey)
         }
-        AppearancePreference.apply(.system)
+        NSApp?.appearance = AppearancePreference.current.appearanceName
+            .flatMap { NSAppearance(named: $0) }
         CanvasBackdrop.fallback = savedFallback
         NotificationCenter.default.post(name: .canvasBackdropDidChange, object: nil)
         super.tearDown()
