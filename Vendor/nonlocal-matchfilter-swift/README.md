@@ -97,6 +97,14 @@ Unlike a coarser stride it thins every brightness level evenly, which is what th
 (4× fewer blocks moved `a` by 4.5 %; 16× fewer made the fit collapse to zero).
 Checkerboard costs 4.1 s instead of 7.6 s and moves `a` by 3.6 %.
 
+The fitted intercept is then multiplied by `NoiseEstimator.interceptScale` (2).
+The fit describes the sensor; the network works *before* the tone curve, and a
+rendered picture lifts shadows 2–4×, amplifying whatever grain survives there.
+Doubling `b` lifts σ only where `b` dominates — dark pixels — and is what closes
+that gap: on L1030546 the deep-shadow residual fell 0.39 → 0.24 DN for ~9 % less
+high-frequency energy in bright detail blocks. `b × 4` bought little more and
+started smoothing dark texture.
+
 ## Seams, and why `crop` exists
 
 A tile's border is a seam: the network conditioned its answer on a boundary that

@@ -259,3 +259,56 @@ final class StrengthTests: XCTestCase {
                        NLMFStrength.strength(forSigma: sigma), accuracy: 1e-12)
     }
 }
+
+final class InterceptScaleTests: XCTestCase {
+
+    /// `measure` must return the fitted curve with the intercept multiplied by
+    /// `interceptScale`, and the slope untouched. Asserted against `fit` on the
+    /// same blocks rather than against the synthetic truth: the fit's own bias is
+    /// a separate question, and this test is about where the multiplier lands.
+    func testMeasureScalesOnlyTheIntercept() {
+        // 2560×1280 is the smallest mosaic that still gives the fit its 40 bins ×
+        // 20 blocks per plane; the test costs ~12 s because of it, which is the
+        // reason it is the only synthetic frame this suite builds.
+        let w = 2560, h = 1280
+        let a0 = 6e-4, b0 = 2e-6
+        var state: UInt64 = 0x5EED_1234
+        func uniform() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Double(state >> 11) * (1.0 / 9007199254740992.0)
+        }
+        func gauss() -> Double { (uniform() + uniform() + uniform() - 1.5) * 2.0 }
+
+        var mosaic = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                // Smooth and monotone: a wrapped ramp aliases inside a 32-px block
+                // and the fit would then measure the pattern, not the noise.
+                let ramp = 0.01 + 0.25 * Double(x + y) / Double(w + h)
+                let sigma = (a0 * ramp + b0).squareRoot()
+                mosaic[y * w + x] = Float(ramp + gauss() * sigma)
+            }
+        }
+
+        let layout = PackedLayout(cfa: "rggb")
+        let model = mosaic.withUnsafeBufferPointer {
+            NoiseEstimator.measure($0.baseAddress!, width: w, height: h, layout: layout)
+        }
+
+        for p in 0..<4 {
+            let (dy, dx) = layout.offsets[p]
+            let ph = (h - dy + 1) / 2, pw = (w - dx + 1) / 2
+            var plane = [Float](repeating: 0, count: ph * pw)
+            for y in 0..<ph {
+                for x in 0..<pw { plane[y * pw + x] = mosaic[(y * 2 + dy) * w + x * 2 + dx] }
+            }
+            let stats = NoiseEstimator.blockStats(plane, width: pw, height: ph,
+                                                 checkerboard: false)
+            let (a, b) = NoiseEstimator.fit(xs: stats)
+            XCTAssertEqual(model.a[p], a, accuracy: 1e-12, "plane \(p) slope changed")
+            XCTAssertEqual(model.b[p], b * NoiseEstimator.interceptScale,
+                           accuracy: max(abs(b) * 1e-9, 1e-15),
+                           "plane \(p) intercept was not scaled")
+        }
+    }
+}

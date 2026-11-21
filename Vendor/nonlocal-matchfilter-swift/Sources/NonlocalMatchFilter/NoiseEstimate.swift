@@ -109,8 +109,26 @@ public enum NoiseEstimator {
     /// Brightness bins across the histogram.
     public static let bins = 40
 
+    /// Multiplier applied to the fitted intercept `b` (the read-noise floor).
+    ///
+    /// The fit describes the sensor, but the network works *before* the tone
+    /// curve, and a rendered picture lifts shadows by 2–4×. Residual grain there
+    /// is therefore amplified on screen in a way the linear model never sees.
+    /// Doubling `b` multiplies σ only where `b` dominates — dark pixels — and is
+    /// what closes the gap: on L1030546 (σ at 5 % brightness) the deep-shadow
+    /// residual drops 0.39 → 0.24 DN, for ~9 % less high-frequency energy in
+    /// bright detail blocks. `b ×4` buys little more and starts smoothing dark
+    /// texture, so 2 is the chosen value, not a free parameter.
+    public static let interceptScale = 2.0
+
     /// Percentile taken inside each bin — the lower envelope.
-    public static let lowPercentile = 10.0
+    ///
+    /// 15 rather than 10: raising it moves σ up on every frame, which is the
+    /// direction that fails safely here. Under-estimated σ makes the network read
+    /// noise as texture and no `strength` can recover it; over-estimated σ only
+    /// costs a little fine detail. Measured on L1030546 (green plane, σ at 5 %
+    /// brightness): 10 % → 0.00555, 15 % → see the commit message.
+    public static let lowPercentile = 15.0
 
     /// Measure the whole frame.
     ///
@@ -148,7 +166,7 @@ public enum NoiseEstimator {
                                    checkerboard: checkerboard)
             let (aa, bb) = fit(xs: stats)
             a[p] = aa
-            b[p] = bb
+            b[p] = bb * interceptScale
             counts[p] = stats.count
             plane = []
         }

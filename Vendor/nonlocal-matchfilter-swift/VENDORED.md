@@ -1,11 +1,12 @@
 # nonlocal-matchfilter-swift — vendored
 
 Source copy of https://github.com/chemharuka/nonlocal-matchfilter-swift at commit
-`102f698` ("strength follows the measured noise, and strips can be lossless JPEG").
+`cff6244` ("noise: measure the envelope at 15 %, and double the read floor").
 
 Photons builds it as a **local SwiftPM package** (`Package.swift` →
 `.package(path: "Vendor/nonlocal-matchfilter-swift")`) so a checkout needs no
-sibling clone. Same arrangement as `Vendor/ansel-denoise-swift`.
+sibling clone: building Photons builds the plugin too. Same arrangement as
+`Vendor/ansel-denoise-swift`.
 
 ## What is here, and what is not
 
@@ -24,16 +25,17 @@ weights and compiled caches) and Photons already ships the one model it uses at
 From the library checkout, with the commit you want to vendor:
 
 ```sh
-rsync -a --exclude .build --exclude .git --exclude Models \
+rsync -a --delete --exclude .build --exclude .git --exclude Models \
+  --exclude .DS_Store \
   ~/Documents/GitHub/nonlocal-matchfilter-swift/ \
   ~/Documents/GitHub/photons/Vendor/nonlocal-matchfilter-swift/
 ```
 
-then update the commit hash above and commit the diff in Photons.
+`--delete` removes this file (it only exists here), so restore it afterwards and
+update the commit hash above, then commit the diff in Photons.
 
 ## Why a copy at all
 
 The denoiser is MIT, so it links in-process; vendoring keeps the build
-reproducible and offline. The alternative — a remote `.package(url:)`
-requirement — would need a published version tag, and this library is not
-released yet (no tag; `1.0.0` was retracted).
+reproducible and offline. A remote `.package(url:)` requirement would need a
+published version tag, and this library is not released yet.
