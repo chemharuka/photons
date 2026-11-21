@@ -136,7 +136,7 @@ final class ImportUpright436Tests: XCTestCase {
         XCTAssertEqual(migrated.schemaVersionApplied, Schema.version)
         XCTAssertEqual(try migrated.dbQueue.read { db in
             try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0
-        }, 7)
+        }, Schema.version)
 
         let after = try dimensions(migrated)
         print("436 A③ after v7: \(after)")
@@ -161,7 +161,7 @@ final class ImportUpright436Tests: XCTestCase {
         XCTAssertEqual(again["turned"]?.1, 9520)
         XCTAssertEqual(try replayed.dbQueue.read { db in
             try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0
-        }, 7)
+        }, Schema.version)
     }
 
     // MARK: - A④ a copy of the real demo library

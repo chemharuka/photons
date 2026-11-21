@@ -1,4 +1,5 @@
 import PhotonsLocalization
+import PhotonsCore
 import Foundation
 import GRDB
 
@@ -22,6 +23,47 @@ import GRDB
 ///
 /// Like rating / flag / colour label, none of this touches `EditModel`, `EditHistory` or
 /// `develop_json`: ⌘Z never walks a stack back, and `editRevision` never moves for one.
+// MARK: - kind
+
+/// 487 — what a stack *is*.
+///
+/// `plain` is every stack that is not a denoise pair (HDR, a manual ⌘G, a merge). `denoise` is the
+/// special two-member pair the denoise path creates: the original and its `-denoised` sibling. The
+/// kind changes two things and nothing else:
+///
+///   · **what the three browsers call it** — `降噪-XXX.dng` with a sparkle icon instead of
+///     `堆叠 XXX.dng` with `⧉`;
+///   · **whether an edit propagates** — a commit on either member is written to both.
+///
+/// It never enters `EditModel`, a history row or a cache key: it does not change a pixel.
+public enum StackKind: String, Sendable, Equatable, CaseIterable {
+    case plain
+    case denoise
+
+    /// The **one** recognition rule, shared by 组堆叠 and 重新堆叠 (487 §2.1-2).
+    ///
+    /// Exactly two members, the same extension, and one stem is the other stem plus `"-denoised"`.
+    /// A third member, a different extension, or a suffix that is not exactly `-denoised`
+    /// (`L-denoised-2.dng`) is `plain` — the rule does not guess from a prefix.
+    public static func forMemberFilenames(_ filenames: [String]) -> StackKind {
+        guard filenames.count == 2 else { return .plain }
+        let a = split(filenames[0])
+        let b = split(filenames[1])
+        guard !a.ext.isEmpty, !b.ext.isEmpty,
+              a.ext.caseInsensitiveCompare(b.ext) == .orderedSame else { return .plain }
+        let aIsProduct = a.stem == b.stem + "-denoised"
+        let bIsProduct = b.stem == a.stem + "-denoised"
+        // Exactly one direction can hold for two different stems; `!=` makes that explicit instead
+        // of relying on "they cannot both be true".
+        return aIsProduct != bIsProduct ? .denoise : .plain
+    }
+
+    private static func split(_ filename: String) -> (stem: String, ext: String) {
+        let name = filename as NSString
+        return (name.deletingPathExtension, name.pathExtension)
+    }
+}
+
 public struct StackSummary: Equatable, Sendable {
     /// The stack's id (`assets.stack_id`).
     public let id: String
@@ -29,11 +71,14 @@ public struct StackSummary: Equatable, Sendable {
     public let memberIDs: [String]
     /// The 置顶 member — the one every browser shows for this stack.
     public let topID: String
+    /// 487 — `plain` unless the pair is a denoise original + product.
+    public let kind: StackKind
 
-    public init(id: String, memberIDs: [String], topID: String) {
+    public init(id: String, memberIDs: [String], topID: String, kind: StackKind = .plain) {
         self.id = id
         self.memberIDs = memberIDs
         self.topID = topID
+        self.kind = kind
     }
 
     public var count: Int { memberIDs.count }
@@ -101,7 +146,76 @@ extension Catalog {
     public func stackSummary(stackID: String) throws -> StackSummary? {
         let members = try stackMembers(stackID: stackID)
         guard let top = members.first(where: { $0.stackRank == 0 }) else { return nil }
-        return StackSummary(id: stackID, memberIDs: members.map(\.id), topID: top.id)
+        let kind = try stackKind(stackID: stackID) ?? .plain
+        return StackSummary(id: stackID, memberIDs: members.map(\.id), topID: top.id, kind: kind)
+    }
+
+    /// 487 — the kind of one stack's rows. Nil when the stack has no live member.
+    ///
+    /// All members of a stack always carry the same value (written together by `makeStack`); the
+    /// `ORDER BY stack_rank` is only a tie-breaker for a hand-edited library, not a second source of
+    /// truth.
+    public func stackKind(stackID: String) throws -> StackKind? {
+        try dbQueue.read { db in
+            let raw = try String.fetchOne(db, sql: """
+                SELECT stack_kind FROM assets WHERE stack_id = ? ORDER BY stack_rank LIMIT 1
+                """, arguments: [stackID])
+            guard let raw else { return nil }
+            return StackKind(rawValue: raw) ?? .plain
+        }
+    }
+
+    /// 487 — the kind of the stack an asset belongs to, or nil when it is in no stack.
+    public func stackKind(ofAsset id: String) throws -> StackKind? {
+        try dbQueue.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT stack_id, stack_kind FROM assets WHERE id = ?
+                """, arguments: [id])
+            guard let row, (row["stack_id"] as String?) != nil else { return nil }
+            return StackKind(rawValue: row["stack_kind"] ?? "plain") ?? .plain
+        }
+    }
+
+    /// 487 — the kinds of several stacks in **one** query, for the projection that rebuilds on every
+    /// reload (`CatalogSession.stacksByTop`). Stacks absent from the result are `plain`.
+    public func stackKinds(stackIDs: [String]) throws -> [String: StackKind] {
+        let unique = Array(Set(stackIDs))
+        guard !unique.isEmpty else { return [:] }
+        let marks = Array(repeating: "?", count: unique.count).joined(separator: ", ")
+        return try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT stack_id, stack_kind FROM assets
+                WHERE stack_id IN (\(marks))
+                ORDER BY stack_id, stack_rank
+                """, arguments: StatementArguments(unique))
+            var out: [String: StackKind] = [:]
+            for row in rows {
+                guard let id: String = row["stack_id"], out[id] == nil else { continue }
+                out[id] = StackKind(rawValue: row["stack_kind"] ?? "plain") ?? .plain
+            }
+            return out
+        }
+    }
+
+    /// 487 — the **other** member of a two-member denoise stack, or nil.
+    ///
+    /// The id is the only thing an edit needs to link to; the kind and the member count are checked
+    /// here so a plain stack or a stack that grew a third member can never propagate an edit.
+    public func denoiseSibling(ofAsset id: String) throws -> String? {
+        try dbQueue.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT stack_id, stack_kind FROM assets WHERE id = ?
+                """, arguments: [id]),
+                  let stackID: String = row["stack_id"],
+                  StackKind(rawValue: row["stack_kind"] ?? "plain") == .denoise else { return nil }
+            let liveCount = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM assets WHERE stack_id = ? AND deleted = 0
+                """, arguments: [stackID]) ?? 0
+            guard liveCount == 2 else { return nil }
+            return try String.fetchOne(db, sql: """
+                SELECT id FROM assets WHERE stack_id = ? AND deleted = 0 AND id <> ? LIMIT 1
+                """, arguments: [stackID, id])
+        }
     }
 }
 
@@ -117,15 +231,25 @@ extension Catalog {
     /// their old stacks are repaired below (a stack that lost its top promotes its first remaining
     /// member; a stack left with a single member dissolves), in the same transaction.
     ///
+    /// 487 — the stack's **kind** is decided here, before the rows are written, by the one rule in
+    /// `StackKind.forMemberFilenames`. A two-member `[L.dng, L-denoised.dng]` is `.denoise`; every
+    /// other shape is `.plain`. The kind is written onto every member (the columns are the only
+    /// storage: there is no `stacks` table), so it dies with the last member.
+    ///
+    /// `alignDenoiseEdits` is `true` for a user restack: a newly made denoise pair then aligns its
+    /// two documents by history time (`alignDenoisePair`). The synthetic-result entry point
+    /// (`makeStack(resultAssetID:participantIDs:)`) passes `false`, because there the product's
+    /// document deliberately carries decoder/NR overrides the original must not inherit.
+    ///
     /// Returns nil when fewer than two of the ids exist — a "stack of one" is not a stack.
     @discardableResult
-    public func makeStack(assetIDs: [String]) throws -> StackSummary? {
+    public func makeStack(assetIDs: [String], alignDenoiseEdits: Bool = true) throws -> StackSummary? {
         var seen = Set<String>()
         var unique: [String] = []
         for id in assetIDs where seen.insert(id).inserted { unique.append(id) }
         guard unique.count >= 2 else { throw StackError.notEnoughPhotos }
 
-        return try dbQueue.write { db -> StackSummary? in
+        let summary = try dbQueue.write { db -> StackSummary? in
             let marks = Array(repeating: "?", count: unique.count).joined(separator: ", ")
             let live = Set(try String.fetchAll(db, sql: """
                 SELECT id FROM assets WHERE id IN (\(marks)) AND deleted = 0
@@ -133,14 +257,23 @@ extension Catalog {
             let ordered = unique.filter { live.contains($0) }
             guard ordered.count >= 2 else { return nil }
 
+            // 487 §2.1-2: recognition is a property of the members' filenames, decided before the
+            // write so the kind and the membership land in the same transaction.
+            let liveMarks = Array(repeating: "?", count: ordered.count).joined(separator: ", ")
+            let filenames = try String.fetchAll(db, sql: """
+                SELECT filename FROM assets WHERE id IN (\(liveMarks))
+                """, arguments: StatementArguments(ordered))
+            let kind = StackKind.forMemberFilenames(filenames)
+
             let stackID = UUID().uuidString
             let oldStacks = Set(try String.fetchAll(db, sql: """
                 SELECT DISTINCT stack_id FROM assets
                 WHERE id IN (\(marks)) AND stack_id IS NOT NULL
                 """, arguments: StatementArguments(ordered)))
             for (rank, assetID) in ordered.enumerated() {
-                try db.execute(sql: "UPDATE assets SET stack_id = ?, stack_rank = ? WHERE id = ?",
-                               arguments: [stackID, rank, assetID])
+                try db.execute(sql: """
+                    UPDATE assets SET stack_id = ?, stack_rank = ?, stack_kind = ? WHERE id = ?
+                    """, arguments: [stackID, rank, kind.rawValue, assetID])
             }
             for old in oldStacks { try Self.repairStack(old, in: db) }
             // Return the summary in **display order**, not in the caller's order: `StackSummary`
@@ -153,11 +286,77 @@ extension Catalog {
                 ORDER BY (capture_time IS NULL), capture_time DESC, filename, id
                 """, arguments: [stackID])
             guard let top = rows.first(where: { $0.stackRank == 0 }) else { return nil }
-            return StackSummary(id: stackID, memberIDs: rows.map(\.id), topID: top.id)
+            return StackSummary(id: stackID, memberIDs: rows.map(\.id), topID: top.id, kind: kind)
+        }
+
+        if alignDenoiseEdits, let summary, summary.kind == .denoise {
+            try alignDenoisePair(summary)
+        }
+        return summary
+    }
+
+    /// 487 §2.4-13 — a **restack** of a denoise pair: the later edit wins.
+    ///
+    /// The comparison is the same fact the history panel shows: `MAX(asset_history.created_at)`
+    /// per member. The later member's current document is written to both (each with one history
+    /// row, label 「重堆对齐（取自 …）」), which is the "one undo step" shape `copySettings` /
+    /// `pasteSettings` already uses. Equal stamps prefer the **product** (`-denoised`), because that
+    /// is the member the user thinks of as the stack's subject; a member whose document is already
+    /// identical is skipped, so the alignment never adds a no-op row.
+    private func alignDenoisePair(_ summary: StackSummary) throws {
+        let members = try dbQueue.read { db -> [(id: String, filename: String, last: String?)] in
+            let marks = Array(repeating: "?", count: summary.memberIDs.count).joined(separator: ", ")
+            return try Row.fetchAll(db, sql: """
+                SELECT a.id, a.filename,
+                       (SELECT MAX(h.created_at) FROM asset_history h WHERE h.asset_id = a.id) AS last
+                FROM assets a WHERE a.id IN (\(marks))
+                """, arguments: StatementArguments(summary.memberIDs)).map {
+                    ($0["id"] as String, $0["filename"] as String, $0["last"] as String?)
+                }
+        }
+        guard members.count == 2 else { return }
+
+        func stamp(_ raw: String?) -> Date { raw.flatMap(ISO8601.date(from:)) ?? .distantPast }
+        let first = members[0], second = members[1]
+        let firstTime = stamp(first.last), secondTime = stamp(second.last)
+        let winner: (id: String, filename: String, last: String?)
+        if firstTime > secondTime {
+            winner = first
+        } else if secondTime > firstTime {
+            winner = second
+        } else {
+            // Same write (or both never edited): the product is the subject of the stack.
+            winner = (second.filename as NSString).deletingPathExtension.hasSuffix("-denoised")
+                ? second : first
+        }
+
+        let document = try develop(forAsset: winner.id)
+        let label = Loc.t("重堆对齐（取自 {0}）", winner.filename)
+        for member in members where member.id != winner.id {
+            guard try develop(forAsset: member.id) != document else { continue }
+            try appendDevelop(document, label: label, forAsset: member.id)
         }
     }
 
-    /// 取消堆叠 for these stacks: every member goes back to `stack_id = NULL, stack_rank = 0`.
+    /// 487 §2.2-4/5 — write one edit to the other member of a denoise stack.
+    ///
+    /// This is the **only** propagation door. It is a no-op (`nil`) when the asset is in no stack,
+    /// the stack is not `.denoise`, the stack does not have exactly two live members, or the sibling
+    /// already holds exactly this document. The last check is what stops A→B→A feedback: writing a
+    /// document the sibling already has adds no history row at all.
+    @discardableResult
+    public func propagateDenoiseEdit(_ edit: EditModel, fromAsset id: String,
+                                     label: String = Catalog.denoiseLinkLabel) throws -> DevelopSaveResult? {
+        guard let sibling = try denoiseSibling(ofAsset: id) else { return nil }
+        guard try develop(forAsset: sibling) != edit else { return nil }
+        return try appendDevelop(edit, label: label, forAsset: sibling)
+    }
+
+    /// 487 — the history label of an edit that crossed to the sibling member.
+    public static let denoiseLinkLabel = Loc.t("降噪联动")
+
+    /// 取消堆叠 for these stacks: every member goes back to `stack_id = NULL, stack_rank = 0`, and
+    /// its `stack_kind` to `plain` (487: the kind is a property of the stack, not the photo).
     /// Returns the number of rows that moved.
     @discardableResult
     public func ungroup(stackIDs: [String]) throws -> Int {
@@ -166,7 +365,8 @@ extension Catalog {
         let marks = Array(repeating: "?", count: unique.count).joined(separator: ", ")
         return try dbQueue.write { db in
             try db.execute(sql: """
-                UPDATE assets SET stack_id = NULL, stack_rank = 0 WHERE stack_id IN (\(marks))
+                UPDATE assets SET stack_id = NULL, stack_rank = 0, stack_kind = 'plain'
+                WHERE stack_id IN (\(marks))
                 """, arguments: StatementArguments(unique))
             return db.changesCount
         }
@@ -266,8 +466,10 @@ extension Catalog {
         case 0:
             return
         case 1:
-            try db.execute(sql: "UPDATE assets SET stack_id = NULL, stack_rank = 0 WHERE stack_id = ?",
-                           arguments: [stackID])
+            try db.execute(sql: """
+                UPDATE assets SET stack_id = NULL, stack_rank = 0, stack_kind = 'plain'
+                WHERE stack_id = ?
+                """, arguments: [stackID])
         default:
             guard !members.contains(where: { ($0["stack_rank"] as Int) == 0 }) else { return }
             guard let firstLive = members.first(where: { ($0["deleted"] as Int) == 0 }) else { return }

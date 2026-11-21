@@ -212,6 +212,10 @@ public final class AssetCardView: NSView {
     /// own `stack_id`, and a count is a property of the stack, not of the photo.
     public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
 
+    /// 487 — what kind of stack this card represents (`plain` / `denoise`). Also set by the
+    /// controller from `stacksByTopID`; it changes the glyph and the caption, never the photo.
+    public var stackKind: StackKind = .plain { didSet { overlay.needsDisplay = true } }
+
     /// 463 — this row stands for a stack whose **hidden** member is missing. Only the top is drawn,
     /// so the member's own badge would never be seen; this makes the row say 「这一叠里有文件不在了」.
     /// Set by the controller from `CatalogSession.stackHasMissingMember(forAssetID:)`.
@@ -271,7 +275,7 @@ public final class AssetCardView: NSView {
     /// §382 — one constructor, used by the caption (to know whether to prefix 「堆叠 」) and by the
     /// corners, so the two can never disagree about whether this card is a stack.
     private var badges: AssetBadges {
-        asset.map { AssetBadges(asset: $0, stackCount: stackCount) }
+        asset.map { AssetBadges(asset: $0, stackCount: stackCount, stackKind: stackKind) }
             ?? AssetBadges(rating: 0, flag: nil, colorLabel: nil)
     }
 
@@ -421,7 +425,8 @@ public final class AssetCardView: NSView {
         // string: cutting the bare name first and pasting the prefix on would hand the eye one
         // character more than the strip can hold.
         let stack = self.badges
-        let name = StackText.displayName(asset.filename, isStack: stack.isStack)
+        let name = StackText.displayName(asset.filename, isStack: stack.isStack,
+                                         kind: stack.stackKind)
         let drawnCaption = PlaceholderStyle.fitted(name, width: captionRect.width,
                                                    font: PlaceholderStyle.captionFont)
         (drawnCaption as NSString).draw(in: captionRect, withAttributes: PlaceholderStyle.captionAttributes)
@@ -465,7 +470,8 @@ public final class AssetGridItem: NSCollectionViewItem {
     }
 
     public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
-                          stackHasMissingMember: Bool = false) {
+                          stackHasMissingMember: Bool = false,
+                          stackKind: StackKind = .plain) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -476,6 +482,7 @@ public final class AssetGridItem: NSCollectionViewItem {
         card.isActive = isActive
         card.isPicked = isSelected
         card.stackCount = stackCount
+        card.stackKind = stackKind
         card.stackHasMissingMember = stackHasMissingMember
         view.toolTip = asset.filename
     }
@@ -765,7 +772,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                 guard let cell = item as? AssetGridItem else { return item }
                 cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
                                stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0,
-                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false)
+                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false,
+                               stackKind: self.session?.stackSummary(forAssetID: asset.id)?.kind ?? .plain)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -903,7 +911,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                   let asset = assetsByID[id] else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
                            stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
-                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id),
+                           stackKind: session.stackSummary(forAssetID: id)?.kind ?? .plain)
         }
     }
 
@@ -937,7 +946,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         let asset = session.assets[indexPath.item]
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
                        stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
-                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id),
+                       stackKind: session.stackSummary(forAssetID: asset.id)?.kind ?? .plain)
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }

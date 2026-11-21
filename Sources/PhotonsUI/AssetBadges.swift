@@ -30,20 +30,38 @@ public struct AssetBadges: Equatable {
     /// own `stack_id`, never how many siblings share it.
     public let stackCount: Int
 
-    public init(rating: Int, flag: String?, colorLabel: String?, stackCount: Int = 0) {
+    /// 487 — what kind of stack this card represents. `plain` renders exactly as it always did
+    /// (`⧉ N`); `denoise` swaps the glyph for the sparkle and gets the 「降噪-」 display name.
+    public let stackKind: StackKind
+
+    public init(rating: Int, flag: String?, colorLabel: String?, stackCount: Int = 0,
+                stackKind: StackKind = .plain) {
         self.rating = max(0, min(5, rating))
         self.flag = AssetFlag.normalized(flag)
         self.colorLabel = ColorLabel.normalized(colorLabel)
         self.stackCount = max(0, stackCount)
+        self.stackKind = stackKind
     }
 
-    public init(asset: Asset, stackCount: Int = 0) {
+    public init(asset: Asset, stackCount: Int = 0, stackKind: StackKind = .plain) {
         self.init(rating: asset.rating, flag: asset.flag, colorLabel: asset.colorLabel,
-                  stackCount: stackCount)
+                  stackCount: stackCount, stackKind: stackKind)
     }
 
     /// A stack of one is not a stack (the catalog dissolves those), so the indicator needs ≥ 2.
     public var isStack: Bool { stackCount >= 2 }
+
+    /// 487 — the glyph this badge paints. `⧉` for every ordinary stack (byte-for-byte the 378/382
+    /// look); a sparkle in the same decorative-glyph family for a denoise pair. One computed
+    /// property so the three surfaces cannot grow three glyphs.
+    public var stackGlyph: String {
+        stackKind == .denoise ? RowBadgeLine.denoiseStackGlyph : RowBadgeLine.stackGlyph
+    }
+
+    /// 「glyph N」 — the text inside the stack capsule, shared with the sidebar's indicator.
+    public var stackIndicatorText: String {
+        isStack ? "\(stackGlyph) \(stackCount)" : ""
+    }
 
     public var isEmpty: Bool {
         rating == 0 && flag == nil && colorLabel == nil && !isStack
@@ -66,7 +84,7 @@ public struct AssetBadges: Equatable {
         if rating > 0 { parts.append("★\(rating)") }
         if let flag { parts.append(flag.glyph) }
         if let colorLabel { parts.append(colorLabel.displayName) }
-        if isStack { parts.append("⧉\(stackCount)") }
+        if isStack { parts.append("\(stackGlyph)\(stackCount)") }
         return parts.isEmpty ? "—" : parts.joined(separator: " ")
     }
 
@@ -155,7 +173,7 @@ public struct AssetBadges: Equatable {
         var x = rect.minX + m.inset
 
         if isStack {
-            let text = "⧉ \(stackCount)" as NSString
+            let text = stackIndicatorText as NSString
             let width = min(rect.width - m.inset * 2,
                             ceil(text.size(withAttributes: BadgeStyle.stack).width) + m.padX * 2)
             out.stackPill = NSRect(x: x, y: y, width: width, height: m.pillHeight)
@@ -267,11 +285,30 @@ public struct AssetBadges: Equatable {
 /// string), so the truncation is solved for the string the eye actually sees.
 public enum StackText {
     public static let prefix = Loc.t("堆叠 ")
+    /// 487 — the name a **denoise** stack's top row shows. The stem is the original photo's, not the
+    /// product's: `L1030552-denoised.dng` reads `降噪-L1030552.dng`, never `降噪-…-denoised.dng`.
+    public static let denoisePrefix = Loc.t("降噪-")
+    /// The product suffix the catalog recognizes (`StackKind.forMemberFilenames`). Kept here so the
+    /// display name and the recognition rule name the same string.
+    public static let denoiseMarker = "-denoised"
     public static let empty = ""
 
-    /// 「堆叠 XXX.dng」 for a stack's 置顶, the filename untouched otherwise.
-    public static func displayName(_ filename: String, isStack: Bool) -> String {
-        isStack ? prefix + filename : filename
+    /// 「堆叠 XXX.dng」 for a stack's 置顶, 「降噪-XXX.dng」 for a denoise pair, the filename untouched
+    /// otherwise. The real `asset.filename` never changes — only the drawn label.
+    public static func displayName(_ filename: String, isStack: Bool,
+                                   kind: StackKind = .plain) -> String {
+        guard isStack else { return filename }
+        return kind == .denoise ? denoiseDisplayName(filename) : prefix + filename
+    }
+
+    /// 「降噪-<stem>.dng」: strip the product's `-denoised` from the stem, keep the extension, and
+    /// prefix. A top that is the **original** (no suffix) simply keeps its stem.
+    public static func denoiseDisplayName(_ filename: String) -> String {
+        let ns = filename as NSString
+        let ext = ns.pathExtension
+        var stem = ns.deletingPathExtension
+        if stem.hasSuffix(denoiseMarker) { stem.removeLast(denoiseMarker.count) }
+        return ext.isEmpty ? denoisePrefix + stem : denoisePrefix + stem + "." + ext
     }
 
     /// 「堆叠5张」 — Arabic digits, as the user asked (16:2x). 465：列表不再画它（用户要求侧栏不显示
@@ -294,6 +331,10 @@ public enum RowBadgeLine {
     public static let colorGlyph = "●"
     /// 堆叠指示的字形：与网格 / 胶片条的胶囊同一个 `⧉`。
     public static let stackGlyph = "⧉"
+    /// 487 — 降噪堆叠的专属字形：`⧉` 同一族（装饰性 Unicode 符号）、但一眼是「降噪」的星芒。
+    /// 选 `✦`（U+2726，black four pointed star）而不是 SF Symbol：堆叠指示在三个面上都是**文字**，
+    /// SF Symbol 会在网格/胶片条（绘制）与侧栏（NSTextField）之间分叉成两套渲染，破坏「三处同源」。
+    public static let denoiseStackGlyph = "✦"
 
     /// 纯文本（无障碍标签、探针与日志用），与 `attributed` 逐字符一致。
     public static func text(_ badges: AssetBadges) -> String {
@@ -320,9 +361,9 @@ public enum RowBadgeLine {
         return out
     }
 
-    /// 右端的堆叠指示：「⧉ 3」。不是堆叠（< 2 张）时调用方给空串并隐藏这个 label。
-    public static func stackIndicator(_ count: Int) -> String {
-        count >= 2 ? "\(stackGlyph) \(count)" : ""
+    /// 右端的堆叠指示：「⧉ 3」，降噪堆叠则是「✦ 3」。不是堆叠（< 2 张）时调用方给空串并隐藏。
+    public static func stackIndicator(_ count: Int, kind: StackKind = .plain) -> String {
+        count >= 2 ? "\(kind == .denoise ? denoiseStackGlyph : stackGlyph) \(count)" : ""
     }
 }
 
