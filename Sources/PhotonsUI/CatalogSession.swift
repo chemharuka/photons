@@ -35,15 +35,21 @@ public enum MissingMarkText {
 /// 两条路的**唯一**架构差别是许可边界：`ansel` 的权重是 GPL-3.0，必须走子进程；
 /// `nonlocal` 的代码与权重都是 MIT，所以是进程内的一次普通调用。产品行为（命名、落盘、
 /// 入库、继承编辑、堆叠、选中）完全相同，因此两者共用 `CatalogSession.denoiseSelection(engine:)`。
+///
+/// §480 加了第三条 `builtin`：不带模型、不带权重、不联网，进程内 CPU 上的一次普通计算
+/// （LightCraft 的噪声估计 + Anscombe + 四平面 NLM）。它同样只是 `DenoiseEngine` 的一个值，
+/// 所以命名/落盘/堆叠仍然只有一条路径。
 public enum DenoiseEngine: String, Sendable, CaseIterable {
     case ansel
     case nonlocal
+    case builtin
 
     /// 菜单项里那个括号里的词，也用于日志。刻意不翻译：它是产品的专名。
     public var displayName: String {
         switch self {
         case .ansel: return "Ansel"
         case .nonlocal: return "Nonlocal"
+        case .builtin: return "内置"
         }
     }
 }
@@ -163,13 +169,65 @@ struct NLMFDenoiseExecutor: DenoiseExecuting {
     }
 }
 
+/// §480 — 进程内的内置降噪（CPU，LightCraft 端口）。与 NLMF 那一层同形：命名/临时名/改名
+/// 仍复用 `AnselDenoiseJob.outputURL`，`body` 只替换「真的算一遍」。
+struct BuiltinDenoiseExecutor: DenoiseExecuting {
+    struct Report: Sendable {
+        var width: Int
+        var height: Int
+        var cfa: String
+        var tiles: Int
+        var seconds: Double
+        var byteCount: Int
+    }
+
+    typealias Body = @Sendable (URL, URL, @escaping @Sendable (String) -> Void) throws -> Report
+
+    let job: BuiltinDenoiseJob
+    var body: Body?
+
+    init(job: BuiltinDenoiseJob, body: Body? = nil) {
+        self.job = job
+        self.body = body
+    }
+
+    func denoise(source: URL, progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
+        let fm = FileManager.default
+        let finalURL = AnselDenoiseJob.outputURL(for: source, fileManager: fm)
+        let temp = finalURL.deletingLastPathComponent()
+            .appendingPathComponent(".builtin-\(UUID().uuidString).dng")
+        defer { try? fm.removeItem(at: temp) }
+
+        let report: Report
+        if let body {
+            report = try body(source, temp, progress)
+        } else {
+            let real = try job.denoise(input: source, output: temp, progress: progress)
+            report = Report(width: real.width, height: real.height, cfa: real.cfa,
+                            tiles: real.tiles, seconds: real.seconds,
+                            byteCount: real.byteCount)
+        }
+        do {
+            try? fm.removeItem(at: finalURL)
+            try fm.moveItem(at: temp, to: finalURL)
+        } catch {
+            throw AnselDenoiseJobError.move("\(error)")
+        }
+        return DenoiseOutcome(output: finalURL, width: report.width, height: report.height,
+                              cfa: report.cfa, tiles: report.tiles, seconds: report.seconds,
+                              byteCount: report.byteCount)
+    }
+}
+
 /// 一次运行要用的那个 job，按引擎选。
 struct DenoiseRunner: Sendable {
     var engine: DenoiseEngine
     var ansel: AnselDenoiseJob
     var nonlocal: NLMFDenoiseJob
+    var builtin: BuiltinDenoiseJob
     /// 只给测试：替换进程内那条路的**推理**，命名与临时名/改名仍是生产代码。
     var nonlocalBody: NLMFDenoiseExecutor.Body?
+    var builtinBody: BuiltinDenoiseExecutor.Body?
 
     func execute(source: URL,
                  progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
@@ -178,6 +236,9 @@ struct DenoiseRunner: Sendable {
             return try AnselDenoiseExecutor(job: ansel).denoise(source: source, progress: progress)
         case .nonlocal:
             return try NLMFDenoiseExecutor(job: nonlocal, body: nonlocalBody)
+                .denoise(source: source, progress: progress)
+        case .builtin:
+            return try BuiltinDenoiseExecutor(job: builtin, body: builtinBody)
                 .denoise(source: source, progress: progress)
         }
     }
@@ -1405,6 +1466,10 @@ public final class CatalogSession {
         NLMFDenoiseJob(modelURL: nlmfResolvedModelURL)
     }
 
+    /// §480 — 内置降噪没有模型、没有工具、没有网络：这个 job 永远是「可用」的。
+    /// 保留存储属性是为了让测试（和将来的 Amount 滑杆）可以换参数，不改变入口语义。
+    public var builtinDenoiseJob = BuiltinDenoiseJob()
+
     /// 工具**真的在**：`AnselDenoiseClient` 会把一条不存在的显式路径原样收下，
     /// 所以这里问的是那个文件本身（与 `isHDRMergeAvailable` 同一条规矩）。
     public var isDenoiseToolAvailable: Bool {
@@ -1427,6 +1492,9 @@ public final class CatalogSession {
     /// 这一段而不用等 ~90 s 的推理；命名与临时名/改名仍然是生产的 `NLMFDenoiseExecutor`。
     /// internal：它是模块内的接缝，不进公开 API。
     var nlmfDenoiseBody: NLMFDenoiseExecutor.Body?
+
+    /// §480 — 同一条接缝，给内置引擎。`nil` = 真跑 CPU NLM。
+    var builtinDenoiseBody: BuiltinDenoiseExecutor.Body?
 
     /// 对选中的**那一张**跑 Ansel 模型降噪（子进程，GPL 权重）。
     @discardableResult
@@ -1482,6 +1550,9 @@ public final class CatalogSession {
                 lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
                 return []
             }
+        case .builtin:
+            // §480 — 没有模型/工具可缺；能读 DNG 就能跑。
+            break
         }
         // 菜单已经拦过这几条；这里是第二次，因为一个过期的菜单行或键盘路径不该让任务白跑。
         let chosen = selectedAssets
@@ -1509,7 +1580,9 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody)
+                                builtin: builtinDenoiseJob,
+                                nonlocalBody: nlmfDenoiseBody,
+                                builtinBody: builtinDenoiseBody)
         let queue = denoiseQueue
         let participantID = asset.id
         let rootID = asset.sourceRootId
@@ -1617,6 +1690,8 @@ public final class CatalogSession {
                 lastDenoiseError = DenoiseNotices.nlmfModelMissing(nlmfDenoiseModelPathHint)
                 return []
             }
+        case .builtin:
+            break
         }
 
         let chosen = selectedAssets
@@ -1661,7 +1736,9 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody)
+                                builtin: builtinDenoiseJob,
+                                nonlocalBody: nlmfDenoiseBody,
+                                builtinBody: builtinDenoiseBody)
         let taskID = backgroundTasks.begin(BackgroundTask(
             kind: .denoise,
             title: Loc.t("降噪 {0} 张", String(describing: (items.count))),
@@ -1756,7 +1833,7 @@ public final class CatalogSession {
                                                   assetID: assetID, stackTopID: run.stackTopID ?? "",
                                                   stackCount: run.stackCount)
             }
-            lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+            lastDenoiseProgress = Loc.t("降噪完成（{0}）：{1}×{2}，{3} 个 tile", lastDenoiseEngine?.displayName ?? "", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
         } else {
             lastDenoiseProgress = nil
         }
@@ -1939,6 +2016,7 @@ public final class CatalogSession {
     nonisolated static func denoiseFailureMessage(_ error: Error) -> String {
         if let ansel = error as? AnselDenoiseJobError { return ansel.description }
         if let nlmf = error as? NLMFDenoiseJobError { return nlmf.description }
+        if let builtin = error as? BuiltinDenoiseJob.Failure { return builtin.description }
         return error.localizedDescription
     }
 
@@ -1984,7 +2062,7 @@ public final class CatalogSession {
                                               assetID: assetID, stackTopID: run.stackTopID ?? "",
                                               stackCount: run.stackCount)
         }
-        lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+        lastDenoiseProgress = Loc.t("降噪完成（{0}）：{1}×{2}，{3} 个 tile", lastDenoiseEngine?.displayName ?? "", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
     }
 
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.

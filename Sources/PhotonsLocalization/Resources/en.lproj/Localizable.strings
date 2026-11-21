@@ -900,7 +900,17 @@
 "降噪失败：{0}" = "Denoise failed: {0}";
 "降噪完成（CPU：--gpu 未生效）" = "Denoise finished (CPU: --gpu had no effect)";
 "降噪完成：{0}×{1}，{2} 个 tile" = "Denoise complete: {0}×{1}, {2} tiles";
+"降噪完成（{0}）：{1}×{2}，{3} 个 tile" = "Denoise complete ({0}): {1}×{2}, {3} tiles";
 "降噪结果已经在库里（内容相同），没有新建照片" = "An identical denoised result is already in the library; no new photo was added";
+"内置降噪 {0} 张…" = "Built-in denoise, {0} photos…";
+"内置降噪 {0}×{1}，{2} 个 tile…" = "Built-in denoise {0}×{1}, {2} tiles…";
+"模型降噪（内置）…" = "AI denoise (Built-in)…";
+"读取 RAW {0}×{1}…" = "Reading RAW {0}×{1}…";
+"估计噪声…" = "Estimating noise…";
+"写入 DNG…" = "Writing DNG…";
+"解码 RAW 失败：{0}" = "Failed to decode RAW: {0}";
+"DNG 没有可识别的 CFA 相位" = "The DNG has no recognisable CFA phase";
+"DNG 没有像素" = "The DNG has no pixels";
 "隐藏 {0}" = "Hide {0}";
 "隐藏其他" = "Hide Others";
 "需要的透视超出 ±{0}" = "The required perspective exceeds ±{0}";

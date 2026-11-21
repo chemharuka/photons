@@ -2037,8 +2037,24 @@ public final class DenoiseMenuTarget: NSObject {
         session?.denoiseSelection(engine: .nonlocal)
     }
 
+    @objc func builtinPressed(_ sender: Any?) {
+        session?.denoiseSelection(engine: .builtin)
+    }
+
     @objc func batchDenoisePressed(_ sender: Any?) {
         session?.denoiseBatchSelection(engine: batchEngine) { [weak self] message in
+            if let present = self?.presentBatchSkipNotice {
+                present(message)
+            } else {
+                DenoiseMenuBuilder.presentBatchSkipAlert(message)
+            }
+        }
+    }
+
+    /// §480 — the built-in engine's own batch row. It is a separate selector rather than a second
+    /// `batchEngine` so the two rows cannot disagree about which engine the click started.
+    @objc func builtinBatchPressed(_ sender: Any?) {
+        session?.denoiseBatchSelection(engine: .builtin) { [weak self] message in
             if let present = self?.presentBatchSkipNotice {
                 present(message)
             } else {
@@ -2058,6 +2074,7 @@ public enum DenoiseMenuBuilder {
         switch engine {
         case .ansel: return Loc.t("模型降噪（Ansel）…")
         case .nonlocal: return Loc.t("模型降噪（Nonlocal）…")
+        case .builtin: return Loc.t("模型降噪（内置）…")
         }
     }
 
@@ -2069,7 +2086,14 @@ public enum DenoiseMenuBuilder {
         Loc.t("降噪 {0} 张…", String(describing: (count)))
     }
 
+    /// §480 — the built-in batch row's title. Deliberately *not* a change to `batchTitle`: the
+    /// existing row is Ansel/NLMF's, and 474's tests (and users' muscle memory) pin that sentence.
+    public static func builtinBatchTitle(count: Int) -> String {
+        Loc.t("内置降噪 {0} 张…", String(describing: (count)))
+    }
+
     public static var batchAction: Selector { #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
+    public static var builtinBatchAction: Selector { #selector(DenoiseMenuTarget.builtinBatchPressed(_:)) }
 
     /// Same shape as the single rows: nil = clickable, otherwise the reason. A mixed selection is
     /// still clickable **when at least two photos are usable** — the skipped ones are reported by
@@ -2093,14 +2117,19 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
+        case .builtin:
+            // §480 — no model, no executable, no network. Nothing to check.
+            break
         }
         return nil
     }
 
     public static func batchItem(session: CatalogSession?, target: DenoiseMenuTarget,
                                  selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
-        let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count),
-                               action: batchAction, keyEquivalent: "")
+        let entry = NSMenuItem(title: engine == .builtin ? builtinBatchTitle(count: selectedIDs.count)
+                                                     : batchTitle(count: selectedIDs.count),
+                               action: engine == .builtin ? builtinBatchAction : batchAction,
+                               keyEquivalent: "")
         entry.target = target
         if let reason = batchUnavailableReason(session: session, selectedIDs: selectedIDs,
                                                engine: engine) {
@@ -2153,6 +2182,9 @@ public enum DenoiseMenuBuilder {
             guard session.isNLMFDenoiseModelAvailable else {
                 return DenoiseNotices.nlmfModelMissing(session.nlmfDenoiseModelPathHint)
             }
+        case .builtin:
+            // §480 — no model, no executable, no network. Nothing to check.
+            break
         }
         return nil
     }
@@ -2161,9 +2193,12 @@ public enum DenoiseMenuBuilder {
     /// 时才可点。
     public static func item(session: CatalogSession?, target: DenoiseMenuTarget,
                             selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
-        let action: Selector = engine == .ansel
-            ? #selector(DenoiseMenuTarget.denoisePressed(_:))
-            : #selector(DenoiseMenuTarget.nonlocalPressed(_:))
+        let action: Selector
+        switch engine {
+        case .ansel: action = #selector(DenoiseMenuTarget.denoisePressed(_:))
+        case .nonlocal: action = #selector(DenoiseMenuTarget.nonlocalPressed(_:))
+        case .builtin: action = #selector(DenoiseMenuTarget.builtinPressed(_:))
+        }
         let entry = NSMenuItem(title: title(for: engine), action: action, keyEquivalent: "")
         entry.target = target
         if let reason = unavailableReason(session: session, selectedIDs: selectedIDs,
@@ -2190,7 +2225,8 @@ public enum DenoiseMenuBuilder {
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: DenoiseMenuTarget,
                               selectedIDs: [String]) {
         for (index, existing) in menu.items.enumerated().reversed()
-            where titles.contains(existing.title) || existing.action == batchAction {
+            where titles.contains(existing.title) || existing.action == batchAction
+                || existing.action == builtinBatchAction {
             menu.removeItem(at: index)
             // Collapse a separator pair this removal just brought together: `HDRMenuBuilder` leaves
             // one after its own row, and the previous open may have put one after ours.
@@ -2214,6 +2250,12 @@ public enum DenoiseMenuBuilder {
         if selectedIDs.count >= 2 {
             menu.insertItem(batchItem(session: session, target: target, selectedIDs: selectedIDs,
                                       engine: target.batchEngine),
+                            at: row)
+            row += 1
+            // §480 — the built-in engine has no dependencies, so its batch row is always the
+            // second one, right under the existing 降噪 N 张 row.
+            menu.insertItem(batchItem(session: session, target: target, selectedIDs: selectedIDs,
+                                      engine: .builtin),
                             at: row)
             row += 1
         }

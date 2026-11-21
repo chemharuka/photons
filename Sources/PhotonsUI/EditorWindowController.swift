@@ -425,6 +425,8 @@ public final class EditorWindowController: NSWindowController {
     /// per-window because the selection is; a second editor window installs its own row on the same
     /// application menu, which AppKit validates against the key window's controller.
     private var batchDenoiseMenuItem: NSMenuItem?
+    /// §480 — the built-in engine's own 编辑-menu batch row.
+    private var builtinBatchDenoiseMenuItem: NSMenuItem?
 
     /// Test seam for the 「已跳过 N 张」 sentence (the menu hides the alert behind a modal).
     public var presentDenoiseBatchNotice: ((String) -> Void)?
@@ -444,18 +446,29 @@ public final class EditorWindowController: NSWindowController {
         if let existing = menu.items.first(where: { $0.action == #selector(batchDenoiseAction(_:)) }) {
             existing.target = self
             batchDenoiseMenuItem = existing
+            if let builtin = menu.items.first(where: { $0.action == #selector(builtinBatchDenoiseAction(_:)) }) {
+                builtin.target = self
+                builtinBatchDenoiseMenuItem = builtin
+            }
             return existing
         }
         let item = NSMenuItem(title: DenoiseMenuBuilder.batchTitle(count: session.selection.count),
                               action: #selector(batchDenoiseAction(_:)), keyEquivalent: "")
         item.target = self
         item.isHidden = session.selection.count < 2
+        let builtin = NSMenuItem(title: DenoiseMenuBuilder.builtinBatchTitle(count: session.selection.count),
+                                 action: #selector(builtinBatchDenoiseAction(_:)), keyEquivalent: "")
+        builtin.target = self
+        builtin.isHidden = session.selection.count < 2
         if let auto = menu.items.firstIndex(where: { $0.action == #selector(autoDevelopAction(_:)) }) {
             menu.insertItem(item, at: auto + 1)
+            menu.insertItem(builtin, at: auto + 2)
         } else {
             menu.addItem(item)
+            menu.addItem(builtin)
         }
         batchDenoiseMenuItem = item
+        builtinBatchDenoiseMenuItem = builtin
         return item
     }
 
@@ -464,6 +477,19 @@ public final class EditorWindowController: NSWindowController {
     @objc public func batchDenoiseAction(_ sender: Any?) {
         guard session.selection.count >= 2 else { return }
         session.denoiseBatchSelection(engine: .nonlocal) { [weak self] message in
+            guard let self else { return }
+            if let present = self.presentDenoiseBatchNotice {
+                present(message)
+            } else {
+                DenoiseMenuBuilder.presentBatchSkipAlert(message)
+            }
+        }
+    }
+
+    /// §480 — 编辑 ▸ 内置降噪 N 张… — the same serial batch, on the engine with no dependencies.
+    @objc public func builtinBatchDenoiseAction(_ sender: Any?) {
+        guard session.selection.count >= 2 else { return }
+        session.denoiseBatchSelection(engine: .builtin) { [weak self] message in
             guard let self else { return }
             if let present = self.presentDenoiseBatchNotice {
                 present(message)
@@ -564,6 +590,12 @@ public final class EditorWindowController: NSWindowController {
             let count = session.selection.count
             item.isHidden = count < 2
             item.title = DenoiseMenuBuilder.batchTitle(count: count)
+            return count >= 2
+        case #selector(builtinBatchDenoiseAction(_:)):
+            // §480 — same rule, and the built-in engine has no dependency that could grey it.
+            let count = session.selection.count
+            item.isHidden = count < 2
+            item.title = DenoiseMenuBuilder.builtinBatchTitle(count: count)
             return count >= 2
         case #selector(applyCropAction(_:)), #selector(cancelCropAction(_:)):
             // 072 §D4 — grey unless the tool is on: with no frame up there is nothing to apply or
