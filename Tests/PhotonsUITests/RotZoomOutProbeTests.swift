@@ -149,8 +149,9 @@ final class RotZoomOutProbeTests: XCTestCase {
             }
             let clipped = canvasRect.intersected(in: Self.viewport)
 
-            // 315 — the matte is a **setting** (`CanvasBackdrop.current`, `#202020` at the default
-            // stop), never the literal `0F0F0F` this probe was written against. Read it, don't type it.
+            // 315 — the matte is a **setting** (`CanvasBackdrop.current`; since 473 the unselected
+            // default follows the appearance, `#202020` dark / `#E6E6E6` light), never the literal
+            // `0F0F0F` this probe was written against. Read it, don't type it.
             let matte = Int(CanvasBackdrop.current.eightBitValue)
             let matteTriple = (matte, matte, matte)
 

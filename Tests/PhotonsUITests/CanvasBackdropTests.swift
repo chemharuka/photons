@@ -10,9 +10,10 @@ import PhotonsLocalization
 /// The user's report (「默认的0f遮罩太暗了，和00有些区分不开」) says the default stop was too close to
 /// the `000000` the frame writes where the photograph does not reach. What is pinned here:
 ///
-///   1. **One enum, one default.** `CanvasBackdrop.current` is `.dark` when nothing is stored, an
-///      unknown stored raw value falls back to `.dark`, and `CanvasPresenter.CanvasMatte` reports the
-///      same stop through its `var` facade.
+///   1. **One enum, one default.** When nothing is stored, `CanvasBackdrop.current` is the
+///      appearance's default (473: `#202020` in dark, `#E6E6E6` in light); an unknown stored raw
+///      value falls back to the same default, and `CanvasPresenter.CanvasMatte` reports the same stop
+///      through its `var` facade.
 ///   2. **The stops are the numbers in the spec.** L\* strictly increasing, and the darkest one
 ///      separates from `000000` (contrast ≥ 1.25 — the old `0F` was 1.10).
 ///   3. **Switching moves the matte and nothing else.** After `set(.light)` / `set(.midGrey)` the
@@ -27,25 +28,40 @@ final class CanvasBackdropTests: XCTestCase {
 
     // MARK: - 1. one enum, one default
 
-    func testTheDefaultStopIsDarkAndAnUnknownStoredStopFallsBack() {
+    func testTheDefaultStopFollowsTheAppearanceAndAnUnknownStoredStopFallsBack() {
         withFreshPreference {
+            let savedFallback = CanvasBackdrop.fallback
+            defer { CanvasBackdrop.fallback = savedFallback }
+
             XCTAssertEqual(CanvasBackdrop.allCases, [.dark, .midGrey, .light])
-            XCTAssertEqual(CanvasBackdrop.current, .dark)
+
+            // 473 — 未选过 = 按当前外观的默认，两条分支都断言。
+            CanvasBackdrop.fallback = .dark
+            XCTAssertEqual(CanvasBackdrop.current, .dark, "dark appearance: #202020")
             XCTAssertEqual(CanvasBackdrop.current.eightBitValue, 0x20, "#20 is 32")
             XCTAssertEqual(CanvasPresenter.CanvasMatte.eightBitValue, 0x20,
                            "the facade must report the stop `current` reports")
 
+            CanvasBackdrop.fallback = .light
+            XCTAssertEqual(CanvasBackdrop.current, .light, "light appearance: #E6E6E6")
+            XCTAssertEqual(CanvasBackdrop.current.eightBitValue, 0xE6, "#E6 is 230")
+
             // A stored value this build does not know (a downgrade, a hand-edited preference) is not
-            // left to make the canvas undefined: it falls back to the default.
+            // left to make the canvas undefined: it falls back to the appearance's default too.
             AppPreferences.store.set("slate", forKey: CanvasBackdrop.defaultsKey)
-            XCTAssertEqual(CanvasBackdrop.current, .dark, "an unknown stop must fall back to .dark")
+            CanvasBackdrop.fallback = .dark
+            XCTAssertEqual(CanvasBackdrop.current, .dark, "unknown stop in dark appearance")
+            CanvasBackdrop.fallback = .light
+            XCTAssertEqual(CanvasBackdrop.current, .light, "unknown stop in light appearance")
 
             // …and a known one is honoured, which is what makes this a preference and not a constant.
             AppPreferences.store.set(CanvasBackdrop.midGrey.rawValue,
                                       forKey: CanvasBackdrop.defaultsKey)
-            XCTAssertEqual(CanvasBackdrop.current, .midGrey)
-            print("backdrop: default .dark = #\(String(CanvasBackdrop.dark.eightBitValue, radix: 16)) "
-                  + "= \(CanvasBackdrop.dark.eightBitValue)/255; unknown raw falls back to .dark")
+            CanvasBackdrop.fallback = .light
+            XCTAssertEqual(CanvasBackdrop.current, .midGrey, "an explicit choice beats the fallback")
+            print("backdrop: no stored value → #\(String(CanvasBackdrop.dark.eightBitValue, radix: 16)) "
+                  + "in dark / #\(String(CanvasBackdrop.light.eightBitValue, radix: 16)) in light; "
+                  + "unknown raw follows the same default")
         }
     }
 

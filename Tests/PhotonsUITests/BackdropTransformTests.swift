@@ -586,9 +586,9 @@ final class BackdropTransformTests: XCTestCase {
     // MARK: - ④ (058) outside the picture is the matte, and the seam still ramps
 
     /// **H2**: with the picture at half the canvas, the canvas outside it is the canvas matte —
-    /// `CanvasBackdrop.current` (`#202020` at the default stop since 315; `#0F0F0F` was the pre-315
-    /// constant) — three channels equal, not the picture's edge column, which is what `saturate()` in
-    /// the shader produced from 037 to 053.
+    /// `CanvasBackdrop.current` (since 473 the *unselected* default follows the appearance: `#202020`
+    /// in dark, `#E6E6E6` in light; `#0F0F0F` was the pre-315 constant) — three channels equal, not
+    /// the picture's edge column, which is what `saturate()` in the shader produced from 037 to 053.
     ///
     /// The same render also carries the seam: the two pixels **inside** the picture's edge are a ramp
     /// from the backdrop to the frame (the feather stays inside, where 037 put it), so the photograph
