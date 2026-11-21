@@ -896,6 +896,8 @@
 "阴影" = "Shadows";
 "阴影色调" = "Shadow tint";
 "降噪" = "Denoise";
+"降噪 {0} 张（{1}）" = "Denoising {0} photos ({1})";
+"降噪 {0} 张（{1}）…" = "Denoising {0} photos ({1})…";
 "降噪 {0}…" = "Denoising {0}…";
 "降噪中" = "Denoising";
 "降噪失败：{0}" = "Denoise failed: {0}";

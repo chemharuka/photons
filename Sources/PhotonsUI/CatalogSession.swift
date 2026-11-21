@@ -1682,7 +1682,8 @@ public final class CatalogSession {
                                 nonlocalBody: nlmfDenoiseBody)
         let taskID = backgroundTasks.begin(BackgroundTask(
             kind: .denoise,
-            title: Loc.t("降噪 {0} 张", String(describing: (items.count))),
+            title: Loc.t("降噪 {0} 张（{1}）", String(describing: (items.count)),
+                         engine.displayName),
             total: items.count,
             currentAssetID: items[0].assetID,
             currentThumbKey: items[0].thumbKey))

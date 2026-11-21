@@ -115,6 +115,61 @@ final class BatchDenoise474Tests: XCTestCase {
         session.nlmfModelURL = model
     }
 
+    /// Ansel 那条路的假执行器（子进程）。`marker` 每真正跑一张就追加一行源文件名，用来证明
+    /// 「点了 Ansel 行」走的确实是 Ansel 执行器，而不是只改了标题。
+    @discardableResult
+    private func installFakeAnsel(on session: CatalogSession, marker: URL? = nil) throws -> URL {
+        let tool = workDir.appendingPathComponent("fake-ansel-denoise-swift")
+        let record = marker.map { "echo \"$input\" >> \"\($0.path)\"" } ?? ""
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "capabilities" ]; then
+          echo '{"tool":{"name":"ansel-denoise-swift","protocol":2},"gpu":"Fake GPU","features":["image","image-dng","gpu"]}'
+          exit 0
+        fi
+        input="$3"
+        out=""
+        while [ $# -gt 0 ]; do
+          if [ "$1" = "--out" ]; then out="$2"; shift 2; continue; fi
+          shift
+        done
+        if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
+        \(record)
+        cp "$input" "$out" || exit 4
+        echo '{"width":1024,"height":1024,"cfa":"rggb","mosaicCfa":"rggb","pieces":1,"columns":1,"rows":1,"seams":0,"seconds":0.05,"readSeconds":0.0,"inferenceSeconds":0.05,"writeSeconds":0.0,"backend":"fake","outputBytes":1}'
+        """
+        try script.write(to: tool, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+
+        let model = workDir.appendingPathComponent(AnselDenoiseVariant.quarter.modelFileName)
+        try Data(repeating: 0, count: 64).write(to: model)
+        var location = AnselDenoiseLocation(executableURL: tool, modelURL: model)
+        location.variant = .quarter
+        session.denoiseLocation = location
+        return tool
+    }
+
+    private func batchRows(in menu: NSMenu) -> [NSMenuItem] {
+        menu.items.filter { $0.action == #selector(DenoiseMenuTarget.batchDenoisePressed(_:)) }
+    }
+
+    /// Thread-safe call counter for the in-process stand-in.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        func record() { lock.lock(); calls += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+    }
+
+    private func makeMenu(session: CatalogSession,
+                          selectedIDs: [String]) -> (NSMenu, DenoiseMenuTarget) {
+        let menu = NSMenu()
+        let target = DenoiseMenuTarget(session: session)
+        DenoiseMenuBuilder.attach(to: menu, session: session, target: target,
+                                  selectedIDs: selectedIDs)
+        return (menu, target)
+    }
+
     // MARK: - the executor stand-in
 
     /// Thread-safe bookkeeping for the stand-in executor. A class because the closure is
@@ -225,7 +280,7 @@ final class BatchDenoise474Tests: XCTestCase {
         XCTAssertEqual(participants.count, 5)
         let initial = try task(in: session)
         XCTAssertEqual(initial.kind, .denoise)
-        XCTAssertEqual(initial.title, "降噪 5 张")
+        XCTAssertEqual(initial.title, "降噪 5 张（Nonlocal）")
         XCTAssertEqual(initial.total, 5)
         XCTAssertEqual(initial.completed, 0)
 
@@ -429,12 +484,13 @@ final class BatchDenoise474Tests: XCTestCase {
         DenoiseMenuBuilder.attach(to: menu, session: session, target: target,
                                   selectedIDs: fixture.assets.map(\.id))
         let row = try XCTUnwrap(menu.items.first {
-            $0.title == DenoiseMenuBuilder.batchTitle(count: 4)
-        }, "多选缺「降噪 4 张…」: \(menu.items.map(\.title))")
+            $0.title == DenoiseMenuBuilder.batchTitle(count: 4, engine: .nonlocal)
+        }, "多选缺「降噪 4 张（Nonlocal）…」: \(menu.items.map(\.title))")
         XCTAssertTrue(row.isEnabled)
         XCTAssertEqual(row.action, #selector(DenoiseMenuTarget.batchDenoisePressed(_:)))
+        XCTAssertEqual(DenoiseMenuBuilder.engine(forTag: row.tag), .nonlocal)
 
-        target.batchDenoisePressed(nil)
+        target.batchDenoisePressed(row)
         waitForTerminal(session)
 
         let done = try task(in: session)
@@ -448,9 +504,140 @@ final class BatchDenoise474Tests: XCTestCase {
         XCTAssertEqual(session.lastDenoiseBatchSkipNotice, notice)
     }
 
-    // MARK: - 编辑菜单：≥ 2 张才出现，单张隐藏
+    // MARK: - ⑧ 478：多选两条批次行，标题点名引擎
 
-    func testEditMenuBatchRowAppearsOnlyForMultiSelection() throws {
+    func testMultiSelectionOffersTwoBatchRowsNamedByEngine() throws {
+        let fixture = try makeSession(dngCount: 4)
+        let session = fixture.session
+        try installFakeAnsel(on: session)
+        try installNLMFModel(on: session)
+        let ids = fixture.assets.map(\.id)
+        session.setSelection(Set(ids), anchor: ids.first)
+
+        let (menu, _) = makeMenu(session: session, selectedIDs: ids)
+        let rows = batchRows(in: menu)
+        print("⑧ 两条批次行：\(rows.map(\.title))")
+        XCTAssertEqual(rows.count, 2, "多选必须两条批次项：\(menu.items.map(\.title))")
+        XCTAssertEqual(rows.map(\.title), ["降噪 4 张（Ansel）…", "降噪 4 张（Nonlocal）…"],
+                       "标题必须全文点名引擎")
+        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal],
+                       "两行各自携带引擎")
+        XCTAssertTrue(rows.allSatisfy(\.isEnabled), "两条依赖都在时都可点")
+
+        // 单选仍不出批次行。
+        let single = try XCTUnwrap(fixture.assets.first).id
+        let (singleMenu, _) = makeMenu(session: session, selectedIDs: [single])
+        XCTAssertEqual(batchRows(in: singleMenu).count, 0, "单选不许出现批次行")
+    }
+
+    // MARK: - ⑨ 478：点 Ansel 行 ⇒ Ansel 执行器 + 任务标题点名 Ansel
+
+    func testTheAnselBatchRowRunsTheAnselExecutorAndNamesTheTask() throws {
+        let fixture = try makeSession(dngCount: 4)
+        let session = fixture.session
+        let marker = workDir.appendingPathComponent("ansel-invocations.log")
+        try installFakeAnsel(on: session, marker: marker)
+        try installNLMFModel(on: session)
+        let inProcess = CallCounter()
+        session.nlmfDenoiseBody = { source, output, _ in
+            inProcess.record()
+            try FileManager.default.copyItem(at: source, to: output)
+            return NLMFDenoiseExecutor.Report(width: 1024, height: 1024, cfa: "rggb",
+                                              tiles: 1, seconds: 0.01, byteCount: 1)
+        }
+        let ids = fixture.assets.map(\.id)
+        session.setSelection(Set(ids), anchor: ids.first)
+
+        let (menu, target) = makeMenu(session: session, selectedIDs: ids)
+        let row = try XCTUnwrap(batchRows(in: menu).first {
+            DenoiseMenuBuilder.engine(forTag: $0.tag) == .ansel
+        })
+        target.batchDenoisePressed(row)
+        waitForTerminal(session)
+
+        let done = try task(in: session)
+        let invocations = (try? String(contentsOf: marker, encoding: .utf8))?
+            .split(separator: "\n").count ?? 0
+        print("⑨ Ansel 行：title=\(done.title) engine=\(String(describing: session.lastDenoiseEngine)) "
+              + "ansel=\(invocations) nonlocal=\(inProcess.count)")
+        XCTAssertEqual(done.title, "降噪 4 张（Ansel）")
+        XCTAssertEqual(session.lastDenoiseEngine, .ansel)
+        XCTAssertEqual(invocations, 4, "点 Ansel 行必须调用 Ansel 子进程执行器")
+        XCTAssertEqual(inProcess.count, 0, "Ansel 行不许调用进程内执行器")
+    }
+
+    // MARK: - ⑩ 478：点 Nonlocal 行 ⇒ 进程内执行器 + 任务标题点名 Nonlocal
+
+    func testTheNonlocalBatchRowRunsTheInProcessExecutorAndNamesTheTask() throws {
+        let fixture = try makeSession(dngCount: 4)
+        let session = fixture.session
+        let marker = workDir.appendingPathComponent("ansel-invocations.log")
+        try installFakeAnsel(on: session, marker: marker)
+        try installNLMFModel(on: session)
+        let inProcess = CallCounter()
+        session.nlmfDenoiseBody = { source, output, _ in
+            inProcess.record()
+            try FileManager.default.copyItem(at: source, to: output)
+            return NLMFDenoiseExecutor.Report(width: 1024, height: 1024, cfa: "rggb",
+                                              tiles: 1, seconds: 0.01, byteCount: 1)
+        }
+        let ids = fixture.assets.map(\.id)
+        session.setSelection(Set(ids), anchor: ids.first)
+
+        let (menu, target) = makeMenu(session: session, selectedIDs: ids)
+        let row = try XCTUnwrap(batchRows(in: menu).first {
+            DenoiseMenuBuilder.engine(forTag: $0.tag) == .nonlocal
+        })
+        target.batchDenoisePressed(row)
+        waitForTerminal(session)
+
+        let done = try task(in: session)
+        let anselInvocations = (try? String(contentsOf: marker, encoding: .utf8))?
+            .split(separator: "\n").count ?? 0
+        print("⑩ Nonlocal 行：title=\(done.title) engine=\(String(describing: session.lastDenoiseEngine)) "
+              + "ansel=\(anselInvocations) nonlocal=\(inProcess.count)")
+        XCTAssertEqual(done.title, "降噪 4 张（Nonlocal）")
+        XCTAssertEqual(session.lastDenoiseEngine, .nonlocal)
+        XCTAssertEqual(inProcess.count, 4, "点 Nonlocal 行必须调用进程内执行器")
+        XCTAssertEqual(anselInvocations, 0, "Nonlocal 行不许启动 Ansel 子进程")
+    }
+
+    // MARK: - ⑪ 478：两行各自置灰、各自说明
+
+    func testTheTwoBatchRowsGreyIndependentlyWithTheirOwnReasons() throws {
+        let fixture = try makeSession(dngCount: 4)
+        let session = fixture.session
+        try installFakeAnsel(on: session)
+        try installNLMFModel(on: session)
+        let ids = fixture.assets.map(\.id)
+        session.setSelection(Set(ids), anchor: ids.first)
+
+        // Nonlocal 模型没了，Ansel 的工具 + 模型都还在。
+        let absent = workDir.appendingPathComponent("no-such-model.mlpackage")
+        session.nlmfModelURL = absent
+        let (menu, _) = makeMenu(session: session, selectedIDs: ids)
+        let rows = batchRows(in: menu)
+        let ansel = try XCTUnwrap(rows.first { DenoiseMenuBuilder.engine(forTag: $0.tag) == .ansel })
+        let nlmf = try XCTUnwrap(rows.first { DenoiseMenuBuilder.engine(forTag: $0.tag) == .nonlocal })
+        print("⑪ 独立置灰：ansel=\(ansel.isEnabled)/\(ansel.toolTip ?? "nil") "
+              + "nonlocal=\(nlmf.isEnabled)/\(nlmf.toolTip ?? "nil")")
+        XCTAssertTrue(ansel.isEnabled, "Ansel 不依赖 NLMF 模型，必须仍可点")
+        XCTAssertFalse(nlmf.isEnabled, "Nonlocal 缺模型，必须灰")
+        XCTAssertTrue(nlmf.toolTip?.contains(absent.path) ?? false, "Nonlocal 的原因要点名模型路径")
+        XCTAssertNotEqual(ansel.toolTip, nlmf.toolTip, "两行不许合成一句话")
+
+        let anselReason = DenoiseMenuBuilder.batchUnavailableReason(
+            session: session, selectedIDs: ids, engine: .ansel)
+        let nlmfReason = DenoiseMenuBuilder.batchUnavailableReason(
+            session: session, selectedIDs: ids, engine: .nonlocal)
+        XCTAssertNil(anselReason)
+        XCTAssertNotNil(nlmfReason)
+        XCTAssertNotEqual(anselReason, nlmfReason, "两条 reason 必须不同")
+    }
+
+    // MARK: - 编辑菜单：≥ 2 张才出现，单张隐藏；两行同时刷新
+
+    func testEditMenuBatchRowsAppearOnlyForMultiSelectionAndRefreshTogether() throws {
         _ = NSApplication.shared
         let fixture = try makeSession(dngCount: 3)
         let controller = EditorWindowController()
@@ -461,22 +648,39 @@ final class BatchDenoise474Tests: XCTestCase {
         try controller.openLibrary(at: fixture.libraryURL)
         let session = controller.session
         session.setSortOrder(.oldestFirst)
+        try installFakeAnsel(on: session)
+        try installNLMFModel(on: session)
 
         let appMenu = MainMenu.build()
         let edit = try XCTUnwrap(appMenu.items.first { $0.submenu?.title == "编辑" }?.submenu)
-        let row = try XCTUnwrap(controller.installBatchDenoiseMenuItem(in: edit))
+        let initialCount = session.selection.count
+        let anselRow = try XCTUnwrap(controller.installBatchDenoiseMenuItem(in: edit))
+        let rows = edit.items.filter {
+            $0.action == #selector(EditorWindowController.batchDenoiseAction(_:))
+        }
+        XCTAssertEqual(rows.count, 2, "编辑菜单必须两行：\(edit.items.map(\.title))")
+        XCTAssertEqual(rows.map(\.title),
+                       [DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .ansel),
+                        DenoiseMenuBuilder.batchTitle(count: initialCount, engine: .nonlocal)])
+        XCTAssertEqual(rows.map { DenoiseMenuBuilder.engine(forTag: $0.tag) }, [.ansel, .nonlocal])
+        let nlmfRow = try XCTUnwrap(rows.first { DenoiseMenuBuilder.engine(forTag: $0.tag) == .nonlocal })
 
-        let probe = NSMenuItem(title: "", action: #selector(EditorWindowController.batchDenoiseAction(_:)),
-                               keyEquivalent: "")
         session.selectOnly(try XCTUnwrap(session.assets.first).id)
-        XCTAssertFalse(controller.validateMenuItem(probe), "单张不出现")
-        XCTAssertTrue(probe.isHidden)
+        XCTAssertFalse(controller.validateMenuItem(anselRow), "单张不出现")
+        XCTAssertTrue(anselRow.isHidden)
+        XCTAssertTrue(nlmfRow.isHidden, "两行一起隐藏")
 
         let ids = session.assets.prefix(2).map(\.id)
         session.setSelection(Set(ids), anchor: ids.first)
-        XCTAssertTrue(controller.validateMenuItem(probe), "多选可点")
-        XCTAssertFalse(probe.isHidden)
-        XCTAssertEqual(probe.title, "降噪 2 张…")
-        XCTAssertEqual(row.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
+        // 两行都先改成旧文案；只校验 Ansel 行也必须把 Nonlocal 行一起刷新。
+        anselRow.title = "stale"
+        nlmfRow.title = "stale"
+        XCTAssertTrue(controller.validateMenuItem(anselRow), "多选可点")
+        XCTAssertFalse(anselRow.isHidden)
+        XCTAssertFalse(nlmfRow.isHidden, "两行一起出现")
+        XCTAssertEqual(anselRow.title, "降噪 2 张（Ansel）…")
+        XCTAssertEqual(nlmfRow.title, "降噪 2 张（Nonlocal）…", "校验任一行要同时刷新两行")
+        XCTAssertEqual(anselRow.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
+        XCTAssertEqual(nlmfRow.action, #selector(EditorWindowController.batchDenoiseAction(_:)))
     }
 }
