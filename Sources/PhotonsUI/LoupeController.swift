@@ -28,6 +28,92 @@ import PhotonsCatalog
 /// develops, so it is never queued behind ImageIO — which is the difference between "the picture
 /// freezes for a second" and "the picture is briefly soft".
 
+/// 463 — the loupe's visible answer to "the file is not where the library says".
+///
+/// A banner, not a sheet: the user is deleting photos in a row, and a modal would interrupt every
+/// one of them. One sentence plus the two verbs that already exist in the context menu (search for
+/// the lost file / remove the entry, recycling the original). It is a real view with real buttons,
+/// so a click works and a test can ask whether it is on screen instead of trusting an `if`.
+final class MissingFileBannerView: NSView {
+    static let height: CGFloat = 46
+    static let maxWidth: CGFloat = 620
+
+    let titleField = NSTextField(labelWithString: MissingMarkText.fileGone)
+    let findButton = NSButton(title: MissingFileText.findMenuTitle, target: nil, action: nil)
+    let removeButton = NSButton(title: MissingMarkText.removeFromLibrary, target: nil, action: nil)
+
+    var onFind: (() -> Void)?
+    var onRemove: (() -> Void)?
+
+    /// What the banner says — the acceptance reads this string, not the pixels.
+    var titleText: String { titleField.stringValue }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.94).cgColor
+        layer?.cornerRadius = 10
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.55).cgColor
+
+        titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleField.textColor = .labelColor
+        titleField.lineBreakMode = .byTruncatingTail
+        addSubview(titleField)
+
+        for button in [findButton, removeButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.target = self
+            addSubview(button)
+        }
+        findButton.action = #selector(findPressed)
+        removeButton.action = #selector(removePressed)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    override var isFlipped: Bool { true }
+
+    /// Place the banner at the top centre of its host, never wider than the canvas. Slide (never
+    /// resize) for a narrow canvas, the same rule the progress cards use.
+    func layout(in host: CGRect) {
+        guard host.width > 1, host.height > 1 else { return }
+        let width = min(Self.maxWidth, max(280, host.width - 32))
+        let x = host.minX + (host.width - width) / 2
+        let y = (superview?.isFlipped ?? false)
+            ? host.minY + 12
+            : host.maxY - Self.height - 12
+        frame = NSRect(x: x, y: y, width: width, height: Self.height)
+
+        let inset: CGFloat = 12
+        let buttonHeight: CGFloat = 22
+        let buttonY = (Self.height - buttonHeight) / 2
+        removeButton.sizeToFit()
+        findButton.sizeToFit()
+        let removeWidth = max(96, removeButton.frame.width)
+        let findWidth = max(104, findButton.frame.width)
+        removeButton.frame = NSRect(x: bounds.width - inset - removeWidth, y: buttonY,
+                                    width: removeWidth, height: buttonHeight)
+        findButton.frame = NSRect(x: removeButton.frame.minX - 8 - findWidth, y: buttonY,
+                                  width: findWidth, height: buttonHeight)
+        let titleWidth = max(10, findButton.frame.minX - inset - 8)
+        titleField.frame = NSRect(x: inset, y: (Self.height - 18) / 2,
+                                  width: titleWidth, height: 18)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // The rounded background is the layer's; drawing here is only the orange leading rule, which
+        // keeps the card readable on both the matte and a bright photograph.
+        NSColor.systemOrange.setFill()
+        NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+    }
+
+    @objc private func findPressed() { onFind?() }
+    @objc private func removePressed() { onRemove?() }
+}
+
 public final class LoupeController: NSViewController, HeadroomSource {
 
     public struct FrameResult {
@@ -320,6 +406,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 裁切工具条: 比例 / 拉直 / 翻转 / 九宫格 / 应用 / 取消. The only chrome on the canvas that takes
     /// clicks, and it exists only while the tool is on.
     let cropBar = CropToolBar()
+    /// 463 — 「文件不在原位置」, with the two verbs the context menu already owns. Hidden unless the
+    /// anchor itself is flagged missing; `refreshMissingBanner` is its only writer.
+    let missingBanner = MissingFileBannerView()
 
     /// The mask painter: pointer → sampled points → `Stroke` (Q22). Owned here because the paint
     /// gesture is a canvas gesture, and handed to the view so `mouseDown` knows which of the two
@@ -1601,6 +1690,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
         zoomSlider.onFit = { [weak self] in self?.zoomToFit() }
         // The wheel and the pinch stay the canvas' gestures even over the pill.
         zoomSlider.wheelTarget = canvasView
+        // 463 — above the canvas and the crop chrome: a missing file is the one thing the user must
+        // act on, so its two verbs cannot be covered by a tool strip. Starts hidden; only
+        // `refreshMissingBanner` shows it.
+        missingBanner.isHidden = true
+        missingBanner.onFind = { [weak self] in
+            guard let self, let session, let id = session.anchorID else { return }
+            MissingFilesActions.findLost([id], session: session, window: self.view.window)
+        }
+        missingBanner.onRemove = { [weak self] in
+            guard let self, let session, let id = session.anchorID else { return }
+            MissingFilesActions.removeAndDelete([id], session: session, window: self.view.window)
+        }
+        container.addSubview(missingBanner)
         layoutZoomSlider()
         view = container
         highlightOverlay.isArmed = session?.highlightWarning ?? false
@@ -1620,6 +1722,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         observeHighlightCeiling()
         refreshDisplay()
         syncZoomSlider()
+        refreshMissingBanner()
     }
 
     public override func viewDidAppear() {
@@ -1631,6 +1734,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         super.viewDidLayout()
         layoutStatusChip()
         layoutZoomSlider()
+        layoutMissingBanner()
         // The control points live in view points, so a resize moves them: rebuild rather than let the
         // overlay keep the old canvas' coordinates.
         refreshMaskHandles()
@@ -1713,6 +1817,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // switch from photo A to photo B kept A's backdrop, A's histogram snapshot and A's zoom
             // bridge, which is `「背景用的低清渲染图还是上一张的」`.
             self.notePhotoIdentity(self.backdropPhotoKey)
+            // 463 — the switch is also when the banner can appear/disappear. The stat itself ran in
+            // `CatalogSession.loadEditForAnchor`; this only reflects the resulting flag.
+            self.refreshMissingBanner()
             // One observer, two jobs: a document change re-renders the current decode (cheap,
             // ~ms); a photo change needs a new decode (expensive, the 0.5 → 1.0 ladder).
             let revision = self.session?.editRevision ?? 0
@@ -1794,6 +1901,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             _ = self.session?.anchorID
         }, { [weak self] in
             self?.refreshHDRMergeHUD()
+        })
+        // 463 — one missing flag moved (the per-switch stat or the decode fallback). Only the banner
+        // moves here; the frame itself will be requested by the ordinary photo-switch path.
+        bridge.observe({ [weak self] in
+            _ = self?.session?.availabilityRevision
+        }, { [weak self] in
+            self?.refreshMissingBanner()
         })
     }
 
@@ -5526,6 +5640,42 @@ public final class LoupeController: NSViewController, HeadroomSource {
         CGPoint(x: container.bounds.midX, y: container.bounds.midY)
     }
 
+    // MARK: - 463 · 「文件不在原位置」 横幅
+
+    /// **The only writer** of the banner. Called from the observation bridge (a missing flag moved,
+    /// the anchor changed), `viewDidLoad` and `viewDidLayout`.
+    ///
+    /// The condition is deliberately the **anchor's own** flag: a stack member's missing file is a
+    /// badge on the representative, not a banner over a different photo. The banner disappears the
+    /// moment a re-stat finds the file again — no dismissal needed, the fact changed.
+    private func refreshMissingBanner() {
+        let missing = session?.mode == .loupe && session?.anchorAsset?.isMissing == true
+        missingBanner.isHidden = !missing
+        guard missing else { return }
+        // The 1920 px stand-in answers "what did this photo look like"; it must not answer for a
+        // file that no longer exists. Taking it down here is what makes the user see the matte plus
+        // the sentence instead of a stale HD JPEG.
+        if firstFramePlaceholderPhoto != nil {
+            firstFramePlaceholderToken?.cancel()
+            firstFramePlaceholderToken = nil
+            canvasView.hideFirstFramePlaceholder()
+            firstFramePlaceholderPhoto = nil
+            firstFramePlaceholderPixelSize = nil
+            firstFramePlaceholderOrientation = nil
+        }
+        if awaitingFirstFrameContent { firstFrameContent = .blank }
+        layoutMissingBanner()
+    }
+
+    private func layoutMissingBanner() {
+        guard !missingBanner.isHidden else { return }
+        missingBanner.layout(in: container.bounds)
+    }
+
+    /// The acceptance reads what is on screen, including the buttons' titles and whether the card
+    /// is up at all. Internal: only tests and this file ask.
+    var missingBannerForTesting: MissingFileBannerView { missingBanner }
+
     // MARK: - 392 · 「HDR 合成」 的居中卡片
     //
     // 和 387 同一张卡、同一套算术，只有三行内容不同（`HDRMergeProgressOverlay`）。显示条件与 387
@@ -6439,7 +6589,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                 completion: { [weak self] result, generation in
                 guard let self else { return }
                 DispatchQueue.main.async {
-                    self.rungArrived(result, identity: job.identity, generation: generation)
+                    self.rungArrived(result, identity: job.identity, generation: generation,
+                                     url: job.url)
                 }
             })
         }
@@ -6460,11 +6611,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///     otherwise nothing would ever paint it (2026-10-26: a photo opened while the display was
     ///     settling stayed black until the user touched the camera, and a full rung could land behind
     ///     a preview that stayed on screen).
-    private func rungArrived(_ result: Result<DecodeRung, Error>, identity: String, generation gen: Int) {
+    private func rungArrived(_ result: Result<DecodeRung, Error>, identity: String,
+                             generation gen: Int, url: URL) {
         let isCurrentFrame = gen == generation
         switch result {
         case .failure(let error):
             if isCurrentFrame { lastPresentError = "\(error)" }
+            // 463 — the second trigger. The stat can miss (the file was deleted after the switch)
+            // or be skipped (an offline root); the driver saying "there is no file at this URL" is
+            // still the truth, so the row is flagged and the banner comes up.
+            if !FileManager.default.fileExists(atPath: url.path) {
+                session?.markMissingAfterDecodeFailure(url: url)
+            }
         case .success(let rung):
             guard isCurrentPhoto(identity) else {
                 staleRungDrops += 1
@@ -6725,6 +6883,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The tests and the bench name their photo through `frameSource`; this stand-in is the
         // catalog path (grid/filmstrip thumbnails keyed by an `Asset`).
         guard frameSource == nil, let session, let asset = session.anchorAsset else { return }
+        // 463 — a missing file has no picture to stand in for. The cached 1920 JPEG is exactly what
+        // the user mistook for a healthy photo; the banner is the honest answer instead.
+        guard !asset.isMissing else {
+            if firstFramePlaceholderPhoto != nil {
+                firstFramePlaceholderToken?.cancel()
+                firstFramePlaceholderToken = nil
+                canvasView.hideFirstFramePlaceholder()
+                firstFramePlaceholderPhoto = nil
+            }
+            return
+        }
         let identity = ladderIdentity(asset)
         // A frame for this photo is already on the layer, or the stand-in is already up/on its way.
         guard presentedPhoto != identity else { return }

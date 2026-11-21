@@ -26,7 +26,8 @@ public final class FilmstripCell: NSCollectionViewItem {
 
     public override var isSelected: Bool { didSet { card.isPicked = isSelected } }
 
-    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
+    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
+                          stackHasMissingMember: Bool = false) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -37,6 +38,7 @@ public final class FilmstripCell: NSCollectionViewItem {
         card.isActive = isActive
         card.isPicked = isSelected
         card.stackCount = stackCount
+        card.stackHasMissingMember = stackHasMissingMember
         view.toolTip = asset.filename
     }
 }
@@ -48,6 +50,8 @@ public final class FilmstripCard: NSView {
     /// §378 — member count of the stack this cell represents (0/1 = not a stack). Set by the
     /// controller from `CatalogSession.stacksByTopID`.
     public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
+    /// 463 — a hidden stack member is missing, so this (the only drawn member) says so.
+    public var stackHasMissingMember: Bool = false { didSet { overlay.needsDisplay = true } }
     /// The decoded thumbnail, or nil while the hash-derived placeholder is all we have.
     public var thumbnail: CGImage? {
         didSet {
@@ -99,7 +103,12 @@ public final class FilmstripCard: NSView {
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
     /// 「原文件已移动」 for this cell, or nil — the same string the grid card and the inspector use.
-    public var missingLabel: String? { asset?.isMissing == true ? MissingFileText.moved : nil }
+    /// 463: a stack whose hidden member is gone says so instead of staying silent.
+    public var missingLabel: String? {
+        if asset?.isMissing == true { return MissingFileText.moved }
+        if stackHasMissingMember { return MissingMarkText.stackHasMissing }
+        return nil
+    }
     /// Set inside `draw` when the badge was actually painted.
     public private(set) var lastDrawnMissingLabel: String?
 
@@ -347,7 +356,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                                                    for: indexPath)
                 guard let cell = item as? FilmstripCell else { return item }
                 cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
-                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0)
+                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0,
+                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -484,7 +494,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
                   let id = cell.cardView.asset?.id,
                   let asset = assetsByID[id] else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
-                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
         }
     }
 
@@ -499,7 +510,8 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             return item
         }
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
-                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }

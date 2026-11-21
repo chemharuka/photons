@@ -212,6 +212,11 @@ public final class AssetCardView: NSView {
     /// own `stack_id`, and a count is a property of the stack, not of the photo.
     public var stackCount: Int = 0 { didSet { overlay.needsDisplay = true } }
 
+    /// 463 — this row stands for a stack whose **hidden** member is missing. Only the top is drawn,
+    /// so the member's own badge would never be seen; this makes the row say 「这一叠里有文件不在了」.
+    /// Set by the controller from `CatalogSession.stackHasMissingMember(forAssetID:)`.
+    public var stackHasMissingMember: Bool = false { didSet { overlay.needsDisplay = true } }
+
     /// 223 — the image lives in its own layer so it can be an EDR surface (float contents); the
     /// placeholder, ring, caption and badges stay in ordinary `draw` above/below it.
     private let thumbnailView = ThumbnailEDRView(cornerRadius: WorkspaceLayout.cardCornerRadius)
@@ -231,7 +236,13 @@ public final class AssetCardView: NSView {
     /// Exposed as a *string* (not only as pixels) on purpose: the badge has to be assertable from a
     /// test and readable from a log, and "there is a pill somewhere in this rect" is not a fact a
     /// test can state.
-    public var missingLabel: String? { asset?.isMissing == true ? MissingFileText.moved : nil }
+    public var missingLabel: String? {
+        if asset?.isMissing == true { return MissingFileText.moved }
+        // 463: the top is healthy, but a member hidden behind it is not. 「原文件已移动」 would
+        // accuse the wrong photo, so the stack gets its own sentence.
+        if stackHasMissingMember { return MissingMarkText.stackHasMissing }
+        return nil
+    }
 
     /// What the last `draw` actually painted — set inside `draw`, so it is evidence and not intent.
     public private(set) var lastDrawnMissingLabel: String?
@@ -498,7 +509,8 @@ public final class AssetGridItem: NSCollectionViewItem {
         didSet { card.needsDisplay = true }
     }
 
-    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
+    public func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
+                          stackHasMissingMember: Bool = false) {
         // A recycled cell must not show a *different* photo for one frame; the same asset keeps
         // its bitmap (a filter/metadata refresh is not a pixel change).
         if card.asset?.id != asset.id {
@@ -509,6 +521,7 @@ public final class AssetGridItem: NSCollectionViewItem {
         card.isActive = isActive
         card.isPicked = isSelected
         card.stackCount = stackCount
+        card.stackHasMissingMember = stackHasMissingMember
         view.toolTip = asset.filename
     }
 }
@@ -783,7 +796,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                                                    for: indexPath)
                 guard let cell = item as? AssetGridItem else { return item }
                 cell.configure(asset: asset, isActive: self.session?.anchorID == asset.id,
-                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0)
+                               stackCount: self.session?.stackSummary(forAssetID: asset.id)?.count ?? 0,
+                               stackHasMissingMember: self.session?.stackHasMissingMember(forAssetID: asset.id) ?? false)
                 self.applyThumbnail(to: cell, index: indexPath.item, asset: asset)
                 return item
             }
@@ -920,7 +934,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
                   let id = cell.cardView.asset?.id,
                   let asset = assetsByID[id] else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
-                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
         }
     }
 
@@ -953,7 +968,8 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         let asset = session.assets[indexPath.item]
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
-                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
         applyThumbnail(to: cell, index: indexPath.item, asset: asset)
         return cell
     }
