@@ -382,8 +382,12 @@ final class TopBarImportExport435Tests: XCTestCase {
             XCTAssertEqual(g.title.height, reference.title.height, accuracy: 0.01,
                            "\(name) 的标题行高与打开不同")
             if let icon = g.icon, let refIcon = reference.icon {
-                XCTAssertEqual(icon.midY, refIcon.midY, accuracy: 0.01,
-                               "\(name) 的图标竖直中心与打开不同")
+                // 465 起图标按原生光学尺寸绘制（12 pt 的 `folder` / `rectangle.split.1x2` 是 18×14，
+                // `square.and.arrow.*` 是 15×17/15×18，`arrow.up.arrow.down` 是 17×14），不再把每个字形
+                // 归一到 14 pt 高 ⇒ 不同字形的高度不再相等，图标竖直中心的半像素级差异是**设计结果**；
+                // 标题基线与行高仍按 ±0.01 钉死（那是文字对齐，没变）。
+                XCTAssertEqual(icon.midY, refIcon.midY, accuracy: 0.5,
+                               "\(name) 的图标竖直中心与打开差了 \(icon.midY - refIcon.midY) pt")
             }
         }
         print("442 · 标题 minY = \(reference.title.minY) · 行高 \(reference.title.height) · 五个按钮逐点相等")
