@@ -107,13 +107,12 @@ final class GuideLineChrome367Tests: XCTestCase {
 
     // MARK: - ② width
 
-    /// ② — the line is **thicker than 328's 1.5 pt** and thinner than 367's 2.5 pt.
+    /// ② — the line body, pinned as a **cross-section count** rather than as "thick enough".
     ///
-    /// 2026-11-11 (user): 「引导线粗细再细一些」 → `GuideLineChrome.lineWidth = 2.0`. At the bitmap's
-    /// 2× that is 4 px of body, and the fully-saturated run the matcher counts is 3 px (the two
-    /// outermost pixels are the anti-aliased skirt). The floor therefore moves 4 → 3, and the
-    /// assertion still fails on 328's 1.5 pt (2 px) — the thing it exists to catch.
-    func testTheLineBodyIsAtLeastFourPixelsWide() throws {
+    /// 2026-11-11（用户）「引导线粗细再细一些」→ 2.0 pt；2026-11-21（用户）「继续再窄一些」→ 1.5 pt。
+    /// 1.5 pt @2× = 3 px 线身，抗锯齿吃掉最外两圈后全饱和的芯只剩 1–2 px，所以这条断言改成**区间**：
+    /// 至少要有一个像素认得出颜色（不然「细」就等于「看不见」），同时不许回到 2.0 pt 的 3 px 芯。
+    func testTheLineBodyIsThinButStillReads() throws {
         let (rep, _) = try makeBitmap()
         let a = CGPoint(x: 200.5, y: 350.5)
         let b = CGPoint(x: 800.5, y: 350.5)
@@ -126,8 +125,9 @@ final class GuideLineChrome367Tests: XCTestCase {
             guard let color = rep.colorAt(x: x, y: y) else { run = 0; continue }
             if matches(color, reference) { run += 1; longest = max(longest, run) } else { run = 0 }
         }
-        print("367 ② 线身: x=500 pt 横截面连续 \(longest) px（2.0 pt @2× = 4 px）")
-        XCTAssertGreaterThanOrEqual(longest, 3, "367 ② 引导线不够粗（< 2.0 pt）")
+        print("367 ② 线身: x=500 pt 横截面连续 \(longest) px（1.5 pt @2× = 3 px 线身）")
+        XCTAssertGreaterThanOrEqual(longest, 1, "367 ② 引导线细到认不出颜色（0 像素命中）")
+        XCTAssertLessThanOrEqual(longest, 2, "367 ② 线身回到了 2.0 pt 那一档（3 px 芯）")
     }
 
     // MARK: - ③ colour
@@ -149,10 +149,10 @@ final class GuideLineChrome367Tests: XCTestCase {
         for (name, delta) in against {
             XCTAssertGreaterThanOrEqual(delta, 25, "367 ③ 与 \(name) 的 ΔE00 太小")
         }
-        // 2026-11-11：用户「再细一些，直接改不跑测试」→ `lineWidth` 2.5 → 2.0（`ba18e3d`）；
-        // 这条断言当时没跟着改，属遗留红，现按实现重钉（仍高于 328 的 1.5 pt）。
-        XCTAssertEqual(GuideLineChrome.lineWidth, 2.0)
-        XCTAssertEqual(GuideLineChrome.shadowWidth, 1.5)
+        // 2026-11-11：`lineWidth` 2.5 → 2.0（`ba18e3d`）；2026-11-21（用户「继续再窄一些」）：2.0 → 1.5，
+        // 晕同时从 1.5 收到 1.0（线身 + 两侧晕 = 3.5 pt）。按实现重钉。
+        XCTAssertEqual(GuideLineChrome.lineWidth, 1.5)
+        XCTAssertEqual(GuideLineChrome.shadowWidth, 1.0)
         XCTAssertEqual(GuideLineChrome.dotRadius, 4)
         XCTAssertEqual(GuideLineChrome.acceptedAlpha, 0.9, accuracy: 1e-12)
     }

@@ -20,20 +20,22 @@ import CoreGraphics
 //
 // `#22D3EE` (青蓝) was chosen against the existing palette: it does not collide with the frame white,
 // the rejected red, the 35 % grid, or the `#202020` backdrop, and it has contrast on sky, foliage and
-// skin. `lineWidth` 2.5 pt + `shadowWidth` 1.5 pt keeps a dark hairline outside the colour, so the
-// line also reads on a white wall. The dots are the endpoint markers: a filled disc of radius 4 pt
-// with a 1 pt black ring, drawn at the same alpha as the line (a rejected line's dots are red too).
+// skin. `lineWidth` + `shadowWidth` keeps a dark hairline outside the colour, so the line also reads
+// on a white wall. The dots are the endpoint markers: a filled disc of radius 4 pt with a 1 pt black
+// ring, drawn at the same alpha as the line (a rejected line's dots are red too).
 public enum GuideLineChrome {
     /// The accepted line's colour — `#22D3EE`.
     public static let acceptedColour = NSColor(srgbRed: 0.13, green: 0.83, blue: 0.93, alpha: 1)
-    /// The line's own width, in points (328's line stays 1.5).
+    /// The line's own width, in points — **1.5 pt**, the same body as 328's 画线拉直 line.
     ///
-    /// 2026-11-11 (user): 「引导线粗细再细一些」 — 2.5 → **2.0 pt**. Still thicker than 328's 1.5
-    /// (the user's original complaint was that the line was not visible), but no longer the
-    /// heavy stroke 367 shipped. The halo keeps its 1.5 pt so the colour still reads on a white wall.
-    public static let lineWidth: CGFloat = 2.0
-    /// The black halo's width on each side, in points (widened with the line).
-    public static let shadowWidth: CGFloat = 1.5
+    /// 2026-11-11（用户）「引导线粗细再细一些」：2.5 → 2.0；2026-11-21（用户）「继续再窄一些」：2.0 → 1.5。
+    /// 走到这一步「粗细」的差别已经很细了：再薄就只有亚像素、抗锯齿一糊就看不见，所以这一档停在
+    /// 328 的 1.5 —— 比它更细的是「没有线」，不是「更细的线」。可读性由色相（#22D3EE）与黑晕维持，
+    /// 不再靠加粗。
+    public static let lineWidth: CGFloat = 1.5
+    /// The black halo's width on each side, in points. 线身变 1.5 后晕也从 1.5 收到 **1.0**：
+    /// 线身 + 两侧晕 = 3.5 pt 的总带，颜色仍有一整像素的对比底，但不再是一条黑边包着细芯。
+    public static let shadowWidth: CGFloat = 1.0
     /// The endpoint disc's radius, in points (diameter 8 pt).
     public static let dotRadius: CGFloat = 4.0
     /// The black ring outside the endpoint disc, in points.
