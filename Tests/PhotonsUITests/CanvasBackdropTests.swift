@@ -2,6 +2,7 @@ import XCTest
 import Metal
 import AppKit
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 315 — the canvas colour is one enum with a preference, and the photograph does not notice.
@@ -36,11 +37,11 @@ final class CanvasBackdropTests: XCTestCase {
 
             // A stored value this build does not know (a downgrade, a hand-edited preference) is not
             // left to make the canvas undefined: it falls back to the default.
-            UserDefaults.standard.set("slate", forKey: CanvasBackdrop.defaultsKey)
+            AppPreferences.store.set("slate", forKey: CanvasBackdrop.defaultsKey)
             XCTAssertEqual(CanvasBackdrop.current, .dark, "an unknown stop must fall back to .dark")
 
             // …and a known one is honoured, which is what makes this a preference and not a constant.
-            UserDefaults.standard.set(CanvasBackdrop.midGrey.rawValue,
+            AppPreferences.store.set(CanvasBackdrop.midGrey.rawValue,
                                       forKey: CanvasBackdrop.defaultsKey)
             XCTAssertEqual(CanvasBackdrop.current, .midGrey)
             print("backdrop: default .dark = #\(String(CanvasBackdrop.dark.eightBitValue, radix: 16)) "
@@ -258,13 +259,13 @@ final class CanvasBackdropTests: XCTestCase {
     /// Run `body` with no stored stop, then put the user's real preference back — the tests share the
     /// process' defaults with every other suite.
     private func withFreshPreference(_ body: () throws -> Void) rethrows {
-        let saved = UserDefaults.standard.object(forKey: CanvasBackdrop.defaultsKey)
-        UserDefaults.standard.removeObject(forKey: CanvasBackdrop.defaultsKey)
+        let saved = AppPreferences.store.object(forKey: CanvasBackdrop.defaultsKey)
+        AppPreferences.store.removeObject(forKey: CanvasBackdrop.defaultsKey)
         defer {
             if let saved {
-                UserDefaults.standard.set(saved, forKey: CanvasBackdrop.defaultsKey)
+                AppPreferences.store.set(saved, forKey: CanvasBackdrop.defaultsKey)
             } else {
-                UserDefaults.standard.removeObject(forKey: CanvasBackdrop.defaultsKey)
+                AppPreferences.store.removeObject(forKey: CanvasBackdrop.defaultsKey)
             }
             NotificationCenter.default.post(name: .canvasBackdropDidChange, object: nil)
         }

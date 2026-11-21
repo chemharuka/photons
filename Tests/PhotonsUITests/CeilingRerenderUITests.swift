@@ -3,6 +3,7 @@ import CoreGraphics
 import Metal
 import PhotonsCore
 import PhotonsUI
+import PhotonsLocalization
 
 /// 323 — 「拖动最高亮度后，没有触发直方图和画面的重算」, on the loupe's own paths.
 ///
@@ -25,13 +26,13 @@ final class CeilingRerenderUITests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        savedPref = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
-        UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+        savedPref = AppPreferences.store.object(forKey: HighlightCeiling.defaultsKey)
+        AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey)
     }
 
     override func tearDown() {
-        if let savedPref { UserDefaults.standard.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
-        else { UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey) }
+        if let savedPref { AppPreferences.store.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
+        else { AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey) }
         for window in windows { window.orderOut(nil) }
         windows.removeAll()
         super.tearDown()

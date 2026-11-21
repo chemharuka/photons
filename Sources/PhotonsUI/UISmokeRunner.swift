@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 import PhotonsCatalog
 import PhotonsCore
 import PhotonsExport
+import PhotonsLocalization
 
 
 /// `--ui-smoke` and `--ui-bench`: the two acceptance harnesses that need a real window.
@@ -47,6 +48,9 @@ public final class UISmokeRunner {
         let suite = UserDefaults(suiteName: ExportDefaults.smokeSuiteName)
         suite?.removePersistentDomain(forName: ExportDefaults.smokeSuiteName)
         ExportDefaults.install(suite)
+        // 467 —— 同一份域也给**所有**偏好用（筛选、排序、画布、宽度…）：烟测不是用户。
+        // AppDelegate 已经在建窗口前装过一次，这里再装一次是为了 harness 被单独构造时也成立。
+        AppPreferences.install(suite)
         self.isolatedDefaults = suite
         self.savedRealPreferences = UserDefaults.standard.dictionaryRepresentation()
             .filter { $0.key.hasPrefix("photons.") }
@@ -3748,6 +3752,7 @@ public final class UISmokeRunner {
         // 466 — the run's export preferences are a fixture, not the user's. Drop the whole suite and
         // the override so a later sheet in this process (there is none in practice) cannot write it.
         ExportDefaults.install(nil)
+        AppPreferences.install(nil)
         isolatedDefaults?.removePersistentDomain(forName: ExportDefaults.smokeSuiteName)
         restoreRealPreferences()
         if failures.isEmpty {

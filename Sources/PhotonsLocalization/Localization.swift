@@ -24,7 +24,7 @@ public enum Loc {
     /// `PHOTONS_LANGUAGE`（测试/命令行）优先，其次偏好，最后默认中文。
     public static var language: String {
         let raw = ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"]
-            ?? UserDefaults.standard.string(forKey: keyLanguage)
+            ?? AppPreferences.store.string(forKey: keyLanguage)
             ?? defaultLanguage
         return supportedLanguages.contains(raw) ? raw : defaultLanguage
     }
@@ -33,7 +33,7 @@ public enum Loc {
 
     public static func setLanguage(_ code: String) {
         guard supportedLanguages.contains(code) else { return }
-        UserDefaults.standard.set(code, forKey: keyLanguage)
+        AppPreferences.store.set(code, forKey: keyLanguage)
         NotificationCenter.default.post(name: languageDidChange, object: nil)
     }
 

@@ -289,7 +289,7 @@ public final class ExportSheetModel {
     }
 
     /// 161 §5 — the last draft the user actually exported, and the close-time writer. `draftStore` is
-    /// injected (`UserDefaults.standard` in the app) so the tests can run against an in-memory store.
+    /// injected (`AppPreferences.store` in the app) so the tests can run against an in-memory store.
     public let draftStore: ExportDraftPersistence.Store
     /// Set when the remembered blob could not be decoded. The bad blob is removed; the defaults are
     /// used, and the notice is how that is *recorded* rather than silently forgotten.
@@ -1126,7 +1126,7 @@ public struct ExportSectionCollapseStore {
         if ExportDefaults.isRunningTests {
             return .memory()
         }
-        return ExportSectionCollapseStore(store: .standard)
+        return ExportSectionCollapseStore(store: AppPreferences.store)
     }
 
     static func memory(_ seed: [String: Bool] = [:]) -> ExportSectionCollapseStore {

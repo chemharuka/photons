@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// **402 — 裁剪框/引导线不该盖到顶栏与胶片条背景上。**
@@ -34,8 +35,8 @@ final class CropOverlayAboveChrome402Tests: XCTestCase {
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         // `setBrowserMode` persists the mode in the user's defaults; a test must not leave the app
         // opening in whichever mode it switched to.
-        savedBrowserMode = UserDefaults.standard.object(forKey: "photons.browserMode")
-        savedBrowserWidth = UserDefaults.standard.object(forKey: "photons.browserWidth")
+        savedBrowserMode = AppPreferences.store.object(forKey: "photons.browserMode")
+        savedBrowserWidth = AppPreferences.store.object(forKey: "photons.browserWidth")
     }
 
     override func tearDownWithError() throws {
@@ -43,8 +44,8 @@ final class CropOverlayAboveChrome402Tests: XCTestCase {
         editors.removeAll()
         for (key, value) in [("photons.browserMode", savedBrowserMode),
                              ("photons.browserWidth", savedBrowserWidth)] {
-            if let value { UserDefaults.standard.set(value, forKey: key) }
-            else { UserDefaults.standard.removeObject(forKey: key) }
+            if let value { AppPreferences.store.set(value, forKey: key) }
+            else { AppPreferences.store.removeObject(forKey: key) }
         }
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
     }

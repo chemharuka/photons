@@ -1,6 +1,7 @@
 import AppKit
 import PhotonsCatalog
 import PhotonsUI
+import PhotonsLocalization
 
 /// Launch options. Deliberately hand-parsed (same reason as `photonsctl`: the acceptance harness
 /// must keep working while the app is mid-refactor).
@@ -44,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
         let args = LaunchArguments(CommandLine.arguments)
+
+        // 466/467 —— 烟测跑的是打包后的 app 本体：在**建窗口之前**就把偏好指到专用 suite，
+        // 否则 `WorkspaceRootView` / session 在 init 里读到、写到的都是用户的
+        // `com.nousresearch.photons`。这一句必须在 `newWindow()` 之前。
+        if args.has("--ui-smoke") || args.has("--ui-bench") {
+            AppPreferences.install(AppPreferences.makeSmokeStore())
+        }
 
         if let smoke = args.value("--ui-smoke") {
             runSmoke(args, library: smoke, bench: false)

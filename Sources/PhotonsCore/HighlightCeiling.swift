@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsLocalization
 
 /// 320 — **the picture's highest brightness**, as one adjustable number.
 ///
@@ -58,7 +59,7 @@ public enum HighlightCeiling {
     /// The number the row shows today. Read on every use (never cached), like
     /// `CanvasBackdrop.current`: a value cached at window open would survive the row that changed it.
     public static var currentEV: Double {
-        guard let stored = UserDefaults.standard.object(forKey: defaultsKey) as? Double else {
+        guard let stored = AppPreferences.store.object(forKey: defaultsKey) as? Double else {
             return defaultEV
         }
         return clampEV(stored)
@@ -71,7 +72,7 @@ public enum HighlightCeiling {
     /// is the Double itself (not a string), so `photons.defaults` shows a number in EV.
     public static func setEV(_ ev: Double) {
         let value = clampEV(ev)
-        UserDefaults.standard.set(value, forKey: defaultsKey)
+        AppPreferences.store.set(value, forKey: defaultsKey)
         NotificationCenter.default.post(name: .highlightCeilingDidChange, object: nil)
     }
 

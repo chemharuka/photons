@@ -395,7 +395,7 @@ public final class CatalogSession {
     /// `.newestFirst` (default) / `.oldestFirst`, restored from `PhotoSortPreferences` at launch.
     public private(set) var sortOrder: PhotoSortOrder
 
-    /// Where the choice is remembered (`UserDefaults.standard` in the app).
+    /// Where the choice is remembered (`AppPreferences.store`：app 里是 standard，测试里是隔离域).
     private let sortPreferenceStore: PhotoSortPreferences.Store
 
     /// Where 「上次打开哪个库」 is remembered. Injectable so a test owns its own domain.
@@ -574,7 +574,7 @@ public final class CatalogSession {
     public private(set) var lastSweepReport: SweepReport?
 
     /// Where the filter bar's state is remembered (043). Injectable so a test runs against its own
-    /// domain and can count writes; production gets `UserDefaults.standard`.
+    /// domain and can count writes; production gets `AppPreferences.store`（= `UserDefaults.standard`）。
     public let filterPersistence: FilterPersistence.Writer
 
     /// The library the filter is remembered *for* — the key of the archive the next write goes to.
@@ -582,9 +582,9 @@ public final class CatalogSession {
     /// open is not written anywhere (there is no library to attach it to).
     private var filterPersistencePath: String?
 
-    public init(filterStore: FilterPersistence.Store = UserDefaults.standard,
-                sortPreferenceStore: PhotoSortPreferences.Store = UserDefaults.standard,
-                recentLibraryStore: RecentLibrary.Store = UserDefaults.standard,
+    public init(filterStore: FilterPersistence.Store = AppPreferences.store,
+                sortPreferenceStore: PhotoSortPreferences.Store = AppPreferences.store,
+                recentLibraryStore: RecentLibrary.Store = AppPreferences.store,
                 remembersRecentLibrary: Bool = true) {
         filterPersistence = FilterPersistence.Writer(store: filterStore)
         self.sortPreferenceStore = sortPreferenceStore

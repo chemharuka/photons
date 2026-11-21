@@ -58,9 +58,8 @@ public enum AppPreferences {
         let defaults = UserDefaults(suiteName: name) ?? .standard
         defaults.removePersistentDomain(forName: name)
         isolatedSuiteName = name
-        atexit {
-            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
-        }
+        IsolatedTestSuite.name = name
+        atexit(removeIsolatedTestSuiteAtExit)
         return defaults
     }()
 
@@ -70,4 +69,19 @@ public enum AppPreferences {
         suite?.removePersistentDomain(forName: smokeSuiteName)
         return suite
     }
+}
+
+/// `atexit` 只收「不捕获上下文的 C 函数」，所以待清理的域名放在文件级盒子里，清理函数也是文件级的。
+private enum IsolatedTestSuite {
+    static var name: String?
+}
+
+private func removeIsolatedTestSuiteAtExit() {
+    guard let name = IsolatedTestSuite.name else { return }
+    UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+    // `removePersistentDomain` 之后 cfprefsd 仍会留一个 42 字节的空 plist；测试进程不该在
+    // `~/Library/Preferences/` 里留下自己的名字，所以把文件也删掉（`defaults delete` 做的就是这件事）。
+    let plist = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Preferences/\(name).plist")
+    try? FileManager.default.removeItem(at: plist)
 }

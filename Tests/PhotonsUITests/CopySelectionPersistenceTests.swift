@@ -3,6 +3,7 @@ import AppKit
 import GRDB
 import PhotonsCore
 import PhotonsCatalog
+import PhotonsLocalization
 @testable import PhotonsCatalog
 @testable import PhotonsUI
 
@@ -157,8 +158,8 @@ final class CopySelectionPersistenceTests: XCTestCase {
     /// defaults store, not argued.
     func testAUserDefaultsStoreWouldGiveBothLibrariesTheSameAnswer() throws {
         let key = "settings.copySelection.v1.081-refutation"
-        defer { UserDefaults.standard.removeObject(forKey: key) }
-        UserDefaults.standard.set("[\"curve\"]", forKey: key)
+        defer { AppPreferences.store.removeObject(forKey: key) }
+        AppPreferences.store.set("[\"curve\"]", forKey: key)
 
         let (urlA, _, assetA) = try newLibrary("DA")
         let (urlB, _, assetB) = try newLibrary("DB")
@@ -174,7 +175,7 @@ final class CopySelectionPersistenceTests: XCTestCase {
         XCTAssertNotEqual(a.copySelection.sections, b.copySelection.sections)
         // … while a defaults-backed store cannot tell them apart.
         let fromDefaults = CopySettingsSelection(storageValue:
-            UserDefaults.standard.string(forKey: key))
+            AppPreferences.store.string(forKey: key))
         XCTAssertEqual(fromDefaults.sections, [.curve],
                        "反证: 同一个 UserDefaults 键对两个库只有一个答案，B 会读到 A 的选择")
     }

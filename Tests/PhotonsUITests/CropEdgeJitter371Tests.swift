@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// **371 — 旋转+校正后，裁切框贴边移动仍会跳动（368 的残留）。**
@@ -67,8 +68,8 @@ final class CropEdgeJitter371Tests: XCTestCase {
     }
 
     override func setUpWithError() throws {
-        savedStaysInside = UserDefaults.standard.object(forKey: CropToolController.staysInsidePixelsKey)
-        UserDefaults.standard.removeObject(forKey: CropToolController.staysInsidePixelsKey)
+        savedStaysInside = AppPreferences.store.object(forKey: CropToolController.staysInsidePixelsKey)
+        AppPreferences.store.removeObject(forKey: CropToolController.staysInsidePixelsKey)
         workDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("photons-crop-371-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
@@ -78,10 +79,10 @@ final class CropEdgeJitter371Tests: XCTestCase {
         for editor in editors { editor.window?.close() }
         editors.removeAll()
         if let savedStaysInside {
-            UserDefaults.standard.set(savedStaysInside,
+            AppPreferences.store.set(savedStaysInside,
                                       forKey: CropToolController.staysInsidePixelsKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: CropToolController.staysInsidePixelsKey)
+            AppPreferences.store.removeObject(forKey: CropToolController.staysInsidePixelsKey)
         }
         savedStaysInside = nil
         if let workDir { try? FileManager.default.removeItem(at: workDir) }

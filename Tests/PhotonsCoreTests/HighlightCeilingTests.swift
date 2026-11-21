@@ -1,5 +1,6 @@
 import XCTest
 import Metal
+import PhotonsLocalization
 @testable import PhotonsCore
 
 /// 320 — **the picture's ceiling**: +2 EV (linear 4.0) was a hard literal in the display-referred
@@ -51,13 +52,13 @@ final class HighlightCeilingTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        savedPref = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
-        UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+        savedPref = AppPreferences.store.object(forKey: HighlightCeiling.defaultsKey)
+        AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey)
     }
 
     override func tearDown() {
-        if let savedPref { UserDefaults.standard.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
-        else { UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey) }
+        if let savedPref { AppPreferences.store.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
+        else { AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey) }
         super.tearDown()
     }
 
@@ -283,7 +284,7 @@ final class HighlightCeilingTests: XCTestCase {
     // MARK: - the preference itself
 
     func testThePreferenceRoundTripsClampsAndLabels() {
-        let defaults = UserDefaults.standard
+        let defaults = AppPreferences.store
         let before = defaults.object(forKey: HighlightCeiling.defaultsKey)
         defer {
             if let before { defaults.set(before, forKey: HighlightCeiling.defaultsKey) }

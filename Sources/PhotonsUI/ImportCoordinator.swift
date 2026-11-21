@@ -39,7 +39,7 @@ public final class ImportCoordinator {
     private let defaults: UserDefaults
     private let cancelFlag = ImportCancelFlag()
 
-    public init(session: CatalogSession, defaults: UserDefaults = .standard) {
+    public init(session: CatalogSession, defaults: UserDefaults = AppPreferences.store) {
         self.session = session
         self.defaults = defaults
     }

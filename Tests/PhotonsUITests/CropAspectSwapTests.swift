@@ -1,5 +1,6 @@
 import XCTest
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 072 §C — 比例：交换长宽 + 自定义比例.
@@ -156,13 +157,13 @@ final class CropAspectSwapTests: XCTestCase {
 
         // The UI preference is a *separate* thing: the last typed string, never the ratio itself.
         let key = CropToolBar.customRatioDefaultsKey
-        let previous = UserDefaults.standard.string(forKey: key)
+        let previous = AppPreferences.store.string(forKey: key)
         defer {
-            if let previous { UserDefaults.standard.set(previous, forKey: key) }
-            else { UserDefaults.standard.removeObject(forKey: key) }
+            if let previous { AppPreferences.store.set(previous, forKey: key) }
+            else { AppPreferences.store.removeObject(forKey: key) }
         }
         CropToolBar.lastCustomRatioText = "7:5"
-        XCTAssertEqual(UserDefaults.standard.string(forKey: key), "7:5", "§C2: 上次值作 UI 偏好")
+        XCTAssertEqual(AppPreferences.store.string(forKey: key), "7:5", "§C2: 上次值作 UI 偏好")
         XCTAssertEqual(CropToolBar.lastCustomRatioText, "7:5")
     }
 

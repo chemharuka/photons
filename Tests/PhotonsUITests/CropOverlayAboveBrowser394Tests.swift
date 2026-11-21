@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// **394 — 裁剪框与引导线不该盖到左侧栏上。**
@@ -31,16 +32,16 @@ final class CropOverlayAboveBrowser394Tests: XCTestCase {
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         // ④ drags the divider, which persists the width in the user's defaults. A test must not leave
         // the app opening at the width it dragged to.
-        savedBrowserWidth = UserDefaults.standard.object(forKey: "photons.browserWidth")
+        savedBrowserWidth = AppPreferences.store.object(forKey: "photons.browserWidth")
     }
 
     override func tearDownWithError() throws {
         for editor in editors { editor.window?.close() }
         editors.removeAll()
         if let savedBrowserWidth {
-            UserDefaults.standard.set(savedBrowserWidth, forKey: "photons.browserWidth")
+            AppPreferences.store.set(savedBrowserWidth, forKey: "photons.browserWidth")
         } else {
-            UserDefaults.standard.removeObject(forKey: "photons.browserWidth")
+            AppPreferences.store.removeObject(forKey: "photons.browserWidth")
         }
         if let workDir { try? FileManager.default.removeItem(at: workDir) }
     }

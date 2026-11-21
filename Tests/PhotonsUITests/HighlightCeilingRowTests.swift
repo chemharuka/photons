@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import PhotonsCore
 import PhotonsCatalog
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 320 — 「最高亮度」 is a **row in the Light card** (the owner's placement: 「没有显示卡就放 Light 卡最底
@@ -19,13 +20,13 @@ final class HighlightCeilingRowTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        savedPref = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
-        UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+        savedPref = AppPreferences.store.object(forKey: HighlightCeiling.defaultsKey)
+        AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey)
     }
 
     override func tearDown() {
-        if let savedPref { UserDefaults.standard.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
-        else { UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey) }
+        if let savedPref { AppPreferences.store.set(savedPref, forKey: HighlightCeiling.defaultsKey) }
+        else { AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey) }
         super.tearDown()
     }
 

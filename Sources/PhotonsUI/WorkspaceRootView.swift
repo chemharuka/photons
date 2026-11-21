@@ -634,7 +634,8 @@ public final class WorkspaceRootView: NSView {
     public var canImport: Bool { session.isOpen && !isImporting }
     public var canExport: Bool { !session.selection.isEmpty }
 
-    private let defaults = UserDefaults.standard
+    /// 466/467 —— 偏好走 `AppPreferences`：测试与烟测不再写进用户的域。
+    private let defaults = AppPreferences.store
 
     // MARK: - 442 · 排序切换的「刷新中」闸门
 

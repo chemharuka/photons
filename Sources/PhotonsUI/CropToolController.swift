@@ -291,7 +291,7 @@ public final class CropToolController {
     public static let staysInsidePixelsKey = "photons.cropStaysInsidePixels"
 
     /// Where the box is remembered. Injected so a test can point at its own suite; the app gets
-    /// `UserDefaults.standard`, the same store `CropToolBar.lastCustomRatioText` uses.
+    /// `AppPreferences.store`, the same store `CropToolBar.lastCustomRatioText` uses.
     private let defaults: UserDefaults
 
     /// The checkbox's state. Stored (not a computed read of `defaults`) so `@Observable` redraws the
@@ -351,7 +351,7 @@ public final class CropToolController {
     /// deliberately survives the mouse-up: a refresh one turn later would otherwise undo the drag.
     private var lockReshapeSuspended = false
 
-    public init(session: CatalogSession?, defaults: UserDefaults = .standard) {
+    public init(session: CatalogSession?, defaults: UserDefaults = AppPreferences.store) {
         self.session = session
         self.defaults = defaults
         self.staysInsidePixelsStorage = defaults.bool(forKey: Self.staysInsidePixelsKey)

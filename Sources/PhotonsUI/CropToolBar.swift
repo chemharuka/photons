@@ -1,4 +1,5 @@
 import AppKit
+import PhotonsLocalization
 import PhotonsCore
 
 // MARK: - the crop bar (画布底部的工具条) — 082: **只读三段信息**
@@ -71,8 +72,8 @@ final class CropToolBar: NSView {
     static let customRatioDefaultsKey = "photons.crop.customRatio"
     /// The `W:H` the inline field starts from (104 replaced the centred panel with it).
     static var lastCustomRatioText: String {
-        get { UserDefaults.standard.string(forKey: customRatioDefaultsKey) ?? "4:3" }
-        set { UserDefaults.standard.set(newValue, forKey: customRatioDefaultsKey) }
+        get { AppPreferences.store.string(forKey: customRatioDefaultsKey) ?? "4:3" }
+        set { AppPreferences.store.set(newValue, forKey: customRatioDefaultsKey) }
     }
 
     override init(frame frameRect: NSRect) {

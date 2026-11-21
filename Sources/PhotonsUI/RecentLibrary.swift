@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsLocalization
 
 /// 「上次打开的库」 — the one thing the next launch has to remember.
 ///
@@ -16,16 +17,16 @@ public enum RecentLibrary {
         func set(_ value: String?, forKey key: String)
     }
 
-    public static func remember(_ url: URL, in store: Store = UserDefaults.standard) {
+    public static func remember(_ url: URL, in store: Store = AppPreferences.store) {
         store.set(url.standardizedFileURL.path, forKey: defaultsKey)
     }
 
-    public static func recall(from store: Store = UserDefaults.standard) -> URL? {
+    public static func recall(from store: Store = AppPreferences.store) -> URL? {
         guard let path = store.string(forKey: defaultsKey), !path.isEmpty else { return nil }
         return URL(fileURLWithPath: path)
     }
 
-    public static func forget(in store: Store = UserDefaults.standard) {
+    public static func forget(in store: Store = AppPreferences.store) {
         store.set(nil, forKey: defaultsKey)
     }
 

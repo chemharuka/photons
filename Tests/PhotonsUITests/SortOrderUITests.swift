@@ -4,6 +4,7 @@ import CryptoKit
 import GRDB
 import PhotonsCore
 import PhotonsCatalog
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 拍摄时间排序（`新→旧 / 旧→新`）：**一个值，三个视图**。
@@ -129,7 +130,7 @@ final class SortOrderUITests: XCTestCase {
 
     // MARK: - the store (one global preference, isolated per test)
 
-    /// Both preference protocols, in memory. A test never touches `UserDefaults.standard`, so no
+    /// Both preference protocols, in memory. A test never touches `AppPreferences.store`, so no
     /// other test file inherits a sort order from this one.
     private final class MemoryStore: FilterPersistence.Store, PhotoSortPreferences.Store {
         var filters: [String: String] = [:]

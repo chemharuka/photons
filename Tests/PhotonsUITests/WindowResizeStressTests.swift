@@ -4,6 +4,7 @@ import QuartzCore
 import Metal
 import PhotonsCore
 import PhotonsUI
+import PhotonsLocalization
 
 /// 068 — **the canvas may not move while the hand is moving.**
 ///
@@ -53,16 +54,16 @@ final class WindowResizeStressTests: XCTestCase {
         super.setUp()
         // The workspace persists a divider drag in the user's defaults; a test must not leave the app
         // opening at the width it dragged to.
-        savedInspectorWidth = UserDefaults.standard.object(forKey: "photons.inspectorWidth")
+        savedInspectorWidth = AppPreferences.store.object(forKey: "photons.inspectorWidth")
     }
 
     override func tearDown() {
         for window in windows { window.orderOut(nil) }
         windows.removeAll()
         if let savedInspectorWidth {
-            UserDefaults.standard.set(savedInspectorWidth, forKey: "photons.inspectorWidth")
+            AppPreferences.store.set(savedInspectorWidth, forKey: "photons.inspectorWidth")
         } else {
-            UserDefaults.standard.removeObject(forKey: "photons.inspectorWidth")
+            AppPreferences.store.removeObject(forKey: "photons.inspectorWidth")
         }
         super.tearDown()
     }

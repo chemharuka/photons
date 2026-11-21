@@ -3,6 +3,7 @@ import AppKit
 import Metal
 import PhotonsCore
 import PhotonsUI
+import PhotonsLocalization
 
 /// The channel row's **over-white segment**: the number a channel paints when the *picture* holds it
 /// above display white, and the clipping ink it is painted in (2026-10-27).
@@ -40,14 +41,14 @@ final class HistogramOverWhiteReadoutTests: XCTestCase {
     /// raises it, so the value is saved and put back here rather than left for the next file — the
     /// same discipline `HighlightCeilingTests` and `CeilingRerenderUITests` use.
     private func saveCeiling() {
-        savedCeiling = UserDefaults.standard.object(forKey: HighlightCeiling.defaultsKey)
+        savedCeiling = AppPreferences.store.object(forKey: HighlightCeiling.defaultsKey)
     }
 
     private func restoreCeiling() {
         if let savedCeiling {
-            UserDefaults.standard.set(savedCeiling, forKey: HighlightCeiling.defaultsKey)
+            AppPreferences.store.set(savedCeiling, forKey: HighlightCeiling.defaultsKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: HighlightCeiling.defaultsKey)
+            AppPreferences.store.removeObject(forKey: HighlightCeiling.defaultsKey)
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsLocalization
 import PhotonsExport
 
 // MARK: - the last export draft (161 §5)
@@ -49,7 +50,7 @@ public enum ExportDefaults {
     public static var draftStore: ExportDraftPersistence.Store {
         if let overrideSuite { return overrideSuite }
         if isRunningTests { return InMemoryDraftStore() }
-        return UserDefaults.standard
+        return AppPreferences.store
     }
 }
 

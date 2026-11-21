@@ -1,4 +1,5 @@
 import Foundation
+import PhotonsLocalization
 
 /// 315 — the colour of the canvas **around** the picture: one enum, one `current`, every producer.
 ///
@@ -51,7 +52,7 @@ public enum CanvasBackdrop: String, CaseIterable, Sendable {
     /// The stop the canvas is drawn with now. Read on every use rather than cached, so the producers
     /// that are recomputed per frame (the pass's clear colour) cannot lag a change.
     public static var current: CanvasBackdrop {
-        guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
+        guard let raw = AppPreferences.store.string(forKey: defaultsKey),
               let stored = CanvasBackdrop(rawValue: raw) else { return .dark }
         return stored
     }
@@ -61,7 +62,7 @@ public enum CanvasBackdrop: String, CaseIterable, Sendable {
     /// notification — it asks `current` per present — but the loupe re-presents the frame it already
     /// has so the visible canvas changes in the same turn.
     public static func set(_ value: CanvasBackdrop) {
-        UserDefaults.standard.set(value.rawValue, forKey: defaultsKey)
+        AppPreferences.store.set(value.rawValue, forKey: defaultsKey)
         NotificationCenter.default.post(name: .canvasBackdropDidChange, object: nil)
     }
 }

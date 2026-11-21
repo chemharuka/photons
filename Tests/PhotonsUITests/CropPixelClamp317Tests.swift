@@ -1,6 +1,7 @@
 import XCTest
 import CoreGraphics
 import PhotonsCore
+import PhotonsLocalization
 @testable import PhotonsUI
 
 /// 317 — 裁切卡的 **「不出像素」** 勾选框：勾上以后，框只能在**旋转后的照片像素**里移动。
@@ -394,7 +395,7 @@ final class CropPixelClamp317Tests: XCTestCase {
     func testSevenTheCropCardCarriesTheRealCheckbox() throws {
         let editor = try CropUITestSupport.makeEditor(in: workDir)
         defer {
-            // 这个窗口用的是 `UserDefaults.standard`：离开前把偏好还原成 307 的默认。
+            // 这个窗口用的是 `AppPreferences.store`：离开前把偏好还原成 307 的默认。
             editor.rootView.loupeController.cropTool.setCropStaysInsidePixels(false)
             editor.window?.orderOut(nil)
         }
@@ -427,7 +428,7 @@ final class CropPixelClamp317Tests: XCTestCase {
         box.performClick(nil)
         CropUITestSupport.pump(0.05)
         XCTAssertTrue(loupe.cropTool.cropStaysInsidePixels, "点一下必须写到控制器")
-        XCTAssertTrue(UserDefaults.standard.bool(forKey: CropToolController.staysInsidePixelsKey),
+        XCTAssertTrue(AppPreferences.store.bool(forKey: CropToolController.staysInsidePixelsKey),
                       "点一下必须写到偏好")
         XCTAssertEqual(box.state, .on)
 

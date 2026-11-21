@@ -1,4 +1,5 @@
 import AppKit
+import PhotonsLocalization
 import CryptoKit
 import Foundation
 import PhotonsCatalog
@@ -91,7 +92,7 @@ public enum FilterPersistence {
     // MARK: read / write
 
     /// The raw blob for `libraryPath`, or nil when there is none (or it is not readable JSON).
-    public static func load(libraryPath: String, from store: Store = UserDefaults.standard) -> StoredFilter? {
+    public static func load(libraryPath: String, from store: Store = AppPreferences.store) -> StoredFilter? {
         guard let json = store.storedFilterJSON(forKey: storageKey(libraryPath: libraryPath)),
               let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(StoredFilter.self, from: data)
@@ -133,7 +134,7 @@ public enum FilterPersistence {
     /// not rewritten, which is what keeps a restore from bouncing straight back into a save.
     @discardableResult
     public static func save(_ filter: CatalogFilter, libraryPath: String,
-                            to store: Store = UserDefaults.standard) -> Bool {
+                            to store: Store = AppPreferences.store) -> Bool {
         guard let json = encoded(stored(from: filter)) else { return false }
         let key = storageKey(libraryPath: libraryPath)
         guard store.storedFilterJSON(forKey: key) != json else { return false }
@@ -142,7 +143,7 @@ public enum FilterPersistence {
     }
 
     /// 「清除全部」 for one library. Only that key goes; every other library keeps its archive.
-    public static func clear(libraryPath: String, in store: Store = UserDefaults.standard) {
+    public static func clear(libraryPath: String, in store: Store = AppPreferences.store) {
         store.removeFilterJSON(forKey: storageKey(libraryPath: libraryPath))
     }
 
@@ -183,7 +184,7 @@ public enum FilterPersistence {
         /// that want to force it; this observer is so the app does not have to remember to.
         private var terminateToken: NSObjectProtocol?
 
-        public init(store: Store = UserDefaults.standard,
+        public init(store: Store = AppPreferences.store,
                     throttle: TimeInterval = FilterPersistence.defaultWriteThrottle) {
             self.store = store
             self.throttle = throttle
