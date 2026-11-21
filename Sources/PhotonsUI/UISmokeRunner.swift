@@ -329,6 +329,11 @@ public final class UISmokeRunner {
             + " display=\(reasons[.displayChanged]) document=\(reasons[.documentChanged])"
             + " camera=\(reasons[.cameraChanged]) canvas=\(reasons[.canvasChanged])"
             + " decodeScale=\(reasons[.decodeScaleChanged])")
+        // 491 — one read-only line the acceptance can grep: hits, then misses split by reason.
+        log("canvas cache hits=\(canvasCache.hits) misses=[noEntry=\(reasons[.noEntryForPhoto])"
+            + " display=\(reasons[.displayChanged]) document=\(reasons[.documentChanged])"
+            + " camera=\(reasons[.cameraChanged]) canvas=\(reasons[.canvasChanged])"
+            + " decodeScale=\(reasons[.decodeScaleChanged])]")
 
         return finish()
     }
