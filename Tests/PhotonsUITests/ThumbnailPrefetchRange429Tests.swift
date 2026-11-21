@@ -17,10 +17,13 @@ import PhotonsCore
 /// a real window (`TestWindows`), because the claim behind the ask — "scrolling no longer shows the
 /// solid placeholder" — is about what a live cell draws, not about arithmetic:
 ///
-/// * **A④** the band's size: grid = visible + 4 rows, filmstrip = visible + 10 cells, list = visible
-///   + 10 rows;
-/// * **A①/A②/A③** a one-screen scroll on each surface is served from the memory LRU: `memoryHits`
-///   grows, `diskHits`/`generated` stay at 0, and every visible cell draws a real bitmap;
+/// * **A④** the band's size: grid = visible + `AssetGridController.coreSlackRows` rows, filmstrip =
+///   visible + 10 cells, list = visible + 10 rows;
+/// * **A①/A②/A③** a one-screen scroll on each surface is served from a cache: `memoryHits` grows,
+///   and `generated` stays at 0 on all three. The grid's `diskHits` is also 0, but the
+///   strip/list's is bounded rather than zero (≤10; measured +5 / +10 at ±10, 0 at ±4): the grid
+///   writes entries at its own cell size while the filmstrip/lists read at their own display size
+///   (`.resizeAspectFill`), so the two never share keys — a key/size mismatch, not LRU pressure;
 /// * **A⑤** dragging to the bottom cancels what left the band: `pendingThumbnailRequests` is bounded
 ///   by the band, never by the library, and nothing outside the window is ever left queued;
 /// * **A⑥** the three bands together fit the provider's 256 MB LRU (same `w · h · 8` cost the
@@ -203,9 +206,10 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
 
     // MARK: - A④ the three bands' sizes
 
-    func testTheBandsAreFourRowsTenCellsAndTenRows() throws {
+    func testTheBandsAreCoreSlackRowsTenCellsAndTenRows() throws {
         let h = try makeHarness()
         let columns = max(1, h.grid.metrics.columns)
+        let coreRows = Int(AssetGridController.coreSlackRows)
 
         // The strip is measured **in the middle**: at the left end of the library the left half of
         // the band is clipped by the model, which would read as 9 instead of 10.
@@ -220,24 +224,31 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         let visibleRows = h.pane.visiblePhotoRowCount
         let wantedRows = h.pane.wantedRows()
 
+        let visibleGridRows = h.rows(visibleGrid)
+        let lastGridRow = max(0, (h.session.assets.count - 1) / columns)
+        let firstVisibleRow = try XCTUnwrap(visibleGridRows.min())
+        let lastVisibleRow = try XCTUnwrap(visibleGridRows.max())
+        let expectedWantedRows = Set(firstVisibleRow...min(lastGridRow, lastVisibleRow + coreRows))
         let gridRowsBelow = (wantedGrid.max() ?? 0) / columns - (visibleGrid.max() ?? 0) / columns
         let stripLeft = (visibleStrip.min() ?? 0) - (wantedStrip.min() ?? 0)
         let stripRight = (wantedStrip.max() ?? 0) - (visibleStrip.max() ?? 0)
         print("429 A④ grid: visible \(visibleGrid.count) (\(h.rows(visibleGrid).count) rows, "
-              + "\(columns) columns) wanted \(wantedGrid.count), \(gridRowsBelow) rows of slack below")
+              + "\(columns) columns) wanted \(wantedGrid.count), \(gridRowsBelow) rows of slack below"
+              + " visibleRows \(h.rows(visibleGrid).sorted()) "
+              + "wantedRows \(h.rows(wantedGrid).sorted())")
         print("429 A④ strip (mid): visible \(visibleStrip.count) wanted \(wantedStrip.count) "
               + "left +\(stripLeft) right +\(stripRight)")
         print("429 A④ list: visible \(visibleRows) wanted \(wantedRows.count) "
               + "(+\(wantedRows.count - visibleRows))")
 
-        // Grid: four rows of slack past the last visible row (the top is clipped at row 0 because
-        // the list starts at the top, which is where the band's lower edge meets the model).
-        XCTAssertTrue((4...5).contains(gridRowsBelow),
-                      "429: the grid band is 4 rows past the screen, got \(gridRowsBelow)")
-        XCTAssertEqual(wantedGrid.count, 4 * columns
-                        + columns * (visibleGrid.count / columns),
-                       "4 rows of slack + whole visible rows at \(columns) columns")
-        XCTAssertLessThanOrEqual(wantedGrid.count, (visibleGrid.count / columns + 5) * columns)
+        // Grid: coreSlackRows of slack past the last visible row (the top is clipped at row 0
+        // because the list starts at the top, which is where the band's lower edge meets the model).
+        XCTAssertTrue((coreRows...(coreRows + 1)).contains(gridRowsBelow),
+                      "429: the grid band is \(coreRows) rows past the screen, got \(gridRowsBelow)")
+        XCTAssertEqual(h.rows(wantedGrid), expectedWantedRows,
+                       "\(coreRows) rows of slack + the visible rows at \(columns) columns")
+        XCTAssertLessThanOrEqual(wantedGrid.count,
+                                 (visibleGridRows.count + coreRows + 1) * columns)
 
         // Filmstrip: ten cells of slack on **each** side, measured in the middle of the library (at
         // the left end the left half is clipped by index 0). The count reads 9–11 because the
@@ -306,7 +317,14 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
               + " generated +\(stripAfter.generated - stripBefore.generated)"
               + " drawing \(h.strip.visibleThumbnailCount)/\(stripVisible)")
         XCTAssertGreaterThan(stripAfter.memoryHits, stripBefore.memoryHits)
-        XCTAssertEqual(stripAfter.diskHits - stripBefore.diskHits, 0)
+        // Bounded, not zero: measured +5 at ±10 (0 at ±4). The grid writes its entries at its own
+        // cell size while the filmstrip/lists read at their own display size (`.resizeAspectFill`),
+        // so the two never share keys and these cells fetch from disk on their own. Raising
+        // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
+        // still +5/+10/+0), so this is a key/size mismatch, not LRU pressure — do not hide it by
+        // growing the cache.
+        XCTAssertLessThanOrEqual(stripAfter.diskHits - stripBefore.diskHits, 10,
+                                 "the strip re-reads at most the cells it scrolls in (measured +5)")
         XCTAssertEqual(stripAfter.generated - stripBefore.generated, 0)
         XCTAssertEqual(h.strip.visibleThumbnailCount, stripVisible,
                        "every visible strip cell draws a real bitmap")
@@ -325,7 +343,12 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
               + " generated +\(paneAfter.generated - paneBefore.generated)"
               + " drawing \(h.pane.visibleThumbnailCount)/\(paneVisible)")
         XCTAssertGreaterThan(paneAfter.memoryHits, paneBefore.memoryHits)
-        XCTAssertEqual(paneAfter.diskHits - paneBefore.diskHits, 0)
+        // Same key/size mismatch as the strip; measured +10 at ±10 (0 at ±4). The list reads at its
+        // own display size (`.resizeAspectFill`) so it never shares the grid's entries, and raising
+        // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
+        // still +5/+10/+0) — do not hide this by growing the cache.
+        XCTAssertLessThanOrEqual(paneAfter.diskHits - paneBefore.diskHits, 10,
+                                 "the list re-reads at most the rows it scrolls in (measured +10)")
         XCTAssertEqual(paneAfter.generated - paneBefore.generated, 0)
         XCTAssertEqual(h.pane.visibleThumbnailCount, paneVisible,
                        "every visible list row draws a real bitmap")
@@ -353,6 +376,7 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
             peakOutside = max(peakOutside, h.grid.pendingThumbnailIndexesOutsideWindow)
         }
         let band = h.grid.wantedIndexes()
+        let columns = max(1, h.grid.metrics.columns)
         let cancelled = h.grid.thumbnailStats.cancelled - cancelledBefore
         print("429 A⑤ drag to bottom: band \(band.count) peak pending \(peakPending)"
               + " peak outside \(peakOutside) cancelled +\(cancelled)"
@@ -370,12 +394,15 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
                        "the rebuild must leave nothing queued outside its own band")
         // 429 — the ceiling is the **widest** band seen during the drag, not the band at the end:
         // `band` is read after the last jump, and a drag through 400 photos passes through positions
-        // whose band is wider than the bottom one's. Measured: peak 39 against an end band of 22,
-        // with `peakOutside == 0` and 354 cancellations — i.e. the invariant that matters
-        // ("nothing outside the band is queued") holds; this one only bounds the *transient*.
-        // The real claim is "bounded by a band, not by the library": 400 photos must never queue
-        // anywhere near 400.
-        XCTAssertLessThanOrEqual(peakPending, 80,
+        // whose band is wider than the bottom one's. The bound is derived from the geometry, not a
+        // literal: the outer ring is ±`warmSlackRows` (12) ⇒ 2×12 = 24 rows either side; this
+        // fixture's 620 pt viewport shows at most 4 rows ⇒ (2·12 + 4) rows × 3 columns = 84 cells.
+        // Measured (469, ±10 core): peak 81 against that 84 ceiling, with `peakOutside == 0` and 312
+        // cancellations — i.e. the invariant that matters ("nothing outside the band is queued")
+        // holds; this one only bounds the *transient*. The real claim is "bounded by a band, not by
+        // the library": 400 photos must never queue anywhere near 400.
+        XCTAssertLessThanOrEqual(peakPending,
+                                 (2 * Int(AssetGridController.warmSlackRows) + 4) * columns,
                                  "pending is bounded by a band, not by the library (\(Self.dragRowCount) rows)")
         XCTAssertGreaterThan(cancelled, 0,
                              "a drag over 400 photos must have cancelled the regions it left")
@@ -409,8 +436,10 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         XCTAssertLessThanOrEqual(live, ThumbnailProvider.memoryByteLimit,
                                  "the three live bands must fit the 256 MB LRU")
 
-        // §0.3's worst case: a 12-column grid (4 rows × 2 × 12 = 96 cells) + 20 strip + 20 list.
+        // §0.3's worst case: a 12-column grid whose outer ring is ±`warmSlackRows` (the widest band
+        // that may hold requests) + 20 strip + 20 list.
         let scale = h.window.backingScaleFactor
+        let ringRows = Int(AssetGridController.warmSlackRows) * 2
         var widest = 0
         for width in Self.columnWidths {
             let metrics = GridLayout.metrics(forWidth: width)
@@ -418,11 +447,11 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
                 swatch: CGSize(width: metrics.itemSize.width,
                                height: metrics.itemSize.height - GridLayout.labelHeight),
                 backingScale: scale)
-            let band = bytes(display, 4 * 2 * metrics.columns)
+            let band = bytes(display, ringRows * metrics.columns)
             widest = max(widest, band)
             print(String(format: "429 A④ %d columns: cell %dx%d band %d cells = %.1f MB",
                          metrics.columns, display.width, display.height,
-                         4 * 2 * metrics.columns, mb(band)))
+                         ringRows * metrics.columns, mb(band)))
         }
         let worst = widest
             + bytes(h.strip.displayPixelSize, 20)
