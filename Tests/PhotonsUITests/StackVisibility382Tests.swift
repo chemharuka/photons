@@ -220,7 +220,11 @@ final class StackVisibility382Tests: XCTestCase {
 
     // MARK: - ② 列表第二行右对齐的「堆叠5张」
 
-    func testTheRowSecondLineEndsWithTheStackCountAndNonStacksHideIt() throws {
+    /// 465 —— 用户口径：侧栏的堆叠行**不再**在第二行右端显示「堆叠N张」。
+    ///
+    /// 列表里表示堆叠只剩两处：文件名前缀「堆叠 」（③ 另测）与缩略图左下角的「⧉ N」胶囊（① 另测）。
+    /// 第二行（机身 · 日期）重新占满整列 —— 这条断言就是「标签没了、meta 也没留下让位的缺口」。
+    func testTheRowSecondLineHasNoStackCountLabel() throws {
         let (session, _) = try makeSession()
         let surfaces = makeSurfaces(session: session)
         let summary = try stackTheNewestFive(session: session)
@@ -229,25 +233,23 @@ final class StackVisibility382Tests: XCTestCase {
         let top = try XCTUnwrap(session.assets.first { $0.id == summary.topID })
         let stackedRow = try XCTUnwrap(rowCell(surfaces.pane, id: top.id))
         stackedRow.layout()
-        XCTAssertEqual(stackedRow.stackLabelText, "堆叠5张", "② 逐字符：堆叠5张")
-        XCTAssertFalse(stackedRow.stackLabelIsHidden, "② 堆叠行不隐藏")
-        // Right-aligned inside the meta column, on the same baseline.
-        XCTAssertEqual(stackedRow.stackLabelFrame.maxY, stackedRow.metaFrame.maxY, accuracy: 0.01,
-                       "② 与 meta 同一条基线")
-        XCTAssertEqual(stackedRow.stackLabelFrame.height, stackedRow.metaFrame.height, accuracy: 0.01)
-        XCTAssertGreaterThanOrEqual(stackedRow.stackLabelFrame.minX,
-                                    stackedRow.metaFrame.maxX + 4 - 0.01,
-                                    "② meta 与「堆叠5张」之间 ≥ 4 pt")
+        // 整列 = 行宽 − 左侧图标列 44 − 右侧 2（与 `layout()` 的算式同一个）。
+        XCTAssertEqual(stackedRow.metaFrame.width, stackedRow.bounds.width - 46, accuracy: 0.5,
+                       "465：第二行右端不再有「堆叠N张」，meta 应占满整列")
+        let countLabels = stackedRow.subviews.compactMap { $0 as? NSTextField }
+            .map(\.stringValue).filter { $0.hasPrefix("堆叠") && $0.hasSuffix("张") }
+        XCTAssertTrue(countLabels.isEmpty, "465：行内不应再有「堆叠N张」标签，实际 \(countLabels)")
+        // 角标还在（这一处没动，① 也测了）。
+        Self.paint(stackedRow)
+        XCTAssertTrue(stackedRow.lastDrawnBadges.contains("stack:5"))
 
         let plain = try XCTUnwrap(session.assets.first { $0.id != top.id && $0.stackId == nil })
         let plainRow = try XCTUnwrap(rowCell(surfaces.pane, id: plain.id))
         plainRow.layout()
-        XCTAssertEqual(plainRow.stackLabelText, "")
-        XCTAssertTrue(plainRow.stackLabelIsHidden, "② 非堆叠行隐藏（且不留空白占位）")
+        XCTAssertEqual(plainRow.metaFrame.width, plainRow.bounds.width - 46, accuracy: 0.5)
         XCTAssertFalse(plainRow.lastDrawnBadges.contains { $0.hasPrefix("stack:") })
-        print("② stacked \"\(stackedRow.stackLabelText)\" frame \(stackedRow.stackLabelFrame) "
-              + "meta \(stackedRow.metaFrame) | plain \"\(plainRow.stackLabelText)\" "
-              + "hidden=\(plainRow.stackLabelIsHidden)")
+        print("② stacked meta \(stackedRow.metaFrame) bounds \(stackedRow.bounds) "
+              + "| 行内「堆叠N张」标签数 \(countLabels.count)")
     }
 
     // MARK: - ③ 文件名「堆叠 XXX.dng」，按拼好的整串截断
@@ -466,7 +468,7 @@ final class StackVisibility382Tests: XCTestCase {
         let firstID = session.assets[0].id
         let before = try XCTUnwrap(rowCell(surfaces.pane, id: firstID))
         before.layout()
-        XCTAssertEqual(before.stackLabelText, "", "⑤b 前置：还没堆叠")
+        XCTAssertEqual(before.stackCount, 0, "⑤b 前置：还没堆叠")
 
         _ = try stackTheNewestFive(session: session)
         pump(0.6)
@@ -477,10 +479,13 @@ final class StackVisibility382Tests: XCTestCase {
         after.layout()
         XCTAssertEqual(after.assetID, firstID, "⑤b 这一行还是那张照片")
         XCTAssertEqual(after.stackCount, 5, "⑤b 行的 stackCount 变成 5（reloadData 重配过）")
-        XCTAssertEqual(after.stackLabelText, "堆叠5张", "⑤b 且第二行右标签已经画上")
+        // 465 —— 第二行右端不再有「堆叠N张」，重配的证据改成文件名前缀（这一行是置顶）。
+        let nameTexts = after.subviews.compactMap { $0 as? NSTextField }.map(\.stringValue)
+        XCTAssertTrue(nameTexts.contains { $0.hasPrefix("堆叠 ") },
+                      "⑤b 且文件名已带「堆叠 」前缀，实际 \(nameTexts)")
         Self.paint(after)
         XCTAssertTrue(after.lastDrawnBadges.contains("stack:5"))
-        print("⑤b list row stackCount \(after.stackCount) label \"\(after.stackLabelText)\" "
+        print("⑤b list row stackCount \(after.stackCount) name \"\(nameTexts.first(where: { $0.hasPrefix("堆叠 ") }) ?? "?")\" "
               + "badges \(after.lastDrawnBadges)")
     }
 
@@ -622,7 +627,8 @@ final class StackVisibility382Tests: XCTestCase {
         let badges = AssetBadges(rating: 3, flag: "pick", colorLabel: "red", stackCount: 5)
         XCTAssertEqual(badges.drawn, ["stars:3", "flag:pick", "color:red", "stack:5"])
         XCTAssertEqual(badges.signature, "★3 ⚑ 红 ⧉5")
-        // The new "how many" wording is a separate field, not a re-purposing of `drawn`.
+        // The "how many" wording is a separate field, not a re-purposing of `drawn`. 465：它已不再
+        // 画在列表第二行（用户要求侧栏不显示），字符串口径本身保留。
         XCTAssertEqual(StackText.countLabel(5), "堆叠5张")
         XCTAssertEqual(StackText.displayName("A.dng", isStack: true), "堆叠 A.dng")
         XCTAssertEqual(StackText.displayName("A.dng", isStack: false), "A.dng")

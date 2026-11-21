@@ -1776,10 +1776,8 @@ final class PhotoRowCell: NSTableCellView {
     private let stars = NSTextField(labelWithString: "")
     /// 「原文件已移动」, over the thumbnail square. Hidden unless the row's original moved.
     private let pill = MissingFilePillView()
-    /// §382 — 「堆叠5张」, right-aligned at the **end of the second line** (机身 · 日期), as the user
-    /// asked: the list does not use a corner badge as its only mark. Hidden on every other row, with
-    /// an empty string, so no blank placeholder reserves width.
-    private let stackLabel = NSTextField(labelWithString: "")
+    // 465 — 第二行右端的「堆叠N张」已按用户口径**取消**：列表只保留文件名前缀「堆叠 」（见
+    // `StackText.displayName`）与缩略图左下角的「⧉ N」胶囊，第二行（机身 · 日期）重新占满整列。
     /// §378 — 「⧉ N」 in the square's bottom-left corner (§382 moved it there from the top-right).
     ///
     /// A view of its own (like `pill`) because AppKit draws a cell *before* its subviews: a capsule
@@ -1831,13 +1829,7 @@ final class PhotoRowCell: NSTableCellView {
         return out
     }
 
-    /// §382 — the second line's right-hand label, as laid out and as shown. The acceptance reads
-    /// both: 「堆叠5张」 on a stack's row, `""` + hidden on every other row.
-    var stackLabelText: String { stackLabel.stringValue }
-    var stackLabelIsHidden: Bool { stackLabel.isHidden }
-    /// The rect the second line's right label occupies (zero when the row is not a stack).
-    var stackLabelFrame: NSRect { stackLabel.isHidden ? .zero : stackLabel.frame }
-    /// The rect `meta` actually has — it gives way to the stack label rather than running under it.
+    /// The rect `meta` actually has — 465 起它占满整列（不再给右端标签让位）。
     var metaFrame: NSRect { meta.frame }
     /// §382 — the square the corner badge draws into, and where it painted the capsules.
     var stackBadgeFrame: NSRect { stackBadge.frame }
@@ -1930,13 +1922,7 @@ final class PhotoRowCell: NSTableCellView {
         meta.lineBreakMode = .byTruncatingTail
         stars.font = .systemFont(ofSize: 8)
         stars.textColor = .systemYellow
-        // §382 — the second line's right-hand count: same 9 pt as `meta`, same baseline, quiet grey.
-        stackLabel.font = .systemFont(ofSize: 9)
-        stackLabel.textColor = .secondaryLabelColor
-        stackLabel.alignment = .right
-        stackLabel.lineBreakMode = .byClipping
-        stackLabel.isHidden = true
-        for v in [swatch, name, meta, stars, stackLabel] { addSubview(v) }
+        for v in [swatch, name, meta, stars] { addSubview(v) }
         addSubview(pill)   // last: the badge sits on top of the thumbnail square
         addSubview(stackBadge)  // and the stack capsule on top of that, in the corner
     }
@@ -1971,12 +1957,6 @@ final class PhotoRowCell: NSTableCellView {
         stars.stringValue = asset.rating > 0 ? PlaceholderSwatch.stars(asset.rating) : ""
         name.textColor = isActive ? .labelColor : .secondaryLabelColor
 
-        // §382 — 「堆叠5张」, right-aligned on the second line. A non-stack row hides it **and**
-        // empties it: a blank label would still reserve the column and push `meta` left.
-        let label = stackCount >= 2 ? StackText.countLabel(stackCount) : StackText.empty
-        stackLabel.stringValue = label
-        stackLabel.isHidden = label.isEmpty
-
         // 「原文件已移动」 takes the meta line: on a 46 pt row the fact that the file is gone outranks
         // the camera model, and the badge is drawn on the thumbnail as well so a glance finds it.
         // 463: a stack whose hidden member is gone gets its own sentence — only the top has a row.
@@ -1994,7 +1974,6 @@ final class PhotoRowCell: NSTableCellView {
         }
         // A recycled row can be reconfigured without a new `layout()` (same frame, new photo).
         refitName()
-        layoutSecondLine()
     }
 
     /// Paint the image (or drop back to the placeholder when `image` is nil).
@@ -2079,10 +2058,7 @@ final class PhotoRowCell: NSTableCellView {
         // the **exact** column `layout()` just gave it (no extra inset: a narrower string would not
         // be the longest one). `byTruncatingTail` above then has nothing left to do.
         refitName(width: width)
-        // §382 — 「堆叠5张」 is right-aligned at the end of the second line, on `meta`'s baseline.
-        // It takes its own width from the right edge and `meta` gives way (≥ 4 pt of air between
-        // them), so a long camera · date never runs under the count.
-        layoutSecondLine(in: NSRect(x: textX, y: metaY, width: width, height: heights.meta))
+        // 465 — 第二行只有 `meta` 一项，整列都是它的（`meta.frame` 已在上面按 `width` 设好）。
         // The pill rides the bottom of the thumbnail square (12 pt tall, inset 1 pt).
         pill.frame = NSRect(x: swatch.frame.minX, y: swatch.frame.maxY - 13,
                             width: swatch.frame.width, height: 12)
@@ -2092,36 +2068,6 @@ final class PhotoRowCell: NSTableCellView {
         stackBadge.frame = swatch.frame
     }
 
-    /// §382 — the **full** width the second line has, before the stack label takes its share. Kept
-    /// here (not read back off `meta.frame`) because `meta` is narrowed on a stack row: reusing its
-    /// frame as the baseline would leave a recycled non-stack row with the narrow column.
-    private var secondLineColumn = NSRect.zero
-
-    /// §382 — lay the second line out as one row: `meta` on the left, 「堆叠5张」 flush right.
-    ///
-    /// Separated from `layout()` because `configure` needs the same arithmetic on a recycled row
-    /// whose frame did not change (so `layout()` may not run again). Both doors pass the **whole**
-    /// column; the label's own width is what is subtracted from it.
-    private func layoutSecondLine(in column: NSRect? = nil) {
-        if let column { secondLineColumn = column }
-        let column = secondLineColumn
-        guard column.width > 0, column.height > 0 else { return }
-        if stackLabel.isHidden {
-            meta.frame = column
-            stackLabel.frame = .zero
-            return
-        }
-        // The label is right-aligned, so its width is its own text's width (a hair of slack keeps
-        // a `byClipping` label from shaving the last glyph).
-        let needed = ceil((stackLabel.stringValue as NSString)
-            .size(withAttributes: [.font: stackLabel.font ?? .systemFont(ofSize: 9)]).width) + 1
-        let labelWidth = min(needed, column.width)
-        let gap: CGFloat = 4
-        let metaWidth = max(0, column.width - labelWidth - gap)
-        meta.frame = NSRect(x: column.minX, y: column.minY, width: metaWidth, height: column.height)
-        stackLabel.frame = NSRect(x: column.maxX - labelWidth, y: column.minY,
-                                  width: labelWidth, height: column.height)
-    }
 }
 
 /// The corner badge over a photo row's 34 pt square.

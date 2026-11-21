@@ -255,8 +255,10 @@ public struct AssetBadges: Equatable {
 
 /// §382 — the words a stack adds to the three surfaces, in **one** place.
 ///
-/// Two strings, both display-only: the 置顶 photo's caption/name is 「堆叠 XXX.dng」, and the photo
-/// list's second line ends with 「堆叠5张」. Neither `asset.filename` nor anything on disk moves —
+/// Two strings, both display-only: the 置顶 photo's caption/name is 「堆叠 XXX.dng」, and
+/// `countLabel` is the 「堆叠5张」 wording — **no longer drawn in the photo list** (465: 用户要求侧栏
+/// 不显示张数文字), kept because the smoke's string probe and the 382 acceptance assert it. Neither
+/// `asset.filename` nor anything on disk moves —
 /// the prefix is composed here and fitted afterwards (`PlaceholderStyle.fitted` on the *joined*
 /// string), so the truncation is solved for the string the eye actually sees.
 public enum StackText {
@@ -268,7 +270,8 @@ public enum StackText {
         isStack ? prefix + filename : filename
     }
 
-    /// 「堆叠5张」 — Arabic digits, as the user asked (16:2x).
+    /// 「堆叠5张」 — Arabic digits, as the user asked (16:2x). 465：列表不再画它（用户要求侧栏不显示
+    /// 「堆叠N张」），只剩这一处字符串口径与它的断言。
     public static func countLabel(_ count: Int) -> String {
         Loc.t("堆叠{0}张", String(describing: (count)))
     }
