@@ -46,6 +46,17 @@ scripts/build-hdrmerge.sh
 # binary that still runs is indistinguishable from a working one until you press the menu item.
 scripts/build-ansel-denoise.sh --to-app
 
+# The denoiser is different from the two tools above: it *is* a SwiftPM edge
+# (`Package.swift` -> `Vendor/nonlocal-matchfilter-swift`), so `make app` compiles it
+# anyway. Building it here as well is a pre-flight check, not a redundancy we forgot to
+# remove: a half-synced vendor tree (a file copied in, its caller not) then fails at a
+# step whose name says "nonlocal-matchfilter", instead of surfacing later as "the app
+# built fine but the denoise menu does nothing". 20-30 s, and it uses its own scratch
+# dir so it never invalidates the app's incremental build.
+swift build --package-path Vendor/nonlocal-matchfilter-swift \
+            --scratch-path .build/vendor-nonlocal \
+            -c release --product NonlocalMatchFilter
+
 make app
 
 # 图标来自 Resources/AppIcon.icon（Icon Composer 文档）+ 由 scripts/appicon.py 烘出的经典 icns。

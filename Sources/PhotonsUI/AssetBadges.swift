@@ -86,14 +86,18 @@ public struct AssetBadges: Equatable {
     /// maxY − height − inset`.
     ///
     /// These numbers are the ticket's: inset 3, capsule 13 pt tall, 4 pt horizontal padding, 3 pt
-    /// between neighbours, 9 pt dot. They are pinned here (not derived) because the acceptance
+    /// between neighbours, 7 pt dot. They are pinned here (not derived) because the acceptance
     /// quotes them, and one place is what keeps the three faces on the same geometry.
+    ///
+    /// 465 —— 色点 9 → **7 pt**：用户口径「色标比选中的绿色旗帜大很多，稍微调小以匹配」。旗帜是
+    /// 9 pt bold 的 `⚑`，墨迹实测 4.5 × 6.0 pt（`✕` 是 6.0 × 6.5）；9 pt 的实心圆比它高一半、面积
+    /// 大四倍，一眼看过去色标在抢戏。7 pt 与字形墨迹同高，胶囊高度（13）不变，`padX` 也不动。
     public enum BadgeMetrics {
         public static let inset: CGFloat = 3
         public static let pillHeight: CGFloat = 13
         public static let padX: CGFloat = 4
         public static let gap: CGFloat = 3
-        public static let dot: CGFloat = 9
+        public static let dot: CGFloat = 7
     }
 
     /// Where a paint put the capsules, in the thumbnail rect's own coordinates.
