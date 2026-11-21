@@ -281,6 +281,51 @@ public enum StackText {
     }
 }
 
+/// 465 —— 侧栏照片行第三行的字：**星级 + 选取 + 色标**，一个 attributed 串。
+///
+/// 用户口径（2026-11-21）：这三样不再画在缩略图上，而是和星级一起放到第三行；顺序是
+/// 「星级 + 选取 + 色标」，空格分隔、**有就占位、没有就下一个靠左**。堆叠指示在同一行右端（见
+/// `stackIndicator(_:)`），所以这里只管左半。
+///
+/// 为什么要 attributed 而不是纯文本：三样各有自己的颜色（星级黄、旗帜绿/红、色标红/黄/绿/蓝/紫），
+/// 而 `NSTextField(stringValue:)` 只有一个 `textColor`。串本身仍是「有就画」，不补占位符。
+public enum RowBadgeLine {
+    /// 色标的字形：一个实心圆点，颜色就是色标色（与缩略图上的圆点是同一个语义）。
+    public static let colorGlyph = "●"
+    /// 堆叠指示的字形：与网格 / 胶片条的胶囊同一个 `⧉`。
+    public static let stackGlyph = "⧉"
+
+    /// 纯文本（无障碍标签、探针与日志用），与 `attributed` 逐字符一致。
+    public static func text(_ badges: AssetBadges) -> String {
+        attributed(badges, font: .systemFont(ofSize: 9)).string
+    }
+
+    /// 第三行左半：星级、旗帜、色点，按这个顺序，空格分隔，只放**有的**项。
+    public static func attributed(_ badges: AssetBadges, font: NSFont) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let space: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+        func add(_ glyph: String, _ color: NSColor) {
+            if out.length > 0 { out.append(NSAttributedString(string: " ", attributes: space)) }
+            out.append(NSAttributedString(string: glyph, attributes: [.font: font, .foregroundColor: color]))
+        }
+        if badges.rating > 0 {
+            add(String(repeating: "★", count: badges.rating), .systemYellow)
+        }
+        if let flag = badges.flag {
+            add(flag.glyph, flag.color)
+        }
+        if let label = badges.colorLabel {
+            add(colorGlyph, label.color)
+        }
+        return out
+    }
+
+    /// 右端的堆叠指示：「⧉ 3」。不是堆叠（< 2 张）时调用方给空串并隐藏这个 label。
+    public static func stackIndicator(_ count: Int) -> String {
+        count >= 2 ? "\(stackGlyph) \(count)" : ""
+    }
+}
+
 /// One set of attributes for every cell (the original stars code did the same, for the same reason:
 /// no per-item font building on a 10k-row grid).
 public enum BadgeStyle {

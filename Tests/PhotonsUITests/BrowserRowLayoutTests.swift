@@ -56,14 +56,14 @@ final class BrowserRowLayoutTests: XCTestCase {
         return cell.layoutProbe
     }
 
-    /// The three lines as one block. `meta` is the bottom line, `stars` the top one (the order the
-    /// cell has always stacked them — only the block's position is under test here).
+    /// The three lines as one block. 465 的行序（自上而下）：文件名、机型+日期、徽标行，
+    /// 所以 y-up 里 `badges` 在最低、`name` 在最高。
     private func textBlock(_ p: PhotoRowCell.LayoutProbe) -> NSRect {
         NSRect(x: p.name.minX,
-               y: min(p.name.minY, p.meta.minY, p.stars.minY),
+               y: min(p.name.minY, p.meta.minY, p.badges.minY),
                width: p.name.width,
-               height: max(p.name.maxY, p.meta.maxY, p.stars.maxY)
-                       - min(p.name.minY, p.meta.minY, p.stars.minY))
+               height: max(p.name.maxY, p.meta.maxY, p.badges.maxY)
+                       - min(p.name.minY, p.meta.minY, p.badges.minY))
     }
 
     /// 1 — the text block and the thumbnail square share a vertical centre, on every row height.
@@ -94,8 +94,8 @@ final class BrowserRowLayoutTests: XCTestCase {
                        "top slack \(topSlack) vs bottom slack \(block.minY)")
     }
 
-    /// 2 + 3 — the three lines neither overlap nor leave the row. Names run bottom → top:
-    /// meta, name, stars.
+    /// 2 + 3 — the three lines neither overlap nor leave the row. 465 起自上而下：
+    /// name（文件名）、meta（机型 · 日期）、badges（星级 + 选取 + 色标）。
     func testTheThreeLinesDoNotOverlapAndStayInsideTheRow() {
         // Frames are sums of the same heights, so "adjacent" can differ by a couple of ulps
         // (10.378378378378377 vs …379 on a 32 pt row). 1e-6 pt is a millionth of a pixel — far
@@ -105,11 +105,11 @@ final class BrowserRowLayoutTests: XCTestCase {
         for h in rowHeights {
             let p = layOut(rowHeight: h)
             XCTAssertGreaterThanOrEqual(p.name.minY + eps, p.meta.maxY, "row \(h): name overlaps meta")
-            XCTAssertGreaterThanOrEqual(p.stars.minY + eps, p.name.maxY, "row \(h): stars overlap name")
+            XCTAssertGreaterThanOrEqual(p.meta.minY + eps, p.badges.maxY, "row \(h): meta overlaps badges")
             XCTAssertGreaterThan(p.name.height, 0, "row \(h): name has no height")
             XCTAssertGreaterThan(p.meta.height, 0, "row \(h): meta has no height")
-            XCTAssertGreaterThan(p.stars.height, 0, "row \(h): stars has no height")
-            for (label, r) in [("name", p.name), ("meta", p.meta), ("stars", p.stars)] {
+            XCTAssertGreaterThan(p.badges.height, 0, "row \(h): badges has no height")
+            for (label, r) in [("name", p.name), ("meta", p.meta), ("badges", p.badges)] {
                 XCTAssertGreaterThanOrEqual(r.minY, 0, "row \(h): \(label) hangs below the row")
                 XCTAssertLessThanOrEqual(r.maxY, h, "row \(h): \(label) is pushed out of the row")
                 XCTAssertGreaterThanOrEqual(r.minX, 0, "row \(h): \(label) starts left of the row")
@@ -131,19 +131,19 @@ final class BrowserRowLayoutTests: XCTestCase {
         for h in rowHeights {
             let p = layOut(rowHeight: h)
             XCTAssertEqual(p.name.minY, p.meta.maxY, accuracy: 0.01, "row \(h): gap under name")
-            XCTAssertEqual(p.stars.minY, p.name.maxY, accuracy: 0.01, "row \(h): gap under stars")
+            XCTAssertEqual(p.meta.minY, p.badges.maxY, accuracy: 0.01, "row \(h): gap under meta")
         }
     }
 
     /// The line heights the cell documents, on any row tall enough to hold them: name 15, meta 12,
-    /// stars 10 (11 / 9 / 8 pt fonts). A taller row grows the slack around the block — never the
+    /// badges 10 (11 / 9 / 9 pt fonts). A taller row grows the slack around the block — never the
     /// lines — so the type size never rides on the row height.
     func testTheLineHeightsAreUnchangedOnRowsTallEnoughToHoldThem() {
         for h in [WorkspaceLayout.browserRowHeight, 60, 74] as [CGFloat] {
             let p = layOut(rowHeight: h)
             XCTAssertEqual(p.name.height, PhotoRowCell.nameLineHeight, accuracy: 0.01, "row \(h)")
             XCTAssertEqual(p.meta.height, PhotoRowCell.metaLineHeight, accuracy: 0.01, "row \(h)")
-            XCTAssertEqual(p.stars.height, PhotoRowCell.starsLineHeight, accuracy: 0.01, "row \(h)")
+            XCTAssertEqual(p.badges.height, PhotoRowCell.badgeLineHeight, accuracy: 0.01, "row \(h)")
             XCTAssertEqual(PhotoRowCell.textBlockHeight, 37, accuracy: 0.01,
                            "15 + 12 + 10 — the block the row centres")
         }
@@ -175,7 +175,7 @@ final class BrowserRowLayoutTests: XCTestCase {
         let shift = (tall - short) / 2
         for (label, r1, r2) in [("name", a.name, b.name),
                                 ("meta", a.meta, b.meta),
-                                ("stars", a.stars, b.stars),
+                                ("badges", a.badges, b.badges),
                                 ("swatch", a.swatch, b.swatch),
                                 ("pill", a.pill, b.pill)] {
             XCTAssertEqual(r2.minY - r1.minY, shift, accuracy: 0.01,

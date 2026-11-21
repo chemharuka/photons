@@ -37,14 +37,8 @@ public enum PlaceholderSwatch {
                        brightness: CGFloat(min(1, c.brightness * 1.45)), alpha: 1)
     }
 
-    /// One star string, no font work: the cells draw this instead of building attributed runs.
-    ///
-    /// 465 —— **只画评了几颗**，不再补空心星凑到 5 颗。用户口径：列表「有几个就画几个」。
-    /// 这也与网格卡片 / 胶片条的 `AssetBadges`（`String(repeating: "★", count: rating)`）同一口径：
-    /// 同一个分数在三面长得一样，而不是一处实心空心混排、一处只有实心。
-    public static func stars(_ rating: Int) -> String {
-        String(repeating: "★", count: max(0, min(5, rating)))
-    }
+    // 465 —— 星级串已由 `RowBadgeLine.attributed`（第三行，带色）与 `AssetBadges`（网格 / 胶片条）
+    // 各自生产；这里原本那版「实心 + 空心凑 5 颗」的 `stars(_:)` 已删除，不再有第二个生产者。
 }
 
 /// Shared text attributes for the placeholder cells (one allocation, not one per item).

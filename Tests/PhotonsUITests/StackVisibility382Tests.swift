@@ -389,32 +389,26 @@ final class StackVisibility382Tests: XCTestCase {
         }
         print("④ film stack \(fp) flag \(ff) glyph \(fGlyph) dot \(fDot) stars \(f.starsPill.map(String.init(describing:)) ?? "—") thumb \(filmRect)")
 
-        // photo list row (the 34 pt square; stars are the row's own text line)
+        // photo list row — 465：徽标不再画在 34 pt 方块上，全部搬到第三行（星级 + 选取 + 色标
+        // 左对齐，堆叠指示右对齐）。所以这里断言的是**文本行**，不是角标矩形。
         let row = try XCTUnwrap(rowCell(surfaces.pane, id: top.id))
-        Self.paint(row)
+        row.layout()
         XCTAssertEqual(row.lastDrawnBadges.sorted(),
                        ["color:red", "flag:pick", "stack:5", "stars:3"],
-                       "④ 列表角标带齐四项，实际 \(row.lastDrawnBadges)")
-        let square = row.stackBadgeFrame
-        XCTAssertEqual(square.width, 34, accuracy: 0.01, "④ 列表：角标 frame 是整张 34 pt 方块")
-        XCTAssertEqual(square.height, 34, accuracy: 0.01, "④ 列表：角标 frame 是整张 34 pt 方块")
-        // The layout rects are in the **badge view's** own coordinates (it is pinned to the square),
-        // so the square for these comparisons is the view's bounds, not its frame in the row.
-        let badgeRect = NSRect(origin: .zero, size: square.size)
-        let rp = try XCTUnwrap(row.stackBadgeLayout.stackPill, "④ 列表：张数胶囊")
-        XCTAssertGreaterThanOrEqual(rp.minX - badgeRect.minX, 0)
-        XCTAssertLessThanOrEqual(rp.minX - badgeRect.minX, 6, "④ 列表：张数距方块左边 ≤ 6")
-        XCTAssertGreaterThanOrEqual(badgeRect.maxY - rp.maxY, 0)
-        XCTAssertLessThanOrEqual(badgeRect.maxY - rp.maxY, 6, "④ 列表：张数距方块底边 ≤ 6")
-        let rGlyph = try XCTUnwrap(row.stackBadgeLayout.flagGlyphRect, "④ 列表：旗标字形")
-        let rDot = try XCTUnwrap(row.stackBadgeLayout.colorDotRect, "④ 列表：色点")
-        XCTAssertLessThanOrEqual(abs(rDot.midY - rGlyph.midY), 1, "④ 列表：旗标与色点同一行")
-        XCTAssertLessThanOrEqual(rGlyph.maxX, rDot.minX, "④ 列表：旗标在色点左侧")
-        for (name, rect) in [("stack", rp), ("flag", try XCTUnwrap(row.stackBadgeLayout.flagPill))] {
-            let inTopRight = rect.minX > badgeRect.midX && rect.minY < 16
-            XCTAssertFalse(inTopRight, "④ 列表：右上角应有徽标 \(name) \(rect)")
-        }
-        print("④ row square \(square) badgeRect \(badgeRect) stack \(rp) glyph \(rGlyph) dot \(rDot) "
+                       "④ 列表第三行带齐四项，实际 \(row.lastDrawnBadges)")
+        XCTAssertEqual(row.badgeLineText, "★★★ ⚑ ●",
+                       "④ 列表第三行左半：星级、选取、色标，空格分隔，实际 \(row.badgeLineText)")
+        XCTAssertEqual(row.stackIndicatorText, "⧉ 5", "④ 列表第三行右半：堆叠指示")
+        // 右对齐：指示贴着行的右端（`layout()` 给它的列右边界是 textX + width = 行宽 − 2）。
+        XCTAssertEqual(row.stackIndicatorFrame.maxX, row.bounds.width - 2, accuracy: 0.5,
+                       "④ 列表：堆叠指示右对齐到行右边距")
+        XCTAssertLessThanOrEqual(row.badgeLineFrame.maxX + 4 - 0.5, row.stackIndicatorFrame.minX,
+                                 "④ 列表：徽标行与堆叠指示之间 ≥ 4 pt")
+        // 同一行：两者竖直中心一致。
+        XCTAssertEqual(row.badgeLineFrame.midY, row.stackIndicatorFrame.midY, accuracy: 0.51,
+                       "④ 列表：徽标行与堆叠指示同一行")
+        print("④ row badgeLine \"\(row.badgeLineText)\" \(row.badgeLineFrame) "
+              + "indicator \"\(row.stackIndicatorText)\" \(row.stackIndicatorFrame) "
               + "badges \(row.lastDrawnBadges)")
     }
 
