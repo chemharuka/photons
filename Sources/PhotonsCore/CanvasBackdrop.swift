@@ -18,7 +18,7 @@ import PhotonsLocalization
 /// intermediate `#2E2E2E` was considered and dropped: at L\* 18.9 it read as the same grey as
 /// `#202020`.
 public enum CanvasBackdrop: String, CaseIterable, Sendable {
-    /// `#202020` — the default. L\* 12.3, 1.29 against `000000`.
+    /// `#202020` — the default in dark appearance. L\* 12.3, 1.29 against `000000`.
     case dark
     /// `#808080` — mid grey. L\* 53.6, 6.4 against `000000`.
     case midGrey
@@ -45,15 +45,21 @@ public enum CanvasBackdrop: String, CaseIterable, Sendable {
     }
 
     /// `photons.canvasBackdrop`. The raw value is the persisted form, so a stored stop that this build
-    /// does not know (a downgrade, a hand-written preference) falls back to `.dark` instead of
+    /// does not know (a downgrade, a hand-written preference) falls back to `fallback` instead of
     /// leaving the canvas undefined.
     public static let defaultsKey = "photons.canvasBackdrop"
+
+    /// The stop used when the user has not chosen one (and when a stored raw value is unknown).
+    ///
+    /// 473 — the UI layer points this at the current appearance: dark `#202020`, light `#E6E6E6`.
+    /// An explicit choice is stored and always wins; this default must never overwrite it.
+    public static var fallback: CanvasBackdrop = .dark
 
     /// The stop the canvas is drawn with now. Read on every use rather than cached, so the producers
     /// that are recomputed per frame (the pass's clear colour) cannot lag a change.
     public static var current: CanvasBackdrop {
         guard let raw = AppPreferences.store.string(forKey: defaultsKey),
-              let stored = CanvasBackdrop(rawValue: raw) else { return .dark }
+              let stored = CanvasBackdrop(rawValue: raw) else { return fallback }
         return stored
     }
 

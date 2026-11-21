@@ -53,6 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppPreferences.install(AppPreferences.makeSmokeStore())
         }
 
+        // 473 — 外观（跟随系统 / 浅色 / 深色）与首帧画布默认。放在建窗口之前：`NSApp.appearance`
+        // 对随后创建的窗口直接生效，`CanvasBackdrop.fallback` 也不会让首帧用错衬底。
+        AppearancePreference.applyStored()
+
         if let smoke = args.value("--ui-smoke") {
             runSmoke(args, library: smoke, bench: false)
             return

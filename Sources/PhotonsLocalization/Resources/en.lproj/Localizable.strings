@@ -801,6 +801,10 @@
 "语义" = "Semantic";
 "语义软边" = "Semantic soft edge";
 "语言" = "Language";
+"外观" = "Appearance";
+"跟随系统" = "System";
+"浅色" = "Light";
+"深色" = "Dark";
 "读数 1 px · S3.6b 输入" = "1 px readout · S3.6b input";
 "读数 1 px · S3.6b 输入 · @%d,%d · RGB %@" = "1 px readout · S3.6b input · @%d,%d · RGB %@";
 "调整" = "Adjustments";
