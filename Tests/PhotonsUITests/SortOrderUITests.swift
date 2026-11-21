@@ -368,9 +368,13 @@ final class SortOrderUITests: XCTestCase {
         // is keyed by that digest plus the display size — the old `preview` key is a different key
         // family and is never written by a grid request, so probing it only ever read `nil`.
         let keyBefore = ThumbnailProvider.hdKey(for: newest, document: session.edit)
-        let pixelsBefore = try XCTUnwrap(provider.memoryImage(for: keyBefore, display: nil),
-                                         "缩略图没有进内存层，后面的「不重解码」无从谈起")
-        let hashBefore = Self.pixelHash(pixelsBefore)
+        // 492 — the memory layer is a **cache**, not a promise: it is bounded (512 images / 256 MB)
+        // and `NSCache` may purge it under process-wide pressure while other test classes are
+        // decoding. `nil` here is therefore not a failure of the behaviour under test. The claim
+        // "sorting is view state, not a re-decode" is asserted below through the provider's counters;
+        // the pixel comparison is kept only as a bonus when the frame is still resident.
+        let pixelsBefore = provider.memoryImage(for: keyBefore, display: nil)
+        let hashBefore = pixelsBefore.map(Self.pixelHash)
 
         let statsBefore = harness.grid.thumbnailStats
         let docBefore = Self.documentHash(session.edit)
@@ -383,9 +387,8 @@ final class SortOrderUITests: XCTestCase {
         harness.settle(10)
 
         let statsAfter = harness.grid.thumbnailStats
-        let pixelsAfter = try XCTUnwrap(provider.memoryImage(for: keyBefore, display: nil),
-                                        "排序之后内存层丢了这一帧")
-        let hashAfter = Self.pixelHash(pixelsAfter)
+        let pixelsAfter = provider.memoryImage(for: keyBefore, display: nil)
+        let hashAfter = pixelsAfter.map(Self.pixelHash)
 
         XCTAssertEqual(harness.gridOrder.count, gridCountBefore)
         XCTAssertEqual(harness.gridOrder, session.assets.map(\.id), "视图顺序 ≠ 会话顺序")
@@ -396,18 +399,23 @@ final class SortOrderUITests: XCTestCase {
         XCTAssertEqual(session.editRevision, revisionBefore, "editRevision 变了")
         XCTAssertEqual(session.persistCount, persistBefore, "persistCount 变了")
 
-        // 像素：同一张的缩略图逐字节相同（memcmp 级，不是「看着一样」）。
-        XCTAssertEqual(hashAfter, hashBefore, "帧像素 hash 变了")
-        // 解码次数不增加；命中从内存层来。
+        // 像素：如果这一帧还在内存层里，读回的字节必须相同（memcmp 级）；缓存被挤掉时，
+        // 下面的计数才是判据，`nil` 本身不算失败（492）。
+        if let hashBefore, let hashAfter {
+            XCTAssertEqual(hashAfter, hashBefore, "帧像素 hash 变了")
+        }
+        // 解码次数 / 产出次数不增加；命中从内存层来（请求可能因重排重发，但必须命中缓存）。
         XCTAssertEqual(statsAfter.generated, statsBefore.generated, "排序触发了重新解码")
+        XCTAssertEqual(statsAfter.decodes, statsBefore.decodes, "排序触发了重新解码（decodes）")
+        XCTAssertEqual(statsAfter.hdJPEGDecodes, statsBefore.hdJPEGDecodes, "排序触发了 HD JPEG 重新解码")
         XCTAssertGreaterThanOrEqual(statsAfter.memoryHits, statsBefore.memoryHits)
         XCTAssertEqual(statsAfter.failures, statsBefore.failures)
 
         print("排序前后 ─ documentHash \(docBefore.prefix(12)) → \(Self.documentHash(session.edit).prefix(12)) · "
               + "history \(historyBefore) → \(session.history.count) · editRevision \(revisionBefore) → \(session.editRevision) · "
               + "persist \(persistBefore) → \(session.persistCount)")
-        print("像素 hash \(hashBefore.prefix(16)) → \(hashAfter.prefix(16))（同一对象: \(pixelsBefore === pixelsAfter)）· "
-              + "解码 generated \(statsBefore.generated) → \(statsAfter.generated) · "
+        print("像素 hash \(hashBefore?.prefix(16) ?? "已在内存层外（计数判据）") → \(hashAfter?.prefix(16) ?? "nil")（同一对象: \(pixelsBefore != nil && pixelsBefore === pixelsAfter)）· "
+              + "解码 generated \(statsBefore.generated) → \(statsAfter.generated) · decodes \(statsBefore.decodes) → \(statsAfter.decodes) · "
               + "memory \(statsBefore.memoryHits) → \(statsAfter.memoryHits) · "
               + "requests \(statsBefore.requests) → \(statsAfter.requests)")
     }
