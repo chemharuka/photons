@@ -414,12 +414,22 @@ final class SingleClickNoCenter383Tests: XCTestCase {
         pump(0.2)
 
         let countBefore = filmstrip.centerScrollCount
+        // §1.4 — 主判据是结构计数：这次编辑提交不许触发任何浏览器面 reveal。
+        let rootRevealBefore = root.browserRevealCount
+        let paneRevealBefore = root.browserPane.revealAnchorCallCount
+        let stripRevealBefore = filmstrip.revealAnchorCallCount
         session.applyEdit { $0.light.exposure = 0.75 }
         let committedAt = Date()
         XCTAssertTrue(session.commitEdit(label: "曝光"), "这次编辑应当落地")
 
         pump(0.15)
         XCTAssertEqual(filmstrip.centerScrollCount, countBefore, "0.25 s 合并窗口内不许滚")
+        XCTAssertEqual(root.browserRevealCount, rootRevealBefore,
+                       "§1.4：合并窗口内编辑提交不得消费浏览器面 reveal")
+        XCTAssertEqual(root.browserPane.revealAnchorCallCount, paneRevealBefore,
+                       "§1.4：合并窗口内不得调用侧栏 revealAnchor")
+        XCTAssertEqual(filmstrip.revealAnchorCallCount, stripRevealBefore,
+                       "§1.4：合并窗口内不得调用胶片条 revealAnchor")
         let arrival = try XCTUnwrap(timeUntil(1.5) { filmstrip.centerScrollCount == countBefore + 1 },
                                     "0.25 s 合并窗口关掉后应当滚一次")
         let elapsed = Date().timeIntervalSince(committedAt)
@@ -429,7 +439,13 @@ final class SingleClickNoCenter383Tests: XCTestCase {
         pump(0.8)
         XCTAssertEqual(filmstrip.centerScrollCount, countBefore + 1,
                        "一次编辑只滚一次（\(countBefore) → \(filmstrip.centerScrollCount)）")
-        note("383 ⑤ 编辑落地：commit \(String(format: "%.3f", elapsed)) s 后滚 1 次（窗口内 0 次；计数 \(countBefore) → \(filmstrip.centerScrollCount)），到达耗时 \(String(format: "%.3f", arrival)) s；1/1")
+        XCTAssertEqual(root.browserRevealCount, rootRevealBefore,
+                       "§1.4：一次编辑提交前后 browserRevealCount 增量必须为 0")
+        XCTAssertEqual(root.browserPane.revealAnchorCallCount, paneRevealBefore,
+                       "§1.4：一次编辑提交前后侧栏 revealAnchor 调用次数必须为 0")
+        XCTAssertEqual(filmstrip.revealAnchorCallCount, stripRevealBefore,
+                       "§1.4：一次编辑提交前后胶片条 revealAnchor 调用次数必须为 0")
+        note("383 ⑤ 编辑落地：commit \(String(format: "%.3f", elapsed)) s 后滚 1 次（窗口内 0 次；计数 \(countBefore) → \(filmstrip.centerScrollCount)），到达耗时 \(String(format: "%.3f", arrival)) s；reveal 调用增量 0；1/1")
     }
 
     // MARK: - ⑥ 拖动期间不居中：10 次 applyEdit（不 commit）增量 0
