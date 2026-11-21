@@ -359,13 +359,19 @@ public enum StageAlgorithmVersion {
     /// the bump rule is the one every comment above spells out (the same stored numbers must produce
     /// different pixels to move this number).
     ///
+    /// **4** — 483: the pass moved from S3.10 (after S3.9/S3.5, before S3c) to **S2.9**, immediately
+    /// after S1 and before the mask stages. Same stored numbers, different pixels whenever the
+    /// document carries a non-identity tone/curve/colour edit (the kernel now runs on scene light
+    /// rather than after S2) or any local mask (the 475 boundary leak disappears). A neutral document
+    /// — every stage between S1 and S4 at identity — is pixel-identical to 3, but the raw key segment
+    /// moved from `s3.10-sharpen` to `s2.9-sharpen`, so the cache cannot mix the two positions.
     /// **3** — 192: the σ **floor** is gone, and the base plane's stride follows the render scale. σ
     /// now runs at exactly `radius_img · S` (the moment-matched sub-texel kernel in `s3_10_tap`
     /// carries everything below one texel), and the plane is built at one texel per **two image
     /// pixels** (`max(1, round(2·S))`) instead of a fixed 2 canvas px. Both change the pixels of the
     /// same document at every rung below 1:1 and above it; S = 1 is value-identical to 2, so the
     /// golden images do not move.
-    public static let sharpen = 3
+    public static let sharpen = 4
     /// **3** — 134: the radius is normalised to half the **diagonal** (the corner is 1.0 at every
     /// aspect ratio), the contour is always circular (the `roundness` field is gone), and `midpoint`
     /// now spans centre → corner (`inner = mid/100`, was `mix(0.25, 1.05, …)` measured in half the

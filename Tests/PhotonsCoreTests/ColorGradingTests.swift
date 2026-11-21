@@ -483,8 +483,8 @@ final class ColorGradingTests: XCTestCase {
                                          edit: EditModel.neutral, display: DisplayOptions())
         let link = try XCTUnwrap(links.grade)
         XCTAssertEqual(links.pipeline, StageChainShape.resting([.grade]))
-        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.grade, .sharpen, .display],
-                       "314: S3.10 排在 S3.8 之后；S3.8 仍在 S3 与 S4 之间")
+        XCTAssertEqual(Array(links.pipeline.suffix(2)), [.grade, .display],
+                       "483: 锐化搬去 S2.9 之后，S3.8 仍是 S4 之前的最后一个算术 pass")
         XCTAssertEqual(link, KeyBuilder(KeyBuilder.digest(of: plain.color))
             .add("grade").add(graded.keyMaterial(.grade)).canonical,
                        "S3.8 必须由 S3 的键种下（没有 HSL/黑白/局部色时）")
@@ -502,7 +502,7 @@ final class ColorGradingTests: XCTestCase {
                                          canvas: dims, content: dims,
                                          edit: edit, display: DisplayOptions())
         XCTAssertEqual(links.pipeline, StageChainShape.resting([.hsl, .grade]))
-        XCTAssertEqual(Array(links.pipeline.suffix(4)), [.hsl, .grade, .sharpen, .display])
+        XCTAssertEqual(Array(links.pipeline.suffix(3)), [.hsl, .grade, .display])
         XCTAssertEqual(try XCTUnwrap(links.grade),
                        KeyBuilder(KeyBuilder.digest(of: try XCTUnwrap(links.hsl)))
                         .add("grade").add(edit.keyMaterial(.grade)).canonical)
@@ -611,6 +611,10 @@ final class ColorGradingTests: XCTestCase {
         let image = Self.bands(width: 24, bandHeight: 8)
         let graph = try makeGraph(image, identity: "grade-cpu")
         var edit = EditModel.neutral
+        // 483 — 锐化 moved to S2.9, *before* S3.8, so the resting 50 would put its own halos into the
+        // frame this comparison reads. The claim is "S3.8's kernel is this CPU reference", so the
+        // document names 锐化 at 0 (the mask/grade goldens' isolation, 329).
+        edit.sharpen = SharpenGroup(amount: 0)
         edit.colorGrading.shadows = GradeWheel(hue: -35, saturation: 60, lightness: 20)
         edit.colorGrading.midtones = GradeWheel(hue: 15, saturation: -30, lightness: -10)
         edit.colorGrading.highlights = GradeWheel(hue: 70, saturation: 20, lightness: 5)

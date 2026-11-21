@@ -70,7 +70,16 @@ final class CacheVersionTests: XCTestCase {
         let geometry = KeyBuilder("photons-render-v1")
             .add(identity).add(size).add(size).add(size).add(stripped(.geometry)).canonical
         let sceneLinear = KeyBuilder(KeyBuilder.digest(of: geometry)).add(stripped(.sceneLinear)).canonical
-        let curve = KeyBuilder(KeyBuilder.digest(of: sceneLinear)).add(stripped(.curve)).canonical
+        // 483 — 锐化 moved to S2.9, between S1 and the curve; the frozen chain must keep that shape
+        // or ⑤ would compare two different graphs instead of one graph with the tokens removed.
+        var curveSeed = sceneLinear
+        if edit.hasSharpen {
+            curveSeed = KeyBuilder(KeyBuilder.digest(of: sceneLinear))
+                .add("sharpen")
+                .add(stripped(.sharpen))
+                .canonical
+        }
+        let curve = KeyBuilder(KeyBuilder.digest(of: curveSeed)).add(stripped(.curve)).canonical
         // 159: contrast sits **after** the tone map, so the "strip the version" chain has the new
         // shape: curve → toneMap → [contrast →] color. It must be the same graph as production with
         // only the `;alg=` tokens removed, or ⑤ would compare two different graphs.
@@ -88,18 +97,9 @@ final class CacheVersionTests: XCTestCase {
                 .canonical
         }
         let color = KeyBuilder(KeyBuilder.digest(of: colorSeed)).add(stripped(.color)).canonical
-        // 314 — 锐化's resting amount became 50, so a shipped document has a real S3.10 and its link
-        // sits between S3 and the vignette (185's slot). Mirroring it here is the same rule as the
-        // contrast link above: the frozen chain must be production's chain with only the `;alg=`
-        // tokens removed. Before 314 this stanza never fired for `contrastEdit()`.
-        var vignetteSeed = color
-        if edit.hasSharpen {
-            vignetteSeed = KeyBuilder(KeyBuilder.digest(of: color))
-                .add("sharpen")
-                .add(stripped(.sharpen))
-                .canonical
-        }
-        let vignette = KeyBuilder(KeyBuilder.digest(of: vignetteSeed)).add(stripped(.vignette)).canonical
+        // 483 — 锐化 is no longer between S3 and the vignette (that stanza mirrored 314's S3.10);
+        // the vignette is seeded by S3 exactly as it was before 314.
+        let vignette = KeyBuilder(KeyBuilder.digest(of: color)).add(stripped(.vignette)).canonical
         let display = KeyBuilder(KeyBuilder.digest(of: vignette))
             .add(DisplayOptions().keyString).add(size).canonical
         return (KeyBuilder.digest(of: geometry), KeyBuilder.digest(of: sceneLinear),
@@ -209,8 +209,10 @@ final class CacheVersionTests: XCTestCase {
         // 192: the σ floor is gone (σ is exactly `radius·S`) and the base plane's stride follows the
         // render scale (`max(1, round(2·S))`), so every rung but 1:1 changes again. S = 1 is
         // value-identical, which is why the golden images do not move.
-        XCTAssertEqual(StageAlgorithmVersion.sharpen, 3,
-                       "192: σ 地板删除 + 基面 stride 随尺度")
+        // 483: S3.10 → S2.9 moved the pass before the mask stages, so the same numbers run on
+        // scene light. Generation 4; the 192 reasons (σ floor, base-plane stride) remain in 3.
+        XCTAssertEqual(StageAlgorithmVersion.sharpen, 4,
+                       "483: 锐化前移到局部编辑之前（S2.9）")
         // 301: the canvas is the rotated crop **frame** (方案 A), so a straightened, non-full crop's
         // pixels moved — generation 4. (246 had taken it to 3 by folding the keystone into the AABB.)
         XCTAssertEqual(StageAlgorithmVersion.geometry, 5,

@@ -43,9 +43,14 @@ enum M1KeyVector {
         let sceneLinear = "\(h(geometry))"
             + "|ev=0.75000;temp=5200.00000;tint=12.00000;hlr=0.40000;wh=10.00000;bl=-8.33333"
             + ";alg=\(alg(.sceneLinear))"
+        // 483: 锐化's link sits immediately after S1 and seeds the curve (the mask stages are absent
+        // in this vector). Its material comes from `SharpenGroup()`'s own resting values (not from a
+        // document), so a default that moves cannot leave this line behind.
+        let sharpenLink = h("\(h(sceneLinear))|sharpen|"
+                            + SharpenGroup().keyString + StageAlgorithmVersion.token(.sharpen))
         // 030: the curve changed stage (`curve` before S2, `w=` instead of `rgb=`); 069: its axis is
         // the card's 0…2 and its points print six decimals.
-        let curve = "\(h(sceneLinear))"
+        let curve = "\(sharpenLink)"
             + "|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000"
             + "|r=0.000000,0.000000;2.000000,2.000000"
             + "|g=0.000000,0.000000;2.000000,2.000000"
@@ -62,15 +67,9 @@ enum M1KeyVector {
             + ";0.00000,0.00000,0.00000;20.00000,0.00000,0.00000"
             + ";0.00000,0.00000,0.00000;0.00000,0.00000,0.00000"
             + ";0.00000,0.00000,0.00000;0.00000,0.00000,0.00000;alg=\(alg(.hsl))"
-        // 314: 锐化's resting amount is 50, so S3.10 is in the chain and the `vignette` link — whose
-        // place in the chain is historical, below S3.10 — is seeded by it. The material comes from
-        // `SharpenGroup()`'s own resting values (not from a document), so a default that moves cannot
-        // leave this line behind.
-        let sharpenLink = h("\(h(hsl))|sharpen|"
-                            + SharpenGroup().keyString + StageAlgorithmVersion.token(.sharpen))
-        // `vignetteSeed` is the sharpen **text**, so the vignette's parent is its digest — which is
-        // `sharpenLink` itself.
-        let vignette = "\(sharpenLink)|\(vignetteMaterial)"
+        // 483: 锐化 left S3, so the `vignette` link is seeded by the HSL link (the last S3 stage in
+        // this vector) exactly as it was before 314 put a sharpen between them.
+        let vignette = "\(h(hsl))|\(vignetteMaterial)"
         let display = "\(h(vignette))|\(DisplayOptions().keyString)|1500x1000"
 
         return [("geometry", geometry), ("sceneLinear", sceneLinear), ("curve", curve),
@@ -98,5 +97,9 @@ enum M1KeyVector {
     /// returned to 1 would let a 2-era frame answer a 1-era key. Only the `alg=` number on the curve
     /// link changed; every material text and every parent digest below it moved with it, which is the
     /// behaviour `CacheVersionTests` describes for any bump.
-    static let pinnedDigest = "5d15d35747806ad4b13ed9741638a74d72c6eef43870c451428888b46ae2274e"
+    /// 483 — re-pinned for the sharpen move: `s3.10` → `s2.9`, and the link now sits between S1 and
+    /// the curve instead of below S3.6. Every parent digest from the curve down moves with it; the
+    /// stage's generation is 4 (the move changes the input domain even though the four parameters do
+    /// not). The geometry/S1/S1.7 texts are unchanged, which is the "only 锐化 moved" claim.
+    static let pinnedDigest = "d24b463722b34ce5501fb33505fb18a1a08f9da4c979c6a00d5e5a07065499df"
 }

@@ -215,7 +215,7 @@ final class SharpenStageTests: XCTestCase {
 
         // …and the decode inputs, which is the key every cached rung was written against.
         let inputs = withZeroSharpen(EditModel.neutral)
-        XCTAssertFalse(inputs.renderInputs.key.contains("s3.10-sharpen"),
+        XCTAssertFalse(inputs.renderInputs.key.contains("s2.9-sharpen"),
                        "amount 0 给 renderInputs.key 加了段")
     }
 

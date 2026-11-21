@@ -307,8 +307,9 @@ final class DetailFXTests: XCTestCase {
                                          edit: untouched,
                                          display: DisplayOptions(headroom: 1))
         XCTAssertNil(links.detailFX, "没有 纹理/清晰度/去雾 就没有 S3.8 链接 —— 不是「链接了但乘 0」")
-        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .toneMap, .color,
-                                        .vignette, .display])
+        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .vignette, .toneMap,
+                                        .color, .display],
+                       "483 隐含修复：allCases 现在是 order 的无条件子集，暗角在 S2 之前")
         XCTAssertEqual(links.pipeline.count, 7, "M1 的七段，一段不多")
 
         let (_, trace) = try renderWithTrace(graph, untouched)

@@ -462,9 +462,11 @@ final class BlackAndWhiteTests: XCTestCase {
             .add("bw").add(document().keyMaterial(.bw)).canonical,
                        "S3.4 is seeded by S3's key, not by the vignette's")
         XCTAssertEqual(bw.pipeline, StageChainShape.resting([.bw]))
-        XCTAssertEqual(Array(bw.pipeline.dropFirst(4).prefix(2)), [.toneMap, .color])
-        XCTAssertEqual(Array(bw.pipeline.suffix(3)), [.bw, .sharpen, .display],
-                       "314: S3.10 排在 S3.4 之后；S3.4 仍在 S3 与 S4 之间")
+        let toneMapIndex = try XCTUnwrap(bw.pipeline.firstIndex(of: .toneMap))
+        XCTAssertEqual(bw.pipeline[(toneMapIndex + 1)...].first, .color,
+                       "S3 still follows S2 (483 moved 锐化 below S1, not out of the chain)")
+        XCTAssertEqual(Array(bw.pipeline.suffix(2)), [.bw, .display],
+                       "483: 锐化搬去 S2.9 之后，S3.4 仍是 S4 之前的最后一个算术 pass")
         XCTAssertEqual(bw.pipeline.count, plain.pipeline.count + 1)
         XCTAssertNotEqual(bw.vignette, plain.vignette, "the vignette reads the grey, so its key must move")
 

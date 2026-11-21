@@ -14,15 +14,16 @@ import PhotonsCore
 /// truth. This type is the test-side mirror of it; the suites reference `resting()` / `chain(adding:)`
 /// instead of writing a chain again, so the next stage is one literal here instead of seven.
 ///
-/// `RenderStage.allCases` is **not** the order to compare against: its membership is the
-/// unconditional stages, but its spelling predates 116 (vignette after colour) and it cannot gain
-/// `sharpen`, which is conditional. Compare chains here, never against `allCases` as an array.
+/// `RenderStage.allCases` is now (483) the unconditional subset **in `order`'s sequence**, so it is
+/// still not the full chain to compare against — `sharpen` is conditional. Compare chains here, never
+/// against `allCases` as an array; the fallback itself is pinned by
+/// `testNeutralFallbackEqualsOrderFilteredToUnconditionalStages`.
 enum StageChainShape {
     /// `RenderStage.order`, verbatim, in execution order.
     static let full: [RenderStage] = [
-        .heal, .geometry, .sceneLinear, .maskAtlas, .localApply, .curve, .dehaze,
+        .heal, .geometry, .sceneLinear, .sharpen, .maskAtlas, .localApply, .curve, .dehaze,
         .vignette, .toneMap, .contrast, .color, .bw, .localColor, .hsl,
-        .pointColour, .grade, .detailFX, .sharpen, .grain, .display,
+        .pointColour, .grade, .detailFX, .grain, .display,
     ]
 
     /// Stages that exist only when a document value says so — `RenderStage.pipeline`'s switch.
@@ -68,27 +69,48 @@ final class StageChainShapeTests: XCTestCase {
                        "无条件链 = 执行顺序去掉条件 stage")
     }
 
-    /// `allCases` still names exactly the unconditional passes; only its **order** is legacy.
+    /// 483 — `allCases` is **`order` filtered to the unconditional stages, item for item**.
     ///
-    /// `RenderStage.pipeline` falls back to it when every conditional flag is false, which is the one
-    /// path (explicit `sharpAmount = 0` plus nothing else set) where the array order is not
-    /// `order`'s. 481 deliberately does not change product code; the suites therefore compare full
-    /// chains against `StageChainShape`, not `allCases`.
-    func testNeutralFallbackNamesTheUnconditionalStages() {
-        XCTAssertEqual(Set(RenderStage.allCases), Set(StageChainShape.unconditional))
-        XCTAssertEqual(Set(RenderStage.pipeline(hasMasks: false)),
-                       Set(StageChainShape.unconditional))
+    /// `RenderStage.pipeline` falls back to it when every conditional flag is false. Until 483 that
+    /// literal had `vignette` after `color` while `order` and the key chain put it before `toneMap`,
+    /// so a document at `sharpAmount == 0` ran the vignette in a different place than the same
+    /// document with 锐化 on. Comparing sequences (not sets) is the point: changing `order` without
+    /// changing the fallback is now impossible.
+    func testNeutralFallbackEqualsOrderFilteredToUnconditionalStages() {
+        let expected = RenderStage.order.filter { !StageChainShape.conditional.contains($0) }
+        XCTAssertEqual(RenderStage.allCases, expected,
+                       "allCases 必须逐项等于 order 去掉条件 stage 后的序列")
+        XCTAssertEqual(RenderStage.pipeline(hasMasks: false), expected,
+                       "all flags false: the fallback is the unconditional chain, in order")
         XCTAssertEqual(RenderStage.pipeline(hasMasks: false)
             .filter { StageChainShape.conditional.contains($0) }, [],
             "all flags false: no conditional stage may appear")
     }
 
+    /// 483 — 锐化 sits **before** the mask stages (475's leak) and still before grain, and it stays
+    /// conditional: a document at `sharpAmount == 0` does not visit it.
+    func testSharpenRunsBeforeTheMaskStagesAndBeforeGrain() throws {
+        let chain = RenderStage.pipeline(hasMasks: true, hasLocalColor: true,
+                                         hasGrain: true, hasSharpen: true)
+        let sharpen = try XCTUnwrap(chain.firstIndex(of: .sharpen))
+        for stage in [RenderStage.maskAtlas, .localApply, .localColor, .grain] {
+            XCTAssertLessThan(sharpen, try XCTUnwrap(chain.firstIndex(of: stage)),
+                              "483: .sharpen must run before \(stage.rawValue)")
+        }
+        XCTAssertEqual(chain.filter { $0 == .sharpen }.count, 1)
+        XCTAssertFalse(RenderStage.pipeline(hasMasks: false).contains(.sharpen),
+                       "sharpAmount == 0: S2.9 must not exist (185's conditional rule)")
+        XCTAssertFalse(RenderStage.pipeline(hasMasks: true, hasLocalColor: true)
+                        .contains(.sharpen),
+                       "masks alone must not summon 锐化")
+    }
+
     /// 314 — the resting document's chain, so the seven suites do not each spell it out.
     func testTheRestingDocumentVisitsSharpen() {
         XCTAssertEqual(StageChainShape.resting(),
-                       [.geometry, .sceneLinear, .curve, .vignette, .toneMap, .color,
-                        .sharpen, .display],
-                       "314: 锐化默认 50，S3.10 在每份新文档的链里")
+                       [.geometry, .sceneLinear, .sharpen, .curve, .vignette, .toneMap, .color,
+                        .display],
+                       "314: 锐化默认 50，S2.9 在每份新文档的链里（483 前移到局部编辑之前）")
     }
 
     // MARK: - each conditional stage, once
@@ -129,7 +151,7 @@ final class StageChainShapeTests: XCTestCase {
             ("detailFX (S3.9: after S3.8)",
              RenderStage.pipeline(hasMasks: false, hasDetailFX: true),
              StageChainShape.chain(adding: [.detailFX])),
-            ("sharpen (S3.10: after S3.9, before vignette/S4)",
+            ("sharpen (S2.9: after S1, before the mask stages)",
              RenderStage.pipeline(hasMasks: false, hasSharpen: true),
              StageChainShape.chain(adding: [.sharpen])),
             ("grain (S3.7 spelling: after vignette, before S4)",

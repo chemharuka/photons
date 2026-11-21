@@ -218,11 +218,11 @@ final class EffectsTests: XCTestCase {
                                          edit: untouched,
                                          display: DisplayOptions(headroom: 1))
         XCTAssertNil(links.grain, "没有颗粒就没有 S3.7 链接 —— 不是「链接了但乘 0」")
-        // 314: 锐化's resting amount is 50, so a resting document visits S3.10 as well — the seven
-        // M1 stages plus the sharpen pass, and no grain (the subject of this file).
-        XCTAssertEqual(links.pipeline, [.geometry, .sceneLinear, .curve, .vignette, .toneMap,
-                                        .color, .sharpen, .display])
-        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S3.10")
+        // 314: 锐化's resting amount is 50, so a resting document visits S2.9 as well (483 moved it
+        // before the mask stages) — the seven M1 stages plus the sharpen pass, and no grain (the
+        // subject of this file).
+        XCTAssertEqual(links.pipeline, StageChainShape.resting())
+        XCTAssertEqual(links.pipeline.count, 8, "314: the resting document visits S2.9")
 
         let (_, trace) = try renderWithTrace(graph, untouched)
         XCTAssertFalse(trace.executed.contains(.grain), "中性帧不许编码 S3.7")
