@@ -18,6 +18,18 @@ public enum ChildProcessTermination {
 
 // MARK: - §432 两条降噪路（产物/堆叠共用一条路径）
 
+/// 463 — the words that belong to the "file is gone" state but are not the existing
+/// 「原文件已移动」 badge (that one is owned by `MissingFilesUI`). Kept here because the session is
+/// the only model type all three browsers and the loupe banner already share.
+public enum MissingMarkText {
+    /// The loupe banner's one-line verdict.
+    public static let fileGone = Loc.t("文件不在原位置")
+    /// A stack's representative when a **hidden member** is the missing one.
+    public static let stackHasMissing = Loc.t("这一叠里有文件不在了")
+    /// The banner's removal verb. It performs the same `removeAndDelete` the context menu does.
+    public static let removeFromLibrary = Loc.t("从库中移除…")
+}
+
 /// 哪一条模型降噪。
 ///
 /// 两条路的**唯一**架构差别是许可边界：`ansel` 的权重是 GPL-3.0，必须走子进程；
@@ -202,6 +214,11 @@ public final class CatalogSession {
     /// this table can then never disagree about which row is a top, and nobody has to remember to
     /// update two things after a stack write.
     public private(set) var stacksByTopID: [String: StackSummary] = [:]
+    /// 463 — stack tops whose **hidden** members include a missing file. The grid/filmstrip/list only
+    /// draw the top, so a member's own badge would never be seen; this is the second half of
+    /// `isMarkedMissing(assetID:)`. Rebuilt with `stacksByTopID` in `reload()` and kept in step by
+    /// the single-row re-stat path.
+    public private(set) var stackTopIDsWithMissingMembers: Set<String> = []
     public private(set) var stats: CatalogStats?
     public private(set) var loadError: String?
 
@@ -710,7 +727,9 @@ public final class CatalogSession {
             // One query for every stack id on screen (not one per row), and only stacks whose
             // **top** survived the filter get an entry — a stack only a hidden member would match
             // is not in `assets` and must not be in this table either.
-            stacksByTopID = Self.stacksByTop(assets, catalog: c)
+            let projection = Self.stacksByTop(assets, catalog: c)
+            stacksByTopID = projection.byTop
+            stackTopIDsWithMissingMembers = projection.missingTopIDs
             stats = try c.stats()
             loadError = nil
             // The camera list is a property of the library, not of the current filter: derive it
@@ -1654,17 +1673,24 @@ public final class CatalogSession {
     /// stack costs nothing. A stack whose top is missing from the query (a soft-deleted top, a row
     /// whose rank was moved) contributes no entry at all: the dictionary is keyed by top, and the
     /// contract is 「no entry = draw no indicator」.
-    static func stacksByTop(_ visible: [Asset], catalog: Catalog) -> [String: StackSummary] {
+    static func stacksByTop(_ visible: [Asset], catalog: Catalog)
+        -> (byTop: [String: StackSummary], missingTopIDs: Set<String>) {
         let stackIDs = Set(visible.compactMap(\.stackId))
-        guard !stackIDs.isEmpty else { return [:] }
-        guard let members = try? catalog.stackMembers(stackIDs: Array(stackIDs)) else { return [:] }
+        guard !stackIDs.isEmpty else { return ([:], []) }
+        guard let members = try? catalog.stackMembers(stackIDs: Array(stackIDs)) else {
+            return ([:], [])
+        }
         var out: [String: StackSummary] = [:]
+        var missingTopIDs: Set<String> = []
         for (id, rows) in members {
             guard let top = rows.first(where: { $0.stackRank == 0 }) else { continue }
             guard visible.contains(where: { $0.id == top.id }) else { continue }
             out[top.id] = StackSummary(id: id, memberIDs: rows.map(\.id), topID: top.id)
+            // 463: a missing **member** is just as real as a missing top, but only the top is drawn.
+            // The row then says 「这一叠里有文件不在了」 instead of showing nothing.
+            if rows.contains(where: \.isMissing) { missingTopIDs.insert(top.id) }
         }
-        return out
+        return (out, missingTopIDs)
     }
 
     // MARK: sort order (view state: one value, three views)
@@ -2510,6 +2536,10 @@ public final class CatalogSession {
             recordHistogram(nil)
             return
         }
+        // 463 — the switch is the detection moment. One `stat` for the photo the user just looked
+        // at, before the early return, so re-selecting the same row after the file came back clears
+        // the flag too. Offline roots are skipped inside the catalog method.
+        recheckAvailability(assetID: a.id)
         if !force, loadedEditAssetID == a.id { return }
         var model: EditModel
         var stack: EditHistory?
@@ -3012,8 +3042,106 @@ public final class CatalogSession {
     /// Why the last relink/delete failed, or nil. Reported, never swallowed.
     public private(set) var lastAvailabilityError: String?
 
+    /// 463 — bumped whenever a missing flag moves (single-row re-stat, decode fallback, full refresh).
+    /// The loupe banner observes it; the three browsers already watch `metadataRevision`, which moves
+    /// with it.
+    public private(set) var availabilityRevision = 0
+
+    /// Test seam: make the per-switch stat lie. `nil` means the real filesystem. The decode-failure
+    /// fallback deliberately bypasses this and forces the answer, which is how the test proves the
+    /// fallback is a second path rather than the stat running twice.
+    var availabilityFileExistsOverrideForTesting: ((URL) -> Bool)?
+
     /// Rows whose original file is not where the library says — what the badge and the menu read.
     public var missingAssets: [Asset] { assets.filter(\.isMissing) }
+
+    /// 463 — the one seam the three browsers use to decide whether a displayed row carries a missing
+    /// mark. A stack's row is marked when the top itself is gone **or** any hidden member is, because
+    /// the hidden member has no cell of its own.
+    public func isMarkedMissing(assetID id: String) -> Bool {
+        if assets.first(where: { $0.id == id })?.isMissing == true { return true }
+        return stackTopIDsWithMissingMembers.contains(id)
+    }
+
+    /// Whether a displayed stack row should say 「这一叠里有文件不在了」. The top's own missing flag is
+    /// still drawn as 「原文件已移动」, so the two sentences never describe the same photo twice.
+    public func stackHasMissingMember(forAssetID id: String) -> Bool {
+        guard assets.first(where: { $0.id == id })?.isMissing != true else { return false }
+        return stackTopIDsWithMissingMembers.contains(id)
+    }
+
+    /// Re-stat just `assetID`, then tell the views. Called when the anchor changes (entering the
+    /// loupe, arrow keys, a click) — the moment the user is looking at a file is the moment the app
+    /// should notice it is gone. Returns the flag, or `nil` when the row/root was not examined.
+    ///
+    /// No `reload()`: members, order, filter and the document do not move because one flag did, and a
+    /// full query on every arrow key would be the wrong price for this fact.
+    @discardableResult
+    public func recheckAvailability(assetID id: String) -> Bool? {
+        guard let catalog else { return nil }
+        let check = availabilityFileExistsOverrideForTesting
+            ?? { FileManager.default.fileExists(atPath: $0.path) }
+        guard let isMissing = try? catalog.recheckAvailability(assetID: id, fileExists: check) else {
+            return nil
+        }
+        applyAvailability(isMissing, assetID: id)
+        return isMissing
+    }
+
+    /// 463 — the decode/development fallback. It is deliberately **not** gated on a fresh `stat`:
+    /// the file can disappear between the switch and the decode, and the decoder saying "no file"
+    /// is itself the evidence. Forcing the flag through the same one-row entry keeps the SQL and the
+    /// offline-root rule in one place (the forced answer is only used for a URL the row itself
+    /// resolves to).
+    func markMissingAfterDecodeFailure(url: URL) {
+        guard let catalog else { return }
+        let target = url.standardizedFileURL.path
+        guard let asset = assets.first(where: {
+            fileURL(for: $0)?.standardizedFileURL.path == target
+        }) else { return }
+        guard let isMissing = try? catalog.recheckAvailability(assetID: asset.id,
+                                                               fileExists: { _ in false }) else {
+            return
+        }
+        applyAvailability(isMissing, assetID: asset.id)
+    }
+
+    /// Write one flag into the in-memory projection and keep the stack marker in step. The database
+    /// is already written by `Catalog.recheckAvailability`; this is the signal half.
+    private func applyAvailability(_ isMissing: Bool, assetID id: String) {
+        var changed = false
+        if let index = assets.firstIndex(where: { $0.id == id }),
+           assets[index].missing != isMissing {
+            assets[index].missing = isMissing
+            changed = true
+        }
+        if refreshStackMissing(forAssetID: id) { changed = true }
+        guard changed else { return }
+        availabilityRevision &+= 1
+        metadataRevision &+= 1
+    }
+
+    /// Re-read the stack this asset belongs to and move its top into/out of the marker set. One
+    /// query, only on the rare event of a flag actually moving.
+    @discardableResult
+    private func refreshStackMissing(forAssetID id: String) -> Bool {
+        guard let catalog,
+              let stackID = (try? catalog.stackID(ofAsset: id)) ?? nil,
+              let members = try? catalog.stackMembers(stackID: stackID),
+              let top = members.first(where: { $0.stackRank == 0 }) else { return false }
+        let had = stackTopIDsWithMissingMembers.contains(top.id)
+        let has = members.contains(where: \.isMissing)
+        if has {
+            stackTopIDsWithMissingMembers.insert(top.id)
+        } else {
+            stackTopIDsWithMissingMembers.remove(top.id)
+        }
+        if let index = assets.firstIndex(where: { $0.id == top.id }),
+           assets[index].missing != top.isMissing {
+            assets[index].missing = top.isMissing
+        }
+        return had != has
+    }
 
     /// The missing subset of the current selection, in library order. Both context-menu verbs act on
     /// exactly this list, so the count in the confirmation sheet is the count that gets deleted.
@@ -3026,6 +3154,7 @@ public final class CatalogSession {
         let report = try? catalog.refreshAvailability()
         lastAvailability = report
         reload()
+        availabilityRevision &+= 1
         return report
     }
 

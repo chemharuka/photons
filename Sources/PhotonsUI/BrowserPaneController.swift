@@ -454,7 +454,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
                   let id = cell.assetID,
                   let asset = session.assets.first(where: { $0.id == id }) else { continue }
             cell.configure(asset: asset, isActive: session.anchorID == id,
-                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0)
+                           stackCount: session.stackSummary(forAssetID: id)?.count ?? 0,
+                           stackHasMissingMember: session.stackHasMissingMember(forAssetID: id))
         }
         footer.stringValue = session.selection.isEmpty
             ? Loc.t("未选择")
@@ -1188,7 +1189,8 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         guard let session, let asset = session.assets[safe: row] else { return nil }
         let cell = PhotoRowCell.reuse(in: tableView, owner: self)
         cell.configure(asset: asset, isActive: session.anchorID == asset.id,
-                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0)
+                       stackCount: session.stackSummary(forAssetID: asset.id)?.count ?? 0,
+                       stackHasMissingMember: session.stackHasMissingMember(forAssetID: asset.id))
         applyThumbnail(to: cell, row: row, asset: asset)
         return cell
     }
@@ -1941,7 +1943,8 @@ final class PhotoRowCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("no nibs") }
 
-    func configure(asset: Asset, isActive: Bool, stackCount: Int = 0) {
+    func configure(asset: Asset, isActive: Bool, stackCount: Int = 0,
+                   stackHasMissingMember: Bool = false) {
         // A recycled row must not show a *different* photo for one frame; the same asset keeps its
         // bitmap (a filter/metadata refresh is not a pixel change).
         if assetID != asset.id {
@@ -1976,7 +1979,10 @@ final class PhotoRowCell: NSTableCellView {
 
         // 「原文件已移动」 takes the meta line: on a 46 pt row the fact that the file is gone outranks
         // the camera model, and the badge is drawn on the thumbnail as well so a glance finds it.
-        let moved = asset.isMissing ? MissingFileText.moved : nil
+        // 463: a stack whose hidden member is gone gets its own sentence — only the top has a row.
+        let moved = asset.isMissing
+            ? MissingFileText.moved
+            : (stackHasMissingMember ? MissingMarkText.stackHasMissing : nil)
         missingLabel = moved
         pill.text = moved
         if let moved {

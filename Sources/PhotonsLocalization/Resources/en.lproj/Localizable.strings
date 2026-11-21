@@ -135,6 +135,7 @@
 "仅版权" = "Copyright only";
 "仅白平衡" = "White Balance Only";
 "从当前照片新建预设…" = "New Preset from Current Photo…";
+"从库中移除…" = "Remove from library…";
 "从照片库移除「{0}」（{1} 张）…" = "Remove “{0}” from library ({1} photos)…";
 "从照片库移除「{0}」（空文件夹）…" = "Remove “{0}” from library (empty folder)…";
 "从照片库移除「{0}」？" = "Remove “{0}” from the library?";
@@ -437,6 +438,7 @@
 "文件内容与库中记录不一致（{0}）：期望 {1}…，实际 {2}…" = "File content differs from the library record ({0}): expected {1}…, found {2}…";
 "文件后缀" = "File extension";
 "文件命名" = "File Naming";
+"文件不在原位置" = "File is not at its original location";
 "文件在 {0} 处被截断" = "The file is truncated at {0}";
 "文件夹" = "Folders";
 "文件设置" = "File Settings";
@@ -825,6 +827,7 @@
 "这些线互相矛盾（差 %.1f°），未应用" = "The lines conflict (%.1f° difference); no correction applied";
 "这些线互相矛盾，未应用" = "The lines conflict; no correction applied";
 "这台机器上没有 CIRAWFilter" = "CIRAWFilter is unavailable on this machine";
+"这一叠里有文件不在了" = "A file in this stack is missing";
 "这张照片不在任何堆叠里" = "This photo is not in a stack";
 "这张照片在所选组里没有非默认设置：粘贴不会改动任何字段" = "This photo has no nondefault settings in the selected groups; pasting will change nothing";
 "这里几乎没有颜色，换个位置点" = "There is almost no color here; try another point";

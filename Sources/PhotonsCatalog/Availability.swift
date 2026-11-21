@@ -155,6 +155,49 @@ extension Catalog {
         return report
     }
 
+    /// Re-stat **one** row and write its `missing` flag — the cheap path a photo switch uses.
+    ///
+    /// `refreshAvailability()` is an open/rescan operation and costs one `stat` per photo; the loupe
+    /// cannot pay that on every arrow key, but the row the user is looking at is exactly the row whose
+    /// file can have disappeared while the app was running. So this is the same rule as the full pass,
+    /// narrowed to one asset:
+    ///
+    ///   · offline roots are **skipped**, never marked (the file may be on an unplugged drive);
+    ///   · the flag is written through `setMissing`, the one SQL entry, so "missing" still means
+    ///     what `refreshAvailability` says it means;
+    ///   · `nil` means "not examined" (no such row, or its root is offline), not "present".
+    ///
+    /// `fileExists` is injectable so a test can make the stat lie and prove the decode-failure
+    /// fallback is a separate path, not this one again.
+    @discardableResult
+    public func recheckAvailability(
+        assetID: String,
+        fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+    ) throws -> Bool? {
+        let row: (root: String, rel: String, wasMissing: Bool)? = try dbQueue.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT source_root_id, rel_path, missing FROM assets
+                WHERE id = ? AND deleted = 0
+                """, arguments: [assetID])
+                .map { ($0["source_root_id"], $0["rel_path"], ($0["missing"] as Int) != 0) }
+        }
+        guard let row else { return nil }
+        let roots = try refreshRootStatus()
+        guard let root = roots.first(where: { $0.id == row.root }), root.status == .online else {
+            return nil
+        }
+        let base = root.managementMode == .copy
+            ? layout.originalsURL
+            : URL(fileURLWithPath: root.pathHint, isDirectory: true)
+        let exists = fileExists(base.appendingPathComponent(row.rel))
+        if exists != !row.wasMissing {
+            try dbQueue.write { db in
+                try Self.setMissing(!exists, ids: [assetID], in: db)
+            }
+        }
+        return !exists
+    }
+
     /// One `UPDATE … IN (…)` per chunk: a 10k library must not be 10k transactions (the same rule
     /// `setRating(_:forAssets:)` follows).
     private static func setMissing(_ missing: Bool, ids: [String], in db: Database) throws {
