@@ -273,6 +273,7 @@
 "同一个 geometry 字段被两张卡同时声明：{0}" = "The same geometry field is declared by two panels: {0}";
 "名称" = "Name";
 "后缀" = "Extension";
+"后台" = "Background";
 "启动" = "Startup";
 "启用" = "Enable";
 "启用蒙版" = "Enable mask";
@@ -567,6 +568,7 @@
 "水平镜像" = "Mirrored horizontally";
 "没有可合并的帧" = "No frames to merge";
 "没有名为“{0}”的预设" = "No preset named “{0}”";
+"没有后台任务" = "No background tasks";
 "没有处理 {0} 管线的生产者" = "No producer for pipeline {0}";
 "没有打开的库" = "No open library";
 "没有找到与条目内容一致的丢失文件；条目仍标记为「原文件已移动」。" = "No missing files with matching content were found. The items are still marked “Original file moved”.";

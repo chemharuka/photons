@@ -1,0 +1,187 @@
+import Foundation
+import Observation
+
+/// 454 P1 — the value type behind 顶栏「排序 | 后台」 and the future background-task panel.
+///
+/// P1 deliberately ships **no producer**: export still runs from its sheet, denoise/HDR keep their
+/// session-owned serial queues, and neither of those paths knows this type exists. The only job here
+/// is to let 「任务」 exist as data that can be written and drawn, so P2/P3 can connect the queues
+/// without changing the model again.
+public struct BackgroundTask: Identifiable, Equatable, Sendable {
+
+    /// The four kinds the owner named. `panorama` is a placeholder: the feature has no producer yet.
+    public enum Kind: String, CaseIterable, Equatable, Sendable {
+        case denoise
+        case hdrMerge
+        case export
+        case panorama
+    }
+
+    /// Terminal states are `finished` / `cancelled` / `failed`. A task is in flight while `queued`
+    /// or `running`.
+    public enum State: String, CaseIterable, Equatable, Sendable {
+        case queued
+        case running
+        case finished
+        case cancelled
+        case failed
+
+        public var isTerminal: Bool {
+            switch self {
+            case .finished, .cancelled, .failed: return true
+            case .queued, .running: return false
+            }
+        }
+    }
+
+    public var id: UUID
+    public var kind: Kind
+    public var title: String
+    public var total: Int
+    public var completed: Int
+    /// The photo currently being worked on, if the producer knows it.
+    public var currentAssetID: String?
+    /// A `ThumbKey`-shaped description of that photo's square thumbnail. P4 is the first phase that
+    /// resolves it to real pixels; until then the panel draws a placeholder square.
+    public var currentThumbKey: String?
+    public var startedAt: Date
+    public var state: State
+    public var failureCount: Int
+
+    public init(id: UUID = UUID(),
+                kind: Kind,
+                title: String,
+                total: Int,
+                completed: Int = 0,
+                currentAssetID: String? = nil,
+                currentThumbKey: String? = nil,
+                startedAt: Date = Date(),
+                state: State = .running,
+                failureCount: Int = 0) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.total = total
+        self.completed = completed
+        self.currentAssetID = currentAssetID
+        self.currentThumbKey = currentThumbKey
+        self.startedAt = startedAt
+        self.state = state
+        self.failureCount = failureCount
+    }
+}
+
+/// The one store P2/P3 will feed. P1 has no caller that mutates it, so the panel is always empty —
+/// which is the phase's acceptance criterion, not an unfinished bit.
+///
+/// Ordering contract: `tasks` is append order (oldest first); an `advance`/`finish` by `id` updates
+/// the existing element in place rather than appending a second one. Only finished (terminal) tasks
+/// are retained, newest `retainedFinishedLimit` by `startedAt`; in-flight tasks are never evicted.
+@MainActor
+@Observable
+public final class BackgroundTaskStore {
+
+    /// Keep at most this many finished tasks. The owner-approved default from ADR §21.5.
+    public static let retainedFinishedLimit = 20
+
+    public private(set) var tasks: [BackgroundTask] = []
+
+    /// Instance spelling of the same limit, so callers can ask the store without naming the type.
+    public var retainedFinishedLimit: Int { Self.retainedFinishedLimit }
+
+    public init() {}
+
+    /// Append a new task and return its id. The caller owns the id for the rest of the run.
+    @discardableResult
+    public func begin(_ task: BackgroundTask) -> UUID {
+        tasks.append(task)
+        pruneFinished()
+        return task.id
+    }
+
+    /// Update one task in place. `nil` arguments leave the corresponding field untouched.
+    ///
+    /// `completed` is clamped to `0…total`; a queued task becomes `running` on its first progress
+    /// report, so a producer never has to send two writes for one step.
+    public func advance(id: UUID,
+                        completed: Int? = nil,
+                        currentAssetID: String? = nil,
+                        currentThumbKey: String? = nil) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        let total = max(0, tasks[index].total)
+        if let completed {
+            tasks[index].completed = min(max(0, completed), total)
+        }
+        if let currentAssetID {
+            tasks[index].currentAssetID = currentAssetID
+        }
+        if let currentThumbKey {
+            tasks[index].currentThumbKey = currentThumbKey
+        }
+        if tasks[index].state == .queued {
+            tasks[index].state = .running
+        }
+    }
+
+    /// Close a task. `finished` means every item was accounted for, so its count reads `40/40`
+    /// without the producer having to send one last `advance`; `cancelled`/`failed` keep the count
+    /// they stopped at.
+    public func finish(id: UUID, state: BackgroundTask.State = .finished, failureCount: Int = 0) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[index].state = state
+        tasks[index].failureCount = max(0, failureCount)
+        if state == .finished {
+            tasks[index].completed = max(0, tasks[index].total)
+        }
+        pruneFinished()
+    }
+
+    /// Remove every terminal task (finished, cancelled, failed); in-flight tasks stay.
+    public func clearFinished() {
+        tasks.removeAll { $0.state.isTerminal }
+    }
+
+    /// `8/40` — the spelling the header row uses. Pure: reads only the value it is given.
+    public nonisolated static func countText(for task: BackgroundTask) -> String {
+        "\(task.completed)/\(task.total)"
+    }
+
+    /// `0…1`. A zero-total finished task counts as complete; everything else with no total is 0.
+    public nonisolated static func progressFraction(for task: BackgroundTask) -> Double {
+        if task.total <= 0 {
+            return task.state == .finished ? 1 : 0
+        }
+        let raw = Double(task.completed) / Double(task.total)
+        return min(1, max(0, raw))
+    }
+
+    // Instance spellings keep the store the obvious place to ask, while the static bodies above are
+    // the ones a pure-logic test can call without touching the main actor.
+    public func countText(for task: BackgroundTask) -> String {
+        Self.countText(for: task)
+    }
+
+    public func progressFraction(for task: BackgroundTask) -> Double {
+        Self.progressFraction(for: task)
+    }
+
+    // MARK: retention
+
+    private func pruneFinished() {
+        let terminal = tasks.indices.filter { tasks[$0].state.isTerminal }
+        let excess = terminal.count - Self.retainedFinishedLimit
+        guard excess > 0 else { return }
+
+        // Oldest `startedAt` first; equal dates fall back to insertion order so a burst of tasks
+        // created in the same clock tick still evicts deterministically.
+        let evict = terminal.sorted { lhs, rhs in
+            let left = tasks[lhs]
+            let right = tasks[rhs]
+            if left.startedAt != right.startedAt { return left.startedAt < right.startedAt }
+            return lhs < rhs
+        }.prefix(excess)
+
+        let doomed = Set(evict)
+        tasks = tasks.enumerated().filter { !doomed.contains($0.offset) }.map(\.element)
+    }
+}

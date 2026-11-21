@@ -191,7 +191,7 @@ public final class ToolButton: NSButton {
 /// its buttons are 24 pt tall with system padding, and it owns its own item layout — three
 /// mismatches with a Pixelmator-style shell. This container is 36 pt tall, centred on the traffic
 /// lights, with 28 pt hit boxes and 1 × 18 pt separators between groups.
-public final class TopBarView: NSView {
+public final class TopBarView: NSView, NSPopoverDelegate {
     public var onOpen: (() -> Void)?
     public var onModeChange: ((CatalogSession.Mode) -> Void)?
     public var onToggleFilmstrip: (() -> Void)?
@@ -227,10 +227,22 @@ public final class TopBarView: NSView {
     /// 文字是**当前顺序**（`新→旧` / `旧→新`），图标是通用的 `arrow.up.arrow.down` 且不随方向变——
     /// 两处同时描述状态会互相打架，所以方向只由文字说一次（见 `PhotoSortOrder`）。
     private let sortButton = ToolButton(title: PhotoSortOrder.default.label, symbol: PhotoSortOrder.symbol)
+    /// 454 P1 — 排序右侧的「后台」入口。它和排序之间还有一条分隔线（`排序 | 后台`）。
+    private let backgroundButton = ToolButton(title: Loc.t("后台"),
+                                               symbol: "square.stack.3d.down.right")
     /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
     /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
     private var separators: [NSView] = []
+
+    /// 454 P1 — the model the future panel and the two background queues share. P1 has no producer,
+    /// so it stays empty; the top bar aliases it through `WorkspaceRootView.backgroundTaskStore`.
+    public let backgroundTaskStore = BackgroundTaskStore()
+    private lazy var backgroundTasksPopoverController = BackgroundTasksPopover(store: backgroundTaskStore)
+    private let backgroundTasksPopover = NSPopover()
+    /// Test/`--ui-smoke` read: whether the popover was opened. Mirrors `isShown` whenever there is a
+    /// window to anchor to (the FilterBar popovers use the same pattern).
+    public private(set) var isBackgroundTasksPopoverOpen = false
 
     public var contentLeading: CGFloat = WorkspaceLayout.trafficLightsWidth + 10
 
@@ -241,8 +253,8 @@ public final class TopBarView: NSView {
 
     /// 顶栏最后一个可交互控件的右边缘。公开给测试：簇的左边缘永远在它右边
     /// （`TopBarStatusCluster.Metrics.minimumGapFromControls` 之外），再长的库名也压不到按钮上。
-    /// 排序按钮排在胶片条按钮后面，所以它是这一行最右的一个。
-    public var controlsTrailingEdge: CGFloat { sortButton.frame.maxX }
+    /// 454 P1 —— 「后台」排在排序右边，所以它是这一行最右的一个。
+    public var controlsTrailingEdge: CGFloat { backgroundButton.frame.maxX }
 
     public override var isFlipped: Bool { true }
 
@@ -267,16 +279,25 @@ public final class TopBarView: NSView {
         // 图标盒与邻居逐点一致（18 × 14），见 `PhotoSortOrder.symbolConfiguration`。
         sortButton.image = PhotoSortOrder.icon()
 
+        backgroundButton.target = self
+        backgroundButton.action = #selector(backgroundTapped)
+
         modeButton.target = self
         modeButton.action = #selector(modeTapped(_:))
         browserButton.target = self
         browserButton.action = #selector(browserTapped(_:))
 
+        backgroundTasksPopover.behavior = .transient
+        backgroundTasksPopover.animates = false
+        backgroundTasksPopover.delegate = self
+        backgroundTasksPopover.contentViewController = backgroundTasksPopoverController
+
         for v: NSView in [openButton, importButton, exportButton, modeButton,
-                          browserButton, sortButton, statusCluster] {
+                          browserButton, sortButton, backgroundButton, statusCluster] {
             addSubview(v)
         }
-        // 442 —— 顶栏只留**一条**分隔线（导出 | 网格/单图），其余按钮靠间距分组。
+        // 442 —— 顶栏第一条分隔线在导出之后；454 P1 在「排序 | 后台」之间加第二条。
+        addSeparator()
         addSeparator()
     }
 
@@ -346,6 +367,15 @@ public final class TopBarView: NSView {
 
     /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
     public var sortButtonView: ToolButton { sortButton }
+    /// 454 P1 —— 顶栏最右的「后台」按钮（`controlsTrailingEdge` 就是它的右边缘）。
+    public var backgroundButtonView: ToolButton { backgroundButton }
+    /// 454 P1 —— 两条分隔线：`[0]` 在导出之后，`[1]` 在排序与后台之间。
+    public var separatorsForTesting: [NSView] { separators }
+    /// 454 P1 —— 面板本体与它的 popover 外壳，供入口/空态测试读取。
+    public var backgroundTasksPopoverControllerForTesting: BackgroundTasksPopover {
+        backgroundTasksPopoverController
+    }
+    public var backgroundTasksPopoverForTesting: NSPopover { backgroundTasksPopover }
     /// 442 —— 排序刷新期间把按钮置灰（点击会被 `WorkspaceRootView` 丢弃）。
     public func setSortEnabled(_ enabled: Bool) { sortButton.isEnabled = enabled }
     /// 它左边那个邻居（胶片条）——「同款」是拿这两个按钮量出来的，不是形容词。
@@ -404,7 +434,7 @@ public final class TopBarView: NSView {
         separators[0].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += Self.separatorGapOut
-        // 442 —— 顺序：打开 导入 导出 | 网格/单图 胶片条 侧栏 排序，只有一条分隔线（在导出之后）。
+        // 442 —— 顺序：打开 导入 导出 | 网格/单图 胶片条 侧栏 排序 | 后台（454 P1 加了第二条分隔线）。
         // 「网格/单图」是一个按钮，宽度固定为两者较宽者。
         place(modeButton, width: Self.modeWidth())
         x += Self.itemGap
@@ -412,6 +442,11 @@ public final class TopBarView: NSView {
         place(browserButton, width: Self.browserWidth())
         x += Self.itemGap
         place(sortButton, width: Self.sortWidth())
+        x += Self.separatorGapIn
+        separators[1].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
+                                     width: 1, height: WorkspaceLayout.toolSeparatorHeight)
+        x += Self.separatorGapOut
+        place(backgroundButton, width: backgroundButton.intrinsicContentSize.width)
 
         // 状态四段：整块右对齐，右边缘 = 顶栏右边距（= 检查器列的右边），整块落在检查器列上方。
         //
@@ -438,6 +473,32 @@ public final class TopBarView: NSView {
 
     @objc private func openTapped() { onOpen?() }
     @objc private func sortTapped() { onToggleSort?() }
+
+    /// 454 P1 —— 点「后台」开/关空面板。A click on the already-open popover's anchor closes it, the
+    /// same toggle the two filter popovers use; `.transient` also closes it on any outside click.
+    @objc private func backgroundTapped() {
+        if isBackgroundTasksPopoverOpen {
+            isBackgroundTasksPopoverOpen = false
+            if backgroundTasksPopover.isShown { backgroundTasksPopover.performClose(nil) }
+            return
+        }
+        backgroundTasksPopoverController.reload()
+        backgroundTasksPopover.contentSize = backgroundTasksPopoverController.preferredContentSize
+        isBackgroundTasksPopoverOpen = true
+        // Without a window (a detached view in a unit test) there is nothing to anchor to; the flag
+        // above is still the truth the bar reports, exactly like `FilterBarView`.
+        guard backgroundButton.window != nil else { return }
+        backgroundTasksPopover.show(relativeTo: backgroundButton.bounds,
+                                    of: backgroundButton,
+                                    preferredEdge: .maxY)
+    }
+
+    public func popoverDidClose(_ notification: Notification) {
+        guard let popover = notification.object as? NSPopover,
+              popover === backgroundTasksPopover else { return }
+        isBackgroundTasksPopoverOpen = false
+    }
+
     @objc private func modeTapped(_ sender: ToolButton) {
         // 按钮写的是当前模式 ⇒ 点它换到另一个。
         onModeChange?(sender.title == Loc.t("网格") ? .loupe : .grid)
@@ -504,6 +565,10 @@ public final class WorkspaceRootView: NSView {
 
     public let session: CatalogSession
     public let topBar = TopBarView()
+    /// 454 P1 —— the one store for background tasks. P1 has no producer (export/HDR/denoise paths are
+    /// untouched); P2/P3 will call `begin` / `advance` / `finish` from here. The top bar owns the
+    /// object so the popover and this alias cannot drift apart.
+    public var backgroundTaskStore: BackgroundTaskStore { topBar.backgroundTaskStore }
     public let browserPane: BrowserPaneController
     public let gridController: AssetGridController
     public let loupeController: LoupeController
