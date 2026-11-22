@@ -156,7 +156,9 @@ func cmdExportBatch(_ a: Args) throws {
 
         // 100 — HDR: the SDR frame above is the file's base and is exactly what a non-HDR export
         // renders (same options, same call). The linear exit is a second render of the *same*
-        // document through S4 only (`s4_display_linear`): same matrix, no OETF, no clamp.
+        // document through S4 only (`s4_display_linear`): same matrix, no OETF, **and (503) the same
+        // picture ceiling** — the exit clamps to `DisplayOptions.highlightCeiling` after the matrix,
+        // so an HDR file cannot keep highlights the screen would have cut.
         guard preset.isHDR else { return pixels }
         let linearDisplay = DisplayOptions(primaries: preset.colorSpace,
                                            bitDepth: 16,
