@@ -4813,6 +4813,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// above the calibrated target legitimately yields 0; this lets a test see that the step ran.
     private(set) var lastAutoColorMetricsForTesting: AutoColor.Metrics?
 
+    /// 498 — the full two-degree-of-freedom plan (vibrance + saturation + what the guards did).
+    private(set) var lastAutoColorPlanForTesting: AutoColor.Plan?
+
+    /// 498 — why a press wrote nothing. `nil` means the last press did move (or none has run yet).
+    /// A menu item reads this for its tooltip so a legitimate 0 + 0 is explained instead of silent.
+    enum AutoColorNoOpReason: Equatable, Sendable {
+        case tooGrey
+        case alreadySaturated
+    }
+    private(set) var lastAutoColorNoOpReasonForTesting: AutoColorNoOpReason?
+
+    /// 498 — how many fixed-point passes the last composite actually used (1…4). The owner asked for
+    /// the measured number in the report.
+    private(set) var lastAutoCompositePassCountForTesting = 0
+
+    /// 498 — one 自动颜色 decision: both slider totals and the plan behind them.
+    struct ColorCandidate: Equatable, Sendable {
+        var vibrance: Double
+        var saturation: Double
+        var plan: AutoColor.Plan
+    }
+
     /// 448 ④ — the frame on screen is the **full rung of the current anchor**. Same spelling as
     /// `measureHistogramNow`'s reuse gate: the photo and the document's decode inputs both name the
     /// rung, and the identity must be the rung's (`-s1.0`), not a preview's or the previous photo's.
@@ -5077,9 +5099,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 自动调整 (453)
 
-    /// 453 — 自动颜色：measure the picture's OKLab chroma and return the suggested `color.vibrance`,
-    /// or `nil` when there is no frame or the value would not move. `AutoColor` is 452's pure decision;
-    /// this is the wiring, and it is deliberately independent of `AutoLight`'s luma measurement.
+    /// 453/498 — 自动颜色：measure the picture's OKLab chroma and return the suggested vibrance.
+    ///
+    /// Kept as a Double for older callers; the product path uses `colorCandidate`, which also carries
+    /// 498's saturation and the guard's verdict. `nil` means there is no frame or nothing would move.
     public func colorVibranceCandidate() -> Double? {
         colorVibranceCandidate(from: nil)
     }
@@ -5087,6 +5110,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `from` is the staged document: 自动调整 measures colour **after** 明暗 changed the picture, still
     /// without writing it. A standalone call reads the live document.
     func colorVibranceCandidate(from document: EditModel?) -> Double? {
+        guard let session else { return nil }
+        let source = document ?? session.edit
+        guard let candidate = colorCandidate(from: document),
+              candidate.vibrance > source.color.vibrance + 1e-9 else { return nil }
+        return candidate.vibrance
+    }
+
+    func colorCandidate() -> ColorCandidate? {
+        colorCandidate(from: nil)
+    }
+
+    /// **498's two-degree-of-freedom decision.** `p50 → vibrance`, `p95 → saturation`, both measured
+    /// on the same scene-linear sample and both measured against the document's current slider values
+    /// (so the second press on a settled picture is a true no-op).
+    func colorCandidate(from document: EditModel?) -> ColorCandidate? {
         let frame = frameState
         guard let session, session.mode == .loupe else { return nil }
         if autoAdjustMustWait() {
@@ -5095,23 +5133,75 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         guard let graph = frame.graph else { return nil }
         let source = document ?? session.edit
-        let sample: LinearSample
+        let initialMetrics: AutoColor.Metrics
         do {
-            sample = try graph.measureLinearSample(source)
+            initialMetrics = AutoColor.metrics(from: try graph.measureLinearSample(source))
         } catch {
             print("AUTO COLOR · measurement failed: \(error)")
             return nil
         }
-        let metrics = AutoColor.metrics(from: sample)
-        let vibrance = AutoColor.plan(metrics)
-        lastAutoColorMetricsForTesting = metrics
-        print(String(format: "AUTO COLOR · chroma p50 %.4f · coloured %.1f%% → vibrance %+.2f",
-                     metrics.chromaP50, metrics.coloredFraction * 100, vibrance))
-        // 452's tool only raises: never lower a picture the owner already saturated, and never write
-        // a "plan" that is below the document. This is also what makes a second press on a settled
-        // document a true no-op (the measurement now includes the boost the first press wrote).
-        guard vibrance > source.color.vibrance + 1e-9 else { return nil }
-        return vibrance
+        lastAutoColorMetricsForTesting = initialMetrics
+
+        // Measure → plan → re-measure on the staged document, up to three passes. The pure solver
+        // already targets p50/p95, but the GPU frame is Float16 and its HSL→RGB→OKLab trip differs
+        // from the Double replay by a couple of percent; this closes that gap **before** the single
+        // history write, so 连点两次 finds a true fixed point.
+        var metrics = initialMetrics
+        var vibrance = source.color.vibrance
+        var saturation = source.color.saturation
+        var plan = AutoColor.plan2D(metrics, currentVibrance: vibrance,
+                                    currentSaturation: saturation,
+                                    floorVibrance: source.color.vibrance,
+                                    floorSaturation: source.color.saturation)
+        var finalMetrics = metrics
+        for _ in 0 ..< 3 {
+            // The floor is the **original** document, not the staged value: the loop may correct an
+            // overshoot downward, but never below what the user already had.
+            let nextV = max(source.color.vibrance, plan.vibrance)
+            let nextS = max(source.color.saturation, plan.saturation)
+            guard abs(nextV - vibrance) > 1e-9
+                    || abs(nextS - saturation) > 1e-9 else { break }
+            vibrance = nextV
+            saturation = nextS
+            var staged = source
+            staged.color.vibrance = vibrance
+            staged.color.saturation = saturation
+            guard let sample = try? graph.measureLinearSample(staged) else { break }
+            metrics = AutoColor.metrics(from: sample)
+            finalMetrics = metrics
+            plan = AutoColor.plan2D(metrics, currentVibrance: vibrance,
+                                    currentSaturation: saturation,
+                                    floorVibrance: source.color.vibrance,
+                                    floorSaturation: source.color.saturation)
+        }
+        // Report the plan that matches the values actually written, with the last guard diagnostics.
+        var reported = plan
+        reported.vibrance = vibrance
+        reported.saturation = saturation
+        lastAutoColorPlanForTesting = reported
+        print(String(format: "AUTO COLOR · chroma p50 %.4f p95 %.4f · coloured %.1f%% "
+                     + "→ vibrance %+.2f (was %+.2f) · saturation %+.2f (was %+.2f, unguarded %+.2f, "
+                     + "new clip %d, skin %+.1f%%) · final p50 %.4f p95 %.4f",
+                     initialMetrics.chromaP50, initialMetrics.chromaP95,
+                     initialMetrics.coloredFraction * 100,
+                     vibrance, source.color.vibrance,
+                     saturation, source.color.saturation, reported.unguardedSaturation,
+                     reported.newClippedPixels, reported.skinChromaChange * 100,
+                     finalMetrics.chromaP50, finalMetrics.chromaP95))
+        // Only raise: never lower a picture the owner already saturated, and never write a "plan"
+        // below the document. When both are already at their target, say why instead of doing nothing.
+        guard vibrance > source.color.vibrance + 1e-9
+                || saturation > source.color.saturation + 1e-9 else {
+            let reason: AutoColorNoOpReason = initialMetrics.coloredFraction < AutoColor.minimumColoredFraction
+                ? .tooGrey : .alreadySaturated
+            lastAutoColorNoOpReasonForTesting = reason
+            print(reason == .tooGrey
+                  ? "AUTO COLOR · 画面几乎没有颜色，未写入"
+                  : "AUTO COLOR · 这张已经足够饱和，未写入")
+            return nil
+        }
+        lastAutoColorNoOpReasonForTesting = nil
+        return ColorCandidate(vibrance: vibrance, saturation: saturation, plan: reported)
     }
 
     /// The document's flips — what the menu ticks and the bar's two switches show.
@@ -5131,16 +5221,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 自动调整 — 复合动作 (453)
 
-    /// **490 — 自动颜色's own entry.** The same plan path the composite uses, but committed on its
-    /// own: one document write and one 「自动颜色」 history row. A press on a settled picture is a
-    /// no-op (`colorVibranceCandidate` returns `nil`), exactly like 自动黑电平 / 自动明暗.
+    /// **490 / 498 — 自动颜色's own entry.** One document write of **both** `color.vibrance` and
+    /// `color.saturation`, and one 「自动颜色」 history row. A press on a settled picture is a no-op
+    /// (`colorCandidate` returns `nil`), exactly like 自动黑电平 / 自动明暗.
     @discardableResult
     public func autoColor() -> Double? {
-        guard let session, let vibrance = colorVibranceCandidate() else { return nil }
-        session.applyEdit { $0.color.vibrance = vibrance }
+        guard let session, let candidate = colorCandidate() else { return nil }
+        session.applyEdit {
+            $0.color.vibrance = candidate.vibrance
+            $0.color.saturation = candidate.saturation
+        }
         requestEditRender()
         session.commitEdit(label: Loc.t("自动颜色"), coalesce: false)
-        return vibrance
+        return candidate.vibrance
     }
 
     /// **派单 453 — 自动调整.** 黑电平 → 明暗 → 自动颜色, **one** document write and **one** history row.
@@ -5187,23 +5280,28 @@ public final class LoupeController: NSViewController, HeadroomSource {
             staged.light.blackOffset = black
             changed = true
         }
-        // 2/3. 明暗 → 自动颜色. 颜色 is last, and its vibrance changes what 明暗 measures, so a second
-        // press on the same picture would otherwise find a different plan. Iterate the pair (still
-        // before any write) to its fixed point; four passes bound the work if a picture oscillates.
+        // 2/3. 明暗 → 自动颜色. 颜色 is last, and both of its sliders change what 明暗 measures, so a
+        // second press on the same picture would otherwise find a different plan. Iterate the pair
+        // (still before any write) to its fixed point; four passes bound the work if a picture
+        // oscillates.
         let passes = converge ? 4 : 1
+        var usedPasses = 0
         for _ in 0 ..< passes {
+            usedPasses += 1
             var passChanged = false
             if let plan = lightPlanCandidate(from: staged) {
                 staged = plan.apply(to: staged)
                 passChanged = true
             }
-            if let vibrance = colorVibranceCandidate(from: staged) {
-                staged.color.vibrance = vibrance
+            if let color = colorCandidate(from: staged) {
+                staged.color.vibrance = color.vibrance
+                staged.color.saturation = color.saturation
                 passChanged = true
             }
             changed = changed || passChanged
             if !passChanged { break }
         }
+        lastAutoCompositePassCountForTesting = usedPasses
         guard changed else { return false }
         session.applyEdit { $0 = staged }
         requestEditRender()
@@ -5223,7 +5321,25 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let menu = NSMenu()
         menu.autoenablesItems = false
         AutoAdjustMenuBuilder.attach(to: menu, session: session, target: autoAdjustMenuTarget)
+        // 498 — a legitimate 0 + 0 must not read as a broken button. The last measurement explains
+        // itself on the row's tooltip; a picture not measured yet gets the normal one-line help.
+        if let color = menu.items.first(where: {
+            $0.action == #selector(AutoAdjustMenuTarget.autoColorPressed(_:))
+        }) {
+            color.toolTip = autoColorHelpText
+        }
         return menu
+    }
+
+    private var autoColorHelpText: String {
+        switch lastAutoColorNoOpReasonForTesting {
+        case .tooGrey:
+            return Loc.t("自动颜色：画面几乎没有颜色，未写入")
+        case .alreadySaturated:
+            return Loc.t("自动颜色：这张已经足够饱和，两个参数都保持 0")
+        case nil:
+            return Loc.t("自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度")
+        }
     }
 
     /// The projection the crop layout is built from at the current camera.
