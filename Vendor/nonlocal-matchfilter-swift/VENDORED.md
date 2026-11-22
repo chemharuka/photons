@@ -1,7 +1,7 @@
 # nonlocal-matchfilter-swift - vendored
 
 Source copy of https://github.com/chemharuka/nonlocal-matchfilter-swift at commit
-`694d505` ("strength: re-anchor sigma to the current estimator (192-frame rescan)").
+`f97b93a` ("service: carry the highlight taper through the host-facing options").
 
 Photons builds it as a **local SwiftPM package** (`Package.swift` ->
 `.package(path: "Vendor/nonlocal-matchfilter-swift")`) so a checkout needs no

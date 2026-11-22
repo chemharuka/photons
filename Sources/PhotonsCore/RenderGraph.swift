@@ -1149,7 +1149,7 @@ private struct DehazeParamsU {
 
 private struct DisplayParams {
     var m: simd_float4x4
-    var a: SIMD4<Float>   // identityMatrix
+    var a: SIMD4<Float>   // identityMatrix, headroom, 503 picture ceiling (0 = caller predates 503)
 }
 
 // MARK: - heal uniforms (mirror of s1_9_heal.metal, byte for byte)
@@ -4549,9 +4549,9 @@ public final class RenderGraph {
             enc.endEncoding()
 
         case .display:
-            // 100: HDR export asks for the linear exit (`s4_display_linear`) — same matrix, no OETF
-            // and no headroom clamp. The default branch names `s4_display` exactly as before, so the
-            // shipped path is untouched down to the pipeline function's name.
+            // 100: HDR export asks for the linear exit (`s4_display_linear`) — same matrix, same
+            // 503 ceiling, no OETF and no headroom clamp. The default branch names `s4_display`
+            // exactly as before, so the shipped path is untouched down to the pipeline function's name.
             let linear = options.display.linearOutput
             let p = try kernels.pipeline(file: "s4_display",
                                          function: linear ? "s4_display_linear" : "s4_display")
@@ -4561,9 +4561,15 @@ public final class RenderGraph {
             // same comparison so the fast path and the matrix can never disagree.
             let target = RenderGraph.outputPrimaries(options.display.primaries)
             let matrix = RenderGraph.primariesMatrix(from: ColorPrimaries.working, to: target)
+            // 503 — `.z` is the picture's ceiling (linear), applied by **both** exits after the
+            // matrix: 320's clamp at the end of S2 is a mid-chain clip, and every stage between S2
+            // and here (对比度 / 饱和度 / 分级 / 清晰度 / 颗粒) can put a pixel back over it. `0` means
+            // "caller predates 503" and leaves the historical behaviour; a real ceiling is `2^0 = 1`
+            // at the lowest (`HighlightCeiling.evRange`), so the sentinel is unambiguous.
             var params = DisplayParams(m: matrix,
                                        a: SIMD4(ColorPrimaries.working == target ? 1 : 0,
-                                                Float(options.display.headroom), 0, 0))
+                                                Float(options.display.headroom),
+                                                Float(options.display.highlightCeiling), 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)
