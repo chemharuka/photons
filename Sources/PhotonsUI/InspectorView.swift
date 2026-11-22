@@ -279,6 +279,8 @@ public struct InspectorView: View {
     @State private var autoBlackHovered = false
     /// 422 — the same for the Light card's 自动调节 icon.
     @State private var autoLightHovered = false
+    /// 496 — and for the Color card's 自动颜色 icon (the same control family).
+    @State private var autoColorHovered = false
 
     /// **Which cards are on screen** (派单 073).
     ///
@@ -1530,6 +1532,9 @@ public struct InspectorView: View {
         if spec.section == .light {
             // 422 — the 明暗 card's 自动调节, drawn exactly like 黑电平's 自动 (one button family).
             autoLightButton
+        } else if spec.section == .color {
+            // 496 — the 色彩 card's 自动颜色, the third member of the same wand-button family.
+            autoColorButton
         } else if spec.section == .correction, let note = autoProfileNote {
             Text(note)
                 .font(.system(size: 9))
@@ -1574,6 +1579,41 @@ public struct InspectorView: View {
                                           : Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
         .accessibilityLabel(Loc.t("自动调节"))
         .accessibilityIdentifier("inspector.light.auto")
+    }
+
+    /// 496 — 「色彩」标题行右侧的 自动颜色, the same bare-icon family as 自动调节 / 自动黑电平.
+    ///
+    /// Geometry, hover, hit area and probe are copied item for item from `autoLightButton`; the only
+    /// differences are the label and the verb. The action is `LoupeController.autoColor()` — the same
+    /// path the right-click row and 「全部自动」 use, so there is no second plan to drift.
+    ///
+    /// A detached panel has no loupe; the button stays visible and is disabled rather than hiding a
+    /// control the user went looking for (the Light card keeps its wand visible too).
+    private var autoColorButton: some View {
+        Button {
+            _ = loupe?.autoColor()
+        } label: {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 14))
+                .foregroundStyle(autoColorHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+                .background(LightAutoProbeHost())
+                .background { AutoColorButtonProbe(help: autoColorHelp) }
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, -2)
+        .onHover { autoColorHovered = $0 }
+        .disabled(loupe == nil || autoAdjustWaitingForDecode)
+        .help(autoColorHelp)
+        .accessibilityLabel(Loc.t("自动颜色"))
+        .accessibilityIdentifier("inspector.color.auto")
+    }
+
+    /// 496 — the help string, named once so the button and its read-back probe cannot disagree.
+    private var autoColorHelp: String {
+        autoAdjustWaitingForDecode ? Loc.t("等待解码…")
+                                   : Loc.t("自动颜色：按画面的色度分布安排自然饱和（只加不减）")
     }
 
     /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.
@@ -4039,6 +4079,51 @@ public final class InspectorHostingView: NSHostingView<InspectorView> {
 // 「自动黑电平」图标的框探针搬到 `BlackLevelAutoProbe.swift`：
 // 060 的 SliderStyleTests 禁止本文件出现 AppKit 包装视图（面板里只许 SwiftUI Slider），
 // 而探针必须是真的 NSView —— 与 ChromaticAberrationProbe / EffectsRowProbe 同一处理。
+
+// MARK: - 496 — the Color 自动 button's state read-back
+
+/// Reports the `isEnabled` and help text SwiftUI actually resolved for the Color card's 自动颜色.
+///
+/// Why a probe and not a control: on macOS 27 the wand `Button` has no AppKit control leaf, and the
+/// accessibility tree is not exposed in a test run (same reason as `DetailRowEnabledProbe`). A child
+/// of the label reads the environment `.disabled` writes and carries the same help string the
+/// `.help` modifier got, so the waiting/disabled state has something to read back. Inert in
+/// production (a zero-size clear rectangle).
+struct AutoColorButtonProbe: View {
+    let help: String
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { AutoColorButtonLog.shared.record(enabled: isEnabled, help: help) }
+            .onChange(of: isEnabled) { _, new in
+                AutoColorButtonLog.shared.record(enabled: new, help: help)
+            }
+            .onChange(of: help) { _, new in
+                AutoColorButtonLog.shared.record(enabled: isEnabled, help: new)
+            }
+    }
+}
+
+/// Where `AutoColorButtonProbe` reports to. Lock-guarded so a re-layout from another thread cannot
+/// tear the pair; the tests are the only reader.
+public final class AutoColorButtonLog: @unchecked Sendable {
+    public static let shared = AutoColorButtonLog()
+    private let lock = NSLock()
+    private var enabled = true
+    private var help = ""
+
+    public func record(enabled: Bool, help: String) {
+        lock.lock(); self.enabled = enabled; self.help = help; lock.unlock()
+    }
+    public func reset() {
+        lock.lock(); enabled = true; help = ""; lock.unlock()
+    }
+    public var state: (enabled: Bool, help: String) {
+        lock.lock(); defer { lock.unlock() }; return (enabled, help)
+    }
+}
 
 // MARK: - the enabled read-back probe
 
