@@ -74,6 +74,28 @@ final class DecodeContractTests: XCTestCase {
         XCTAssertFalse(none.downgraded)
     }
 
+    /// 506-C — the thumbnail pool's decode policy: the widest **non-ML** version this file offers.
+    ///
+    /// Pure, because it is a table rule (no RAW, no filter). The order matters — `8` before `8.dng`,
+    /// because that is Apple's own default spelling — and a v9-only body must answer `nil` so the
+    /// caller keeps the request it had instead of inventing a spelling the body would silently
+    /// ignore (the silent-downgrade rule this file has pinned since D2′).
+    func testWidestClassicVersionAvoidsTheNeuralStage() {
+        XCTAssertTrue(DecoderCapabilities.usesNeuralStage("9"))
+        XCTAssertTrue(DecoderCapabilities.usesNeuralStage("9.dng"))
+        XCTAssertFalse(DecoderCapabilities.usesNeuralStage("8.dng"))
+
+        XCTAssertEqual(DecoderCapabilities.widestClassicVersion(
+                           offered: ["6.dng", "7", "7.dng", "8", "8.dng", "9.dng"]), "8")
+        XCTAssertEqual(DecoderCapabilities.widestClassicVersion(
+                           offered: ["6", "7", "9.dng"]), "7")
+        XCTAssertEqual(DecoderCapabilities.widestClassicVersion(
+                           offered: ["8.dng", "9.dng"]), "8.dng",
+                       "a DNG body that only whitelists the suffixed form gets it")
+        XCTAssertNil(DecoderCapabilities.widestClassicVersion(offered: ["9", "9.dng"]),
+                     "a v9-only body has no classic decoder; the caller keeps its own request")
+    }
+
     /// v9 silently turns three sliders into no-ops (§11.1) — the capability set has to say so.
     func testV9DropsThreeSliders() {
         let v8 = DecoderCapabilities(requestedVersion: nil, effectiveVersion: "8", defaultVersion: "8")

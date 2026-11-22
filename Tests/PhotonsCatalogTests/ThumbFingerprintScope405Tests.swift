@@ -97,15 +97,23 @@ final class ThumbFingerprintScope405Tests: XCTestCase {
     }
 
     // MARK: - ①–③ today's keys, frozen
+    //
+    // ①–③ were **re-recorded by 506-C** (2026-11-22). Every HD key moves exactly once, on purpose:
+    // the fingerprint now spells the grid's own decoder policy (`tdec=classic` — the grid never goes
+    // through the ML/v9 stage, docs/tasks/506-raw-decode-ane-concurrency.md) instead of the
+    // document's `ver=` request. So the pixels of every high-ISO file genuinely change, and a
+    // thumbnail rendered by the crashing v9 path must not stay servable. Cost: one background
+    // rebuild of the HD cache; the legacy/preview families are untouched (their keys carry no
+    // document and no policy).
 
     func testTheNeutralDocumentFingerprintIsByteIdenticalToToday() {
         XCTAssertEqual(ThumbRecipe.editFingerprint(.neutral),
-                       "d70642ef60809c9c3b9412c9de46cd7d3bb77beab2adcba52eeb0fc07079a5c8")
+                       "983169dd351aceef37e774ca948240a04d304f812d2f9112249f0434fe3d7e89")
     }
 
     func testACroppedAndRotatedDocumentFingerprintIsByteIdenticalToToday() {
         XCTAssertEqual(ThumbRecipe.editFingerprint(cropped),
-                       "3befa1a35dadd9b05a423700118231aef22978f0c842f1b7a7b8bfca38e76c78")
+                       "2b0e2ec89fea216a046246cc36b739adce043bbd852f104724168e190d7eca61")
     }
 
     /// ③ today's key of a document that **runs** dehaze. 417 re-recorded it: `dehaze` moved 11 → 12
@@ -113,10 +121,11 @@ final class ThumbFingerprintScope405Tests: XCTestCase {
     /// `ThumbRecipe.editFingerprint` spells a *used* stage's live version — so this key must move, while
     /// ① and ② (documents that do not run S1.9, which read `ThumbFingerprintBaseline`) stay byte-identical.
     /// The baseline table itself is untouched: its `.dehaze: 11` entry is the neutral placeholder for
-    /// non-dehaze documents and never follows a bump.
+    /// non-dehaze documents and never follows a bump. 506-C re-recorded it once more, for the key's
+    /// decoder-policy token (see ①–③ above).
     func testADehazeOnlyEditChangesTheFingerprint() {
         XCTAssertEqual(ThumbRecipe.editFingerprint(dehazed),
-                       "0d7c9794b1ec56d05c6d0401a086eda8905cdfd1b8e58f1626afa4e1ed6dc271")
+                       "8127d2d5c1cd9283b1fe7987cc76ec67e4c78f042fcf5f1fb6890318a98d54f5")
         // …and it is genuinely a different key from neutral, i.e. ① is not passing by accident.
         XCTAssertNotEqual(ThumbRecipe.editFingerprint(dehazed),
                           ThumbRecipe.editFingerprint(.neutral))
