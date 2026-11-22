@@ -5321,25 +5321,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let menu = NSMenu()
         menu.autoenablesItems = false
         AutoAdjustMenuBuilder.attach(to: menu, session: session, target: autoAdjustMenuTarget)
-        // 498 — a legitimate 0 + 0 must not read as a broken button. The last measurement explains
-        // itself on the row's tooltip; a picture not measured yet gets the normal one-line help.
-        if let color = menu.items.first(where: {
-            $0.action == #selector(AutoAdjustMenuTarget.autoColorPressed(_:))
-        }) {
-            color.toolTip = autoColorHelpText
-        }
         return menu
-    }
-
-    private var autoColorHelpText: String {
-        switch lastAutoColorNoOpReasonForTesting {
-        case .tooGrey:
-            return Loc.t("自动颜色：画面几乎没有颜色，未写入")
-        case .alreadySaturated:
-            return Loc.t("自动颜色：这张已经足够饱和，两个参数都保持 0")
-        case nil:
-            return Loc.t("自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度")
-        }
     }
 
     /// The projection the crop layout is built from at the current camera.
