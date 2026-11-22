@@ -279,6 +279,8 @@ public struct InspectorView: View {
     @State private var autoBlackHovered = false
     /// 422 — the same for the Light card's 自动调节 icon.
     @State private var autoLightHovered = false
+    /// 496 — and for the Color card's 自动颜色 icon (the same control family).
+    @State private var autoColorHovered = false
 
     /// **Which cards are on screen** (派单 073).
     ///
@@ -1530,6 +1532,9 @@ public struct InspectorView: View {
         if spec.section == .light {
             // 422 — the 明暗 card's 自动调节, drawn exactly like 黑电平's 自动 (one button family).
             autoLightButton
+        } else if spec.section == .color {
+            // 496 — the 色彩 card's 自动颜色, the third member of the same wand-button family.
+            autoColorButton
         } else if spec.section == .correction, let note = autoProfileNote {
             Text(note)
                 .font(.system(size: 9))
@@ -1574,6 +1579,40 @@ public struct InspectorView: View {
                                           : Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
         .accessibilityLabel(Loc.t("自动调节"))
         .accessibilityIdentifier("inspector.light.auto")
+    }
+
+    /// 496 — 「色彩」标题行右侧的 自动颜色, the same bare-icon family as 自动调节 / 自动黑电平.
+    ///
+    /// Geometry, hover, hit area and probe are copied item for item from `autoLightButton`; the only
+    /// differences are the label and the verb. The action is `LoupeController.autoColor()` — the same
+    /// path the right-click row and 「全部自动」 use, so there is no second plan to drift.
+    ///
+    /// A detached panel has no loupe; the button stays visible and is disabled rather than hiding a
+    /// control the user went looking for (the Light card keeps its wand visible too).
+    private var autoColorButton: some View {
+        Button {
+            _ = loupe?.autoColor()
+        } label: {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 14))
+                .foregroundStyle(autoColorHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+                .background(LightAutoProbeHost())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, -2)
+        .onHover { autoColorHovered = $0 }
+        .disabled(loupe == nil || autoAdjustWaitingForDecode)
+        .help(autoColorHelp)
+        .accessibilityLabel(Loc.t("自动颜色"))
+        .accessibilityIdentifier("inspector.color.auto")
+    }
+
+    /// 496 — the help string, named once so the waiting and ready states cannot disagree.
+    private var autoColorHelp: String {
+        autoAdjustWaitingForDecode ? Loc.t("等待解码…")
+                                   : Loc.t("自动颜色：按画面的色度分布安排自然饱和（只加不减）")
     }
 
     /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.
