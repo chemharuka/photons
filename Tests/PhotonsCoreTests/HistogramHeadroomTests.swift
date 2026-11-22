@@ -221,9 +221,10 @@ final class HistogramHeadroomTests: XCTestCase {
     /// A **debug** build dominates both sides with the CPU binning, so the numbers below are not the
     /// shipping ones — the delta is, which is why the assertion is on the delta.
     ///
-    /// 517 turns one sample into **three batches × n**, judged by the median delta against the old
-    /// path's own p50 from the same run (≤ 5 % of it, with the original 0.2 ms as the floor) and a
-    /// 1.0 ms hard ceiling. The numbers themselves were not raised.
+    /// 517 turns one sample into **three batches × n**, judged by the **minimum** batch delta against
+    /// the original 0.2 ms (no percentage coefficient, no raised budget), plus a "no worse on the
+    /// typical batch" check on the median p50s. Noise can only push a batch delta up, so the minimum
+    /// is the stable estimator; the median check is the persistence gate.
     func testTheSceneLinearSourceIsNotSlowerThanTheS4FrameItReplaced() throws {
         let picture = fourBlocks(width: 1200, height: 800)      // 0.96 Mpx, viewport-shaped
         let graph = try makeGraph(picture, identity: "histogram-cost")
@@ -273,15 +274,16 @@ final class HistogramHeadroomTests: XCTestCase {
 
         // 517 — three batches × n, in **this** run. A single p50 pair decides the sign of the delta
         // on a debug build where the CPU binning dominates both sides; one unlucky batch can flip it.
-        // The three batch deltas' **median** is the one that judges, and every sample is printed.
+        // The **minimum** of the three batch deltas is the one that judges, and every sample is
+        // printed.
         //
         // · Reference: `p50(before)`, the old S4-frame path's own p50 — it is already in hand because
         //   both sides run here, back to back, with the same compile and the same machine load.
-        // · Relative gate: `delta ≤ max(0.2, 0.05 × p50(before))` — the new source may not cost more
-        //   than 5 % of what the frame it replaced already costs. 0.2 ms is **not raised**: it stays
-        //   as the `max()` floor so a fast (release-like) frame keeps the old absolute signal.
-        // · Hard ceiling: `delta ≤ 1.0 ms` — if the reference itself regresses, the 5 % band widens
-        //   with it; this keeps a real regression red regardless.
+        // · Absolute budget: `delta ≤ 0.2 ms` — the original number, **unchanged**. Noise only makes
+        //   a batch delta larger, so taking the minimum across three batches removes the coin flip
+        //   without loosening the signal by a single coefficient.
+        // · Second gate: the median `p50(after)` may not exceed the median `p50(before)` by more than
+        //   0.2 ms — a single lucky batch cannot hide two typical batches that got worse.
         let batchCount = 3
         var beforeP50s: [Double] = []
         var afterP50s: [Double] = []
@@ -301,29 +303,29 @@ final class HistogramHeadroomTests: XCTestCase {
                   + String(format: "%.2f → %.2f ms · delta %+.2f ms",
                            before, after, after - before))
         }
-        let delta = p50(deltas)
-        let referenceP50 = p50(beforeP50s)
-        let relativeBudget = max(0.2, 0.05 * referenceP50)
-        let hardCeiling = 1.0
+        let delta = deltas.min()!
+        let medianBefore = p50(beforeP50s)
+        let medianAfter = p50(afterP50s)
+        let budget = 0.2
         let batchDeltaText = deltas.map { String(format: "%+.2f", $0) }.joined(separator: " ")
         let batchBeforeText = beforeP50s.map { String(format: "%.2f", $0) }.joined(separator: " ")
         let batchAfterText = afterP50s.map { String(format: "%.2f", $0) }.joined(separator: " ")
 
         print("070 cost: frame 1200×800 · S4-frame source p50 [\(batchBeforeText)] ms"
-              + " (reference " + String(format: "%.2f", referenceP50) + " ms)"
               + " · scene-linear source p50 [\(batchAfterText)] ms"
-              + " · batch deltas [\(batchDeltaText)] ms → median delta "
+              + " · batch deltas [\(batchDeltaText)] ms → min delta "
               + String(format: "%+.2f", delta) + " ms"
-              + String(format: " · relative budget %.2f ms · hard ceiling %.1f ms",
-                       relativeBudget, hardCeiling)
+              + String(format: " · median p50 %.2f → %.2f ms · budget %.1f ms",
+                       medianBefore, medianAfter, budget)
               + " (debug build; the CPU binning dominates both)")
-        XCTAssertLessThanOrEqual(delta, relativeBudget,
+        XCTAssertLessThanOrEqual(delta, budget,
                                  "moving the measurement to the scene-linear texture may not cost the "
-                                 + "present frame more than 5 % of the S4 frame's own p50 "
-                                 + String(format: "(median delta %+.2f ms vs budget %.2f ms)",
-                                          delta, relativeBudget))
-        XCTAssertLessThanOrEqual(delta, hardCeiling,
-                                 "median delta " + String(format: "%+.2f", delta)
-                                 + " ms exceeds the 1.0 ms hard ceiling")
+                                 + "present frame more than 0.2 ms on its fastest batch "
+                                 + String(format: "(min delta %+.2f ms vs budget %.1f ms)",
+                                          delta, budget))
+        XCTAssertLessThanOrEqual(medianAfter, medianBefore + budget,
+                                 "median scene-linear p50 " + String(format: "%.2f", medianAfter)
+                                 + " ms is more than 0.2 ms worse than the S4-frame p50 "
+                                 + String(format: "%.2f", medianBefore) + " ms")
     }
 }

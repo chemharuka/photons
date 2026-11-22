@@ -194,31 +194,38 @@ final class ColdStartLoupeTests: XCTestCase {
                                  "the stand-in is not centred: midY \(placeholderRect.midY)"
                                  + " vs canvas midY \(canvasPoints.height / 2)")
 
-        // 517 — **同一次运行内的参照 + 双闸**, replacing the single absolute sample.
+        // 517 — **按参照帧标定 + 双闸**, replacing the single absolute sample and the first round's
+        // fixed 60 % coefficient.
         //
         //   · Reference: `firstRealFrameMs`, the moment `waitFor` saw the real frame. The stand-in's
         //     whole job is to beat the frame it replaces, so that frame is the semantically correct
         //     yardstick — not a number picked on an idle machine.
-        //   · Relative gate: `≤ max(250, 0.6 × firstRealFrameMs)`. 60 % leaves the stand-in a 1.6×
-        //     margin against the frame it stands in for; when the machine (or a decode) gets slower,
-        //     the reference grows with it instead of the gate going red for being busy.
-        //   · Hard ceiling: **1500 ms**. A purely relative gate relaxes without bound if the reference
-        //     itself regresses; this is the absolute floor of the signal.
-        //   · **The budget was not raised**: 250 ms is still there, as the `max()` lower bound. What
-        //     changed is how many times we look and what we compare against.
-        let relativeBudgetMs = max(250.0, 0.6 * firstRealFrameMs)
+        //   · Calibration, not a fixed ratio: on this machine's debug build the first real frame took
+        //     **961.0 ms** in the 517 run, and the original 250 ms matte budget was measured on a
+        //     machine like that one. So the budget is `250 ms × max(1, firstRealFrameMs / 961 ms)`:
+        //     at the reference frame time the gate is exactly the original 250 ms (not one millisecond
+        //     looser), a slower machine widens both together, and a faster one never tightens below
+        //     250 (otherwise we would be testing the machine, not the stand-in).
+        //   · Hard ceiling: **1500 ms**. Calibration alone widens without bound if the reference itself
+        //     regresses; this is the absolute floor of the signal.
+        //   · **The budget was not raised**: 250 ms is the base of the calibration, not a new number.
+        let referenceFirstRealFrameMs = 961.0
+        let budgetMs = 250.0 * max(1.0, firstRealFrameMs / referenceFirstRealFrameMs)
         let hardCeilingMs = 1500.0
         print(String(format: "517 cold start: matte %.1f ms · stand-in generation %.1f ms"
-                     + " · first real frame %.1f ms · relative budget %.1f ms · hard ceiling %.0f ms",
-                     matteMs, generationMs, firstRealFrameMs, relativeBudgetMs, hardCeilingMs))
-        XCTAssertLessThanOrEqual(matteMs, relativeBudgetMs,
-                                 "empty-cache matte window \(matteMs) ms exceeds 60 % of the first "
-                                 + "real frame (\(firstRealFrameMs) ms → budget \(relativeBudgetMs) ms)")
+                     + " · first real frame %.1f ms · calibrated budget %.1f ms"
+                     + " · hard ceiling %.0f ms",
+                     matteMs, generationMs, firstRealFrameMs, budgetMs, hardCeilingMs))
+        XCTAssertLessThanOrEqual(matteMs, budgetMs,
+                                 "empty-cache matte window \(matteMs) ms exceeds the calibrated budget "
+                                 + "(first real frame \(firstRealFrameMs) ms vs reference "
+                                 + "\(referenceFirstRealFrameMs) ms → budget \(budgetMs) ms)")
         XCTAssertLessThanOrEqual(matteMs, hardCeilingMs,
                                  "empty-cache matte window \(matteMs) ms exceeds the 1500 ms hard ceiling")
-        XCTAssertLessThanOrEqual(generationMs, relativeBudgetMs,
-                                 "stand-in generation \(generationMs) ms exceeds 60 % of the first "
-                                 + "real frame (\(firstRealFrameMs) ms → budget \(relativeBudgetMs) ms)")
+        XCTAssertLessThanOrEqual(generationMs, budgetMs,
+                                 "stand-in generation \(generationMs) ms exceeds the calibrated budget "
+                                 + "(first real frame \(firstRealFrameMs) ms vs reference "
+                                 + "\(referenceFirstRealFrameMs) ms → budget \(budgetMs) ms)")
         XCTAssertLessThanOrEqual(generationMs, hardCeilingMs,
                                  "stand-in generation \(generationMs) ms exceeds the 1500 ms hard ceiling")
         print(String(format: "251 empty cache: matte %.1f ms · stand-in generation %.1f ms"
