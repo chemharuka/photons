@@ -750,17 +750,25 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
               row < photosTable.numberOfRows else { return }
         let clip = photosScroll.contentView
         let visible = clip.bounds.height
-        let content = photosTable.bounds.height
-        let item = photosTable.rect(ofRow: row)
-        guard visible > 0, content > 0, item.height > 0 else { return }
+        // 507 — 位置从**数据**算（行号 × 行距），不问 `rect(ofRow:)`：刚 reloadData 的表还没有
+        // 任何一行材化，`rect(ofRow:)` 的可用性取决于「上一趟布局有没有跑」，这正是「先切换再
+        // 滚动」的残余。行高是 `configure(table:rowHeight:)` 设死的常数，所以行号就够。
+        let pitch = max(1, photosTable.rowHeight + photosTable.intercellSpacing.height)
+        let content = CGFloat(photosTable.numberOfRows) * pitch
+        let itemMid = CGFloat(row) * pitch + photosTable.rowHeight / 2
+        guard visible > 0, content > 0 else { return }
         if scrollActivity.isUserScrolling(photosScroll) { return }
-        if clip.bounds.intersects(item) { return }
-        let target = CenteredScroll.target(itemMidpoint: item.midY,
+        let target = CenteredScroll.target(itemMidpoint: itemMid,
                                            contentLength: content,
                                            visibleLength: visible)
+        // 已在位（≤ 0.5 pt）就是 no-op：来回切面不会把用户滚过的视口再拽一次。
+        guard abs(clip.bounds.origin.y - target) > 0.5 else { return }
         scrollActivity.beginOwnChange()
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
         photosScroll.reflectScrolledClipView(clip)
+        photosTable.noteRevealPlacement()
+        // 这一带的行就地布局出来：可见行与它们的 on-screen 请求在本次调用返回前就已存在。
+        photosTable.layoutSubtreeIfNeeded()
     }
 
     /// 471 — reveal 消费前的只读接缝：用户正在驱动这一面的滚动条时不抢。
@@ -770,6 +778,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
+    /// 507 — 这个表真正跑过的布局次数（与网格的 `AssetCollectionView.layoutPassCount` 同口径）。
+    /// 切图那一 turn 里必须是 1：可见行在第一趟布局里就该齐。
+    public var photoListLayoutPassCountForTesting: Int { photosTable.layoutPassCount }
+
 
     /// 430 — how many times the photo list has been rebuilt (`reloadData`). The counter behind
     /// 「加一颗星不该重载侧栏」: a metadata write must leave it where it was, a structure change
@@ -2135,6 +2147,18 @@ final class PhotoRowCell: NSTableCellView {
 /// double-click's target (`openTargetID`). 383: the hook no longer eats a press — nothing swallows.
 final class PhotoListTableView: NSTableView {
     var onMouseDown: ((NSEvent) -> Bool)?
+    /// 507 — 与 `AssetCollectionView.layoutPassCount` 同口径：这个表真正跑过的布局次数。
+    private(set) var layoutPassCount = 0
+
+    override func layout() {
+        super.layout()
+        layoutPassCount += 1
+    }
+
+    /// 507 — 「已知则直出」的可观测证据：这一面真正把 clip 挪到锚点上的次数（已在位是 no-op）。
+    private(set) var revealPlacementCount = 0
+    func noteRevealPlacement() { revealPlacementCount += 1 }
+
     /// 430 — how many times this table was rebuilt. The same number the grid exposes as
     /// `reloadCount`: a metadata write (a star) must not move it, a structure change must.
     private(set) var reloadCount = 0

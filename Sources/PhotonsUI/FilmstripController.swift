@@ -1079,19 +1079,31 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
               let scroll = collectionView.enclosingScrollView else { return }
         let clip = scroll.contentView
         let visible = clip.bounds.width
-        let content = collectionView.collectionViewLayout?.collectionViewContentSize.width ?? 0
-        guard visible > 0, content > 0,
-              let item = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
-        else { return }
+        // 507 — 位置同样从**数据**算（序号 × 格距）：`layoutAttributesForItem` 对一条 500 张的
+        // 带子只保证「已准备好的那一段」有值，远处那张问不到 —— 问不到就什么都不做，于是只能
+        // 等下一趟布局再来一次，那还是「先切换再滚动」。格距与内边距都是 flow 上的常数。
+        let pitch = max(1, flow.itemSize.width + flow.minimumInteritemSpacing)
+        let count = CGFloat(session.assets.count)
+        let content = flow.sectionInset.left + flow.sectionInset.right
+            + count * flow.itemSize.width + max(0, count - 1) * flow.minimumInteritemSpacing
+        let itemMid = flow.sectionInset.left + CGFloat(index) * pitch + flow.itemSize.width / 2
+        guard visible > 0, content > 0 else { return }
         if scrollActivity.isUserScrolling(scroll) { return }
-        if clip.bounds.intersects(item.frame) { return }
-        let target = CenteredScroll.target(itemMidpoint: item.frame.midX,
+        let target = CenteredScroll.target(itemMidpoint: itemMid,
                                            contentLength: content,
                                            visibleLength: visible)
+        // 已在位（≤ 0.5 pt）就是 no-op：来回切面不把用户滚过的带子再拽一次（471 ⑤）。
+        guard abs(clip.bounds.origin.x - target) > 0.5 else { return }
         scrollActivity.beginOwnChange()
         clip.scroll(to: NSPoint(x: target, y: 0))
         scroll.reflectScrolledClipView(clip)
+        revealPlacementCount += 1
+        // 这一带的格子就地布局出来：可见格与它们的 on-screen 请求在本次调用返回前就已存在。
+        collectionView.layoutSubtreeIfNeeded()
     }
+
+    /// 507 — 与网格/侧栏同口径的「直出」证据：真正把 clip 挪到锚点上的次数（已在位是 no-op）。
+    public private(set) var revealPlacementCount = 0
 
     /// 471 — reveal 消费前的只读接缝：用户正在驱动这一面的滚动条时不抢。
     var isUserScrolling: Bool {
