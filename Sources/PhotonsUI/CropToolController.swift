@@ -2419,17 +2419,22 @@ public final class CropToolController {
         guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return nil }
         let space: CropSpace = perspective?.hasWarp == true ? .canvas : document.cropSpace
         let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
-        // **505 — two answers, both feasible, the larger wins.** `AutoCropSolver` is the solver, but
-        // its edge enumeration cannot express a rectangle whose side is supported by an
-        // **axis-parallel** edge (see `bandRectangle`), and that is every keystoned document at 0° of
-        // straighten — the commonest keystone there is. It answers `nil` there, so the frame used to
-        // keep its black corners. The band rectangle is the same problem's other half; both are
-        // verified inside the polygon, so the maximum of the two is inside it too.
-        let solved = AutoCropSolver.maximumRectangle(in: polygon)
-        let band = Self.bandRectangle(in: polygon)
-        guard let rect = [solved, band].compactMap({ $0 }).max(by: {
-            Double($0.width * $0.height) < Double($1.width * $1.height)
-        }) else { return nil }
+        // **520 — the exact answer comes first.** `MaxInscribedRect` maximizes `width · height`
+        // directly, using the convexity lemma (`top` concave, `bot` convex), so it expresses the
+        // axis-parallel side 489's `edges⁴` enumeration could not, and it is not tied to a vertex-y
+        // band the way 505's patch was. Pixel area is a constant multiple of normalized `w·h` in both
+        // crop spaces (both extents are constants), so comparing `w·h` here is comparing pixels.
+        //
+        // The two older candidates are a **fallback only** — not the answer. They remain because a
+        // degenerate or numerically awkward polygon may leave the exact solver `nil`, and returning
+        // the old feasible rectangle is better than returning nothing; both are verified inside the
+        // polygon, so their maximum is inside it too.
+        let exact = MaxInscribedRect.maximumRectangle(in: polygon)
+        let legacy = [AutoCropSolver.maximumRectangle(in: polygon), Self.bandRectangle(in: polygon)]
+            .compactMap { $0 }.max(by: {
+                Double($0.width * $0.height) < Double($1.width * $1.height)
+            })
+        guard let rect = exact ?? legacy else { return nil }
         let plane = space == .canvas
             ? CropMath.documentCanvas(source: sourceSize, straightenDegrees: angle,
                                       perspective: perspective).size
@@ -2491,7 +2496,12 @@ public final class CropToolController {
         return Self.convexHull(samples)
     }
 
-    /// **505 — the full-band answer, for the polygons `AutoCropSolver` declines.**
+    /// **505 — the full-band answer, kept only as a historical fallback (520 superseded it).**
+    ///
+    /// 520's `MaxInscribedRect` is the exact solver and is what `autoCropTarget` uses. This band is no
+    /// longer a candidate answer: it is pinned to the hull's vertex `y`s and to the narrowest chord
+    /// across the whole band, so it can only be optimal when the best rectangle happens to span the
+    /// full y-range. It survives so a polygon the exact solver declines still gets a feasible rect.
     ///
     /// The solver's enumeration writes one linear row per side of the answer (`[a, 0, b, 0, c]` for
     /// `left`, …), which names `left` only when that supporting edge's `a ≠ 0`. A quad with an
@@ -2506,9 +2516,9 @@ public final class CropToolController {
     /// chords' left and right ends are linear in `y` between vertices, so their extremes are reached
     /// at the vertices' own `y` values — the band is computed exactly, not sampled.
     ///
-    /// The solver itself is untouched. This is a second, independent *candidate*: its four corners
-    /// are checked with the same containment the solver uses, and the caller takes the larger of the
-    /// two (both are inside the picture, so the larger one is too).
+    /// Its four corners are checked with the same containment the exact solver uses. The caller only
+    /// reaches for it when `MaxInscribedRect` returns `nil`; it is never allowed to overrule the
+    /// exact answer (the optimum is ≥ any band by construction).
     private static func bandRectangle(in polygon: [NormalizedPoint]) -> NormalizedRect? {
         guard polygon.count >= 3 else { return nil }
         let ys = Set(polygon.map(\.y)).sorted()
