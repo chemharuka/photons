@@ -94,6 +94,15 @@ final class DecodeContractTests: XCTestCase {
                        "a DNG body that only whitelists the suffixed form gets it")
         XCTAssertNil(DecoderCapabilities.widestClassicVersion(offered: ["9", "9.dng"]),
                      "a v9-only body has no classic decoder; the caller keeps its own request")
+        // 513 — `CIRAWDecoderVersionNone` is Core Image's "this file has no RAW decoder", and it is the
+        // **only** entry a JPEG reports. It is not a spelling that can be assigned: answering it made
+        // every HD thumbnail of a JPEG library throw `unsupportedVersion("None")` (430's 30/30 cells).
+        XCTAssertNil(DecoderCapabilities.widestClassicVersion(offered: ["None"]),
+                     "a JPEG offers `None`, not a decoder version — the caller must keep its request")
+        XCTAssertNil(DecoderCapabilities.widestClassicVersion(offered: ["None", "9.dng"]),
+                     "…and `None` must not shadow the v9-only answer either")
+        XCTAssertEqual(DecoderCapabilities.widestClassicVersion(offered: ["None", "7"]), "7",
+                       "a real classic spelling still wins over the sentinel")
     }
 
     /// v9 silently turns three sliders into no-ops (§11.1) — the capability set has to say so.

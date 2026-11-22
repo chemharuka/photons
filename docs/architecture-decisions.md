@@ -995,3 +995,30 @@ struct CanvasPresentation {
 **本声明不产生派单**：455 / 456 的代码必须在用户回答 22.6 之后才开。
 
 
+
+## 23. 缩略图的解码版本是**策略**，不是文档的请求（506-C 落地更正，2026-11-22；513 补规则）
+
+**决策（owner，2026-11-22，三份 `.ips` 之后）**：网格/胶片条/侧栏三处的 HD 缩略图**从不进** Apple 的 ML
+（v9）RAW 阶段。v9 是 `CIImageProcessorKernel → CIESpressoWrapper → E5RT/ANE`，那张 E5RT 程序表是
+**进程级**的；缩略图池是唯一把 8–9 路解码同时开着的地方，三份崩溃报告（11-18 / 11-21 / 11-22）都死在
+`ANEServicesThread` 上（见 `docs/tasks/506-raw-decode-ane-concurrency.md`）。loupe / 导出 / 批量导出**不动**，
+它们仍按文档请求（可以选 v9）。
+
+**落地形态（代码即如此）**
+- `DecodeOptions.avoidNeuralStage` 是一个**策略开关**：`decodeDetailed` 在自动规则之后把版本钉到这个
+  文件自己 offer 的最宽非 ML 拼写（`DecoderCapabilities.widestClassicVersion`；实测每台机身 `8`）。
+- 调用点：`ThumbnailProvider.renderHD`、`ThumbnailProvider.renderedThumbnail`、`photonsctl thumbs`。
+- **键**拼的是策略而不是文档的数字：`ThumbRecipe.fingerprintMaterial` 里 `ver=<文档请求>` 换成
+  `ThumbDecoderProfile.token`（`tdec=classic`）。代价是一次性 HD 缓存重建（legacy/preview 族不动）。
+- **文档的 decoderVersion 不再移动网格**，这是接受的代价，不是遗漏。
+
+**513 补的一条规则（"None" 不是版本）**：`CIRAWDecoderVersionNone` 是 Core Image 对「这个文件没有 RAW
+解码器」的回答，也是**任何 JPEG 的 `supportedDecoderVersions` 的唯一一项**。`widestClassicVersion` 的兜底
+曾经把它当拼写返回，于是 `decodeDetailed` 抛 `unsupportedVersion("None")` ⇒ JPEG 库的 HD 缩略图
+**一张都出不来**（430 用例：30 格全部挂请求、0 格有图）。规则：策略只返回 `knownVersions` 里的拼写，
+`None` 一律 `nil`（调用方保持自己的请求）。反向门：该兜底改回去 ⇒ `DecodeContractTests
+.testWidestClassicVersionAvoidsTheNeuralStage` 与 `RatingReloadGridCenter430Tests
+.testReturningFromTheLoupeKeepsAToBAndDrawsFromMemory` 同时红。
+
+**教训（写给下一次）**：这套策略是一次 `commit -a` 顺手扫进一个名为「顶栏改名」的提交（`4554573`）的，
+提交信息里一个字都没提。凡是改**解码版本解析**这种跨模块语义的，提交标题必须自己说清楚。
