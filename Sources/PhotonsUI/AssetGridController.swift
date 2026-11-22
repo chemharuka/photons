@@ -2118,15 +2118,20 @@ public enum DenoiseMenuBuilder {
     /// Same shape as the single rows: nil = clickable, otherwise the reason. A mixed selection is
     /// still clickable **when at least two photos are usable** — the skipped ones are reported by
     /// the alert, not by hiding the verb.
+    ///
+    /// 510 — the judgement is **per photo**, not per app: a photo that is already running or
+    /// already queued is not counted as usable (it would only be skipped), but *another* photo
+    /// running never makes this row grey. 「别的照片在跑」 used to disable every denoise row.
     public static func batchUnavailableReason(session: CatalogSession?, selectedIDs: [String],
                                               engine: DenoiseEngine) -> String? {
         guard let session else { return DenoiseNotices.noLibrary }
         guard selectedIDs.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
-        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
-        let usable = session.selectedAssets.filter {
-            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+        let free = usableSelectedAssets(session: session)
+        guard !free.isEmpty else {
+            // Nothing left to enqueue. Say **why** when the reason is the queue, not the format.
+            return busyReason(session: session) ?? DenoiseNotices.batchNeedsTwo
         }
-        guard usable.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
+        guard free.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         switch engine {
         case .ansel:
             guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }
@@ -2141,6 +2146,26 @@ public enum DenoiseMenuBuilder {
         return nil
     }
 
+    /// 510 — 选中里**能立刻入队**的那些：DNG、有文件 URL、而且不在这张自己的运行/队列里。
+    /// 菜单的可用性、tooltip 的张数与 `denoiseBatchSelection` 的跳过规则读的是同一个集合。
+    public static func usableSelectedAssets(session: CatalogSession) -> [Asset] {
+        let busy = session.denoiseBusyAssetIDs
+        return session.selectedAssets.filter {
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil && !busy.contains($0.id)
+        }
+    }
+
+    /// 510 — 「这些选中的照片为什么一张都不能入队」。nil = 原因不是队列（那就交给格式/依赖那几句）。
+    static func busyReason(session: CatalogSession) -> String? {
+        let usable = session.selectedAssets.filter {
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+        }
+        guard !usable.isEmpty else { return nil }
+        let running = usable.filter { session.denoiseAssetIsRunning($0.id) }
+        if running.count == usable.count { return DenoiseNotices.runningThisPhoto }
+        return DenoiseNotices.alreadyQueued
+    }
+
     public static func batchItem(session: CatalogSession?, target: DenoiseMenuTarget,
                                  selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
         let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count, engine: engine),
@@ -2153,9 +2178,8 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            let usable = session?.selectedAssets.filter {
-                $0.ext.lowercased() == "dng" && session?.fileURL(for: $0) != nil
-            }.count ?? selectedIDs.count
+            let usable = session.map { DenoiseMenuBuilder.usableSelectedAssets(session: $0).count }
+                ?? selectedIDs.count
             entry.toolTip = Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
                                   String(describing: (usable)))
         }
@@ -2186,8 +2210,10 @@ public enum DenoiseMenuBuilder {
         guard asset.ext.lowercased() == "dng" else {
             return DenoiseNotices.onlyDNG(asset.filename)
         }
-        // 「正在跑」在依赖之前：跑着的时候再说「缺模型」是假消息，而它其实什么都不缺。
-        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
+        // 510 — 「正在跑」说的是**这张照片**，不是「应用里有活在跑」：别的照片在跑时这一行照旧
+        // 可点（点了就是入队）。两句原因分开，用户才知道自己该等还是该换一张。
+        if session.denoiseAssetIsRunning(asset.id) { return DenoiseNotices.runningThisPhoto }
+        if session.denoiseAssetIsQueued(asset.id) { return DenoiseNotices.alreadyQueued }
         switch engine {
         case .ansel:
             guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }

@@ -102,17 +102,20 @@ final class BackgroundTaskBars488Tests: XCTestCase {
         print("488② bars=1 w=\(bars.barFramesForTesting[0].width) blue=\(bars.blueFractionsForTesting[0])")
     }
 
-    // MARK: - ③ three tasks: vertical 3 pt, centred, queued all grey
+    // MARK: - ③ three tasks: vertical 3 pt, centred, a 0 % line is all grey
 
+    /// 510 — the third line used to be a `.queued` task (488 drew it as a grey line). 510 puts queued
+    /// requests in the **panel** only (`「排队中（前面还剩 N 个）」`) and keeps the header for
+    /// 「正在执行的那条 + 已完成未过期的」, so the grey line here is now a running task at 0/5 —
+    /// the geometry and the all-grey claim are unchanged, the membership rule is asserted at the end.
     func testThreeTasksStackThreePointsApartCentredWithQueuedAllGrey() {
         let store = BackgroundTaskStore()
         let first = store.begin(BackgroundTask(kind: .denoise, title: "降噪 40 张", total: 40,
                                                startedAt: Date(timeIntervalSince1970: 1)))
         store.advance(id: first, completed: 10)
         let second = finishedTask(store, title: "导出 40 张照片", started: 2)
-        let third = store.begin(BackgroundTask(kind: .export, title: "排队中", total: 5,
-                                               startedAt: Date(timeIntervalSince1970: 3),
-                                               state: .queued))
+        let third = store.begin(BackgroundTask(kind: .export, title: "刚开始的导出", total: 5,
+                                               startedAt: Date(timeIntervalSince1970: 3)))
 
         let bar = makeBar(store: store)
         refresh(bar)
@@ -128,15 +131,28 @@ final class BackgroundTaskBars488Tests: XCTestCase {
             XCTAssertEqual(frame.midX, bars.bounds.midX, accuracy: 0.5, "三条水平居中")
         }
 
-        // display order is newest first: queued, finished, 10/40.
+        // display order is newest first: 0/5, finished, 10/40.
         let fractions = Dictionary(uniqueKeysWithValues: zip(bars.visibleTaskIDsForTesting,
                                                               bars.blueFractionsForTesting))
-        XCTAssertEqual(fractions[third] ?? -1, 0, accuracy: 0.0001, "queued 全灰")
+        XCTAssertEqual(fractions[third] ?? -1, 0, accuracy: 0.0001, "0/5 全灰")
         XCTAssertEqual(fractions[second] ?? -1, 1, accuracy: 0.0001, "40/40 全蓝")
         XCTAssertEqual(fractions[first] ?? -1, 0.25, accuracy: 0.0001, "10/40 = 25% 蓝")
         XCTAssertEqual(bars.visibleTaskIDsForTesting, [third, second, first], "新任务在最上")
         print("488③ bars=3 ys=\(frames.map(\.minY)) midX=\(frames.map(\.midX)) "
               + "blue=\(bars.blueFractionsForTesting.map { String(format: "%.2f", $0) })")
+
+        // 510 — a **queued** request draws no header line at all: it lives in the panel, where its
+        // text can say 「排队中（前面还剩 N 个）」. This also keeps the four slots for real progress.
+        let queued = store.begin(BackgroundTask(kind: .denoise, title: "排队中", total: 5,
+                                                startedAt: Date(timeIntervalSince1970: 4),
+                                                state: .queued,
+                                                queuedAhead: 1))
+        refresh(bar)
+        let afterQueue = bar.backgroundTaskBars
+        print("510 排队项：store=\(store.tasks.count) 顶栏=\(afterQueue.visibleTasks.count) "
+              + "ids=\(afterQueue.visibleTaskIDsForTesting)")
+        XCTAssertEqual(afterQueue.visibleTasks.count, 3, "排队项不占顶栏槽位")
+        XCTAssertFalse(afterQueue.visibleTaskIDsForTesting.contains(queued))
     }
 
     // MARK: - ④ six tasks: only the newest four are drawn

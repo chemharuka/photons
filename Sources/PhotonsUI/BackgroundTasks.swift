@@ -47,6 +47,10 @@ public struct BackgroundTask: Identifiable, Equatable, Sendable {
     public var startedAt: Date
     public var state: State
     public var failureCount: Int
+    /// 510 — how many requests still have to finish before this one may start. Only meaningful
+    /// while `state == .queued`; the panel reads it as 「排队中（前面还剩 N 个）」. A running row
+    /// keeps whatever value it had — the panel never draws it once the state is `.running`.
+    public var queuedAhead: Int?
 
     public init(id: UUID = UUID(),
                 kind: Kind,
@@ -57,7 +61,8 @@ public struct BackgroundTask: Identifiable, Equatable, Sendable {
                 currentThumbKey: String? = nil,
                 startedAt: Date = Date(),
                 state: State = .running,
-                failureCount: Int = 0) {
+                failureCount: Int = 0,
+                queuedAhead: Int? = nil) {
         self.id = id
         self.kind = kind
         self.title = title
@@ -68,6 +73,7 @@ public struct BackgroundTask: Identifiable, Equatable, Sendable {
         self.startedAt = startedAt
         self.state = state
         self.failureCount = failureCount
+        self.queuedAhead = queuedAhead
     }
 }
 
@@ -134,7 +140,8 @@ public final class BackgroundTaskStore {
     public func advance(id: UUID,
                         completed: Int? = nil,
                         currentAssetID: String? = nil,
-                        currentThumbKey: String? = nil) {
+                        currentThumbKey: String? = nil,
+                        queuedAhead: Int? = nil) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         let total = max(0, tasks[index].total)
         if let completed {
@@ -146,9 +153,20 @@ public final class BackgroundTaskStore {
         if let currentThumbKey {
             tasks[index].currentThumbKey = currentThumbKey
         }
+        if let queuedAhead {
+            tasks[index].queuedAhead = queuedAhead
+        }
         if tasks[index].state == .queued {
             tasks[index].state = .running
         }
+    }
+
+    /// 510 — update only the queue position of a row that is still waiting. Deliberately **not**
+    /// `advance`: that one flips `.queued` to `.running` on its first write, which is exactly what
+    /// this call must not do while the row is still behind another request.
+    public func setQueuedAhead(id: UUID, _ value: Int) {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[index].queuedAhead = value
     }
 
     /// 474 — drop the "currently running" photo without touching counts. A batch clears it at the

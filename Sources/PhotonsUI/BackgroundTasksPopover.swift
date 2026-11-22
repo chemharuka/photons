@@ -58,7 +58,16 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyLabel = NSTextField(labelWithString: Loc.t("没有后台任务"))
+    /// 510 — 「清空队列」. Only queued requests are dropped; the request that is executing keeps
+    /// running. Hidden whenever no row is waiting, so the panel looks unchanged without a queue.
+    private let clearQueueButton = NSButton(title: Loc.t("清空队列"), target: nil, action: nil)
     private let bridge = ObservationBridge()
+
+    /// 510 — set by the top bar from the live session. The panel owns the store, not the producer,
+    /// so the queue action has to be handed in.
+    public var onClearDenoiseQueue: (() -> Void)? {
+        didSet { reload() }
+    }
 
     private static let rowIdentifier = NSUserInterfaceItemIdentifier("BackgroundTaskRow")
     private static let columnIdentifier = NSUserInterfaceItemIdentifier("BackgroundTaskColumn")
@@ -108,6 +117,15 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
         emptyLabel.setAccessibilityIdentifier("backgroundTasks.empty")
         root.addSubview(emptyLabel)
 
+        clearQueueButton.bezelStyle = .inline
+        clearQueueButton.controlSize = .small
+        clearQueueButton.font = .systemFont(ofSize: 11)
+        clearQueueButton.target = self
+        clearQueueButton.action = #selector(clearQueueTapped)
+        clearQueueButton.setAccessibilityIdentifier("backgroundTasks.clearQueue")
+        clearQueueButton.isHidden = true
+        root.addSubview(clearQueueButton)
+
         reload()
         layoutContents()
 
@@ -127,12 +145,25 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
 
     private func layoutContents() {
         let bounds = view.bounds
-        scrollView.frame = bounds.insetBy(dx: 8, dy: 8)
+        let footer: CGFloat = clearQueueButton.isHidden ? 0 : Self.footerHeight
+        scrollView.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16),
+                                  height: max(0, bounds.height - 16 - footer))
         let labelHeight: CGFloat = 20
         emptyLabel.frame = NSRect(x: 12,
                                   y: ((bounds.height - labelHeight) / 2).rounded(),
                                   width: max(0, bounds.width - 24),
                                   height: labelHeight)
+        let buttonWidth: CGFloat = 78
+        clearQueueButton.frame = NSRect(x: bounds.width - 8 - buttonWidth, y: 6,
+                                        width: buttonWidth, height: 18)
+    }
+
+    private static let footerHeight: CGFloat = 24
+
+    /// 510 — drop the waiting requests only. The executing one keeps its row and its progress.
+    @objc private func clearQueueTapped() {
+        onClearDenoiseQueue?()
+        reload()
     }
 
     // MARK: data
@@ -143,9 +174,19 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
         let isEmpty = backgroundTaskStore.tasks.isEmpty
         emptyLabel.isHidden = !isEmpty
         scrollView.isHidden = isEmpty
+        clearQueueButton.isHidden = !hasQueuedDenoiseTasks
         tableView.reloadData()
         view.needsLayout = true
     }
+
+    /// 510 — «is there anything waiting», i.e. is 「清空队列」 worth a button.
+    public var hasQueuedDenoiseTasks: Bool {
+        backgroundTaskStore.tasks.contains { $0.kind == .denoise && $0.state == .queued }
+    }
+
+    public var isClearQueueButtonVisibleForTesting: Bool { !clearQueueButton.isHidden }
+
+    public func clearQueueForTesting() { clearQueueTapped() }
 
     public var emptyStateText: String { emptyLabel.stringValue }
     public var isShowingEmptyState: Bool { !emptyLabel.isHidden }
@@ -391,7 +432,13 @@ private final class BackgroundTaskRowView: NSTableCellView {
         case .finished, .failed:
             let success = max(0, task.total - task.failureCount)
             text += " · 成功 \(success) / 失败 \(task.failureCount)"
-        case .queued, .running:
+        case .queued:
+            // 510 — a waiting request says where it stands. `queuedAhead` counts the running
+            // request (1) plus every request queued before it, so the head of the queue reads
+            // 「前面还剩 1 个」 while another request is executing.
+            text += " · " + Loc.t("排队中（前面还剩 {0} 个）",
+                                  String(describing: (task.queuedAhead ?? 0)))
+        case .running:
             break
         }
         titleLabel.stringValue = text

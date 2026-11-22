@@ -58,6 +58,28 @@ public enum DenoiseNotices {
     public static let singlePhotoOnly = Loc.t("模型降噪只处理单张照片")
     public static let alreadyRunning = Loc.t("已有一次模型降噪在进行")
     public static let batchNeedsTwo = Loc.t("批量降噪至少需要两张可处理的 DNG")
+
+    /// 510 — 「这张照片自己」在忙的两句。与上面的 `alreadyRunning` 是**两件事**：那句说的是
+    /// 「全局有活在跑」，这两句说的只是「这张」—— 别的照片在跑时它们不出现。
+    public static let runningThisPhoto = Loc.t("正在降噪")
+    public static let alreadyQueued = Loc.t("已在队列中")
+
+    /// 510 — 入队成功的那句。「前面还有 N 个」数的是**还会先跑完的请求**（正在跑的算 1 个）。
+    public static func queued(_ ahead: Int) -> String {
+        Loc.t("已加入降噪队列（前面还有 {0} 个）", String(describing: (ahead)))
+    }
+
+    /// 510 — 批量里有一部分已经在跑/已排队，所以只对剩下的那些开单。
+    public static func batchQueueSkipped(_ skipped: Int, kept: Int) -> String {
+        Loc.t("将跳过 {0} 张已在队列中的照片，只对 {1} 张运行降噪。",
+              String(describing: (skipped)), String(describing: (kept)))
+    }
+
+    /// 510 — `clearDenoiseQueue()` 之后面板/日志里那一句。
+    public static func clearedQueue(_ count: Int) -> String {
+        Loc.t("已清空降噪队列（{0} 个）", String(describing: (count)))
+    }
+
     public static func onlyDNG(_ filename: String) -> String {
         Loc.t("只支持 DNG：{0}", String(describing: (filename)))
     }
@@ -1412,6 +1434,52 @@ public final class CatalogSession {
     /// 里（成功与失败都走这里）置回 `nil`。只读，派生自当前这一次运行。
     public private(set) var denoiseAssetID: String?
 
+    // MARK: - 510 · 请求队列（不是第二个执行器）
+
+    /// 510 — 一次**降噪请求**。它只是「要做的事」，不含任何执行状态：真正干活的一直是那条
+    /// 串行 `photons.denoise` 队列（`isDenoiseRunning` / `denoiseAssetID` / `denoiseBatch`）。
+    ///
+    /// 之所以要这一层：原来的门是**全局** `isDenoiseRunning`，一次降噪在跑，整个应用的
+    /// 「模型降噪」对任何照片都灰。用户要的是「跑着的时候还能继续加」。队列记住加的那些，
+    /// 执行仍然是并发度 1 —— 下一个请求只在**上一个请求的主 actor 收尾**里被派发。
+    public struct DenoiseRequest: Sendable, Equatable {
+        /// 单张 1 个；批量 ≥2。**入队时**就已经是「真正会跑的那些」，被跳过的照片不在里面 ——
+        /// 所以队列里的每一张都是「点了就会降噪的那张」。
+        public var assetIDs: [String]
+        public var engine: DenoiseEngine
+        public var id: UUID
+        /// 这个请求在 `BackgroundTasks` 里的那一行。入队时就建好（`.queued` + `queuedAhead`），
+        /// 轮到它时**同一行**变成进度条 —— 一个请求从头到尾只有一个行号。
+        public var taskID: UUID
+
+        public init(assetIDs: [String], engine: DenoiseEngine,
+                    id: UUID = UUID(), taskID: UUID = UUID()) {
+            self.assetIDs = assetIDs
+            self.engine = engine
+            self.id = id
+            self.taskID = taskID
+        }
+
+        public var isBatch: Bool { assetIDs.count >= 2 }
+    }
+
+    /// FIFO。去重按 `assetID`：入队前已经查过 `denoiseBusyAssetIDs`，所以同一张照片永远不会
+    /// 有两个排队请求。
+    private var pendingDenoiseRequests: [DenoiseRequest] = []
+
+    /// 队列里还有几个在等。**不含**正在执行的那一个 —— 那是 `denoiseAssetID`。
+    public var denoiseQueueDepth: Int { pendingDenoiseRequests.count }
+
+    /// 只读的排队项，顺序就是执行顺序。面板与测试读它，写入口只有 `enqueueDenoiseRequest`。
+    public var pendingDenoiseRequestsSnapshot: [DenoiseRequest] { pendingDenoiseRequests }
+
+    /// 510 — 入队时的那句 notice（「已加入降噪队列（前面还有 N 个）」）。直接开跑时为 nil。
+    public private(set) var lastDenoiseQueueNotice: String?
+
+    /// 510 — 批量里有多少张因为「已经在跑 / 已在队列」被跳过。与 `lastDenoiseBatchSkippedCount`
+    /// 分开：一个是「不支持降噪」，一个是「已经在队列里」，用户要改的东西不一样。
+    public private(set) var lastDenoiseQueueSkippedCount = 0
+
     /// 上一次成功的数字。失败时留 nil 并填 `lastDenoiseError`。
     public struct DenoiseReport: Sendable, Equatable {
         public let output: URL
@@ -1675,14 +1743,11 @@ public final class CatalogSession {
         denoiseRunCount += 1
         lastDenoiseError = nil
         lastDenoiseProgress = nil
+        lastDenoiseQueueNotice = nil
         denoiseRanOffMain = nil
 
-        guard let catalog else {
+        guard catalog != nil else {
             lastDenoiseError = DenoiseNotices.noLibrary
-            return []
-        }
-        guard !isDenoiseRunning else {
-            lastDenoiseError = DenoiseNotices.alreadyRunning
             return []
         }
         switch engine {
@@ -1713,36 +1778,149 @@ public final class CatalogSession {
             lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
         }
-        guard let url = fileURL(for: asset) else {
+        guard fileURL(for: asset) != nil else {
             lastDenoiseError = DenoiseNotices.onlyDNG(asset.filename)
             return []
         }
-        // 451 — 上一次被杀留下的 `.denoise-*.dng` 先清掉，同一个目录里的残留不会越积越多。
-        // 只碰这个操作自己的前缀：同目录里可能正有一次 HDR 在写 `.hdrmerge-*.dng`。
-        _ = InterruptedWorkSweep.removeLeftovers(in: url.deletingLastPathComponent(), kinds: ["denoise"])
-        guard let importService = makeImportService() else {
+        guard makeImportService() != nil else {
             lastDenoiseError = DenoiseNotices.noLibrary
             return []
         }
 
+        // 510 — 只有「**这张照片自己**」在跑或在队列里才拒绝。「别的照片在跑」不再是理由：
+        // 那种情况走下面同一条入队路径，notice 会说前面还有几个。
+        if denoiseAssetIsRunning(asset.id) {
+            lastDenoiseError = DenoiseNotices.runningThisPhoto
+            return []
+        }
+        if denoiseAssetIsQueued(asset.id) {
+            lastDenoiseError = DenoiseNotices.alreadyQueued
+            return []
+        }
+        return enqueueDenoiseRequest(assetIDs: [asset.id], engine: engine)
+    }
+    // MARK: - 510 · 队列 → 一个执行器
+
+    /// 入队（或在空闲时直接开跑）。单张与批量、第一次与排队**都走这一条**：并发度 1 与
+    /// 「一个请求一行」因此只有一处实现。
+    @discardableResult
+    private func enqueueDenoiseRequest(assetIDs: [String], engine: DenoiseEngine) -> [String] {
+        let ahead = pendingDenoiseRequests.count + (isDenoiseRunning ? 1 : 0)
+        let taskID = beginDenoiseTaskRow(assetIDs: assetIDs, engine: engine, ahead: ahead)
+        let request = DenoiseRequest(assetIDs: assetIDs, engine: engine, taskID: taskID)
+        pendingDenoiseRequests.append(request)
+        // 排队项的取消 = 从队列里拿掉它自己。轮到它执行时，这一句会在 launch 里被丢掉。
+        backgroundTasks.registerCancel(id: taskID) { [weak self] in
+            self?.dropQueuedDenoiseRequest(request.id)
+        }
+        if ahead > 0 {
+            lastDenoiseQueueNotice = DenoiseNotices.queued(ahead)
+        }
+        pumpDenoiseQueue()
+        return assetIDs
+    }
+
+    /// 入队时就建好面板那一行：`total` 是这次请求的张数（单张 1），`title` 与串行执行时
+    /// 用到的一模一样，所以「排队中 → 进度条」是同一条行状态在变，不是换了一行。
+    private func beginDenoiseTaskRow(assetIDs: [String], engine: DenoiseEngine, ahead: Int) -> UUID {
+        let first = assets.first { $0.id == assetIDs.first }
+        let title = assetIDs.count >= 2
+            ? Loc.t("降噪 {0} 张（{1}）", String(describing: (assetIDs.count)), engine.displayName)
+            : (first?.filename ?? Loc.t("降噪"))
+        let thumbKey = first.map { ThumbnailProvider.hdJPEGKey(for: $0).keyString }
+        return backgroundTasks.begin(BackgroundTask(kind: .denoise,
+                                                    title: title,
+                                                    total: max(1, assetIDs.count),
+                                                    currentAssetID: assetIDs.first,
+                                                    currentThumbKey: thumbKey,
+                                                    state: .queued,
+                                                    queuedAhead: ahead))
+    }
+
+    /// 队列推进一步。**只有**主 actor 上、且 `isDenoiseRunning == false` 时才会派发 —— 这就是
+    /// 「并发度恒为 1」的实现点：下一个请求只从上一个请求的收尾里进来，`photons.denoise`
+    /// 队列永远只有一个块在跑。
+    private func pumpDenoiseQueue() {
+        guard !isDenoiseRunning else {
+            refreshDenoiseQueueRows()
+            return
+        }
+        while !pendingDenoiseRequests.isEmpty {
+            let request = pendingDenoiseRequests.removeFirst()
+            if startDenoiseRequest(request) {
+                refreshDenoiseQueueRows()
+                return
+            }
+            // 这个请求开不了（照片已不在库里）：行已经按失败关掉，接着看下一个。
+        }
+        isDenoiseRunning = false
+        denoiseAssetID = nil
+    }
+
+    /// 真的开始一个请求。返回 false = 它没能起来（行已关掉），调用方接着看队头。
+    @discardableResult
+    private func startDenoiseRequest(_ request: DenoiseRequest) -> Bool {
+        guard let catalog, let importService = makeImportService() else {
+            lastDenoiseError = DenoiseNotices.noLibrary
+            backgroundTasks.forgetCancel(id: request.taskID)
+            backgroundTasks.finish(id: request.taskID, state: .failed, failureCount: 1)
+            return false
+        }
+        let items = makeDenoiseItems(for: request.assetIDs)
+        guard !items.isEmpty else {
+            lastDenoiseError = DenoiseNotices.onlyDNG(request.assetIDs.first ?? "")
+            backgroundTasks.forgetCancel(id: request.taskID)
+            backgroundTasks.finish(id: request.taskID, state: .failed, failureCount: 1)
+            return false
+        }
+        // 排队期间那个「取消排队」的把手必须消失：从这一刻起这一行归生产者管。
+        backgroundTasks.forgetCancel(id: request.taskID)
+        if items.count >= 2 {
+            launchDenoiseBatch(items: items, engine: request.engine, taskID: request.taskID,
+                               catalog: catalog, importService: importService)
+        } else {
+            launchSingleDenoise(item: items[0], engine: request.engine, taskID: request.taskID,
+                                catalog: catalog, importService: importService)
+        }
+        return true
+    }
+
+    /// 一次请求的每一项：库里的那张、文件 URL、根、方形缩略图键。**开跑时**才解析，所以排队
+    /// 期间库里换了东西也不会拿着过期的 URL 去跑。
+    private func makeDenoiseItems(for assetIDs: [String]) -> [DenoiseBatchItem] {
+        assetIDs.compactMap { id in
+            guard let asset = assets.first(where: { $0.id == id }),
+                  let url = fileURL(for: asset) else { return nil }
+            return DenoiseBatchItem(assetID: asset.id,
+                                    source: url,
+                                    rootID: asset.sourceRootId,
+                                    thumbKey: ThumbnailProvider.hdJPEGKey(for: asset).keyString)
+        }
+    }
+
+    /// 单张请求开跑：451 的残留清扫、454 的那一条任务行、`photons.denoise` 上的那一个块。
+    /// 与 386 的版本逐句一致，只有两处不同：任务行**入队时就建好**（这里只把它从 `.queued`
+    /// 推到 `.running`），以及收尾时队列要接着走。
+    private func launchSingleDenoise(item: DenoiseBatchItem, engine: DenoiseEngine, taskID: UUID,
+                                     catalog: Catalog, importService: ImportService) {
+        // 451 — 上一次被杀留下的 `.denoise-*.dng` 先清掉，同一个目录里的残留不会越积越多。
+        // 只碰这个操作自己的前缀：同目录里可能正有一次 HDR 在写 `.hdrmerge-*.dng`。
+        _ = InterruptedWorkSweep.removeLeftovers(in: item.source.deletingLastPathComponent(),
+                                                 kinds: ["denoise"])
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
                                 nonlocalBody: nlmfDenoiseBody)
         let queue = denoiseQueue
-        let participantID = asset.id
-        let rootID = asset.sourceRootId
+        let participantID = item.assetID
         isDenoiseRunning = true
         denoiseAssetID = participantID
         lastDenoiseEngine = engine
         lastDenoiseProgress = Loc.t("准备降噪…")
-        // 454 P2a — same cutoff as HDR: every `guard … return []` above refused before work began,
-        // so it creates no task and keeps its notice in `lastDenoiseError`. From here the task is the
-        // record of the run; one photograph is one item, so `completed` reaches 1 only in `finish`.
-        let taskID = backgroundTasks.begin(BackgroundTask(kind: .denoise,
-                                                           title: asset.filename,
-                                                           total: 1,
-                                                           currentAssetID: participantID))
+        // 454 P2a — the row already exists (built at enqueue time); this only moves it from
+        // `.queued` to `.running` and pins the photo it is working on.
+        backgroundTasks.advance(id: taskID, completed: 0,
+                                currentAssetID: participantID, currentThumbKey: item.thumbKey)
         let report: @Sendable (String) -> Void = { [weak self] text in
             Task { @MainActor in
                 self?.lastDenoiseProgress = text
@@ -1751,11 +1929,65 @@ public final class CatalogSession {
         }
         queue.async { [weak self] in
             let run = Self.runDenoise(job: job, importService: importService, catalog: catalog,
-                                      source: url, participantID: participantID, rootID: rootID,
-                                      progress: report)
+                                      source: item.source, participantID: participantID,
+                                      rootID: item.rootID, progress: report)
             Task { @MainActor in self?.finishDenoise(run, taskID: taskID) }
         }
-        return [participantID]
+    }
+
+    /// 批量请求开跑：474 的那台状态机，一件不少。取消只置 `cancelled`（当前项跑完就停），
+    /// **队列本身不受影响**。
+    private func launchDenoiseBatch(items: [DenoiseBatchItem], engine: DenoiseEngine, taskID: UUID,
+                                    catalog: Catalog, importService: ImportService) {
+        for directory in Set(items.map { $0.source.deletingLastPathComponent() }) {
+            _ = InterruptedWorkSweep.removeLeftovers(in: directory, kinds: ["denoise"])
+        }
+        let job = DenoiseRunner(engine: engine,
+                                ansel: AnselDenoiseJob(location: denoiseLocation),
+                                nonlocal: nlmfDenoiseJob,
+                                nonlocalBody: nlmfDenoiseBody)
+        backgroundTasks.advance(id: taskID, completed: 0,
+                                currentAssetID: items[0].assetID,
+                                currentThumbKey: items[0].thumbKey)
+        backgroundTasks.registerCancel(id: taskID) { [weak self] in
+            // Only a flag: the item already running is allowed to finish (§3 P4). 510 — the
+            // requests **queued behind it** still run, so this is not a queue cancel.
+            self?.denoiseBatch?.cancelled = true
+        }
+        denoiseBatch = DenoiseBatchState(taskID: taskID, engine: engine, job: job,
+                                         catalog: catalog, importService: importService,
+                                         items: items)
+        startNextDenoiseBatchItem()
+    }
+
+    /// 队里每一行的「前面还剩几个」。正在跑的那个算 1 个 —— 所以队头读数是 1，不是 0。
+    private func refreshDenoiseQueueRows() {
+        let running = isDenoiseRunning ? 1 : 0
+        for (index, request) in pendingDenoiseRequests.enumerated() {
+            backgroundTasks.setQueuedAhead(id: request.taskID, index + running)
+        }
+    }
+
+    /// 面板上「取消」一个**排队项**：只把它从队列里拿掉，正在跑的那个不受影响。
+    private func dropQueuedDenoiseRequest(_ requestID: UUID) {
+        guard let index = pendingDenoiseRequests.firstIndex(where: { $0.id == requestID }) else { return }
+        let request = pendingDenoiseRequests.remove(at: index)
+        backgroundTasks.finish(id: request.taskID, state: .cancelled)
+        refreshDenoiseQueueRows()
+    }
+
+    /// 510 — 「清空队列」：只清 pending，**不动正在跑的那一个**。返回清掉了几个。
+    @discardableResult
+    public func clearDenoiseQueue() -> Int {
+        let cleared = pendingDenoiseRequests
+        guard !cleared.isEmpty else { return 0 }
+        pendingDenoiseRequests.removeAll()
+        for request in cleared {
+            backgroundTasks.forgetCancel(id: request.taskID)
+            backgroundTasks.finish(id: request.taskID, state: .cancelled)
+        }
+        lastDenoiseQueueNotice = DenoiseNotices.clearedQueue(cleared.count)
+        return cleared.count
     }
 
     // MARK: - 474 · 批量降噪（一条任务，串行）
@@ -1794,10 +2026,36 @@ public final class CatalogSession {
     ///
     /// A cancelled batch has no queue any more: the one item already running is allowed to finish, but
     /// nothing after it will start, so those photos must not keep showing 「等待降噪」.
+    ///
+    /// 510 — the pending **requests** are part of this set too: a photo waiting behind another
+    /// request is 「等待降噪」 for exactly the same reason as a photo waiting behind another item of
+    /// one batch. This is also the set the menu's 「已在队列中」 uses.
     public var denoiseQueuedAssetIDs: Set<String> {
-        guard let batch = denoiseBatch, !batch.cancelled,
-              batch.nextIndex < batch.items.count else { return [] }
-        return Set(batch.items[batch.nextIndex...].map(\.assetID))
+        var waiting: Set<String> = []
+        if let batch = denoiseBatch, !batch.cancelled,
+           batch.nextIndex < batch.items.count {
+            waiting.formUnion(batch.items[batch.nextIndex...].map(\.assetID))
+        }
+        for request in pendingDenoiseRequests {
+            waiting.formUnion(request.assetIDs)
+        }
+        return waiting
+    }
+
+    /// 510 — 忙的照片：正在跑的那张 + 批量里还没轮到的 + 队列里的。菜单、批量跳过与入队去重
+    /// **共用**这一个集合，别处不许各写一份。
+    public var denoiseBusyAssetIDs: Set<String> {
+        var busy = denoiseQueuedAssetIDs
+        if let running = denoiseAssetID { busy.insert(running) }
+        return busy
+    }
+
+    /// 510 — 「这张自己在跑」。
+    public func denoiseAssetIsRunning(_ assetID: String) -> Bool { denoiseAssetID == assetID }
+
+    /// 510 — 「这张已在队列里等」（不含正在跑的那张；`denoiseBusyAssetIDs` 是两者的并集）。
+    public func denoiseAssetIsQueued(_ assetID: String) -> Bool {
+        denoiseQueuedAssetIDs.contains(assetID)
     }
 
     /// 479 — `true` while a batch exists that may still start more items (i.e. not cancelled and not
@@ -1828,15 +2086,13 @@ public final class CatalogSession {
         lastDenoiseError = nil
         lastDenoiseBatchSkippedCount = 0
         lastDenoiseBatchSkipNotice = nil
+        lastDenoiseQueueSkippedCount = 0
+        lastDenoiseQueueNotice = nil
         lastDenoiseProgress = nil
         denoiseRanOffMain = nil
 
-        guard let catalog else {
+        guard catalog != nil else {
             lastDenoiseError = DenoiseNotices.noLibrary
-            return []
-        }
-        guard !isDenoiseRunning else {
-            lastDenoiseError = DenoiseNotices.alreadyRunning
             return []
         }
         switch engine {
@@ -1863,58 +2119,55 @@ public final class CatalogSession {
         }
         // Per-photo availability is the single-photo rule (`dng` + a file URL), applied one photo at
         // a time. Skipped photos are counted here and named to the user before the first item starts.
-        var items: [DenoiseBatchItem] = []
+        //
+        // 510 — a photo that is **already running or already queued** is skipped too, and counted
+        // separately (`lastDenoiseQueueSkippedCount`): the menu promises 「将跳过 N 张已在队列中的
+        // 照片」, which is a different sentence from 「不支持降噪」.
+        var assetIDs: [String] = []
         var skipped: [String] = []
+        var queuedSkips: [String] = []
         for asset in chosen {
-            guard asset.ext.lowercased() == "dng", let url = fileURL(for: asset) else {
+            guard asset.ext.lowercased() == "dng", fileURL(for: asset) != nil else {
                 skipped.append(asset.filename)
                 continue
             }
-            items.append(DenoiseBatchItem(assetID: asset.id,
-                                          source: url,
-                                          rootID: asset.sourceRootId,
-                                          thumbKey: ThumbnailProvider.hdJPEGKey(for: asset).keyString))
-        }
-        guard items.count >= 2 else {
-            lastDenoiseError = DenoiseNotices.batchNeedsTwo
-            return []
+            if denoiseAssetIsRunning(asset.id) || denoiseAssetIsQueued(asset.id) {
+                queuedSkips.append(asset.filename)
+                continue
+            }
+            assetIDs.append(asset.id)
         }
         lastDenoiseBatchSkippedCount = skipped.count
-        if !skipped.isEmpty {
-            let notice = DenoiseNotices.batchSkipped(skipped.count, kept: items.count)
-            lastDenoiseBatchSkipNotice = notice
-            beforeStart?(notice)
-        }
-
-        // 451 — same per-operation cleanup as single denoise, once per directory in the batch.
-        for directory in Set(items.map { $0.source.deletingLastPathComponent() }) {
-            _ = InterruptedWorkSweep.removeLeftovers(in: directory, kinds: ["denoise"])
-        }
-        guard let importService = makeImportService() else {
-            lastDenoiseError = DenoiseNotices.noLibrary
+        lastDenoiseQueueSkippedCount = queuedSkips.count
+        guard assetIDs.count >= 2 else {
+            // 一张都没剩下、而且原因是「都已经在队列里」时，说的必须是那句话，不是「至少两张」。
+            lastDenoiseError = queuedSkips.isEmpty ? DenoiseNotices.batchNeedsTwo
+                                                   : DenoiseNotices.alreadyQueued
+            emitDenoiseBatchSkipNotice(skipped: skipped, queued: queuedSkips,
+                                       kept: assetIDs.count, beforeStart: beforeStart)
             return []
         }
+        emitDenoiseBatchSkipNotice(skipped: skipped, queued: queuedSkips,
+                                   kept: assetIDs.count, beforeStart: beforeStart)
 
-        let job = DenoiseRunner(engine: engine,
-                                ansel: AnselDenoiseJob(location: denoiseLocation),
-                                nonlocal: nlmfDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody)
-        let taskID = backgroundTasks.begin(BackgroundTask(
-            kind: .denoise,
-            title: Loc.t("降噪 {0} 张（{1}）", String(describing: (items.count)),
-                         engine.displayName),
-            total: items.count,
-            currentAssetID: items[0].assetID,
-            currentThumbKey: items[0].thumbKey))
-        backgroundTasks.registerCancel(id: taskID) { [weak self] in
-            // Only a flag: the item already running is allowed to finish (§3 P4).
-            self?.denoiseBatch?.cancelled = true
+        return enqueueDenoiseRequest(assetIDs: assetIDs, engine: engine)
+    }
+
+    /// 474/510 — the one line the menu shows before a batch starts. Two reasons, two sentences,
+    /// joined into one message so the user still only dismisses one alert.
+    private func emitDenoiseBatchSkipNotice(skipped: [String], queued: [String], kept: Int,
+                                            beforeStart: ((String) -> Void)?) {
+        var parts: [String] = []
+        if !skipped.isEmpty {
+            parts.append(DenoiseNotices.batchSkipped(skipped.count, kept: kept))
         }
-        denoiseBatch = DenoiseBatchState(taskID: taskID, engine: engine, job: job,
-                                         catalog: catalog, importService: importService,
-                                         items: items)
-        startNextDenoiseBatchItem()
-        return items.map(\.assetID)
+        if !queued.isEmpty {
+            parts.append(DenoiseNotices.batchQueueSkipped(queued.count, kept: kept))
+        }
+        guard !parts.isEmpty else { return }
+        let notice = parts.joined(separator: " ")
+        lastDenoiseBatchSkipNotice = notice
+        beforeStart?(notice)
     }
 
     /// Start the next item. The queue is the existing serial `photons.denoise`; the next item is
@@ -2025,11 +2278,14 @@ public final class CatalogSession {
                                    state: batch.successes > 0 ? .finished : .failed,
                                    failureCount: batch.failures)
         }
-        guard batch.successes > 0 else { return }
-        reload()
-        if let last = batch.lastOutputAssetID, assets.contains(where: { $0.id == last }) {
-            selectOnly(last)
+        if batch.successes > 0 {
+            reload()
+            if let last = batch.lastOutputAssetID, assets.contains(where: { $0.id == last }) {
+                selectOnly(last)
+            }
         }
+        // 510 — the batch's row is closed; whoever is waiting behind it starts now.
+        pumpDenoiseQueue()
     }
 
     /// 一次降噪的产物。纯 `Sendable` 盒子，后台那一半永远不碰 session。
@@ -2201,6 +2457,8 @@ public final class CatalogSession {
                                failureCount: succeeded ? 0 : 1)
         guard succeeded, let assetID = run.assetID else {
             lastDenoiseProgress = nil
+            // 510 — a failed request must not stall the queue behind it.
+            pumpDenoiseQueue()
             return
         }
         // 堆叠是库元数据，不是编辑：和评分用同一个信号，⌘Z 不会走回去。
@@ -2223,6 +2481,8 @@ public final class CatalogSession {
                                               stackCount: run.stackCount)
         }
         lastDenoiseProgress = Loc.t("降噪完成：{0}×{1}，{2} 个 tile", String(describing: (run.width)), String(describing: (run.height)), String(describing: (run.tiles)))
+        // 510 — this request is over; the head of the queue starts here (and only here).
+        pumpDenoiseQueue()
     }
 
     /// The `stacksByTopID` half of the projection, computed from the rows the query just returned.
