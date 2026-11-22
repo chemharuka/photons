@@ -1,10 +1,18 @@
 import Foundation
 
-// MARK: - 452/498 — 自动颜色（自动饱和度）的纯函数
+// MARK: - 452/498/511 — 自动颜色（自动饱和度）的纯函数
 //
 // The owner's ask (2026-11-20): add 自动颜色 beside 自动黑电平 / 自动明暗. 498 (2026-11-22) makes it
 // **two degrees of freedom**: the picture's chroma p50 drives `color.vibrance`, its chroma p95 drives
 // `color.saturation`, and the saturation solve has a hard clipping guard.
+//
+// **511 (2026-11-22) — bounded additive lift + damping, not an absolute solve.** The two targets are
+// now only a **reference point**: the measured gap to a target turns into a bounded, damped
+// **addition** (`maxAdditiveVibrance` / `maxAdditiveSaturation`), never "solve until p50/p95 land on
+// the target". The 498 solver hit its +60 ceiling on fog (the scene wants more than 60, which is the
+// tell that the model is wrong); 511 caps the automatic lift and lowers it further when the frame is
+// mostly grey or its chroma is uniformly low. Everything else below — OKLab chroma, only-raise, the
+// clipping budget, the skin guard, the target calibration — still holds.
 //
 // **Why OKLab chroma and not HSL saturation.** HSL's `s` is a per-pixel statement about the largest
 // channel, and it saturates at 1 on white; OKLab's `C = √(a² + b²)` is perceptual and survives the
@@ -18,6 +26,16 @@ import Foundation
 //
 // The two targets are **calibrated**, not guessed round numbers: see `targetChromaP50` /
 // `targetChromaP95` and `AutoColor498Tests.testCalibrationDistribution498` (the 441/452 pattern).
+// 511 keeps those numbers but demotes them from "must reach" to "reference for the gap".
+//
+// `AutoColor511Tests` pins the formula: `gap = target / measured − 1`, then
+//
+//     lift = cap · (1 − exp(−responseK · gap)) · dampFraction · dampUniform
+//     vibrance = max(floorV, liftV.rounded())      // whole slider units, a total value
+//
+// The two damping terms are the ticket's behavioural core: `dampFraction` says "grey haze is
+// scattered light, not missing saturation" and `dampUniform` says "a picture whose p95/p50 is
+// already narrow has no colourful tail to lift". Both are 1 for an ordinary photograph.
 
 public enum AutoColor {
 
@@ -111,6 +129,31 @@ public enum AutoColor {
     /// 452's old name; kept so older call sites keep compiling. 498 moved the target from the
     /// library median to the 70th percentile — seeing 0.0219 here again is the "0+0" regression.
     public static let defaultTarget: Double = targetChromaP50
+
+    // MARK: - 511 — the bounded additive lift
+
+    /// **511 — the hard automatic ceiling for vibrance**, in slider units. 15 is Lightroom's
+    /// measured Auto landing point and the ticket's §3.2.1 bound; this is *not* `maxVibrance` (60,
+    /// the manual slider range — untouched).
+    public static let maxAdditiveVibrance: Double = 15
+
+    /// **511 — the hard automatic ceiling for saturation.** Smaller than vibrance on purpose:
+    /// global saturation is the dangerous knob, so auto only trims with it.
+    public static let maxAdditiveSaturation: Double = 8
+
+    /// **511 — response steepness.** `gap = 1` (measured is half the target) gives
+    /// `1 − exp(−0.9) ≈ 59 %` of the ceiling; `gap = 3` gives ≈ 93 %. The exponential is the
+    /// diminishing-returns shape the ticket asks for (4× the gap is **not** 4× the lift).
+    public static let responseK: Double = 0.9
+
+    /// **511 — below this coloured fraction the lift starts fading out.** A fog / grey-day frame
+    /// sits around 0.05, so it gets ~1/3 of the lift; an ordinary photograph is ≥ 0.15 and gets all
+    /// of it. `minimumColoredFraction` still hard-returns 0 below 0.02.
+    public static let referenceColoredFraction: Double = 0.15
+
+    /// **511 — the p95/p50 ratio of an ordinary photograph.** Lower than this (a narrow chroma
+    /// distribution) is a second reason to hold back, because there is no colourful tail to raise.
+    public static let referenceSpread: Double = 3.0
 
     /// Below this coloured fraction the frame is (almost) grey and auto colour returns 0 + 0.
     /// Same line as `HSLBands.chromaGate`, so "coloured" means the same thing in both places.
@@ -237,8 +280,9 @@ public enum AutoColor {
     ///
     /// Inverts the kernel's curve in *chroma* space: `C' = C + v/100 · k · (1 − C)`, so
     /// `v = 100 · (target − C) / (k · (1 − C))`. 498 keeps it for older callers and for the synthetic
-    /// `Metrics` that carry no pixels; the product path `plan2D` replays the kernel on the measured
-    /// samples so the result really lands on `targetChromaP50`.
+    /// `Metrics` that carry no pixels. **511 note:** the product path `plan2D` no longer uses this
+    /// absolute solve; it turns the gap into a bounded, damped additive lift instead. `plan` is kept
+    /// untouched because 452's callers and `AutoColor452Tests` depend on its exact arithmetic.
     ///
     /// - Already at/above `target` → **0** (this tool only raises).
     /// - Fewer than `minimumColoredFraction` coloured samples → **0** (grey/black frames).
@@ -278,14 +322,22 @@ public enum AutoColor {
                                predictedChromaP50: 0, predictedChromaP95: 0)
     }
 
-    /// **498 — the product decision.** `p50 → vibrance`, `p95 → saturation`, both raise-only, with a
-    /// hard no-new-clipping gate and a skin-band cap.
+    /// **498/511 — the product decision.** `p50 → vibrance`, `p95 → saturation`, both raise-only,
+    /// with a hard no-new-clipping gate and a skin-band cap.
+    ///
+    /// 511 changed *what the two numbers mean*: they are a **total slider value** derived from a
+    /// bounded, damped gap, not the result of solving the picture onto an absolute target. See the
+    /// formula in the file header: `lift = cap · (1 − e^(−k·gap)) · dampF · dampU`, then
+    /// `max(floor, lift.rounded())`. Whole slider units make a second press a fixed point: the
+    /// measurement already contains the first lift, so its gap (and therefore its lift) is smaller,
+    /// and `max(floor, …)` returns the value the document already has.
     ///
     /// `currentVibrance` / `currentSaturation` describe the picture that was measured (the sample
-    /// already includes them, so they are inverted back to base first). `floorVibrance` /
-    /// `floorSaturation` are the document that may be written over — the result is never below them,
-    /// which is what makes a second press on a settled picture a no-op. In the normal call they are
-    /// the same; 自动颜色's internal re-measure loop passes the original document as the floor.
+    /// already includes them, so they are inverted back to base first for the clipping/skin replay).
+    /// `floorVibrance` / `floorSaturation` are the document that may be written over — the result is
+    /// never below them, which is what makes a second press on a settled picture a no-op. In the
+    /// normal call they are the same; 自动颜色's internal re-measure loop passes the original
+    /// document as the floor.
     public static func plan2D(_ m: Metrics,
                               currentVibrance: Double = 0,
                               currentSaturation: Double = 0,
@@ -295,63 +347,43 @@ public enum AutoColor {
                               targetP95: Double = targetChromaP95) -> Plan {
         guard m.sampleCount > 0, m.coloredFraction >= minimumColoredFraction else { return .zero }
 
-        // The measured sliders are already in the sample. Recover each pixel's **base** saturation
-        // once, then every solve below is an absolute slider solve — no additive double-counting, so
-        // a settled document re-solves to exactly the values it already carries.
-        //
-        // `current*` describes the picture that was measured; `floor*` is the document the caller is
-        // allowed to write over. They differ inside 自动颜色's own measure→plan→re-measure loop: a
-        // staged overshoot may be lowered again, but never below the document the run started from.
+        // 511's bounded additive formula, in whole slider units. `m` is the picture **as it stands**
+        // (it already includes `current*`); the two damping terms are the ticket's "fog is scattered
+        // light, not missing saturation" and "no colourful tail, no lift" brakes.
         let measuredV = min(maxVibrance, max(0, currentVibrance))
         let measuredS = min(maxSaturation, max(0, currentSaturation))
         let floorV = min(maxVibrance, max(0, floorVibrance ?? currentVibrance))
         let floorS = min(maxSaturation, max(0, floorSaturation ?? currentSaturation))
+
+        let gapV = max(0, targetP50 / max(m.chromaP50, 1e-6) - 1)
+        let gapS = max(0, targetP95 / max(m.chromaP95, 1e-6) - 1)
+        let dampFraction = min(max(m.coloredFraction / referenceColoredFraction, 0), 1)
+        let dampUniform = min(max((m.chromaP95 / max(m.chromaP50, 1e-6)) / referenceSpread, 0), 1)
+        let liftV = maxAdditiveVibrance * (1 - exp(-responseK * gapV)) * dampFraction * dampUniform
+        let liftS = maxAdditiveSaturation * (1 - exp(-responseK * gapS)) * dampFraction * dampUniform
+
+        // The guards replay the kernel from **base** saturation (the document without auto colour),
+        // so the whole-unit totals above are the absent-double-count absolute values they consume.
         let pixels = m.pixels.isEmpty ? m.pixels
             : basePixels(m.pixels, vibrance: measuredV, saturation: measuredS)
-        var vibrance = floorV
-        var saturation = floorS
-        var unguarded = floorS
+        var vibrance = min(maxVibrance, max(floorV, liftV.rounded()))
+        var saturation = min(maxSaturation, max(floorS, liftS.rounded()))
+        var unguarded = saturation
         var newClipped = 0
 
-        if pixels.isEmpty {
-            // Synthetic Metrics (no pixels): keep the 452 formula, and treat its output as absolute.
-            vibrance = min(maxVibrance, max(floorV, plan(m, target: targetP50)))
-            let p95AfterV = predictedChroma(m.chromaP95, afterVibrance: vibrance)
-            let settledP95 = targetP95 * (1 - settledTolerance)
-            if p95AfterV > 1e-9, p95AfterV < settledP95 {
-                saturation = min(maxSaturation,
-                                 max(floorS, floorS + 100 * (targetP95 / p95AfterV - 1)))
+        if !pixels.isEmpty {
+            // Guards, in the 498 order: clipping (a hard budget), then the skin band, then never
+            // below the document the caller may write over.
+            var guarded = min(saturation, clippingLimitedSaturation(pixels, vibrance: vibrance))
+            if skinChromaChange(pixels, vibrance: vibrance, saturation: guarded,
+                                reference: floorS) > skinGuardLimit {
+                guarded = skinLimitedSaturation(pixels, vibrance: vibrance,
+                                                lower: floorS, limit: guarded)
             }
-            unguarded = saturation
-        } else {
-            for _ in 0 ..< 4 {
-                let nextV = solveVibrance(pixels, target: targetP50,
-                                          range: floorV ... maxVibrance, saturation: saturation)
-                let solvedS = saturationForP95(pixels, vibrance: nextV,
-                                               target: targetP95, range: floorS ... maxSaturation)
-                unguarded = solvedS
-                var nextS = solvedS
-
-                // Hard guard: no newly clipped picture sample.
-                let cap = clippingLimitedSaturation(pixels, vibrance: nextV)
-                if nextS > cap { nextS = max(floorS, cap) }
-
-                // Skin guard: the **saturation stage's own** contribution to skin chroma must stay
-                // within 10 %, measured against the same vibrance. Vibrance is not reduced here.
-                if skinChromaChange(pixels, vibrance: nextV, saturation: nextS,
-                                    reference: floorS) > skinGuardLimit {
-                    nextS = skinLimitedSaturation(pixels, vibrance: nextV,
-                                                  lower: floorS, limit: nextS)
-                }
-
-                let stable = abs(nextV - vibrance) < 1e-4 && abs(nextS - saturation) < 1e-4
-                vibrance = nextV
-                saturation = nextS
-                if stable { break }
-            }
+            saturation = max(floorS, guarded)
             newClipped = countNewClipped(pixels, vibrance: vibrance, saturation: saturation)
             if Double(newClipped) / Double(m.sampleCount) > maxNewClippedFraction {
-                // 护栏优先：never add a clipped sample just to reach the p95 target.
+                // 护栏优先：never add a clipped sample just to reach a p95 target.
                 saturation = floorS
                 newClipped = 0
             }
@@ -453,61 +485,6 @@ public enum AutoColor {
             values[i] = chromaAfterPlan(pixels[i], vibrance: vibrance, saturation: saturation)
         }
         return AutoLight.percentiles(values, [q])[0]
-    }
-
-    /// Binary-search the absolute vibrance that puts p50 on `target`, with the other slider held at
-    /// `saturation`. `range.lowerBound` is the document's current value, so this only raises.
-    private static func solveVibrance(_ pixels: [Metrics.Pixel], target: Double,
-                                      range: ClosedRange<Double>,
-                                      saturation: Double) -> Double {
-        func p50(_ v: Double) -> Double {
-            percentileAfterPlan(pixels, vibrance: v, saturation: saturation, q: 0.50)
-        }
-        let lower = range.lowerBound
-        let upper = range.upperBound
-        let goal = target * (1 - settledTolerance)
-        if p50(lower) >= goal { return lower }
-        if p50(upper) <= goal { return upper }
-        var lo = lower
-        var hi = upper
-        for _ in 0 ..< 20 {
-            let mid = (lo + hi) * 0.5
-            if p50(mid) < target {
-                lo = mid
-            } else {
-                hi = mid
-            }
-            if hi - lo < 1e-4 { break }
-        }
-        return hi
-    }
-
-    /// The absolute saturation that maps post-vibrance p95 onto `target`, searched between the
-    /// document's current value and the ceiling. p95 is monotonic in saturation, so binary search is
-    /// exact even though HSL→OKLab is not linear.
-    private static func saturationForP95(_ pixels: [Metrics.Pixel], vibrance: Double,
-                                         target: Double, range: ClosedRange<Double>) -> Double {
-        guard target > 1e-9 else { return range.lowerBound }
-        func p95(_ s: Double) -> Double {
-            percentileAfterPlan(pixels, vibrance: vibrance, saturation: s, q: 0.95)
-        }
-        let lower = range.lowerBound
-        let upper = range.upperBound
-        let goal = target * (1 - settledTolerance)
-        if p95(lower) >= goal { return lower }
-        if p95(upper) <= goal { return upper }
-        var lo = lower
-        var hi = upper
-        for _ in 0 ..< 20 {
-            let mid = (lo + hi) * 0.5
-            if p95(mid) < target {
-                lo = mid
-            } else {
-                hi = mid
-            }
-            if hi - lo < 1e-4 { break }
-        }
-        return hi
     }
 
     /// The saturation at the `clippingGuardFraction` rank of per-pixel caps. Each cap is the largest

@@ -5142,9 +5142,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         lastAutoColorMetricsForTesting = initialMetrics
 
-        // Measure → plan → re-measure on the staged document, up to three passes. The pure solver
-        // already targets p50/p95, but the GPU frame is Float16 and its HSL→RGB→OKLab trip differs
-        // from the Double replay by a couple of percent; this closes that gap **before** the single
+        // Measure → plan → re-measure on the staged document, up to three passes. 511's plan is a
+        // **bounded, damped addition**, not an absolute solve: the second pass sees the first lift
+        // in the picture, so its whole-unit lift is ≤ the value already staged and `max(floor, …)`
+        // returns it. This loop still closes the GPU frame vs Double replay gap before the single
         // history write, so 连点两次 finds a true fixed point.
         var metrics = initialMetrics
         var vibrance = source.color.vibrance
