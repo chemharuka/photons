@@ -15,6 +15,17 @@ import PhotonsExtensions
 /// whether M3.5 needs the other path.
 public final class AssetCollectionView: NSCollectionView {
     public var onKeyDown: ((NSEvent) -> Bool)?
+    /// 507 — layout passes this collection view actually ran. The switch acceptance counts the
+    /// passes between "the switch happened" and "the visible set is right": a placement that only
+    /// sets the clip and defers the band leaves the count at 0 in that turn, which is exactly the
+    /// 「先切换再滚动」 the user reported. Structural, not a copy of any code path's arithmetic.
+    public private(set) var layoutPassCount = 0
+
+    public override func layout() {
+        super.layout()
+        layoutPassCount += 1
+    }
+
     /// 352 — the press hook. Returning `true` swallows the press entirely (no selection, no cell
     /// change): the double-click guard's answer when the second press of a pair landed on a
     /// different cell than the first. `nil` (the grid) behaves exactly as before.
@@ -1207,6 +1218,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// cancelled the moment it scrolls away — never in the first-frame path.
     public func thumbnailRematerializeOnAppear() {
         guard isViewLoaded else { return }
+        // 507 — the band that is born here is the one **under the anchor**: 「该展示哪一张」在切换前
+        // 就已知，所以视口先归位，再让这一带布局出来。反过来（先布局旧位置、再滚过去）会把旧位置
+        // 的格子先创建一遍、按旧索引发一轮请求，再滚走 —— 那就是「先切换再滚动」，也是 430 的
+        // 占位图闪一下的残余。
+        placeAnchorInViewport()
         collectionView.layoutSubtreeIfNeeded()
         reconfigureVisibleItems()
         refreshVisibleThumbnails()
@@ -1215,6 +1231,56 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    /// 507 — 「已知则直出」：锚点在切换那一刻就是已知的，于是按 metrics 算出它该在哪、直接置 clip，
+    /// 再让**这一带**布局出来。不再走「滚到第 N 项」那条 API —— 它先失效整块
+    /// 布局、再让 AppKit 在下一趟把沿途 cell 一个个创建出来，正是用户说的「先切换再滚动」。
+    ///
+    /// 位置规则是 471r 胶片条那一套的等价物（`CenteredScroll.target`，纵向钳在
+    /// `[0, content − visible]`）：第一行/最后一行贴着边，中间的行落在视口中线。
+    ///
+    /// - Returns: `true` when there was an anchor and live geometry to place it with.
+    @discardableResult
+    public func placeAnchorInViewport() -> Bool {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let index = session.assets.firstIndex(where: { $0.id == id }) else { return false }
+        // The clip's *height* is the target's denominator, and it is known without laying anything
+        // out: the grid's own frame minus the filter bar (`layoutGrid()`'s arithmetic). Laying the
+        // scroll view out first would create the cells at the **old** origin — the band that used to
+        // be on screen would be born, ask for its thumbnails and only then be scrolled away.
+        let clip = scrollView.contentView
+        let visible = max(0, view.bounds.height - FilterBarView.height)
+        let m = metrics
+        guard visible > 0, m.rowHeight > 0, m.columns > 0 else { return false }
+        guard collectionView.numberOfItems(inSection: 0) > index else { return false }
+
+        let row = index / m.columns
+        let itemMid = m.inset + CGFloat(row) * m.rowHeight + m.itemSize.height / 2
+        // Arithmetic, not `layoutAttributesForItem`: a row forty rows away has no prepared
+        // attributes yet, and asking for them is what forced the old two-pass scroll.
+        let rows = max(1, Int(ceil(Double(session.assets.count) / Double(m.columns))))
+        let content = m.inset * 2 + CGFloat(rows) * m.itemSize.height
+            + CGFloat(rows - 1) * m.spacing
+        guard content > 0 else { return false }
+
+        let target = CenteredScroll.target(itemMidpoint: itemMid,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        let moved = abs(clip.bounds.origin.y - target) > 0.5
+        if moved {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+            scrollView.reflectScrolledClipView(clip)
+            anchorPlacementCount += 1
+        }
+        // The band under the new origin is created **here**, in this call: the visible cells and
+        // their on-screen thumbnail asks exist before the switch returns, with no second layout
+        // pass and nothing created at the old offset (§4's 「占位图不许等到下一趟」).
+        collectionView.layoutSubtreeIfNeeded()
+        return true
+    }
+
+    /// 507 — how many times a switch actually moved this viewport (idempotent switches stay 0).
+    public private(set) var anchorPlacementCount = 0
+
     /// 430 — put the photo the loupe was showing in the **middle** of the grid, not merely inside it.
     ///
     /// `.nearest…` would leave it at the edge, so a one-row change would look like nothing happened.
@@ -1222,14 +1288,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// to four columns the user was not editing, trading "my photo is centred" for "the page jumped
     /// sideways". The row is the axis the loupe transition actually changes.
     ///
+    /// 507 — the placement is now the direct one (`placeAnchorInViewport()`); the rule did not move.
     /// Called by `WorkspaceRootView` once per `loupe → grid` switch, never on a metadata refresh, so
     /// a scroll the user made is not undone.
     public func centerOnAnchorIfNeeded() {
-        guard isViewLoaded, let session, let id = session.anchorID,
-              let index = session.assets.firstIndex(where: { $0.id == id }),
-              collectionView.numberOfItems(inSection: 0) > index else { return }
-        collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)],
-                                     scrollPosition: .centeredVertically)
+        placeAnchorInViewport()
     }
 
     /// 303 — after an edit, re-ask for the one photo that moved. Only a cell that is **on screen**
@@ -1879,10 +1942,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     public func showAnchor() {
-        guard let session, let id = session.anchorID,
-              let index = session.assets.firstIndex(where: { $0.id == id }) else { return }
-        let path = IndexPath(item: index, section: 0)
-        collectionView.scrollToItems(at: [path], scrollPosition: .nearestHorizontalEdge)
+        // 507 — one placement rule for both entries (the smoke's "show anchor" and the loupe → grid
+        // switch): direct, never a scroll-then-create.
+        placeAnchorInViewport()
     }
 
     @objc private func handleDoubleClick(_ recognizer: NSClickGestureRecognizer) {
@@ -2274,15 +2336,20 @@ public enum DenoiseMenuBuilder {
     /// Same shape as the single rows: nil = clickable, otherwise the reason. A mixed selection is
     /// still clickable **when at least two photos are usable** — the skipped ones are reported by
     /// the alert, not by hiding the verb.
+    ///
+    /// 510 — the judgement is **per photo**, not per app: a photo that is already running or
+    /// already queued is not counted as usable (it would only be skipped), but *another* photo
+    /// running never makes this row grey. 「别的照片在跑」 used to disable every denoise row.
     public static func batchUnavailableReason(session: CatalogSession?, selectedIDs: [String],
                                               engine: DenoiseEngine) -> String? {
         guard let session else { return DenoiseNotices.noLibrary }
         guard selectedIDs.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
-        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
-        let usable = session.selectedAssets.filter {
-            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+        let free = usableSelectedAssets(session: session)
+        guard !free.isEmpty else {
+            // Nothing left to enqueue. Say **why** when the reason is the queue, not the format.
+            return busyReason(session: session) ?? DenoiseNotices.batchNeedsTwo
         }
-        guard usable.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
+        guard free.count >= 2 else { return DenoiseNotices.batchNeedsTwo }
         switch engine {
         case .ansel:
             guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }
@@ -2297,6 +2364,26 @@ public enum DenoiseMenuBuilder {
         return nil
     }
 
+    /// 510 — 选中里**能立刻入队**的那些：DNG、有文件 URL、而且不在这张自己的运行/队列里。
+    /// 菜单的可用性、tooltip 的张数与 `denoiseBatchSelection` 的跳过规则读的是同一个集合。
+    public static func usableSelectedAssets(session: CatalogSession) -> [Asset] {
+        let busy = session.denoiseBusyAssetIDs
+        return session.selectedAssets.filter {
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil && !busy.contains($0.id)
+        }
+    }
+
+    /// 510 — 「这些选中的照片为什么一张都不能入队」。nil = 原因不是队列（那就交给格式/依赖那几句）。
+    static func busyReason(session: CatalogSession) -> String? {
+        let usable = session.selectedAssets.filter {
+            $0.ext.lowercased() == "dng" && session.fileURL(for: $0) != nil
+        }
+        guard !usable.isEmpty else { return nil }
+        let running = usable.filter { session.denoiseAssetIsRunning($0.id) }
+        if running.count == usable.count { return DenoiseNotices.runningThisPhoto }
+        return DenoiseNotices.alreadyQueued
+    }
+
     public static func batchItem(session: CatalogSession?, target: DenoiseMenuTarget,
                                  selectedIDs: [String], engine: DenoiseEngine) -> NSMenuItem {
         let entry = NSMenuItem(title: batchTitle(count: selectedIDs.count, engine: engine),
@@ -2309,9 +2396,8 @@ public enum DenoiseMenuBuilder {
             entry.toolTip = reason
         } else {
             entry.isEnabled = true
-            let usable = session?.selectedAssets.filter {
-                $0.ext.lowercased() == "dng" && session?.fileURL(for: $0) != nil
-            }.count ?? selectedIDs.count
+            let usable = session.map { DenoiseMenuBuilder.usableSelectedAssets(session: $0).count }
+                ?? selectedIDs.count
             entry.toolTip = Loc.t("依次对可用的 {0} 张照片降噪，其余会在开始前提示跳过",
                                   String(describing: (usable)))
         }
@@ -2342,8 +2428,10 @@ public enum DenoiseMenuBuilder {
         guard asset.ext.lowercased() == "dng" else {
             return DenoiseNotices.onlyDNG(asset.filename)
         }
-        // 「正在跑」在依赖之前：跑着的时候再说「缺模型」是假消息，而它其实什么都不缺。
-        guard !session.isDenoiseRunning else { return DenoiseNotices.alreadyRunning }
+        // 510 — 「正在跑」说的是**这张照片**，不是「应用里有活在跑」：别的照片在跑时这一行照旧
+        // 可点（点了就是入队）。两句原因分开，用户才知道自己该等还是该换一张。
+        if session.denoiseAssetIsRunning(asset.id) { return DenoiseNotices.runningThisPhoto }
+        if session.denoiseAssetIsQueued(asset.id) { return DenoiseNotices.alreadyQueued }
         switch engine {
         case .ansel:
             guard session.isDenoiseToolAvailable else { return DenoiseNotices.anselToolMissing }

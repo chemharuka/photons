@@ -255,6 +255,12 @@ public final class TopBarView: NSView, NSPopoverDelegate {
             backgroundTasksPopoverController.thumbnailSource = backgroundTaskThumbnailSource
         }
     }
+
+    /// 510 — 「清空队列」 on the panel. The header owns the store, the session owns the queue, so
+    /// the workspace hands the action in here and the header forwards it to the popover.
+    public var onClearDenoiseQueue: (() -> Void)? {
+        didSet { backgroundTasksPopoverController.onClearDenoiseQueue = onClearDenoiseQueue }
+    }
     private lazy var backgroundTasksPopoverController = BackgroundTasksPopover(store: backgroundTaskStore)
     private let backgroundTasksPopover = NSPopover()
     /// Test/`--ui-smoke` read: whether the popover was opened. Mirrors `isShown` whenever there is a
@@ -755,6 +761,10 @@ public final class WorkspaceRootView: NSView {
             fileURLForAsset: { [weak session] asset in
                 session?.fileURL(for: asset)
             })
+        // 510 — the panel's 「清空队列」 drops waiting requests only; the executing one keeps going.
+        self.topBar.onClearDenoiseQueue = { [weak session] in
+            session?.clearDenoiseQueue()
+        }
         self.browserPane = browserPane
         self.gridController = gridController
         self.loupeController = LoupeController(session: session)

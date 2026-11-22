@@ -258,6 +258,16 @@ extension InspectorView {
             Text(CorrectionCardRow.guideLines.title)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
+                // 508 — 双击「引导线」三个字: every line goes **and** both keystone sliders go to 0
+                // (切变/宽高比校正 untouched). The same `ResetOnDoubleClick` the rest of the card
+                // uses, so the gesture (contentShape + count: 2 + help), not a second dialect.
+                .modifier(ResetOnDoubleClick(
+                    action: { _ = tool?.clearGuideLinesAndResetPerspective() },
+                    help: Loc.t("双击清空引导线并把透视归零")))
+                .accessibilityIdentifier(CorrectionCardRow.guideLines.titleID)
+                // The title is a SwiftUI `Text` (no NSView of its own), so the UI acceptance gets its
+                // frame from a probe with exactly the text's bounds, not from a guessed coordinate.
+                .background(CropRowProbeHost(rowID: CorrectionCardRow.guideLines.titleID))
             Spacer(minLength: 4)
             if let tool, !tool.guideLines.isEmpty {
                 // 354 §2.5 — 「清除引导线」: every line goes, the picture stays (the lines are on the
@@ -549,6 +559,10 @@ public enum CorrectionCardRow: String, CaseIterable, Sendable, Hashable {
 
     /// 354 — 「清除引导线」, on the same row (only drawn while there are lines).
     public var clearID: String { "inspector.crop.\(rawValue).clear" }
+
+    /// **508** — the row's title itself, the label that takes the double-click (「引导线」三个字).
+    /// The probe under it carries the same id, so a UI acceptance can click the text's own frame.
+    public var titleID: String { "inspector.crop.\(rawValue).title" }
 }
 
 // MARK: - 082: the section names

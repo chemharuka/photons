@@ -1638,6 +1638,54 @@ public final class CropToolController {
     @discardableResult
     public func clearGuideLines() -> Bool {
         guard !guideLines.isEmpty else { return false }
+        discardGuideLines()
+        writeGuideLineSolution(nil, lines: [])
+        onGuideLineChange?()
+        return true
+    }
+
+    /// **508** — 双击「引导线」三个字: every line goes **and** the two keystone parameters go to 0.
+    ///
+    /// The two halves are one gesture to the user (the lines are what the keystone was solved *from*:
+    /// 「清除所有引导线并恢复透视校正为0」), so they are **one** write and **one** history row
+    /// (「清除引导线与透视」) — ⌘Z puts the lines and both numbers back together.
+    ///
+    /// What it deliberately does **not** touch: `perspectiveShear` / `perspectiveAspect`. 切变 and
+    /// 宽高比校正 are their own rows with their own value (1 for `a`, never 0), and 508 §2 is explicit
+    /// that 「透视校正」 means the two keystone sliders only. The 垃圾桶按钮 (`clearGuideLines`) keeps
+    /// its 354 semantics too: lines only, keystone untouched.
+    ///
+    /// With a crop draft open the write goes through the document (327: the document owns the
+    /// keystone) and `writeGuideLineSolution` carries the result into the draft, so 应用 cannot write
+    /// the old numbers back. Without a draft it is the document alone.
+    ///
+    /// Returns false — nothing written, no row, no byte moved — when there is already no line **and**
+    /// both keystones are 0.
+    @discardableResult
+    public func clearGuideLinesAndResetPerspective() -> Bool {
+        guard let session else { return false }
+        let document = session.edit.geometry
+        // Both copies count: with the crop tool closed the controller's view state is the stale one
+        // (`reloadGuideLines` only seeds while the tool is armed), so 「有没有线」 is asked of the
+        // document too — otherwise the gesture would silently do nothing to lines the card still shows.
+        let hasLines = !guideLines.isEmpty || !document.guideLines.isEmpty
+        let keystone = document.perspectiveVertical != 0 || document.perspectiveHorizontal != 0
+        guard hasLines || keystone else { return false }
+        // 354's own finish (the lines, the fit, the red rejection state) — one function, two doors.
+        discardGuideLines()
+        writeGuideLineSolution(nil, lines: [],
+                              resettingKeystone: true,
+                              label: Loc.t("清除引导线与透视"))
+        onGuideLineChange?()
+        return true
+    }
+
+    /// The in-memory half of 「清除引导线」: every line, the fit's answer and the red rejection state.
+    ///
+    /// Shared by the 垃圾桶按钮 (`clearGuideLines`, 354) and 508's double-click so the two doors cannot
+    /// drift; it writes nothing — the caller's one `writeGuideLineSolution` owns the document and the
+    /// history row.
+    private func discardGuideLines() {
         guideLines = []
         guideLineSolution = nil
         guideLineFailure = nil
@@ -1647,9 +1695,6 @@ public final class CropToolController {
         guideLinePairInsufficient = false
         rejectedGuideLine = nil
         rejectedGuideLineAlpha = 1
-        writeGuideLineSolution(nil, lines: [])
-        onGuideLineChange?()
-        return true
     }
 
     /// §2.5 — the one write: the endpoints, both parameters **and the turn** into the document, **one**
@@ -1663,7 +1708,14 @@ public final class CropToolController {
     /// one gesture is one row and one document (the lines are document data now, not view state).
     /// The row is closed the way `commitStraighten` closes 转动's (end/reopen the crop session),
     /// because a guide-line fit is one discrete gesture and must not fold into a drag still in flight.
-    private func writeGuideLineSolution(_ solution: GuideLineSolution?, lines: [GuideLine]) {
+    ///
+    /// **508** — `resettingKeystone` adds 双击「引导线」's second half to the *same* `applyEdit`: both
+    /// keystone parameters back to 0 (a fit that clears the lines and leaves the numbers would make the
+    /// user delete the keystone by hand — one gesture, one row, so ⌘Z returns both).
+    /// `perspectiveShear` / `perspectiveAspect` are **not** written: they are the other two rows'.
+    private func writeGuideLineSolution(_ solution: GuideLineSolution?, lines: [GuideLine],
+                                        resettingKeystone: Bool = false,
+                                        label: String = Loc.t("引导线")) {
         guard let session else { return }
         // 356 — 引导线应用 is a **command**, not a gesture: close a gesture's session *before* the
         // write, so the fit's row is written by `commitEdit` in exactly one way from every
@@ -1671,7 +1723,7 @@ public final class CropToolController {
         // inside a session the row was the whole `base → edit` (crop-so-far **and** fit in one row,
         // so ⌘Z put both back), outside it was the fit alone. Same 40 px of keystone, two different
         // documents after the next ⌘Z — the user's 「只要历史里有东西，变换就不对」.
-        closeToolSession(label: Loc.t("引导线"))
+        closeToolSession(label: label)
         let before = session.edit.geometry
         let stored = lines.map(Self.stored)
         // **505 — the same gesture owns the auto crop.** A fit is one user action, so the frame it
@@ -1706,6 +1758,11 @@ public final class CropToolController {
                 // is the angle the document already had, so this line is a no-op for
                 // `.rotationOutOfRange`.
                 $0.geometry.rotationDegrees = CropTool.clampStraighten(solution.straighten)
+            } else if resettingKeystone {
+                // 508 — 双击「引导线」: the two keystone sliders back to their identity. 切变/宽高比
+                // 校正 stay: 宽高比's identity is 1, and neither is what the lines solved.
+                $0.geometry.perspectiveVertical = 0
+                $0.geometry.perspectiveHorizontal = 0
             }
             $0.geometry.guideLines = stored
             if let crop {
@@ -1714,7 +1771,7 @@ public final class CropToolController {
             }
         }
         guard session.edit.geometry != before else { return }
-        _ = session.commitEdit(label: Loc.t("引导线"), coalesce: false)
+        _ = session.commitEdit(label: label, coalesce: false)
         // The draft carries the document's keystone so the overlay, the red-frame predicate and
         // 应用 all see the picture the fit just produced.
         draft.perspectiveVertical = session.edit.geometry.perspectiveVertical
