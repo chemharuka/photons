@@ -129,12 +129,25 @@ public struct NLMFDenoiseJob: Sendable {
     /// - `strength`: left `nil` — the library derives it from the frame's measured
     ///   noise (`NLMFStrength`), because one value cannot suit ISO 800 and ISO 3200.
     ///   1.0 plastifies fine texture; the derived value never goes above 0.85.
+    /// - `highlightTaper / taperLow / taperHigh`: `0.18` of the blend is given up
+    ///   over 0.05–0.25 of linear RAW brightness, so shadows keep the whole
+    ///   strength and the highlights keep `0.85 × 0.82 ≈ 0.70`.
+    ///
+    ///   The knees were chosen by measuring, not by feel: 0.18–0.60 (mid-grey and
+    ///   up) turned out to act on 0.2 % of a dark museum frame — the gold
+    ///   highlights there sit *below* 0.18, because the tone curve, not the scene,
+    ///   is what makes them look bright. 0.05–0.25 moves 4 % of that frame's gold
+    ///   crop while lifting the bright crop of an outdoor frame from 8.8 % to 21 %.
+    ///   On both, everything at or below 0.05 keeps its blend weight bit for bit.
     public func options(modelURL: URL) -> NLMFDenoiseOptions {
         var o = NLMFDenoiseOptions(modelURL: modelURL)
         o.strength = nil
         o.crop = 4
         o.measureNoise = true
         o.checkerboardNoise = true
+        o.highlightTaper = 0.18
+        o.taperLow = 0.05
+        o.taperHigh = 0.25
         return o
     }
 
