@@ -205,8 +205,24 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
     }
 
     /// 网格切换入口 = 单图 → 网格（`showModule(for: .grid)` → `applyPendingGridEntry`）。
+    /// 期望位置的**独立**算法：规则本身（`CenteredScroll.target`：锚点行居中、两端钳住），
+    /// 几何全部来自现场读数。它不是「同一次切换自己停在哪」，所以把实现换回滚动式时它会变红。
+    private func gridExpected(_ root: WorkspaceRootView, clipHeight: CGFloat) -> CGPoint? {
+        guard let id = root.session.anchorID,
+              let index = root.session.assets.firstIndex(where: { $0.id == id }) else { return nil }
+        let m = root.gridController.metrics
+        guard m.columns > 0, m.rowHeight > 0, clipHeight > 0 else { return nil }
+        let rows = max(1, Int(ceil(Double(root.session.assets.count) / Double(m.columns))))
+        let content = m.inset * 2 + CGFloat(rows) * m.itemSize.height + CGFloat(rows - 1) * m.spacing
+        let row = index / m.columns
+        let mid = m.inset + CGFloat(row) * m.rowHeight + m.itemSize.height / 2
+        return CGPoint(x: 0, y: CenteredScroll.target(itemMidpoint: mid,
+                                                      contentLength: content,
+                                                      visibleLength: clipHeight))
+    }
+
     private func gridReading(_ root: WorkspaceRootView, library: Library,
-                             replay expected: CGPoint?) -> Reading {
+                             replay measured: Bool) -> Reading {
         let scroll = root.gridController.scrollView
         root.session.mode = .loupe
         root.showModule(for: .loupe)
@@ -225,12 +241,14 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
                                visible: gridVisible(root),
                                layouts: root.gridController.collectionView.layoutPassCount - layoutsBefore)
 
-        if expected == nil {
+        if !measured {
             settle(10)
-            let o = scroll.contentView.bounds.origin
+            let expected = gridExpected(root, clipHeight: scroll.contentView.bounds.height) ?? .zero
             return Reading(surface: "网格", immediate: immediate,
-                           afterLayout: Sample(origin: o, visible: gridVisible(root), layouts: 0),
-                           expected: o, expectedBand: gridBand(root, originY: o.y),
+                           afterLayout: Sample(origin: scroll.contentView.bounds.origin,
+                                               visible: gridVisible(root), layouts: 0),
+                           expected: expected,
+                           expectedBand: gridBand(root, originY: expected.y),
                            requests: [], visibleCount: 0, turnsToCorrect: 0)
         }
         root.layoutSubtreeIfNeeded()
@@ -244,8 +262,9 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
             root.layoutSubtreeIfNeeded()
             turns += 1
         }
+        let expected = gridExpected(root, clipHeight: scroll.contentView.bounds.height) ?? .zero
         return Reading(surface: "网格", immediate: immediate, afterLayout: afterLayout,
-                       expected: expected!, expectedBand: gridBand(root, originY: expected!.y),
+                       expected: expected, expectedBand: gridBand(root, originY: expected.y),
                        requests: requests, visibleCount: afterLayout.visible.count,
                        turnsToCorrect: turns)
     }
@@ -270,8 +289,22 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         return Set(first...max(first, last))
     }
 
+    /// 侧栏的期望位置：同一条规则（行中点居中、两端钳住），行距来自表本身。
+    private func paneExpected(_ root: WorkspaceRootView, clipHeight: CGFloat) -> CGPoint? {
+        guard let id = root.session.anchorID,
+              let row = root.session.assets.firstIndex(where: { $0.id == id }) else { return nil }
+        let table = root.browserPane.photoListForTesting
+        let pitch = max(1, table.rowHeight + table.intercellSpacing.height)
+        let count = CGFloat(table.numberOfRows)
+        guard count > 0, clipHeight > 0 else { return nil }
+        let mid = CGFloat(row) * pitch + table.rowHeight / 2
+        return CGPoint(x: 0, y: CenteredScroll.target(itemMidpoint: mid,
+                                                      contentLength: count * pitch,
+                                                      visibleLength: clipHeight))
+    }
+
     private func paneReading(_ root: WorkspaceRootView, library: Library,
-                             replay expected: CGPoint?) -> Reading {
+                             replay measured: Bool) -> Reading {
         let scroll = try! paneScroll(root)
         // 从胶片条切回侧栏（同 mode 的 set 是 no-op，根本没有「切换」）。
         root.setBrowserMode(.filmstrip)
@@ -286,12 +319,14 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         let immediate = Sample(origin: scroll.contentView.bounds.origin,
                                visible: paneVisible(root),
                                layouts: root.browserPane.photoListLayoutPassCountForTesting - layoutsBefore)
-        if expected == nil {
+        if !measured {
             settle(10)
-            let o = scroll.contentView.bounds.origin
+            let expected = paneExpected(root, clipHeight: scroll.contentView.bounds.height) ?? .zero
             return Reading(surface: "侧栏", immediate: immediate,
-                           afterLayout: Sample(origin: o, visible: paneVisible(root), layouts: 0),
-                           expected: o, expectedBand: paneBand(root, originY: o.y),
+                           afterLayout: Sample(origin: scroll.contentView.bounds.origin,
+                                               visible: paneVisible(root), layouts: 0),
+                           expected: expected,
+                           expectedBand: paneBand(root, originY: expected.y),
                            requests: [], visibleCount: 0, turnsToCorrect: 0)
         }
         root.layoutSubtreeIfNeeded()
@@ -304,8 +339,9 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
             root.layoutSubtreeIfNeeded()
             turns += 1
         }
+        let expected = paneExpected(root, clipHeight: scroll.contentView.bounds.height) ?? .zero
         return Reading(surface: "侧栏", immediate: immediate, afterLayout: afterLayout,
-                       expected: expected!, expectedBand: paneBand(root, originY: expected!.y),
+                       expected: expected, expectedBand: paneBand(root, originY: expected.y),
                        requests: [], visibleCount: afterLayout.visible.count, turnsToCorrect: turns)
     }
 
@@ -327,8 +363,25 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         return Set(first...max(first, last))
     }
 
+    /// 胶片条的期望位置：同一条规则，格距/内边距来自 flow 布局。
+    private func stripExpected(_ root: WorkspaceRootView, clipWidth: CGFloat) -> CGPoint? {
+        guard let id = root.session.anchorID,
+              let index = root.session.assets.firstIndex(where: { $0.id == id }) else { return nil }
+        let flow = root.filmstripController.collectionView.collectionViewLayout as? NSCollectionViewFlowLayout
+        guard let flow, flow.itemSize.width > 0, clipWidth > 0 else { return nil }
+        let count = CGFloat(root.session.assets.count)
+        let content = flow.sectionInset.left + flow.sectionInset.right
+            + count * flow.itemSize.width + max(0, count - 1) * flow.minimumInteritemSpacing
+        let pitch = flow.itemSize.width + flow.minimumInteritemSpacing
+        let mid = flow.sectionInset.left + CGFloat(index) * pitch + flow.itemSize.width / 2
+        return CGPoint(x: CenteredScroll.target(itemMidpoint: mid,
+                                                contentLength: content,
+                                                visibleLength: clipWidth),
+                       y: 0)
+    }
+
     private func stripReading(_ root: WorkspaceRootView, library: Library,
-                              replay expected: CGPoint?) -> Reading {
+                              replay measured: Bool) -> Reading {
         let scroll = try! stripScroll(root)
         // 从侧栏切到胶片条。
         root.setBrowserMode(.list)
@@ -343,12 +396,14 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         let immediate = Sample(origin: scroll.contentView.bounds.origin,
                                visible: stripVisible(root),
                                layouts: root.filmstripController.collectionView.layoutPassCount - layoutsBefore)
-        if expected == nil {
+        if !measured {
             settle(10)
-            let o = scroll.contentView.bounds.origin
+            let expected = stripExpected(root, clipWidth: scroll.contentView.bounds.width) ?? .zero
             return Reading(surface: "胶片条", immediate: immediate,
-                           afterLayout: Sample(origin: o, visible: stripVisible(root), layouts: 0),
-                           expected: o, expectedBand: stripBand(root, originX: o.x),
+                           afterLayout: Sample(origin: scroll.contentView.bounds.origin,
+                                               visible: stripVisible(root), layouts: 0),
+                           expected: expected,
+                           expectedBand: stripBand(root, originX: expected.x),
                            requests: [], visibleCount: 0, turnsToCorrect: 0)
         }
         root.layoutSubtreeIfNeeded()
@@ -361,8 +416,9 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
             root.layoutSubtreeIfNeeded()
             turns += 1
         }
+        let expected = stripExpected(root, clipWidth: scroll.contentView.bounds.width) ?? .zero
         return Reading(surface: "胶片条", immediate: immediate, afterLayout: afterLayout,
-                       expected: expected!, expectedBand: stripBand(root, originX: expected!.x),
+                       expected: expected, expectedBand: stripBand(root, originX: expected.x),
                        requests: [], visibleCount: afterLayout.visible.count, turnsToCorrect: turns)
     }
 
@@ -374,18 +430,18 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         let session = try makeSession(library)
         let root = try makeRoot(session, mode: .list)
 
-        let gridTruth = gridReading(root, library: library, replay: nil)
-        let grid = gridReading(root, library: library, replay: gridTruth.expected)
+        let gridTruth = gridReading(root, library: library, replay: false)
+        let grid = gridReading(root, library: library, replay: true)
         note("网格 ground truth \(fmt(gridTruth.expected))")
         describe(grid)
 
-        let paneTruth = paneReading(root, library: library, replay: nil)
-        let pane = paneReading(root, library: library, replay: paneTruth.expected)
+        let paneTruth = paneReading(root, library: library, replay: false)
+        let pane = paneReading(root, library: library, replay: true)
         note("侧栏 ground truth \(fmt(paneTruth.expected))")
         describe(pane)
 
-        let stripTruth = stripReading(root, library: library, replay: nil)
-        let strip = stripReading(root, library: library, replay: stripTruth.expected)
+        let stripTruth = stripReading(root, library: library, replay: false)
+        let strip = stripReading(root, library: library, replay: true)
         note("胶片条 ground truth \(fmt(stripTruth.expected))")
         describe(strip)
 
@@ -437,8 +493,8 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         let session = try makeSession(library)
         let root = try makeRoot(session, mode: .list)
 
-        let truth = gridReading(root, library: library, replay: nil)
-        let grid = gridReading(root, library: library, replay: truth.expected)
+        let truth = gridReading(root, library: library, replay: false)
+        let grid = gridReading(root, library: library, replay: true)
         note("请求口径（网格）")
         describe(grid)
 
@@ -483,7 +539,7 @@ final class SwitchRendersInPlace507Tests: XCTestCase {
         let visible = gridVisible(root)
         let layouts = root.gridController.collectionView.layoutPassCount - layoutsBefore
         let requests = root.gridController.requestLog.count - logBefore
-        let truth = gridReading(root, library: library, replay: nil)
+        let truth = gridReading(root, library: library, replay: false)
         note("滚远后切图：origin \(fmt(origin))，期望 \(fmt(truth.expected))，"
              + "layout \(layouts) 次，请求 \(requests) 个，可见 \(visible.count) 格"
              + "（锚点在：\(visible.contains(Self.anchorIndex))）")
