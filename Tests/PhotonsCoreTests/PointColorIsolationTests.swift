@@ -17,6 +17,18 @@ final class PointColorIsolationTests: XCTestCase {
     private static let toWorking = ColorPrimaries.conversion(from: .decoded, to: .working)
     private static let toSRGB = ColorPrimaries.conversion(from: .working, to: .sRGB)
 
+    /// 499 — the resting document with S2.9 switched off. Since 483 the sharpener runs at S2.9,
+    /// *before* S3.6b, so a `EditModel.neutral` frame reaches the kernel already sharpened while
+    /// the CPU host reference reads the original pixels. Any assertion that compares the kernel to
+    /// the host, or that demands byte/ΔE identity (order-free, idempotent), has to use this
+    /// document — otherwise it measures the sharpener. `amount = 0` is the pre-314 spelling of
+    /// "S3.10/S2.9 does not exist" (same fixture as `LocalColorStageTests.unsharpened`).
+    private static var unsharpened: EditModel {
+        var edit = EditModel.neutral
+        edit.sharpen = SharpenGroup(amount: 0, radius: 2.0, detail: 25, masking: 0)
+        return edit
+    }
+
     private func picture(_ width: Int, _ height: Int, identity: String,
                          _ body: (Int, Int) -> (Double, Double, Double)) -> LinearImage {
         var rgba = [Float16](repeating: 0, count: width * height * 4)
@@ -95,6 +107,9 @@ final class PointColorIsolationTests: XCTestCase {
             return (c.x, c.y, c.z)
         }
         let graph = try makeGraph(image, identity: "285-isolation")
+        // Kept on `neutral` on purpose: S2.9 sharpens the same input for both frames (it runs
+        // before S3.6b), so the before/after comparison isolates S3.6b's own effect. This test is
+        // about locality, not about the kernel matching a host reference.
         let neutral = try display(graph, EditModel.neutral)
 
         let a = swatch(aRGB)
@@ -142,9 +157,11 @@ final class PointColorIsolationTests: XCTestCase {
         var b = swatch(bRGB)
         b.hue = -30; b.saturation = -20; b.luminance = -10
 
-        var forward = EditModel.neutral
+        // Order-free is an identity claim (swap commutativity), so no sharpener may be in the graph
+        // (483 warning): `unsharpened`, not `neutral`.
+        var forward = Self.unsharpened
         forward.color.point = PointColorSet(swatches: [a, b], active: 0)
-        var reverse = EditModel.neutral
+        var reverse = Self.unsharpened
         reverse.color.point = PointColorSet(swatches: [b, a], active: 0)
 
         let f = try display(graph, forward)
@@ -184,7 +201,9 @@ final class PointColorIsolationTests: XCTestCase {
         b.hue = -30; b.saturation = -15; b.luminance = -5
         let set = PointColorSet(swatches: [a, b], active: 0)
 
-        var edit = EditModel.neutral
+        // 499 — the kernel reads S3.6b's input after S2.9, so the host must be compared on an
+        // unsharpened document; otherwise the delta is the sharpener, not a kernel/host divergence.
+        var edit = Self.unsharpened
         edit.color.point = set
         // Read S3.6b's own output texture (linear working, Float16) rather than the S4 display
         // image: this pins the arithmetic, not the display transform on top of it.
