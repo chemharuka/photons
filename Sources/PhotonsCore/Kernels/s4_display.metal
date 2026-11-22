@@ -34,10 +34,34 @@ using namespace metal;
 // matrix. `NewSaturatedColourTests.testS4ClampsAfterThePrimariesMatrix` renders a pure Rec.2020
 // green and asserts every output channel is ≥ 0 — and that test is red if this line moves back
 // above the matrix (measured: R = −7.5938).
+//
+// ── 503: the picture's ceiling is applied **here**, at both exits ────────────────────────────────
+// 320 put `min(v, ceiling)` at the end of S2. Everything between S2 and this kernel — 对比度,
+// 饱和度/自然饱和度, 黑白, 局部色彩, HSL, 点颜色, 分级, 清晰度/细节, 颗粒 — can put a pixel back over
+// that ceiling, so 「最高亮度」 was a mid-chain clip rather than the top of the picture: measured on a
+// push document, 对比度 +40 alone took the peak from 4.92 to **10.08**, 分级 高光 +40 to **13.73**, and
+// even with the tail guards (S3.9/S3.7 clamp at the ceiling themselves) the `Rec.2020 → sRGB` matrix
+// lifted a texture that was entirely ≤ 4.92 to **7.46** at the exit. The histogram and the pointer
+// row read that number as the top, so the plot and the readout disagreed with the picture.
+//
+// So the clamp is here, and it is here **twice**: `s4_display` (what the screen shows) and
+// `s4_display_linear` (what an HDR export writes) are two exits of one picture, and a preference that
+// only holds on screen would export light the user set a limit on.
+//
+// Position — three constraints, all of them load-bearing:
+//   · **after** the matrix, for the reason 075 gives above: the matrix mixes, so a clamp in front of
+//     it can be pushed over by the matrix's own arithmetic (measured: 4.92 in, 7.46 out);
+//   · **before** `min(v, headroom)` (the panel's ceiling, which must still win when it is lower) and
+//     before `srgb_encode` (a clamp on an encoded code is a clamp on a different quantity);
+//   · **`p.a.z == 0` means "no extra clamp"** — a caller that predates 503. A real ceiling is
+//     `2^0 = 1` at the lowest (`HighlightCeiling.evRange` starts at 0 EV), so 0 is unambiguous.
+//
+// S2's own clamp stays where it is (503 does not remove it): it is the tone map's shoulder finish and
+// it is what makes the identity branch's "≤ ceiling is byte-identical" claim true.
 
 struct DisplayParams {
     float4x4 m;   // working primaries → linear output primaries (column-major, from ColorPrimaries)
-    float4 a;     // identityMatrix, headroom, pad, pad
+    float4 a;     // identityMatrix, headroom, 503 ceiling (linear; 0 = caller predates 503), pad
 };
 
 static inline float srgb_encode(float v) {
@@ -56,21 +80,31 @@ kernel void s4_display(texture2d<float, access::read> src [[texture(0)]],
         // first line that can produce a negative — see the header.
         v = max(v, 0.0);
     }
+    // 503 — the picture's ceiling, behind the matrix (a saturated value at the ceiling leaves the
+    // matrix 1.5× brighter) and in front of the panel's own bound. `0` = caller predates 503.
+    float ceiling = p.a.z;
+    if (ceiling > 0.0) {
+        v = min(v, ceiling);
+    }
     float headroom = max(p.a.y, 0.0);
     v = min(v, headroom);
     float3 enc = float3(srgb_encode(v.x), srgb_encode(v.y), srgb_encode(v.z));
     dst.write(float4(enc, 1.0), gid);
 }
 
-// S4 — the **linear exit** (100, HDR export). Same primaries matrix as `s4_display`, then **nothing**:
-// no OETF, no `min(v, headroom)`, so extended-range values survive into an `rgba16Float` texture.
+// S4 — the **linear exit** (100, HDR export). Same primaries matrix as `s4_display`, then the
+// picture's ceiling and **nothing else**: no OETF, no `min(v, headroom)`, so extended-range values
+// survive into an `rgba16Float` texture.
 //
 // This exists because a gain map is a ratio between HDR and SDR *linear* light; deriving it from the
 // display-encoded texture would (a) lose everything the headroom clamp removed and (b) invert a
 // nonlinear transfer twice. It is the same code stream as the screen — one matrix, one read — so an
 // export cannot disagree with what S4 would have shown.
 //
-// `s4_display` itself is untouched above: the default path stays byte-identical (golden-checked).
+// 503 — and the ceiling is part of "cannot disagree": `HighlightCeiling` is a **preference** (how much
+// light the photograph may keep), not a document field, so it belongs to the picture rather than to
+// the screen. Without this line an HDR export would hand the gain-map writer everything the display
+// path had just refused to show. Same order as `s4_display`: matrix → ceiling.
 kernel void s4_display_linear(texture2d<float, access::read> src [[texture(0)]],
                               texture2d<float, access::write> dst [[texture(1)]],
                               constant DisplayParams &p [[buffer(0)]],
@@ -83,5 +117,9 @@ kernel void s4_display_linear(texture2d<float, access::read> src [[texture(0)]],
     // The output primaries' cube still has a negative side (`Rec2020 → sRGB`'s −0.5876); a linear
     // export writes light, and negative light is not a value the file format can carry.
     v = max(v, 0.0);
+    float ceiling = p.a.z;
+    if (ceiling > 0.0) {
+        v = min(v, ceiling);
+    }
     dst.write(float4(v, 1.0), gid);
 }

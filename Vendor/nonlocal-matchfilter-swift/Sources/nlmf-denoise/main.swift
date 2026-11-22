@@ -43,6 +43,14 @@ guard a.count == 4, b.count == 4 else { die("--a and --b each need 4 values (R,G
 
 // No `--strength` means "derive it from this frame's noise" (NLMFStrength).
 let strength = flag("--strength").flatMap(Double.init)
+// `--strength-taper q` gives up `q` of the blend weight towards the highlights
+// (shadows keep the whole `strength`); 0, the default, is the old behaviour.
+let strengthTaper = flag("--strength-taper").flatMap(Double.init) ?? 0
+// `--taper-knee lo,hi` moves where the taper starts and finishes (linear RAW
+// brightness). Defaults match the mid-grey anchored mapping.
+let knee = flag("--taper-knee").map(parseDoubles) ?? []
+let taperLow = knee.count == 2 ? knee[0] : 0.18
+let taperHigh = knee.count == 2 ? knee[1] : 0.60
 let crop = flag("--crop").flatMap(Int.init) ?? 0
 // `--measure-noise` estimates the sensor's Poisson-Gaussian curve from this
 // frame and ignores --a/--b. Without it, or with explicit values, the CLI
@@ -60,7 +68,8 @@ let request = DenoiseRequest(
     input: URL(fileURLWithPath: inputPath),
     output: URL(fileURLWithPath: outPath),
     mlpackage: mlpackage,
-    a: a, b: b, strength: strength, crop: crop,
+    a: a, b: b, strength: strength, strengthTaper: strengthTaper,
+    taperLow: taperLow, taperHigh: taperHigh, crop: crop,
     estimateNoise: measureNoise, checkerboardNoise: checkerboardNoise,
     dualRaw: dualRaw)
 
@@ -83,6 +92,7 @@ do {
             "writeSeconds": report.writeSeconds,
             "seconds": report.seconds,
             "outputBytes": report.outputBytes,
+            "strengthTaper": request.strengthTaper,
             "writerTiles": report.writerTiles,
             "hasAlternate": report.hasAlternate,
         ]
@@ -95,8 +105,8 @@ do {
         FileHandle.standardOutput.write(Data("\n".utf8))
     } else {
         print("wrote \(outPath)  \(report.width)×\(report.height) \(report.cfa)")
-        print(String(format: "  strength %.2f (σ(0.05)=%.5f)  read %.1f s, inference %.1f s, write %.1f s, total %.1f s",
-                     report.strength, report.sigma,
+        print(String(format: "  strength %.3f (σ(0.05)=%.5f)  highlights %.3f  read %.1f s, inference %.1f s, write %.1f s, total %.1f s",
+                     report.strength, report.sigma, report.strengthHighlight,
                      report.readSeconds, report.inferenceSeconds,
                      report.writeSeconds, report.seconds))
         print("  \(report.tiles) tiles (\(report.tilesX)×\(report.tilesY)), "

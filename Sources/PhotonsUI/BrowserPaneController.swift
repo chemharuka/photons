@@ -25,6 +25,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     /// 006 §5's "可见 + 上下各一行"). The user's ask is "侧栏也一样加入 10 个": with 46 pt rows a
     /// screen is ~10 rows, so ten either side means the next screen is already decoded when the
     /// list moves. Everything outside the band is cancelled, so the cost is bounded at 20 rows.
+    ///
+    /// 502 — this is the **resting** slack, `ScrollVelocityBand.base`. The leading side grows to
+    /// `cap` (30 rows) with the scroll speed (`bandAboveRows` / `bandBelowRows`); the trailing side
+    /// stays this value.
     static let prefetchSlackRows = 10
 
     private let headerTitle = NSTextField(labelWithString: Loc.t("素材浏览"))
@@ -180,6 +184,29 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
     private var lastTier: ThumbTier?
     private var lastLibraryURL: URL?
     private var loggedMissingCache = false
+
+    // MARK: 502 — the direction-aware band
+
+    /// 502 — samples `photosScroll.contentView.bounds.origin.y` once per reconcile pass.
+    private var velocitySampler = ScrollVelocityBand.Sampler()
+    /// The band **this** pass used, in rows above and below the visible rows. Both are
+    /// `prefetchSlackRows` until a pass sees real movement, which is what keeps v = 0 identical.
+    private var bandAboveRows = BrowserPaneController.prefetchSlackRows
+    private var bandBelowRows = BrowserPaneController.prefetchSlackRows
+    /// The cancellation ring's half-widths: 2 × slack (±20) at rest, `band + 10` on the leading side.
+    private var ringAboveRows = BrowserPaneController.prefetchSlackRows * 2
+    private var ringBelowRows = BrowserPaneController.prefetchSlackRows * 2
+    /// 502 — velocity-extension rows a pass deferred at the budget; drained by the next pass.
+    private var coreBacklog: Set<Int> = []
+    private var coreContinuationScheduled = false
+
+    /// 502 — per-pass cap on **new** rows, counted only over the velocity extension; the resting
+    /// ±`prefetchSlackRows` band is never deferred. One screen of rows, doubled.
+    var coreBudgetPerPass: Int {
+        get { coreBudgetOverride ?? max(1, visibleRows().count * 2) }
+        set { coreBudgetOverride = newValue }
+    }
+    private var coreBudgetOverride: Int?
 
     /// When the filmstrip is the browser (mode B), the photo rows live down there instead.
     public var showsPhotoList = true {
@@ -750,17 +777,25 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
               row < photosTable.numberOfRows else { return }
         let clip = photosScroll.contentView
         let visible = clip.bounds.height
-        let content = photosTable.bounds.height
-        let item = photosTable.rect(ofRow: row)
-        guard visible > 0, content > 0, item.height > 0 else { return }
+        // 507 — 位置从**数据**算（行号 × 行距），不问 `rect(ofRow:)`：刚 reloadData 的表还没有
+        // 任何一行材化，`rect(ofRow:)` 的可用性取决于「上一趟布局有没有跑」，这正是「先切换再
+        // 滚动」的残余。行高是 `configure(table:rowHeight:)` 设死的常数，所以行号就够。
+        let pitch = max(1, photosTable.rowHeight + photosTable.intercellSpacing.height)
+        let content = CGFloat(photosTable.numberOfRows) * pitch
+        let itemMid = CGFloat(row) * pitch + photosTable.rowHeight / 2
+        guard visible > 0, content > 0 else { return }
         if scrollActivity.isUserScrolling(photosScroll) { return }
-        if clip.bounds.intersects(item) { return }
-        let target = CenteredScroll.target(itemMidpoint: item.midY,
+        let target = CenteredScroll.target(itemMidpoint: itemMid,
                                            contentLength: content,
                                            visibleLength: visible)
+        // 已在位（≤ 0.5 pt）就是 no-op：来回切面不会把用户滚过的视口再拽一次。
+        guard abs(clip.bounds.origin.y - target) > 0.5 else { return }
         scrollActivity.beginOwnChange()
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
         photosScroll.reflectScrolledClipView(clip)
+        photosTable.noteRevealPlacement()
+        // 这一带的行就地布局出来：可见行与它们的 on-screen 请求在本次调用返回前就已存在。
+        photosTable.layoutSubtreeIfNeeded()
     }
 
     /// 471 — reveal 消费前的只读接缝：用户正在驱动这一面的滚动条时不抢。
@@ -770,6 +805,10 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
 
     /// The list the double-click is wired to — the test reads `doubleAction` / `target` off it.
     public var photoListForTesting: NSTableView { photosTable }
+    /// 507 — 这个表真正跑过的布局次数（与网格的 `AssetCollectionView.layoutPassCount` 同口径）。
+    /// 切图那一 turn 里必须是 1：可见行在第一趟布局里就该齐。
+    public var photoListLayoutPassCountForTesting: Int { photosTable.layoutPassCount }
+
 
     /// 430 — how many times the photo list has been rebuilt (`reloadData`). The counter behind
     /// 「加一颗星不该重载侧栏」: a metadata write must leave it where it was, a structure change
@@ -1053,30 +1092,95 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
             }
         }
 
+        // 502 — one velocity sample per pass, before any geometry read.
+        updateVelocityBand()
+
         let wanted = wantedRows()
-        guard force || wanted != lastWanted else { return }
+        guard force || wanted != lastWanted || !coreBacklog.isEmpty else { return }
         lastWanted = wanted
         let visible = visibleRows()
 
-        // 449 — cancel only what left the **outer ring**: visible ± 2 × prefetchSlackRows (±20
-        // rows). A continuous scroll usually moves the band by only a few rows; cancelling the
-        // ±10-row band every pass threw away bytes that had just been produced
-        // (`ThumbnailService.suppressWrite`). The value is fixed by §3: slack × 2.
+        // 449 — cancel only what left the **outer ring**. A continuous scroll usually moves the band
+        // by only a few rows; cancelling the narrow band every pass threw away bytes that had just
+        // been produced (`ThumbnailService.suppressWrite`).
+        //
+        // 502 — the ring is now `max(2 × slack, forwardBand + 10)` on the leading side (still ±20 at
+        // rest), so the pass that issues a 30-row forward ask cannot condemn it in the same turn.
         let outer = outerWantedRows()
         for (row, token) in thumbRequests where !outer.contains(row) {
             token.cancel()
             thumbRequests.removeValue(forKey: row)
         }
 
-        for row in wanted {
-            guard row < session.assets.count else { continue }
+        // 502 — the resting ±`prefetchSlackRows` band is asked for unconditionally; only the rows the
+        // velocity extension adds are budgeted, and the rest waits in `coreBacklog` for the next pass.
+        let resting = restingRows()
+        for row in resting.subtracting(visible).sorted() {
+            issueThumbnailRow(row, session: session, provider: provider, visible: visible)
+        }
+
+        // 502 — a visible row must never sit on a placeholder while nothing is in flight: the wider
+        // band issues more asks, and a delivery that lands while its row is being realised or recycled
+        // is dropped (`thumbnailDidLoad` finds no cell yet). One lookup per visible row; draw the LRU
+        // bitmap if there is one, re-ask only when there is neither a bitmap nor a pending request.
+        let display = displayPixels
+        for row in visible.sorted() where row < session.assets.count {
+            guard let cell = photosTable.view(atColumn: 0, row: row, makeIfNecessary: false)
+                    as? PhotoRowCell,
+                  cell.thumbnail == nil else { continue }
             let asset = session.assets[row]
-            let display = displayPixels
             let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset))
-            if provider.memoryImage(for: key, display: display) != nil { continue }
-            if thumbRequests[row] != nil { continue }
-            requestThumbnail(row: row, asset: asset, tier: cellTier, display: display,
-                             priority: visible.contains(row) ? .onScreen : .prefetch)
+            if let image = provider.memoryImage(for: key, display: display) {
+                cell.thumbnailTier = cellTier
+                cell.applyThumbnail(image, key: key, display: display)
+                continue
+            }
+            issueThumbnailRow(row, session: session, provider: provider, visible: visible)
+        }
+
+        var deferred: Set<Int> = []
+        var issued = 0
+        // 502 — carry an earlier pass's deferred rows first, while the ring still covers them.
+        let carried = coreBacklog.intersection(outer).subtracting(visible).subtracting(resting)
+        let fresh = wanted.subtracting(resting).subtracting(visible).subtracting(carried)
+        for row in Array(carried).sorted() + Array(fresh).sorted() {
+            if issued >= coreBudgetPerPass {
+                deferred.insert(row)
+                continue
+            }
+            if issueThumbnailRow(row, session: session, provider: provider, visible: visible) {
+                issued += 1
+            }
+        }
+        coreBacklog = deferred.filter { thumbRequests[$0] == nil }
+        if !coreBacklog.isEmpty { scheduleCoreContinuation() }
+    }
+
+    /// 502 — ask for one row unless the LRU already holds the bitmap or a request is outstanding.
+    /// Returns whether a request was handed to the provider (`wantedRows()` already bounds-checks,
+    /// the `count` guard is for the extension band, which can overshoot the library at the end).
+    @discardableResult
+    private func issueThumbnailRow(_ row: Int, session: CatalogSession,
+                                   provider: ThumbnailProvider, visible: Set<Int>) -> Bool {
+        guard row >= 0, row < session.assets.count else { return false }
+        let asset = session.assets[row]
+        let display = displayPixels
+        let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset))
+        if provider.memoryImage(for: key, display: display) != nil { return false }
+        if thumbRequests[row] != nil { return false }
+        requestThumbnail(row: row, asset: asset, tier: cellTier, display: display,
+                         priority: visible.contains(row) ? .onScreen : .prefetch)
+        return true
+    }
+
+    /// 502 — the "下一 pass 继续" half of the core budget, coalesced into one item.
+    private func scheduleCoreContinuation() {
+        guard !coreContinuationScheduled else { return }
+        coreContinuationScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self else { return }
+            self.coreContinuationScheduled = false
+            self.reconcileThumbnails(force: false)
         }
     }
 
@@ -1105,31 +1209,99 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         range.length <= 0 ? 0..<0 : range.location..<(range.location + range.length)
     }
 
-    /// Visible rows plus ten either side; everything else is cancelled (§5). 429 raised the slack
-    /// from five rows to ten — the list is 46 pt rows, so ten is about one screen.
-    /// Internal, not private, so the 429 acceptance can read the band's size off the live pane.
+    /// Visible rows plus the band: `prefetchSlackRows` (10) behind and, once the list is moving,
+    /// up to `ScrollVelocityBand.cap` (30) ahead. At rest both sides are 10, exactly what 429
+    /// shipped. Everything outside the ring is cancelled.
+    /// Internal, not private, so the 429/502 acceptance can read the band off the live pane.
     func wantedRows() -> Set<Int> {
+        expandedRows(above: bandAboveRows, below: bandBelowRows)
+    }
+
+    /// 502 — the resting band, visible ± `prefetchSlackRows`. Always asked for, never budgeted.
+    func restingRows() -> Set<Int> {
+        let slack = BrowserPaneController.prefetchSlackRows
+        return expandedRows(above: slack, below: slack)
+    }
+
+    /// 449 — the cancellation ring: visible ± the ring half-widths. ±20 rows at rest (2 × slack);
+    /// 502 pushes the leading side to `band + 10` so it is always ≥ the forward band.
+    func outerWantedRows() -> Set<Int> {
+        expandedRows(above: ringAboveRows, below: ringBelowRows)
+    }
+
+    /// The geometry half of all three sets.
+    private func expandedRows(above: Int, below: Int) -> Set<Int> {
         let visible = photosTable.rows(in: photosScroll.contentView.bounds)
         guard visible.length > 0 else { return [] }
-        let slack = BrowserPaneController.prefetchSlackRows
-        let lower = max(0, visible.location - slack)
-        let upper = min(session?.assets.count ?? 0, visible.location + visible.length + slack)
+        let count = session?.assets.count ?? 0
+        let lower = max(0, visible.location - above)
+        let upper = min(count, visible.location + visible.length + below)
         guard lower < upper else { return [] }
         return Set(lower..<upper)
     }
 
-    /// 449 — the cancellation ring, **visible ± 2 × `prefetchSlackRows`** (±20 rows). Requests are
-    /// kept while they sit inside this ring even if the narrower request band (±10) has moved past
-    /// them; only the outer edge condemns a request. Fixed by §3, not tunable here.
-    func outerWantedRows() -> Set<Int> {
-        let visible = photosTable.rows(in: photosScroll.contentView.bounds)
-        guard visible.length > 0 else { return [] }
-        let slack = BrowserPaneController.prefetchSlackRows * 2
-        let lower = max(0, visible.location - slack)
-        let upper = min(session?.assets.count ?? 0, visible.location + visible.length + slack)
-        guard lower < upper else { return [] }
-        return Set(lower..<upper)
+    /// 502 — one velocity sample for this pass; rows increase downwards, so an increasing `origin.y`
+    /// is the forward direction.
+    private func updateVelocityBand() {
+        let bounds = photosScroll.contentView.bounds
+        let sample = velocitySampler.sample(offset: bounds.origin.y,
+                                            time: CACurrentMediaTime(),
+                                            unitPoints: WorkspaceLayout.browserRowHeight,
+                                            viewportSpan: bounds.height)
+        let trailing = sample.backward
+        let leading = sample.forward
+        switch sample.direction {
+        case .forward:
+            bandAboveRows = trailing
+            bandBelowRows = leading
+        case .backward:
+            bandAboveRows = leading
+            bandBelowRows = trailing
+        case .none:
+            bandAboveRows = trailing
+            bandBelowRows = trailing
+        }
+
+        let ring = ScrollVelocityBand.cancellationRing(
+            forward: sample.forward, restingRing: BrowserPaneController.prefetchSlackRows * 2)
+        let restingRing = BrowserPaneController.prefetchSlackRows * 2
+        switch sample.direction {
+        case .forward:
+            ringAboveRows = restingRing
+            ringBelowRows = max(ring, restingRing)
+        case .backward:
+            ringAboveRows = max(ring, restingRing)
+            ringBelowRows = restingRing
+        case .none:
+            ringAboveRows = restingRing
+            ringBelowRows = restingRing
+        }
     }
+
+    /// 502 — seed the sampler as if the previous pass sampled `offsetDelta` points ago, `seconds`
+    /// before now, at `previousRowsPerSecond`. Acceptance only.
+    func primeVelocityForTesting(offsetDelta: CGFloat, seconds: TimeInterval,
+                                 previousRowsPerSecond: Double) {
+        velocitySampler.prime(offset: photosScroll.contentView.bounds.origin.y - offsetDelta,
+                              time: CACurrentMediaTime() - seconds,
+                              speed: previousRowsPerSecond)
+    }
+
+    /// 502 — rows a pass deferred at the budget.
+    var deferredCoreRowsForTesting: Set<Int> { coreBacklog }
+
+    /// 502 — rows this pane believes are still outstanding; the ring acceptance compares it with
+    /// `outerWantedRows()` (the grid exposes the same reading as `queuedThumbnailIndexes`).
+    var queuedThumbnailRows: Set<Int> { Set(thumbRequests.keys) }
+
+
+    /// 502 — run one reconcile pass synchronously (the coalescer would otherwise let a decode land
+    /// between the scroll and the reading).
+    func reconcileThumbnailsForTesting(force: Bool = true) { reconcileThumbnails(force: force) }
+
+    /// 502 — drop the coalesced work item so a test can run its own pass.
+    func cancelScheduledThumbnailReconcileForTesting() { reconcileGate.cancelPending() }
+
 
     // MARK: thumbnail probes (used by `--grid-probe`)
 
@@ -1182,6 +1354,9 @@ public final class BrowserPaneController: NSViewController, NSTableViewDataSourc
         lastTier = nil
         thumbnailProvider = nil
         providerCache = nil
+        // 502 — a different library must not inherit a speed measured across the swap.
+        velocitySampler.reset()
+        coreBacklog.removeAll()
     }
 
     // MARK: data source
@@ -2135,6 +2310,18 @@ final class PhotoRowCell: NSTableCellView {
 /// double-click's target (`openTargetID`). 383: the hook no longer eats a press — nothing swallows.
 final class PhotoListTableView: NSTableView {
     var onMouseDown: ((NSEvent) -> Bool)?
+    /// 507 — 与 `AssetCollectionView.layoutPassCount` 同口径：这个表真正跑过的布局次数。
+    private(set) var layoutPassCount = 0
+
+    override func layout() {
+        super.layout()
+        layoutPassCount += 1
+    }
+
+    /// 507 — 「已知则直出」的可观测证据：这一面真正把 clip 挪到锚点上的次数（已在位是 no-op）。
+    private(set) var revealPlacementCount = 0
+    func noteRevealPlacement() { revealPlacementCount += 1 }
+
     /// 430 — how many times this table was rebuilt. The same number the grid exposes as
     /// `reloadCount`: a metadata write (a star) must not move it, a structure change must.
     private(set) var reloadCount = 0
