@@ -674,6 +674,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
     public func warmHDPreview(for asset: Asset, fileURL: URL?, document: EditModel,
                               onLanded: (@MainActor () -> Void)? = nil) -> Bool {
         let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document)
+        // 515 — even the early returns below mean "this is the document on screen", and the one HD
+        // file a photo may keep has to belong to it: a cell's slower render of a stale document must
+        // not publish later and prune it (§308 orders pruning by publication, not by intent).
+        service.noteHDWarmKey(key)
         // The file is the product. If it is already there (a re-render of a document the user came
         // back to) there is nothing to ask for; a stat is cheaper than a queue round trip.
         if cache.exists(key) {
