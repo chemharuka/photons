@@ -177,6 +177,17 @@ final class ThumbnailWarm437Tests: XCTestCase {
         }
     }
 
+    /// 502 — hold the band at rest for this pass.
+    ///
+    /// This suite is about the **warm ring** (±12), so a one-row programmatic jump must not register as
+    /// a fast scroll: with a velocity band, the newly-entered row would move from "warm" to "core" and
+    /// the +1-row / +0-row warm arithmetic measured here would stop describing the ring. The widening
+    /// has its own acceptance (`ScrollVelocityBand502Tests`), and resting is byte-for-byte the pre-502
+    /// band, so nothing about 437's claim is relaxed.
+    private func holdBandAtRest(_ h: Harness) {
+        h.grid.primeVelocityForTesting(offsetDelta: 0, seconds: 0.1, previousRowsPerSecond: 0)
+    }
+
     private func makeHarness(_ session: CatalogSession,
                              wait: Bool = true) throws -> Harness {
         let window = TestWindows.make(contentRect: NSRect(x: 0, y: 0,
@@ -361,6 +372,7 @@ final class ThumbnailWarm437Tests: XCTestCase {
 
         var warm = h.grid.warmRequests
         h.scrollRows(1)
+        holdBandAtRest(h)
         h.grid.reconcileThumbnailsForTesting()
         let first = h.grid.warmRequests - warm
         print("437 A④ one row down: +\(first) warm (columns \(h.columns))")
@@ -369,6 +381,7 @@ final class ThumbnailWarm437Tests: XCTestCase {
 
         warm = h.grid.warmRequests
         h.scrollRows(0)
+        holdBandAtRest(h)
         h.grid.reconcileThumbnailsForTesting()
         let back = h.grid.warmRequests - warm
         print("437 A④ back to top: +\(back) warm")
@@ -377,6 +390,7 @@ final class ThumbnailWarm437Tests: XCTestCase {
 
         warm = h.grid.warmRequests
         h.scrollRows(1)
+        holdBandAtRest(h)
         h.grid.reconcileThumbnailsForTesting()
         let again = h.grid.warmRequests - warm
         print("437 A④ same row again: +\(again) warm")

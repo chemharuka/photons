@@ -192,6 +192,11 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
     public var isShowingEmptyState: Bool { !emptyLabel.isHidden }
     public var rowHeightForTesting: CGFloat { tableView.rowHeight }
 
+    /// 504 — the table's own row count after the last `reloadData()`. This is the number the panel
+    /// actually draws, which is what 「面板行数」 in the retention dispatch must compare against
+    /// `store.displayTasks.count` and the top bar's visible lines.
+    public var tableRowCountForTesting: Int { tableView.numberOfRows }
+
     /// The row's one-line title (`标题 · 12/40`, plus the terminal counts). Reads the cell the table
     /// actually renders, not a copy of its formatting.
     public func rowTextForTesting(at row: Int) -> String? {
