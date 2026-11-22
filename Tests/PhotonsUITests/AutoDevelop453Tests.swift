@@ -117,6 +117,41 @@ final class AutoDevelop453Tests: XCTestCase {
         XCTAssertNotEqual(session.edit, before)
     }
 
+    // MARK: - ①b 497 — 自动调整 is the whole verb: light and colour move in one undoable row
+
+    /// The menu no longer offers a separate 「自动颜色」 row because 「自动调整」 already includes
+    /// colour. A baseline vibrance of -20 makes the raise-only colour step move even when the
+    /// fixture's own chroma plan is 0, so the assertion has teeth: dropping the colour step from the
+    /// composite turns `vibrance` red.
+    func testAutoAdjustMovesLightAndColorAndUndoRevertsBoth() throws {
+        let url = try rawFixture()
+        let session = CatalogSession()
+        let loupe = makeController(url: url, identity: "497-both", session: session)
+        XCTAssertTrue(waitForFull(loupe, photo: "497-both"), "the full rung never reached the canvas")
+
+        session.applyEdit { $0.color.vibrance = -20 }
+        XCTAssertTrue(session.commitEdit(label: "原照"))
+        let before = session.edit
+        let historyBefore = session.history.count
+
+        XCTAssertTrue(loupe.autoDevelop(), "a settled full frame must produce a composite plan")
+        XCTAssertEqual(session.history.count, historyBefore + 1,
+                       "自动调整 must be one history row")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "自动调整")
+
+        let lightMoved = session.edit.light.exposure != before.light.exposure
+            || session.edit.light.highlights != before.light.highlights
+            || session.edit.light.whites != before.light.whites
+            || session.edit.light.blacks != before.light.blacks
+        XCTAssertTrue(lightMoved, "明暗 must move")
+        XCTAssertNotEqual(session.edit.color.vibrance, before.color.vibrance,
+                          "色彩 must move inside the same 自动调整 row")
+
+        XCTAssertTrue(session.undo())
+        XCTAssertEqual(session.edit, before, "one ⌘Z undoes light and colour together")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "原照")
+    }
+
     // MARK: - ② the order is load-bearing
 
     func testAutoLightMeasuresTheNewBlackOffset() throws {

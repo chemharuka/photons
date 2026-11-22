@@ -5212,11 +5212,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     /// 453 — the loupe canvas' right-click menu. The canvas view forwards `menu(for:)` here; a photo
-    /// and the loupe are the only requirements, and the rows call this controller's own verbs.
+    /// and the loupe are the only requirements, and the row calls this controller's own verb.
     private lazy var autoAdjustMenuTarget = AutoAdjustMenuTarget(
         session: session,
-        perform: { [weak self] in _ = self?.autoDevelop() },
-        performColor: { [weak self] in _ = self?.autoColor() })
+        perform: { [weak self] in _ = self?.autoDevelop() })
 
     public func canvasContextMenu(for event: NSEvent) -> NSMenu? {
         _ = event

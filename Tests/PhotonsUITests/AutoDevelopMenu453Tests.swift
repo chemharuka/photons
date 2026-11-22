@@ -111,9 +111,10 @@ final class AutoDevelopMenu453Tests: XCTestCase {
         menu.items.first { $0.title == AutoAdjustMenuBuilder.title }
     }
 
-    /// 490 — the colour sibling travels on exactly the same menu.
-    private func colorRow(in menu: NSMenu) -> NSMenuItem? {
-        menu.items.first { $0.title == AutoAdjustMenuBuilder.colorTitle }
+    /// 497 — the auto entries on a menu, in order. Exactly one row, never 490's colour sibling.
+    private func autoTitles(in menu: NSMenu) -> [String] {
+        menu.items.map(\.title)
+            .filter { $0 == AutoAdjustMenuBuilder.title || $0 == "自动颜色" }
     }
 
     // MARK: - ① 编辑 ▸ 自动调整 · ⌘U
@@ -171,9 +172,17 @@ final class AutoDevelopMenu453Tests: XCTestCase {
         let stripMenu = try XCTUnwrap(surfaces.strip.menuForRightClick(nil))
         XCTAssertNotNil(autoRow(in: gridMenu), "网格右键缺「自动调整」: \(gridMenu.items.map(\.title))")
         XCTAssertNotNil(autoRow(in: stripMenu), "胶片条右键缺「自动调整」: \(stripMenu.items.map(\.title))")
-        // 490 — 自动颜色 is its own row, single photo only, on the very same menus.
-        XCTAssertNotNil(colorRow(in: gridMenu), "网格右键缺「自动颜色」: \(gridMenu.items.map(\.title))")
-        XCTAssertNotNil(colorRow(in: stripMenu), "胶片条右键缺「自动颜色」: \(stripMenu.items.map(\.title))")
+        // 497 — the composite already includes colour, so there is exactly one auto row.
+        XCTAssertEqual(autoTitles(in: gridMenu), ["自动调整"],
+                       "网格右键只能有一条自动项: \(gridMenu.items.map(\.title))")
+        XCTAssertEqual(autoTitles(in: stripMenu), ["自动调整"],
+                       "胶片条右键只能有一条自动项: \(stripMenu.items.map(\.title))")
+        // 453's order: the row is followed by exactly one separator.
+        let autoIndex = try XCTUnwrap(gridMenu.items.firstIndex { $0.title == AutoAdjustMenuBuilder.title })
+        XCTAssertTrue(gridMenu.items.dropFirst(autoIndex + 1).first?.isSeparatorItem == true,
+                      "自动调整之后应有一条分隔线: \(gridMenu.items.map(\.title))")
+        XCTAssertFalse(gridMenu.items.dropFirst(autoIndex + 2).first?.isSeparatorItem == true,
+                       "不许留双分隔线: \(gridMenu.items.map(\.title))")
 
         session.setSelection(Set(assets.map(\.id)), anchor: assets[0].id)
         pump(0.1)
@@ -181,8 +190,8 @@ final class AutoDevelopMenu453Tests: XCTestCase {
         let stripMany = try XCTUnwrap(surfaces.strip.menuForRightClick(nil))
         XCTAssertNil(autoRow(in: gridMany), "多选时网格不得出现批量自动: \(gridMany.items.map(\.title))")
         XCTAssertNil(autoRow(in: stripMany), "多选时胶片条不得出现批量自动: \(stripMany.items.map(\.title))")
-        XCTAssertNil(colorRow(in: gridMany), "多选时网格不得出现批量自动颜色: \(gridMany.items.map(\.title))")
-        XCTAssertNil(colorRow(in: stripMany), "多选时胶片条不得出现批量自动颜色: \(stripMany.items.map(\.title))")
+        XCTAssertEqual(autoTitles(in: gridMany), [], "多选时网格不得有自动项: \(gridMany.items.map(\.title))")
+        XCTAssertEqual(autoTitles(in: stripMany), [], "多选时胶片条不得有自动项: \(stripMany.items.map(\.title))")
     }
 
     // MARK: - ③ loupe 画布的 menu(for:)
@@ -204,9 +213,8 @@ final class AutoDevelopMenu453Tests: XCTestCase {
         let row = try XCTUnwrap(autoRow(in: menu),
                                 "loupe 画布缺「自动调整」: \(menu.items.map(\.title))")
         XCTAssertEqual(row.title, "自动调整")
-        // 490 — and its colour sibling.
-        let color = try XCTUnwrap(colorRow(in: menu),
-                                  "loupe 画布缺「自动颜色」: \(menu.items.map(\.title))")
-        XCTAssertEqual(color.title, "自动颜色")
+        // 497 — the composite already includes colour; no second auto row.
+        XCTAssertEqual(autoTitles(in: menu), ["自动调整"],
+                       "loupe 画布只能有一条自动项: \(menu.items.map(\.title))")
     }
 }
