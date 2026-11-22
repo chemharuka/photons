@@ -47,9 +47,13 @@ public final class BackgroundTaskBars: NSView {
 
     /// `tasks` must be newest-first. Cancelled/failed rows are removed from the group entirely
     /// (the dispatch's §2.1 item 3), then the top four are kept.
+    ///
+    /// 510 — **queued** rows are not drawn here either: the header bar is 「正在执行的那条 + 已完成
+    /// 未过期的」, a request that has not started yet belongs to the panel where its text can say
+    /// 「排队中（前面还剩 N 个）」. A 3 pt line with no progress would just look like a stuck job.
     public func update(tasks newestFirst: [BackgroundTask]) {
         let shown = newestFirst
-            .filter { $0.state != .cancelled && $0.state != .failed }
+            .filter { $0.state != .cancelled && $0.state != .failed && $0.state != .queued }
             .prefix(Metrics.maximumVisibleBars)
         visibleTasks = Array(shown)
 
