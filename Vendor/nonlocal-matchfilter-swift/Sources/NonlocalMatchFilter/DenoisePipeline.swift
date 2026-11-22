@@ -36,6 +36,31 @@ public struct DenoiseRequest {
     /// `NLMFStrength` — the same value cannot suit ISO 800 and ISO 3200. The
     /// report says which value was used.
     public var strength: Double?
+    /// How much of the blend weight to give up at the top of the tonal range.
+    ///
+    /// `strength` is one number per frame, which is as far as a frame-level
+    /// noise comparison can justify — but the detail the network takes away is
+    /// not spread evenly over the frame: it concentrates where the signal is
+    /// strong. `strengthTaper = q > 0` scales the blend by
+    /// `1 − q·smoothstep(0.18, 0.60, x)`, so shadows keep the whole `strength`
+    /// and highlights keep `strength·(1 − q)`.
+    ///
+    /// The smoothstep is pinned to exactly 0 below its lower knee, so a pixel at
+    /// or under 18 % brightness is blended with the unaltered `strength` —
+    /// bit for bit, not approximately. `0` (the default) is the historical
+    /// behaviour.
+    public var strengthTaper: Double
+    /// Where `strengthTaper` starts and finishes, in normalised linear RAW
+    /// brightness. Below `taperLow` the blend weight is untouched (bit for bit);
+    /// above `taperHigh` it is `strength·(1 − strengthTaper)`.
+    ///
+    /// Both are linear scene values, which is *not* what the eye calls "bright":
+    /// a tone curve lifts the shadows 2–4×, so 0.18 here reads as ~0.46 on
+    /// screen. A dark frame (a museum interior, say) can put its gold highlights
+    /// below 0.18 and then the taper never acts — measure the frame's own
+    /// histogram before choosing these.
+    public var taperLow: Double
+    public var taperHigh: Double
     /// Unreliable border to discard from each tile, in **plane** pixels.
     ///
     /// The network's edge pixels disagree with a differently-anchored grid
@@ -60,6 +85,8 @@ public struct DenoiseRequest {
 
     public init(input: URL, output: URL, mlpackage: String,
                 a: [Double], b: [Double], strength: Double? = nil,
+                strengthTaper: Double = 0,
+                taperLow: Double = 0.18, taperHigh: Double = 0.60,
                 crop: Int = 0, estimateNoise: Bool = false,
                 checkerboardNoise: Bool = false, dualRaw: Bool = false) {
         self.input = input
@@ -68,6 +95,9 @@ public struct DenoiseRequest {
         self.a = a
         self.b = b
         self.strength = strength
+        self.strengthTaper = strengthTaper
+        self.taperLow = taperLow
+        self.taperHigh = taperHigh
         self.crop = crop
         self.estimateNoise = estimateNoise
         self.checkerboardNoise = checkerboardNoise
@@ -91,6 +121,9 @@ public struct DenoiseReport: Sendable {
     public let outputBytes: Int
     /// Strength actually applied: the caller's, or the value `NLMFStrength` chose.
     public let strength: Double
+    /// Blend weight at the highlight end of the taper (`strength·(1 − q)`);
+    /// equal to `strength` when `strengthTaper` is 0.
+    public let strengthHighlight: Double
     /// Green-plane σ at 5 % brightness that the strength was derived from.
     public let sigma: Double
     public let writerTiles: Int
@@ -191,6 +224,12 @@ public enum DenoisePipeline {
         let strength = request.strength ?? NLMFStrength.strength(forSigma: sigma)
         progress?(String(format: "strength %.2f (σ(0.05)=%.5f%@)", strength, sigma,
                          request.strength == nil ? ", derived from the frame" : ""))
+        let strengthHighlight = strength * (1 - max(0, request.strengthTaper))
+        if request.strengthTaper > 0 {
+            progress?(String(format: "  blend tapers %.2f → %.2f over raw %.2f–%.2f (q=%.2f)",
+                             strength, strengthHighlight, request.taperLow, request.taperHigh,
+                             request.strengthTaper))
+        }
 
         // 4. denoise, tile by tile
         let den: CoreMLDenoiser
@@ -346,14 +385,25 @@ public enum DenoisePipeline {
         var out = [Float](repeating: 0, count: width * height)
         out.withUnsafeMutableBufferPointer { outPtr in
             mosaic.withUnsafeBufferPointer { mosaicPtr in
-                let s = Float(strength)
+                let sBase = Float(strength)
+                // Per-pixel reduction of the blend weight towards the highlights;
+                // `0` reproduces the frame-wide `strength` exactly.
+                let taperQ = Float(max(0, request.strengthTaper))
+                let k0 = Float(request.taperLow), k1 = Float(max(request.taperHigh, request.taperLow + 1e-6))
                 for i in 0..<n {
                     let w = wsum[i]
                     // No tile reached this pixel (only possible when `crop` pushes
                     // the kept windows apart): keep the source sample.
                     var d = w > 0 ? acc[i] / w : mosaicPtr[i]
                     if d < 0 { d = 0 } else if d > 1 { d = 1 }
-                    outPtr[i] = s == 1 ? d : mosaicPtr[i] + s * (d - mosaicPtr[i])
+                    let inputValue = mosaicPtr[i]
+                    var s = sBase
+                    if taperQ > 0 {
+                        var t = (inputValue - k0) / (k1 - k0)
+                        t = t < 0 ? 0 : (t > 1 ? 1 : t)
+                        s = sBase * (1 - taperQ * (t * t * (3 - 2 * t)))
+                    }
+                    outPtr[i] = s == 1 ? d : inputValue + s * (d - inputValue)
                 }
             }
         }
@@ -399,6 +449,7 @@ public enum DenoisePipeline {
             seconds: Date().timeIntervalSince(t0),
             outputBytes: written.byteCount,
             strength: strength,
+            strengthHighlight: strengthHighlight,
             sigma: sigma,
             writerTiles: written.tileCount,
             hasAlternate: written.hasAlternate,

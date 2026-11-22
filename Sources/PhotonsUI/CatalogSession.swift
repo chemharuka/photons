@@ -170,6 +170,8 @@ struct DenoiseRunner: Sendable {
     var nonlocal: NLMFDenoiseJob
     /// 只给测试：替换进程内那条路的**推理**，命名与临时名/改名仍是生产代码。
     var nonlocalBody: NLMFDenoiseExecutor.Body?
+    /// 只给测试（512）：替换「继承库属性」那一步，默认走 `catalog.copyLibraryMetadata`。
+    var metadataInheritBody: (@Sendable (Catalog, _ from: String, _ to: String) throws -> Int)?
 
     func execute(source: URL,
                  progress: @escaping @Sendable (String) -> Void) throws -> DenoiseOutcome {
@@ -1441,6 +1443,20 @@ public final class CatalogSession {
     /// 供 tooltip / 日志读。成功一次就清空，与 `lastDenoiseError` 同一个生命周期。
     public private(set) var lastDenoiseInheritError: String?
 
+    /// 512 — 继承**库属性**那一步自己的失败原因，中文一句。`nil` = 没跑过或成功了。
+    ///
+    /// 与 `lastDenoiseInheritError` 同一个形状、同一个理由：产物的星级/旗标/色标/关键词是
+    /// 「这张照片是什么」，它没搬成功时文件已经在磁盘、已经入库、已经堆叠 —— 降噪本身是成功的。
+    /// 所以这一条也**绝不**写成 `run.failure`，否则 `finishDenoise` 会把整单判失败、连报告一起清掉。
+    public private(set) var lastDenoiseMetadataInheritError: String?
+
+    /// 512 — 一次成功降噪后，产物**实际**继承到的库属性一行，供测试与用户核对：
+    /// `继承库属性：★1 / 旗标 pick / 色标 red / 关键词 2 个`。
+    ///
+    /// 它是从库里**读回来**的，不是回调里记的计数 —— 所以「代码以为写了」与「用户看到的值」
+    /// 不可能是两个数。失败路径留 `nil`（那时没有任何东西可报告）。
+    public private(set) var lastDenoiseMetadataInheritSummary: String?
+
     /// 工具与模型在哪儿。Injectable：测试把它指向一个不存在的可执行文件或模型路径，
     /// 就能复现「菜单灰掉的三种原因」，不需要真装东西。
     public var denoiseLocation = AnselDenoiseLocation()
@@ -1523,6 +1539,11 @@ public final class CatalogSession {
     /// 这一段而不用等 ~90 s 的推理；命名与临时名/改名仍然是生产的 `NLMFDenoiseExecutor`。
     /// internal：它是模块内的接缝，不进公开 API。
     var nlmfDenoiseBody: NLMFDenoiseExecutor.Body?
+
+    /// 512 — 继承库属性那一步的替身，`nil` = 真调 `catalog.copyLibraryMetadata`。与
+    /// `nlmfDenoiseBody` 同一个用途：测试要能**注入一次必然失败的复制**，否则
+    /// 「元数据失败不许拖垮降噪」这条只能靠读代码证明。internal：模块内的接缝，不进公开 API。
+    var denoiseMetadataInheritBody: (@Sendable (Catalog, _ from: String, _ to: String) throws -> Int)?
 
     // MARK: 485 — edit-time clean + cache
 
@@ -1728,7 +1749,8 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody)
+                                nonlocalBody: nlmfDenoiseBody,
+                                metadataInheritBody: denoiseMetadataInheritBody)
         let queue = denoiseQueue
         let participantID = asset.id
         let rootID = asset.sourceRootId
@@ -1898,7 +1920,8 @@ public final class CatalogSession {
         let job = DenoiseRunner(engine: engine,
                                 ansel: AnselDenoiseJob(location: denoiseLocation),
                                 nonlocal: nlmfDenoiseJob,
-                                nonlocalBody: nlmfDenoiseBody)
+                                nonlocalBody: nlmfDenoiseBody,
+                                metadataInheritBody: denoiseMetadataInheritBody)
         let taskID = backgroundTasks.begin(BackgroundTask(
             kind: .denoise,
             title: Loc.t("降噪 {0} 张（{1}）", String(describing: (items.count)),
@@ -1977,6 +2000,10 @@ public final class CatalogSession {
         denoiseRanOffMain = run.ranOffMain
         lastDenoiseError = run.failure
         lastDenoiseInheritError = run.inheritFailure
+        // 512 — 库属性那一步是同一种附注：单独一行，不影响 `lastDenoiseError` / 报告的有无。
+        lastDenoiseMetadataInheritError = run.metadataInheritFailure
+        lastDenoiseMetadataInheritSummary = run.failure == nil
+            ? metadataInheritSummary(forAsset: run.assetID) : nil
         lastDenoiseReport = nil
         if succeeded, let assetID = run.assetID {
             metadataWriteCount += 1
@@ -2050,6 +2077,8 @@ public final class CatalogSession {
         var stackCount = 0
         /// §395 — 继承编辑那一步的失败原因。**不进 `failure`**：降噪成功了，产物不该被判失败。
         var inheritFailure: String?
+        /// 512 — 继承库属性那一步的失败原因。与 `inheritFailure` 同一个理由：它只是附注。
+        var metadataInheritFailure: String?
     }
 
     /// §395 / §396 — 那唯一一条「产物带着原图编辑」历史行的 label。
@@ -2116,6 +2145,25 @@ public final class CatalogSession {
             }
             run.assetID = importedID
 
+            // 512 — **库属性**（星级 / 旗标 / 色标 / 关键词 / 拍摄时间）与 §395 的编辑是两件事：
+            // 「这张照片是什么」先搬，「怎么处理」后搬。`ImportService` 按内容哈希新建一行，
+            // `assets` 的默认值就是 ★0 / 无旗标 / 无色标 / 零关键词 —— 1 星的原图降噪后变 0 星
+            // 就是这一步缺了的后果。
+            //
+            // 与 §395 同一条失败纪律：**绝不**设 `run.failure`。降噪已经成功（文件在磁盘、已入库），
+            // 元数据没搬成只是产物少了几项标签，不该让整单变红、把报告与堆叠一起丢掉。
+            // `participantID` 是**这一项**原图的 id —— 批量的每一项都从它自己那一张继承。
+            progress(Loc.t("继承库属性…"))
+            do {
+                if let body = job.metadataInheritBody {
+                    try body(catalog, participantID, importedID)
+                } else {
+                    try catalog.copyLibraryMetadata(fromAsset: participantID, toAsset: importedID)
+                }
+            } catch {
+                run.metadataInheritFailure = error.localizedDescription
+            }
+
             // §395 — 产物继承原图的**全部**编辑。用现成的那一对：`copySettings` 取快照、
             // `pasteSettings` 合并写入（不经 `sections:` ⇒ 全量；它只写 payload 带的字段，且
             // 里面走 `appendDevelop`，所以整件事是**一个** undo 步骤；蒙版是追加不是替换）。
@@ -2180,6 +2228,18 @@ public final class CatalogSession {
         return error.localizedDescription
     }
 
+    /// 512 — 产物**实际**继承到的库属性，一行读回库里（不是回调里记的计数）：星级、旗标、色标、
+    /// 关键词个数。`finishDenoise` 的两条收尾路径都写它，日志与测试读同一个字符串。
+    private func metadataInheritSummary(forAsset id: String?) -> String? {
+        guard let id, let catalog, let asset = try? catalog.asset(id: id) else { return nil }
+        let keywords = (try? catalog.keywords(assetId: id)) ?? []
+        return Loc.t("继承库属性：★{0} / 旗标 {1} / 色标 {2} / 关键词 {3} 个",
+                     String(describing: (asset.rating)),
+                     asset.flag ?? Loc.t("无"),
+                     asset.colorLabel ?? Loc.t("无"),
+                     String(describing: (keywords.count)))
+    }
+
     /// 回到主 actor：发布结果、推进投影、选中产物。
     private func finishDenoise(_ run: DenoiseRun, taskID: UUID) {
         isDenoiseRunning = false
@@ -2191,6 +2251,10 @@ public final class CatalogSession {
         lastDenoiseError = run.failure
         // §395 — 继承失败是**降噪成功**的附注：它单独一行，不影响 `lastDenoiseError` / 报告的有无。
         lastDenoiseInheritError = run.inheritFailure
+        // 512 — 库属性那一步是同一种附注：单独一行，不影响 `lastDenoiseError` / 报告的有无。
+        lastDenoiseMetadataInheritError = run.metadataInheritFailure
+        lastDenoiseMetadataInheritSummary = run.failure == nil
+            ? metadataInheritSummary(forAsset: run.assetID) : nil
         lastDenoiseReport = nil
         let succeeded = run.failure == nil && run.assetID != nil
         // 454 P2a — task closes on success and every failure return inside `runDenoise`. Success
