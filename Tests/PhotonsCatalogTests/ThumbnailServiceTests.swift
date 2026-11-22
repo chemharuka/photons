@@ -752,6 +752,51 @@ final class ThumbnailServiceTests: XCTestCase {
         XCTAssertEqual(tickets.filter { $0.isCancelled }.count, 19)
     }
 
+    /// 515 — the one HD file a photo keeps belongs to the document the warm door last asked for.
+    ///
+    /// `ThumbnailCache` prunes by publication order (§308/§363), so a slow render that was asked for
+    /// *before* the warm but finishes *after* it used to land last and delete the warm's file — the
+    /// 「切文档后预览偶发不暖」 the warm door exists to prevent. The service now drops a different
+    /// document's bytes while the warm's key owns the photo's HD family.
+    func testALateRenderOfAnotherDocumentDoesNotPruneTheWarm() throws {
+        let cache = try makeCache()
+        let producer = StubProducer()
+        let gate = DispatchSemaphore(value: 0)
+        producer.gate = gate
+        producer.startedSignal = DispatchSemaphore(value: 0)
+        let service = ThumbnailService(cache: cache, config: .init(maxConcurrency: 2),
+                                       producer: producer)
+
+        func hd(_ fingerprint: String, warm: Bool) -> ThumbRequestSpec {
+            ThumbRequestSpec(key: ThumbKey(contentHash: contentHash(30), tier: .t2048,
+                                           pipeline: .graph, recipeDigest: "-",
+                                           spec: .hdJPEG, editFingerprint: fingerprint),
+                             source: URL(fileURLWithPath: "/tmp/asset-30.CR3"),
+                             isBackgroundWarm: warm)
+        }
+        let stale = hd("stale", warm: false)
+        let warm = hd("warm", warm: true)
+
+        // The stale document is asked first, and its producer is the slow one.
+        producer.gateKey = stale.key
+        _ = service.request(stale, priority: .onScreen)
+        XCTAssertEqual(producer.startedSignal!.wait(timeout: .now() + 5), .success)
+
+        // The warm is asked while the stale render is blocked, and its file lands first.
+        _ = service.request(warm, priority: .prefetch)
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !cache.exists(warm.key) { usleep(2_000) }
+        XCTAssertTrue(cache.exists(warm.key), "the warm's file never landed")
+
+        gate.signal()
+        waitIdle(service)
+
+        XCTAssertTrue(cache.exists(warm.key), "the warm's file was pruned by a stale document")
+        XCTAssertFalse(cache.exists(stale.key), "the stale document's bytes were written")
+        XCTAssertGreaterThanOrEqual(service.stats().missCancelled, 1)
+        XCTAssertEqual(producer.callCount, 2)
+    }
+
     // MARK: - ⑧ G path keys
 
     /// §0 / D12: the two pipelines produce two different keys for the same bytes at the same tier, so

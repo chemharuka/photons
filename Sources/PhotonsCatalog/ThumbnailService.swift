@@ -406,6 +406,31 @@ public final class ThumbnailService: @unchecked Sendable {
     private var subscriptionID: Int64 = 0
     private var activeCount = 0
     private var currentGeneration = 0
+    /// 515 — for each photo's HD family (`contentHash + extension`), the key the **warm door** last
+    /// asked for: the document that is on screen.
+    ///
+    /// `ThumbnailCache` keeps one HD file per photo and prunes the loser by publication order
+    /// (§308/§363): whichever store's rename lands later deletes the earlier file. Publication order
+    /// is not intent order — a *slow* render for a document the user already left (a browser cell's
+    /// persisted, neutrally-developed row, say) can publish after the warm for the document on screen
+    /// and prune it. That is the user-visible 「切文档后预览偶发不暖」, and no amount of cancellation
+    /// in one surface fixes it: the competing job belongs to another surface that never heard of the
+    /// edit.
+    ///
+    /// So while the warm's file is on disk, an HD job for a **different** document of the same photo
+    /// does not write at all (`Job` bytes are dropped, counted as cancelled). The rule is guarded by
+    /// `cache.exists(warmKey)`, which makes it self-clearing: once the file is gone (or the warm never
+    /// produced one) ordinary asks are free again, and a newer warm simply replaces the key.
+    private var latestHDWarmKey: [String: ThumbKey] = [:]
+    /// FIFO for the cap; the mark only has to outlive "somebody else's render of this photo", seconds.
+    private var latestHDWarmKeyOrder: [String] = []
+    static let latestHDWarmKeyLimit = 4096
+    /// 515 — HD stores are one-at-a-time. Writes are 1–3 ms, and the thing being excluded is not the
+    /// encode: `ThumbnailCache.retainNewestHDOnly` orders the one-file-per-photo prune by publication
+    /// time, and two renames of the same photo inside one timestamp tick leave *both* files (§363).
+    /// Serialising the store is what makes "the warm's document is the one file left" an invariant
+    /// instead of a race.
+    private let hdStoreLock = NSLock()
     private var paused = false
     private var summaries: [Int64: ThumbResult] = [:]
 
@@ -615,12 +640,42 @@ public final class ThumbnailService: @unchecked Sendable {
         sequence += 1
         let job = Job(key: spec.key, source: spec.source, sequence: sequence,
                       generation: gen, priority: priority)
+        if spec.isBackgroundWarm { noteHDWarmLocked(spec.key) }
         job.subscribers.append(Subscription(id: ticket.id, completion: completion))
         pending.append(job)
         jobs[spec.key] = job
         counters.queued = pending.count
         counters.queuedPeak = max(counters.queuedPeak, pending.count)
         return job
+    }
+
+    /// 515 — the identity of "one photo's one HD file family": the content hash picks the photo, the
+    /// extension picks the `.heic`/`.jpg` sibling that `ThumbnailCache.retainNewestHDOnly` prunes
+    /// independently.
+    private static func hdFamilyID(_ key: ThumbKey) -> String {
+        key.contentHash + "|" + key.spec.fileExtension
+    }
+
+    /// 515 — record that the warm door now owns this photo's HD family. The lock is held.
+    private func noteHDWarmLocked(_ key: ThumbKey) {
+        guard key.spec.isHDFamily else { return }
+        let family = ThumbnailService.hdFamilyID(key)
+        if latestHDWarmKey[family] == nil {
+            latestHDWarmKeyOrder.append(family)
+            while latestHDWarmKeyOrder.count > ThumbnailService.latestHDWarmKeyLimit {
+                latestHDWarmKey.removeValue(forKey: latestHDWarmKeyOrder.removeFirst())
+            }
+        }
+        latestHDWarmKey[family] = key
+    }
+
+    /// 515 — the provider's early returns (the file is already there, the digest is already warmed)
+    /// never reach `admitLocked`, but they still mean "this document is the one on screen". Recording
+    /// the key here keeps the ownership current without issuing a request.
+    public func noteHDWarmKey(_ key: ThumbKey) {
+        lock.lock()
+        noteHDWarmLocked(key)
+        lock.unlock()
     }
 
     // MARK: held refusals (326)
@@ -847,6 +902,8 @@ public final class ThumbnailService: @unchecked Sendable {
         lock.lock()
         job.producerMilliseconds = producedMs
         let dropBytes = job.suppressWrite
+        let warmKey = job.key.spec.isHDFamily
+            ? latestHDWarmKey[ThumbnailService.hdFamilyID(job.key)] : nil
         lock.unlock()
 
         if dropBytes {
@@ -856,6 +913,22 @@ public final class ThumbnailService: @unchecked Sendable {
             return
         }
 
+        // 515 — the warm door's document owns this photo's one HD file: when that file is on disk, a
+        // render of a *different* document must not store, because `ThumbnailCache.retainNewestHDOnly`
+        // prunes by publication order and a slow older intent would delete the file on screen. The
+        // check runs **inside** the HD store gate: a warm admitted while this job was rendering may
+        // have published between the snapshot above and the rename below.
+        let hdFamily = job.key.spec.isHDFamily
+        if hdFamily { hdStoreLock.lock() }
+        if hdFamily, let warmKey, warmKey.digest != job.key.digest, cache.exists(warmKey) {
+            hdStoreLock.unlock()
+            lock.lock()
+            counters.missCancelled += 1
+            counters.cancelledInFlight += 1
+            lock.unlock()
+            finish(job, origin: .cancelled, data: nil, payload: nil, error: nil)
+            return
+        }
         do {
             // 311 — the third leg of a warm's cost: the write itself (temp file + rename + the
             // one-file-per-photo prune). Measured, because "render+encode+write" is the number the
@@ -864,6 +937,7 @@ public final class ThumbnailService: @unchecked Sendable {
             try cache.store(payload.data, for: job.key)
             let writeMs = Double(DispatchTime.now().uptimeNanoseconds
                                  - writeStart.uptimeNanoseconds) / 1e6
+            if hdFamily { hdStoreLock.unlock() }
             lock.lock()
             counters.lastWriteMilliseconds = writeMs
             counters.totalWriteMilliseconds += writeMs
@@ -872,6 +946,7 @@ public final class ThumbnailService: @unchecked Sendable {
             if counters.writeTimes.count > 1024 { counters.writeTimes.removeFirst(counters.writeTimes.count - 1024) }
             lock.unlock()
         } catch {
+            if hdFamily { hdStoreLock.unlock() }
             finish(job, origin: .failed, data: nil, payload: nil, error: error.localizedDescription)
             return
         }
