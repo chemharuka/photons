@@ -241,6 +241,11 @@ final class AutoColor511Tests: XCTestCase {
                      plan.saturation, plan.unguardedSaturation,
                      plan.skinChromaChange * 100, skinChange(m1, m2) * 100))
         XCTAssertLessThanOrEqual(plan.saturation, plan.unguardedSaturation)
+        // 511 — this rail is **inert** under the new cap: `maxAdditiveSaturation = 8` produces a +8.0 %
+        // skin change, below the 10 % threshold. It stays as the fence for any future cap change, so the
+        // tripwire below re-arms the discussion the day someone raises it past 10.
+        XCTAssertLessThanOrEqual(AutoColor.maxAdditiveSaturation, 10,
+                                 "自动饱和上限超过 10 ⇒ 肤色护栏不再是空门，必须重跑这条并更新结论")
         XCTAssertLessThanOrEqual(plan.skinChromaChange, AutoColor.maxSkinChromaChange + 1e-9)
         XCTAssertLessThanOrEqual(skinChange(m1, m2), AutoColor.maxSkinChromaChange + 1e-9,
                                  "肤色带平均彩度变化 ≤ 10%（498 阈值不变）")
@@ -317,8 +322,10 @@ final class AutoColor511Tests: XCTestCase {
 
     // MARK: - §6.3 the gap ≈ 1 endpoint
 
-    /// The replacement band `[0.75, 1.10]` is promised for `gap ≤ 0.65`; the endpoint sample is kept
-    /// as its own assertion so the report can name the 0.72 vs 0.75 tension instead of hiding it.
+    /// The gap = 1 endpoint, under 511's **corrected** contract: strict improvement, and no overshoot
+    /// past 110 % of the target. The old `[0.75, 1.10]` band was the "solve to target" era's judge and
+    /// cannot hold once the plan is a bounded addition (measured 0.72 here; 14 real photos span
+    /// 0.22–1.27 with a 0.52 median). Kept as its own test so the numbers stay in the report.
     func testGapOneEndpointIsNineAndStaysAboveSeventyPercent() {
         let t = AutoColor.targetChromaP50
         // 70 % at exactly target/2 (the median), 30 % at the 498 band fixture's tail ⇒ p50 =
@@ -337,8 +344,11 @@ final class AutoColor511Tests: XCTestCase {
                      m.chromaP50, t / m.chromaP50 - 1, plan.vibrance,
                      after.chromaP50, after.chromaP50 / t))
         XCTAssertEqual(plan.vibrance, 9, "gap = 1 ⇒ 0.59 × 15")
-        XCTAssertGreaterThanOrEqual(after.chromaP50, t * 0.70,
-                                    "端点只承诺 ≥ 0.70 × target（实测 0.72）")
+        // 511 口径修正（覆盖规格 §3.3 的 `[0.75, 1.10]` 窗口）：`[0.75,1.10]` 是「解到目标」时代的判据，
+        // 与「有界加法」互斥。真实 14 张照片的 `p50'/target` 是 0.22–1.27、中位数 0.52，只有 1 张进窗口。
+        // 新契约两条：**严格改善**（`p50' > p50`）与**不许越界**（`p50' ≤ 1.10 × target`）。
+        XCTAssertGreaterThan(after.chromaP50, m.chromaP50, "必然改善")
+        XCTAssertLessThanOrEqual(after.chromaP50, t * 1.10, "不许越过目标的 110 %")
     }
 
     // MARK: - §3.1 measurement table
