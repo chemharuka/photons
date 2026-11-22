@@ -525,6 +525,59 @@ final class AutoCropAfterStraighten505Tests: XCTestCase {
         }
     }
 
+    // MARK: - ⑧ 520 — large straighten angles: the exact rectangle, not the 489/505 candidates
+
+    /// At 10° and below the optimal rectangle happens to have its four sides on polygon edges, so
+    /// 489's `edges⁴` solver finds it. At 20–45° that stops being true: the sides are limited by
+    /// vertices, and 489 either answers `nil` or a much smaller edge-supported rectangle — 505's band
+    /// is pinned to vertex `y`s and is smaller still. These are the angles 520 is for.
+    ///
+    /// Each fixture is compared with an independent grid optimum over the same source frame (the
+    /// render-level check is the black-pixel count), so the assertion is about the picture, not about
+    /// the solver's own arithmetic.
+    func testLargeStraightenAnglesReachTheExactRectangle() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        for angle in [20.0, 30.0, 40.0, 45.0] {
+            let (session, tool) = try makeTool { geometry in
+                geometry.rotationDegrees = angle
+            }
+            XCTAssertTrue(tool.autoCrop(), "⑧ \(angle)°: 应求出矩形")
+            let rect = CropRect(session.edit.geometry.crop)
+            let polygon = rotatedPicture(angle: angle)
+            let optimum = bruteForceArea(polygon)
+            let area = Double(rect.width * rect.height)
+            let corners = [NormalizedPoint(rect.left, rect.top),
+                           NormalizedPoint(rect.right, rect.top),
+                           NormalizedPoint(rect.right, rect.bottom),
+                           NormalizedPoint(rect.left, rect.bottom)]
+            let inside = corners.allSatisfy {
+                CropMath.quadContains(polygon, x: $0.x, y: $0.y)
+            }
+            note(String(format: "520 ⑧ 纯拉直 %.0f° · 框 L%.4f T%.4f R%.4f B%.4f · 面积 %.4f"
+                         + " · 暴力最优 %.4f · 比 %.4f · 四角在内 %@",
+                         angle, rect.left, rect.top, rect.right, rect.bottom, area,
+                         optimum, area / max(optimum, 1e-12), inside ? "是" : "否"))
+            XCTAssertTrue(inside, "⑧ \(angle)°: 四角必须都落在照片内")
+            // 97 %, not 100 %: the answer is inset by one output pixel per side (the render's black
+            // fringe, `autoCropTarget`), and the grid is sampled at 1/300.
+            XCTAssertGreaterThanOrEqual(area, optimum * 0.97,
+                                        "⑧ \(angle)°: 面积 \(area) 小于暴力最优 \(optimum) 的 97%")
+            XCTAssertEqual(try blackPixels(session.edit.geometry), 0,
+                           "⑧ \(angle)°: 框内不许有黑像素")
+        }
+    }
+
+    /// The turned photo's four corners in source-normalized coordinates (the space a pure straighten
+    /// solves in), before the legal-box clip the solver does internally.
+    private func rotatedPicture(angle: Double) -> [NormalizedPoint] {
+        let w = Double(Self.source.width), h = Double(Self.source.height)
+        let rotation = CropGeometry.RotationMatrix(degrees: angle)
+        return [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map { corner in
+            let turned = rotation.apply(x: (corner.0 - 0.5) * w, y: (corner.1 - 0.5) * h)
+            return NormalizedPoint(0.5 + turned.x / w, 0.5 + turned.y / h)
+        }
+    }
+
     /// The polygon the tool solves in, rebuilt here from the document map — 17 samples a side, hull.
     private func polygon(vertical: Double, horizontal: Double, shear: Double,
                          angle: Double) -> [NormalizedPoint] {
