@@ -15,8 +15,10 @@ import PhotonsExtensions
 ///   ① the product's stored document carries the source's non-default edits (exposure + contrast
 ///      printed from both sides);
 ///   ② **every key** of the source's `developJson` exists in the product's with an equal value
-///      (recursive containment — extra keys in the product are allowed, missing/unequal are not).
-///      `masks` is the one documented exception and ③ measures it on its own terms;
+///      (recursive containment — extra keys in the product are allowed, missing/unequal are not),
+///      **except** `light.highlightRecovery`: 325 removed that row from the Light card, so
+///      `EditSnapshot.capture` no longer carries it (see ⑦, the boundary test).
+///      `masks` is the one other documented exception and ③ measures it on its own terms;
 ///   ③ masks are **appended**, not substituted: one source mask ⇒ one product mask (same name,
 ///      feether, geometry; fresh id, because the id is the atlas-cache identity), and a second paste
 ///      leaves the product's first mask untouched;
@@ -79,7 +81,9 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
     ///
     /// Deliberately **no mask** here (③ has its own fixture) and deliberately nothing the clipboard
     /// does not carry at all (`detailSettings`, `healSpots`, `color.point`, `guideLines`) — the last
-    /// test in this file measures that boundary instead of assuming it away.
+    /// test in this file measures that boundary instead of assuming it away. `light.highlightRecovery`
+    /// is the one field we *do* set that the clipboard stopped carrying in 325; ② names that single
+    /// allowed diff instead of silently skipping it.
     private func richDocument() -> EditModel {
         var d = EditModel.neutral
         d.light.exposure = 1.5
@@ -351,7 +355,12 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
         print("② 顶层 key 源=\(try topLevelKeys(sourceJSON))")
         print("② 顶层 key 产物=\(try topLevelKeys(productJSON))")
         print("② 递归比较了 \(leaves) 个叶子，差异 \(diffs.count) 条：\(diffs)")
-        XCTAssertEqual(diffs, [], "② 源图的每个 key 都必须在产物里存在且相等（masks 由 ③ 单独测）")
+        // 516 — 325 把 Light 卡的「高光恢复」行摘掉后，`EditSnapshot.capture` 不再携带这个叶子
+        // （`EditSnapshot.swift:964`），所以继承按设计不会把它写进产物。richDocument 的其余每个
+        // 叶子都必须过去；唯一允许的差异就是这一条，在这里**具名**钉住，而不是放宽成「差不多」。
+        XCTAssertEqual(diffs, ["light.highlightRecovery: 15.0 ≠ 0.0"],
+                       "② 除 325 摘掉的 高光恢复 之外，源图的每个 key 都必须在产物里存在且相等"
+                       + "（masks 由 ③ 单独测）")
         XCTAssertGreaterThan(leaves, 60, "② 这一份文档的叶子数必须够多，否则「全部字段」没被真正测到")
 
         // The product is its own row, in its own file, top of a new stack: the §386 contract is
@@ -578,9 +587,10 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
     /// `EditSnapshot` is the clipboard of 「复制设置」, and it deliberately carries the twelve cards'
     /// leaves — not `detailSettings` (042's four detail axes), not `healSpots` (修复画笔), not
     /// `color.point` (点颜色), not `geometry.guideLines`, and never `showMaskID`. §2.5 forbids
-    /// changing that type for this ticket, so those edits do **not** reach the product. Pinning the
-    /// gap here is the honest option: if the clipboard grows, this test goes red and ② can be
-    /// extended instead of the report quietly ageing.
+    /// changing that type for this ticket, so those edits do **not** reach the product. Since 325 the
+    /// same is true of `light.highlightRecovery`: the panel has no 高光恢复 row, so a new capture
+    /// does not carry it. Pinning the gap here is the honest option: if the clipboard grows, this
+    /// test goes red and ② can be extended instead of the report quietly ageing.
     func testTheClipboardsBoundaryIsTheKnownGap() throws {
         var doc = richDocument()
         doc.detailSettings.detail = 6
@@ -616,8 +626,12 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
                       "边界：354 的辅助线没有过去（EditSnapshot 不带 guideLines）")
         XCTAssertTrue(docDiffs.contains { $0.hasPrefix("healSpots") },
                       "边界：修复画笔没有过去（EditSnapshot 不带 healSpots）")
-        XCTAssertEqual(docDiffs.count, 3,
-                       "边界：除这三条之外**没有任何**别的差异 —— 全部实拍差异都在这里点名了：\(docDiffs)")
+        // 516 — 第四条不是回归：325 把 Light 卡的「高光恢复」行摘掉后，⌘C/继承 就不再携带它
+        // （`EditSnapshot.capture` 在 964 行把它留成 nil）。它属于「已知缺口」，与上面三条同权。
+        XCTAssertTrue(docDiffs.contains { $0.hasPrefix("light.highlightRecovery") },
+                      "边界：325 之后 高光恢复 不再被 ⌘C/继承 携带（已知缺口）")
+        XCTAssertEqual(docDiffs.count, 4,
+                       "边界：除这四条之外**没有任何**别的差异 —— 全部实拍差异都在这里点名了：\(docDiffs)")
         XCTAssertEqual(try stored(productID).healSpots.count, 0, "修复画笔没有过去（已知缺口）")
         XCTAssertNil(try stored(productID).detailSettings.detail, "042 的四个细节轴没有过去（已知缺口）")
     }
