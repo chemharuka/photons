@@ -134,9 +134,24 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         XCTAssertFalse(base.keyString.contains("gm23"))
     }
 
-    /// The HD thumbnail is our graph, not the camera's JPEG: its key must follow the decoder version
-    /// and the four NR/detail amounts, or a switch would keep serving the default decoder's picture.
-    func testHDKeyMovesWithTheDocumentsDecoderVersionAndDetail() {
+    /// 513 — the HD key follows the **thumbnail pipeline's decode policy**, not the document's
+    /// decoder request; the four NR/detail amounts still move it.
+    ///
+    /// 506-C pinned the grid to the file's widest **classic** decoder after three crashes in Apple's
+    /// process-wide E5RT program table (`docs/tasks/506-raw-decode-ane-concurrency.md`): the HD pool
+    /// is the only place that keeps eight or nine decodes in flight, and the v9 stage is what puts
+    /// them on the ANE. `ThumbDecoderProfile.token` (`tdec=classic`) replaced the document's `ver=`
+    /// in the fingerprint, so a v9 document and a neutral one are **the same HD file** — that is the
+    /// accepted trade, stated in `ThumbDecoderProfile`'s own doc.
+    ///
+    /// This test asserted the opposite (`decoderVersion` must move the key) because it predates
+    /// 506-C, and 506-C left it behind: its own verification ran the Catalog/Core filters only, so
+    /// nothing re-read this file. `ThumbFingerprintScope405Tests
+    /// .testTheHDKeySpellsTheThumbnailDecoderPolicyNotTheDocumentsVersion` is the green suite that
+    /// pins the same rule at the recipe level — the two cannot both be right, and 506-C is the later,
+    /// documented decision. Nothing is loosened: what the grid's decode actually reads (the four
+    /// detail amounts) must still move the key, and it is asserted here.
+    func testHDKeyPinsTheClassicDecoderPolicyAndStillMovesWithDetail() {
         let neutral = ThumbKey.hd(contentHash: "abc", document: .neutral)
         var versioned = EditModel.neutral
         versioned.decoderVersion = "9.dng"
@@ -146,21 +161,29 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let v9 = ThumbKey.hd(contentHash: "abc", document: versioned)
         let nr = ThumbKey.hd(contentHash: "abc", document: detailed)
 
-        XCTAssertNotEqual(neutral.digest, v9.digest, "v9 must be a different HD thumbnail")
+        XCTAssertEqual(ThumbDecoderProfile.token, "tdec=classic",
+                       "the key's one decoder spelling is the policy, and it names the classic path")
+        XCTAssertEqual(neutral.digest, v9.digest,
+                       "506-C: the grid never enters the ML stage, so a v9 document is the same file")
         XCTAssertNotEqual(neutral.digest, nr.digest, "the detail amounts must move the HD thumbnail")
-        XCTAssertNotEqual(v9.digest, nr.digest, "version and detail are independent inputs")
-        XCTAssertNotEqual(ThumbRecipe.editFingerprint(.neutral),
-                          ThumbRecipe.editFingerprint(versioned))
+        XCTAssertNotEqual(v9.digest, nr.digest, "…independently of the decoder request")
+        XCTAssertEqual(ThumbRecipe.editFingerprint(.neutral),
+                       ThumbRecipe.editFingerprint(versioned),
+                       "the document's decoder request must not reach the HD fingerprint")
         XCTAssertNotEqual(ThumbRecipe.editFingerprint(.neutral),
                           ThumbRecipe.editFingerprint(detailed))
         // The default document is unchanged, so every pre-change HD key still hits.
         XCTAssertEqual(neutral, ThumbKey.hd(contentHash: "abc", document: EditModel.neutral))
     }
 
-    /// The measured half: two HD files for the same RAW and the same exposure, one document asking
-    /// for `9.dng`. The key must move **and** the bytes must differ — the producer must pass the
-    /// version into `DecodeOptions`, not just name it in the key.
-    func testHDThumbnailPixelsFollowTheDocumentsDecoderVersion() throws {
+    /// 513 — the measured half of the same policy: two HD files for the same RAW and the same
+    /// exposure, one document asking for `9.dng`. 506-C says the grid cannot honour that request, so
+    /// the two must be **one** key and **one** picture — the classic decoder's.
+    ///
+    /// This test used to assert the opposite (different key, different bytes), which is the pre-506-C
+    /// contract; see the field note on the key test above. The assertions are not weaker, they are
+    /// pointed the other way: the request is *ignored*, and the file is the classic decode.
+    func testHDThumbnailPixelsComeFromThePinnedClassicDecoder() throws {
         let url = try rawURL()
         let offered = try RAWDecoder.availableVersions(for: url)
         try XCTSkipUnless(offered.contains("9.dng"), "this fixture offers no v9.dng: \(offered)")
@@ -176,12 +199,14 @@ final class ThumbnailHDRCacheTests: XCTestCase {
         let second = try generateHD(display: ImageSize(width: 326, height: 242),
                                     document: v9, provider: provider)
 
-        print("THUMB decoder · v8 \(first.key.digest.prefix(16)) \(first.data.count) bytes"
-              + " · v9 \(second.key.digest.prefix(16)) \(second.data.count) bytes")
-        XCTAssertNotEqual(first.key.digest, second.key.digest,
-                          "the HD key must move with decoderVersion")
-        XCTAssertNotEqual(first.data, second.data,
-                          "the HD file is still the default decoder's picture")
+        print("THUMB decoder · classic \(first.key.digest.prefix(16)) \(first.data.count) bytes"
+              + " · v9-document \(second.key.digest.prefix(16)) \(second.data.count) bytes")
+        XCTAssertEqual(first.key.digest, second.key.digest,
+                       "the HD key names the pipeline's decoder policy, not the document's request")
+        XCTAssertEqual(first.data, second.data,
+                       "the grid's picture is the classic decode even when the document asks for v9")
+        XCTAssertTrue(ThumbKey.hd(contentHash: "abc", document: v9).keyString.contains("sv3"),
+                      "…and it is still the HD family's key")
     }
 
     /// 2 — three views, one file: the HD key ignores the per-cell tier, so a 256 px grid cell, a

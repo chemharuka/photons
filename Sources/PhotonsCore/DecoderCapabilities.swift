@@ -1,3 +1,4 @@
+import CoreImage
 import Foundation
 
 /// What the system RAW pipeline *actually* delivers, as opposed to what was asked for.
@@ -133,11 +134,22 @@ public struct DecoderCapabilities: Sendable, Equatable {
     /// whitelist), then `7` / `7.dng`, then `6` / `6.dng`. A body that offers none of them answers
     /// `nil`, and the caller keeps whatever it had — no invented spelling, because assigning a
     /// version a body does not whitelist is a silent no-op that reads back something else.
+    ///
+    /// 513 — **the `None` sentinel is not a version.** `CIRAWDecoderVersionNone` is what Core Image
+    /// reports for a file that has no RAW decoder at all, and it is the *only* entry in
+    /// `supportedDecoderVersions` for every JPEG (the grid asks for an HD file for those too, so this
+    /// function is reached on that path). Answering `"None"` made `decodeDetailed` throw
+    /// `unsupportedVersion(requested: "None", available: ["None"])` for **every** cell of a JPEG
+    /// library — measured on `RatingReloadGridCenter430Tests`: 30 requests, 30 failures, 0 drawn
+    /// thumbnails, `generated`/`diskHits` never moving. The rule the type doc states is "no invented
+    /// spelling"; `"None"` is the invented one.
     public static func widestClassicVersion(offered: [String]) -> String? {
         for candidate in ["8", "8.dng", "7", "7.dng", "6", "6.dng"] where offered.contains(candidate) {
             return candidate
         }
-        return offered.last { !usesNeuralStage($0) }
+        return offered.last {
+            $0 != CIRAWDecoderVersion.none.rawValue && !usesNeuralStage($0)
+        }
     }
 
     /// D2′ default: v8 when the file offers it, otherwise whatever Apple defaults to.

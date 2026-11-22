@@ -4500,11 +4500,23 @@ public final class RenderGraph {
                                ceiling: options.display.highlightCeiling)
 
         case .sharpen:
-            // S3.10 — 自研锐化 (185). Encoded **only** when `sharpAmount > 0`
+            // S2.9 — 自研锐化 (185). Encoded **only** when `sharpAmount > 0`
             // (`RenderStage.pipeline(hasSharpen:)`), so a document at 0 has no pass to be neutral in
             // and its frame, trace and key chain are the pre-185 ones byte for byte.
+            //
+            // 483 moved the pass out of the display-referred chain (S3.10) and into the **linear** one
+            // (S2.9, right after S1). 513 — the tail clamp kept reading `DisplayOptions.highlightCeiling`
+            // when it moved, and that is a *display-referred* top: S2's own clamp (both branches) and
+            // the three display-referred tail guards (S3.7 grain / S3.8 detail / this pass before 483)
+            // are where the picture's ceiling belongs. At S2.9 the bound truncated scene-linear light
+            // *before* the tone map and the curve — and because the sharpen link is seeded by S1 and
+            // carries no ceiling (483's key chain), a cached linear chain kept the previous ceiling's
+            // clamp, so a warmed graph could never show more than the old top no matter what S2 was
+            // told (`CeilingRerenderTests`: +4.0 after 2.3 came out 4.9219 = 2^2.3 while S2 ran with
+            // ceil=16 and `s2` was counted as a run, not a hit). The kernel's only upper bound is now
+            // the canvas' own float16 range, which no scene-linear value here can reach.
             try encodeSharpen(cb: cb, into: out, from: src, edit: edit, plan: plan,
-                              ceiling: options.display.highlightCeiling)
+                              ceiling: Double(Float16.greatestFiniteMagnitude))
 
         case .dehaze:
             // S1.9 — 117: 去雾 in the scene-linear domain. Encoded **only** when `effects.dehaze != 0`
