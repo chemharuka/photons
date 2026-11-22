@@ -63,6 +63,10 @@ extension TransformGuides489IntegrationTests {
 
         let levelHistory = editor.session.history.snapshots.count
         let levelCrop = editor.session.edit.geometry.crop
+        // 505 — 自动裁剪 now honours 「不出像素」 (a size change is not that switch's business), and
+        // the preference is process-wide: a suite that ticked it earlier would decide this test's
+        // answer. Pin it off for the fixture.
+        _ = tool.setCropStaysInsidePixels(false)
         XCTAssertFalse(tool.autoCrop(), "a level picture is left byte-identical")
         XCTAssertEqual(editor.session.history.snapshots.count, levelHistory)
         XCTAssertEqual(editor.session.edit.geometry.crop, levelCrop)

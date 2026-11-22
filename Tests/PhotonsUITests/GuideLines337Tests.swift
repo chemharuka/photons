@@ -587,8 +587,13 @@ final class GuideLines337Tests: XCTestCase {
                      black2 * 100, canvas2.width, canvas2.height,
                      (export2[2].x - export2[0].x), (export2[2].y - export2[0].y),
                      tool2.draft.crop.width, tool2.draft.crop.height))
-        XCTAssertGreaterThan(black2, 0.0001, "337 ⑪ 关掉勾选后黑角可以出现")
-        XCTAssertEqual(tool2.draft.crop, .full, "337 ⑪ 关掉勾选就不内切（框不动）")
+        // 505 — 自动裁切 now runs on every guide-line commit, so with this switch off the frame still
+        // lands on the largest no-black rectangle: the 「frame may stay on the black corners」
+        // capability is 310/317's (a manual drag), not this switch's. The 「黑像素 = 0」 assertion
+        // above is the acceptance and is untouched.
+        XCTAssertEqual(black2, 0, accuracy: 1e-9, "505: 关掉勾选也有自动裁切 ⇒ 没有黑角")
+        XCTAssertLessThan(tool2.draft.crop.width * tool2.draft.crop.height, 1,
+                          "505: 引导线提交默认自动裁切（框随透视而变）")
         XCTAssertEqual(session2.edit.geometry.perspectiveVertical, session.edit.geometry.perspectiveVertical,
                        accuracy: 1e-9, "337 ⑪ 勾选与否解出来的 v 是同一个")
     }
