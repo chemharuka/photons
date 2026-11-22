@@ -309,13 +309,19 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         let stripBefore = h.strip.thumbnailStats
         let cellStep = h.strip.appliedItemSize.width + WorkspaceLayout.filmstripSpacing
         scroll(h.stripScroll, to: NSPoint(x: cellStep * 5, y: 0))
-        h.settle(8)
+        h.settle(1)
+        // 502 — a one-screen jump is fast enough to widen the band towards its 30-cell cap, so this
+        // pass asks for more cells than 429's ±10 did. The reads are bounded by *that* band, not by
+        // the library; the number is printed so the widening is visible instead of absorbed.
+        let stripPrefetch = h.strip.wantedIndexes().subtracting(h.strip.visibleIndexes()).count
+        h.waitForBands()
         let stripAfter = h.strip.thumbnailStats
         let stripVisible = h.strip.visibleCellCount
         print("429 A② strip +\(Int(cellStep * 5)) pt: memory +\(stripAfter.memoryHits - stripBefore.memoryHits)"
               + " disk +\(stripAfter.diskHits - stripBefore.diskHits)"
               + " generated +\(stripAfter.generated - stripBefore.generated)"
-              + " drawing \(h.strip.visibleThumbnailCount)/\(stripVisible)")
+              + " drawing \(h.strip.visibleThumbnailCount)/\(stripVisible)"
+              + " band asked \(stripPrefetch) cells")
         XCTAssertGreaterThan(stripAfter.memoryHits, stripBefore.memoryHits)
         // Bounded, not zero: measured +5 at ±10 (0 at ±4). The grid writes its entries at its own
         // cell size while the filmstrip/lists read at their own display size (`.resizeAspectFill`),
@@ -323,8 +329,9 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
         // still +5/+10/+0), so this is a key/size mismatch, not LRU pressure — do not hide it by
         // growing the cache.
-        XCTAssertLessThanOrEqual(stripAfter.diskHits - stripBefore.diskHits, 10,
-                                 "the strip re-reads at most the cells it scrolls in (measured +5)")
+        XCTAssertLessThanOrEqual(stripAfter.diskHits - stripBefore.diskHits,
+                                 stripPrefetch + stripVisible,
+                                 "the strip re-reads at most the cells its band asked for")
         XCTAssertEqual(stripAfter.generated - stripBefore.generated, 0)
         XCTAssertEqual(h.strip.visibleThumbnailCount, stripVisible,
                        "every visible strip cell draws a real bitmap")
@@ -335,20 +342,24 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         let paneBefore = h.pane.thumbnailStats
         let rowStep = WorkspaceLayout.browserRowHeight
         scroll(h.paneScroll, to: NSPoint(x: 0, y: rowStep * 10))
-        h.settle(8)
+        h.settle(1)
+        let panePrefetch = h.pane.wantedRows().subtracting(h.pane.visibleRows()).count
+        h.waitForBands()
         let paneAfter = h.pane.thumbnailStats
         let paneVisible = h.pane.visiblePhotoRowCount
         print("429 A③ list +\(Int(rowStep * 10)) pt: memory +\(paneAfter.memoryHits - paneBefore.memoryHits)"
               + " disk +\(paneAfter.diskHits - paneBefore.diskHits)"
               + " generated +\(paneAfter.generated - paneBefore.generated)"
-              + " drawing \(h.pane.visibleThumbnailCount)/\(paneVisible)")
+              + " drawing \(h.pane.visibleThumbnailCount)/\(paneVisible)"
+              + " band asked \(panePrefetch) rows")
         XCTAssertGreaterThan(paneAfter.memoryHits, paneBefore.memoryHits)
         // Same key/size mismatch as the strip; measured +10 at ±10 (0 at ±4). The list reads at its
         // own display size (`.resizeAspectFill`) so it never shares the grid's entries, and raising
         // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
         // still +5/+10/+0) — do not hide this by growing the cache.
-        XCTAssertLessThanOrEqual(paneAfter.diskHits - paneBefore.diskHits, 10,
-                                 "the list re-reads at most the rows it scrolls in (measured +10)")
+        XCTAssertLessThanOrEqual(paneAfter.diskHits - paneBefore.diskHits,
+                                 panePrefetch + paneVisible,
+                                 "the list re-reads at most the rows its band asked for")
         XCTAssertEqual(paneAfter.generated - paneBefore.generated, 0)
         XCTAssertEqual(h.pane.visibleThumbnailCount, paneVisible,
                        "every visible list row draws a real bitmap")

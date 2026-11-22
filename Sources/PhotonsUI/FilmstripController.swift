@@ -285,6 +285,29 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     private var lastWanted: Set<Int> = []
     private var lastTier: ThumbTier?
 
+    // MARK: 502 — the direction-aware band
+
+    /// 502 — samples `bounds.origin.x` once per reconcile pass; cells per second, not rows.
+    private var velocitySampler = ScrollVelocityBand.Sampler()
+    /// The band **this** pass used, in cells to the left and to the right of the viewport. Both are
+    /// the shipped 10 until a pass sees movement.
+    private var bandLeftCells = ScrollVelocityBand.base
+    private var bandRightCells = ScrollVelocityBand.base
+    /// The cancellation ring: 20 cells at rest, `band + 10` on the leading side.
+    private var ringLeftCells = ScrollVelocityBand.base * 2
+    private var ringRightCells = ScrollVelocityBand.base * 2
+    /// 502 — velocity-extension cells a pass deferred at the budget; drained by the next pass.
+    private var coreBacklog: Set<Int> = []
+    private var coreContinuationScheduled = false
+
+    /// 502 — per-pass cap on **new** cells, counted only over the velocity extension; the resting
+    /// ±10-cell band is never deferred. One screen of cells, doubled.
+    var coreBudgetPerPass: Int {
+        get { coreBudgetOverride ?? max(1, visibleIndexes().count * 2) }
+        set { coreBudgetOverride = newValue }
+    }
+    private var coreBudgetOverride: Int?
+
     public init(session: CatalogSession) {
         self.session = session
         super.init(nibName: nil, bundle: nil)
@@ -617,6 +640,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         thumbRequests.removeAll()
         lastWanted = []
         lastTier = nil
+        // 502 — a new cache is a new library: do not carry a speed across the swap.
+        velocitySampler.reset()
+        coreBacklog.removeAll()
         providerCache = cache
         let made = ThumbnailProvider.shared(for: cache)
         thumbnailProvider = made
@@ -765,34 +791,99 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
             }
         }
 
+        // 502 — one velocity sample per pass (cells per second, from `bounds.origin.x`).
+        updateVelocityBand()
+
         let wanted = wantedIndexes()
-        if !force, wanted == lastWanted { return }
+        if !force, wanted == lastWanted, coreBacklog.isEmpty { return }
         lastWanted = wanted
         let visible = visibleIndexes()
 
-        // 449 — cancel only what left the **outer ring**: visible ± 2 × 10 cells (±20), not the
-        // ±10-cell request band. A live scroll moves a few cells per pass; condemning the narrow
-        // band every time discarded bytes that had just been produced (§3 fixes this at slack × 2).
+        // 449 — cancel only what left the **outer ring**, not the ±10-cell request band. A live
+        // scroll moves a few cells per pass; condemning the narrow band every time discarded bytes
+        // that had just been produced.
+        //
+        // 502 — the ring is `max(20, forwardBand + 10)` on the leading side (still ±20 at rest), so a
+        // 30-cell forward ask is never condemned by the pass that issued it.
         let outer = outerWantedIndexes()
         for (index, token) in thumbRequests where !outer.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
         }
 
+        // 502 — the resting ±10-cell band goes out unconditionally; only the velocity extension is
+        // budgeted, and the rest waits in `coreBacklog` for the next pass.
+        let resting = restingWantedIndexes()
+        for index in resting.subtracting(visible).sorted() {
+            issueThumbnailCell(index, session: session, provider: provider, visible: visible)
+        }
+
+        // 502 — a visible cell must never sit on a placeholder while nothing is in flight: the wider
+        // band issues more asks, and a delivery that lands while its cell is being realised or recycled
+        // is dropped (`thumbnailDidLoad` finds no cell yet), which used to leave the cell empty until
+        // the user scrolled again. One lookup per visible cell; it draws the LRU bitmap if there is one
+        // and re-asks only when there is neither a bitmap nor an outstanding request.
         let display = displayPixels
-        for index in wanted {
-            guard index < session.assets.count else { continue }
+        for index in visible.sorted() {
+            guard index < session.assets.count,
+                  let cell = collectionView.item(at: IndexPath(item: index, section: 0)) as? FilmstripCell,
+                  cell.cardView.thumbnail == nil else { continue }
             let asset = session.assets[index]
-            if provider.memoryImage(for: ThumbnailProvider.hdJPEGKey(for: asset,
+            let key = ThumbnailProvider.hdJPEGKey(for: asset, document: document(for: asset))
+            if let image = provider.memoryImage(for: key, display: display) {
+                cell.cardView.thumbnailTier = tier(for: asset)
+                cell.cardView.applyThumbnail(image, key: key, display: display)
+                continue
+            }
+            issueThumbnailCell(index, session: session, provider: provider, visible: visible)
+        }
+
+        var deferred: Set<Int> = []
+        var issued = 0
+        // 502 — carry an earlier pass's deferred cells first, while the ring still covers them.
+        let carried = coreBacklog.intersection(outer).subtracting(visible).subtracting(resting)
+        let fresh = wanted.subtracting(resting).subtracting(visible).subtracting(carried)
+        for index in Array(carried).sorted() + Array(fresh).sorted() {
+            if issued >= coreBudgetPerPass {
+                deferred.insert(index)
+                continue
+            }
+            if issueThumbnailCell(index, session: session, provider: provider, visible: visible) {
+                issued += 1
+            }
+        }
+        coreBacklog = deferred.filter { thumbRequests[$0] == nil }
+        if !coreBacklog.isEmpty { scheduleCoreContinuation() }
+    }
+
+    /// 502 — ask for one cell unless the LRU has it or a request is outstanding.
+    @discardableResult
+    private func issueThumbnailCell(_ index: Int, session: CatalogSession,
+                                    provider: ThumbnailProvider, visible: Set<Int>) -> Bool {
+        guard index >= 0, index < session.assets.count else { return false }
+        let asset = session.assets[index]
+        let display = displayPixels
+        if provider.memoryImage(for: ThumbnailProvider.hdJPEGKey(for: asset,
                                                                  document: document(for: asset)),
-                                     display: display) != nil { continue }
-            if thumbRequests[index] != nil { continue }
-            // §4 ①②: the selected/anchor cell wins even if it is only in the slack band; the rest of
-            // the visible window is on-screen work; the slack is prefetch.
-            let isAnchor = session.anchorID == asset.id || session.selection.contains(asset.id)
-            let priority: ThumbPriority = (isAnchor || visible.contains(index)) ? .onScreen : .prefetch
-            requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
-                             priority: priority)
+                                display: display) != nil { return false }
+        if thumbRequests[index] != nil { return false }
+        // §4 ①②: the selected/anchor cell wins even if it is only in the slack band; the rest of
+        // the visible window is on-screen work; the slack is prefetch.
+        let isAnchor = session.anchorID == asset.id || session.selection.contains(asset.id)
+        let priority: ThumbPriority = (isAnchor || visible.contains(index)) ? .onScreen : .prefetch
+        requestThumbnail(index: index, asset: asset, tier: cellTier, display: display,
+                         priority: priority)
+        return true
+    }
+
+    /// 502 — the "下一 pass 继续" half of the core budget, coalesced into one item.
+    private func scheduleCoreContinuation() {
+        guard !coreContinuationScheduled else { return }
+        coreContinuationScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self else { return }
+            self.coreContinuationScheduled = false
+            self.reconcileThumbnails(force: false)
         }
     }
 
@@ -805,28 +896,105 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
     /// "胶片条左右各 10 个": ten cells is a bit more than one screen of a 90 pt strip, so the row
     /// that comes in after a flick is already in the memory LRU. Only the horizontal inset grows.
     ///
-    /// Internal, not private, so the 429 acceptance can read the band's size off the live view.
+    /// 502 — the trailing side is still `base` (10); the leading side follows the scroll speed up to
+    /// `cap` (30 cells). At rest both sides are 10, so `bounds.insetBy(dx: -10 cells)` is reproduced
+    /// exactly.
+    ///
+    /// Internal, not private, so the 429/502 acceptance can read the band's size off the live view.
     func wantedIndexes() -> Set<Int> {
+        expandedIndexes(left: bandLeftCells, right: bandRightCells)
+    }
+
+    /// 502 — the resting band, ±10 cells. Always asked for, never budgeted.
+    func restingWantedIndexes() -> Set<Int> {
+        expandedIndexes(left: ScrollVelocityBand.base, right: ScrollVelocityBand.base)
+    }
+
+    /// 449 — the cancellation ring. ±20 cells at rest (2 × 10); 502 pushes the leading side to
+    /// `band + 10` cells so it is always ≥ the forward band. Requests inside it survive a pass even
+    /// when the narrower cell band has moved past them.
+    func outerWantedIndexes() -> Set<Int> {
+        expandedIndexes(left: ringLeftCells, right: ringRightCells)
+    }
+
+    /// The geometry half of all three sets, in cells.
+    private func expandedIndexes(left: Int, right: Int) -> Set<Int> {
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
-        let slack = max(24, flow.itemSize.width) * 10
-        let expanded = bounds.insetBy(dx: -slack, dy: 0)
+        let pitch = max(24, flow.itemSize.width)
+        let expanded = CGRect(x: bounds.minX - pitch * CGFloat(left),
+                              y: bounds.minY,
+                              width: bounds.width + pitch * CGFloat(left + right),
+                              height: bounds.height)
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
         return Set(attributes.compactMap { $0.indexPath?.item })
     }
 
-    /// 449 — the cancellation ring, **visible ± 2 × 10 cells** (±20). Requests inside it survive a
-    /// pass even when the narrower ±10-cell request band has moved past them. §3 fixes the value.
-    func outerWantedIndexes() -> Set<Int> {
-        guard let scroll = collectionView.enclosingScrollView else { return [] }
+    /// 502 — one velocity sample per pass. The strip is horizontal, so the unit is the cell width and
+    /// an increasing `origin.x` (scrolling right) is the forward direction.
+    private func updateVelocityBand() {
+        guard let scroll = collectionView.enclosingScrollView else {
+            bandLeftCells = ScrollVelocityBand.base
+            bandRightCells = ScrollVelocityBand.base
+            ringLeftCells = ScrollVelocityBand.base * 2
+            ringRightCells = ScrollVelocityBand.base * 2
+            return
+        }
         let bounds = scroll.contentView.bounds
-        let slack = max(24, flow.itemSize.width) * 20
-        let expanded = bounds.insetBy(dx: -slack, dy: 0)
-        guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
-        else { return [] }
-        return Set(attributes.compactMap { $0.indexPath?.item })
+        let sample = velocitySampler.sample(offset: bounds.origin.x,
+                                            time: CACurrentMediaTime(),
+                                            unitPoints: max(24, flow.itemSize.width),
+                                            viewportSpan: bounds.width)
+        let trailing = sample.backward
+        let leading = sample.forward
+        switch sample.direction {
+        case .forward:
+            bandLeftCells = trailing
+            bandRightCells = leading
+        case .backward:
+            bandLeftCells = leading
+            bandRightCells = trailing
+        case .none:
+            bandLeftCells = trailing
+            bandRightCells = trailing
+        }
+
+        let ring = ScrollVelocityBand.cancellationRing(
+            forward: sample.forward, restingRing: ScrollVelocityBand.base * 2)
+        let restingRing = ScrollVelocityBand.base * 2
+        switch sample.direction {
+        case .forward:
+            ringLeftCells = restingRing
+            ringRightCells = max(ring, restingRing)
+        case .backward:
+            ringLeftCells = max(ring, restingRing)
+            ringRightCells = restingRing
+        case .none:
+            ringLeftCells = restingRing
+            ringRightCells = restingRing
+        }
     }
+
+    /// 502 — seed the sampler as if the previous pass sampled `offsetDelta` points ago, `seconds`
+    /// before now, at `previousCellsPerSecond`. Acceptance only.
+    func primeVelocityForTesting(offsetDelta: CGFloat, seconds: TimeInterval,
+                                 previousCellsPerSecond: Double) {
+        guard let scroll = collectionView.enclosingScrollView else { return }
+        velocitySampler.prime(offset: scroll.contentView.bounds.origin.x - offsetDelta,
+                              time: CACurrentMediaTime() - seconds,
+                              speed: previousCellsPerSecond)
+    }
+
+    /// 502 — cells a pass deferred at the budget.
+    var deferredCoreIndexesForTesting: Set<Int> { coreBacklog }
+
+    /// 502 — run one reconcile pass synchronously.
+    func reconcileThumbnailsForTesting(force: Bool = true) { reconcileThumbnails(force: force) }
+
+    /// 502 — drop the coalesced work item so a test can run its own pass.
+    func cancelScheduledThumbnailReconcileForTesting() { reconcileGate.cancelPending() }
+
 
     // MARK: thumbnail probes (used by `--ui-smoke`)
 
