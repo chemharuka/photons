@@ -15,6 +15,17 @@ import PhotonsExtensions
 /// whether M3.5 needs the other path.
 public final class AssetCollectionView: NSCollectionView {
     public var onKeyDown: ((NSEvent) -> Bool)?
+    /// 507 — layout passes this collection view actually ran. The switch acceptance counts the
+    /// passes between "the switch happened" and "the visible set is right": a placement that only
+    /// sets the clip and defers the band leaves the count at 0 in that turn, which is exactly the
+    /// 「先切换再滚动」 the user reported. Structural, not a copy of any code path's arithmetic.
+    public private(set) var layoutPassCount = 0
+
+    public override func layout() {
+        super.layout()
+        layoutPassCount += 1
+    }
+
     /// 352 — the press hook. Returning `true` swallows the press entirely (no selection, no cell
     /// change): the double-click guard's answer when the second press of a pair landed on a
     /// different cell than the first. `nil` (the grid) behaves exactly as before.
@@ -1207,6 +1218,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// cancelled the moment it scrolls away — never in the first-frame path.
     public func thumbnailRematerializeOnAppear() {
         guard isViewLoaded else { return }
+        // 507 — the band that is born here is the one **under the anchor**: 「该展示哪一张」在切换前
+        // 就已知，所以视口先归位，再让这一带布局出来。反过来（先布局旧位置、再滚过去）会把旧位置
+        // 的格子先创建一遍、按旧索引发一轮请求，再滚走 —— 那就是「先切换再滚动」，也是 430 的
+        // 占位图闪一下的残余。
+        placeAnchorInViewport()
         collectionView.layoutSubtreeIfNeeded()
         reconfigureVisibleItems()
         refreshVisibleThumbnails()
@@ -1215,6 +1231,56 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
     }
 
+    /// 507 — 「已知则直出」：锚点在切换那一刻就是已知的，于是按 metrics 算出它该在哪、直接置 clip，
+    /// 再让**这一带**布局出来。不再走「滚到第 N 项」那条 API —— 它先失效整块
+    /// 布局、再让 AppKit 在下一趟把沿途 cell 一个个创建出来，正是用户说的「先切换再滚动」。
+    ///
+    /// 位置规则是 471r 胶片条那一套的等价物（`CenteredScroll.target`，纵向钳在
+    /// `[0, content − visible]`）：第一行/最后一行贴着边，中间的行落在视口中线。
+    ///
+    /// - Returns: `true` when there was an anchor and live geometry to place it with.
+    @discardableResult
+    public func placeAnchorInViewport() -> Bool {
+        guard isViewLoaded, let session, let id = session.anchorID,
+              let index = session.assets.firstIndex(where: { $0.id == id }) else { return false }
+        // The clip's *height* is the target's denominator, and it is known without laying anything
+        // out: the grid's own frame minus the filter bar (`layoutGrid()`'s arithmetic). Laying the
+        // scroll view out first would create the cells at the **old** origin — the band that used to
+        // be on screen would be born, ask for its thumbnails and only then be scrolled away.
+        let clip = scrollView.contentView
+        let visible = max(0, view.bounds.height - FilterBarView.height)
+        let m = metrics
+        guard visible > 0, m.rowHeight > 0, m.columns > 0 else { return false }
+        guard collectionView.numberOfItems(inSection: 0) > index else { return false }
+
+        let row = index / m.columns
+        let itemMid = m.inset + CGFloat(row) * m.rowHeight + m.itemSize.height / 2
+        // Arithmetic, not `layoutAttributesForItem`: a row forty rows away has no prepared
+        // attributes yet, and asking for them is what forced the old two-pass scroll.
+        let rows = max(1, Int(ceil(Double(session.assets.count) / Double(m.columns))))
+        let content = m.inset * 2 + CGFloat(rows) * m.itemSize.height
+            + CGFloat(rows - 1) * m.spacing
+        guard content > 0 else { return false }
+
+        let target = CenteredScroll.target(itemMidpoint: itemMid,
+                                           contentLength: content,
+                                           visibleLength: visible)
+        let moved = abs(clip.bounds.origin.y - target) > 0.5
+        if moved {
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+            scrollView.reflectScrolledClipView(clip)
+            anchorPlacementCount += 1
+        }
+        // The band under the new origin is created **here**, in this call: the visible cells and
+        // their on-screen thumbnail asks exist before the switch returns, with no second layout
+        // pass and nothing created at the old offset (§4's 「占位图不许等到下一趟」).
+        collectionView.layoutSubtreeIfNeeded()
+        return true
+    }
+
+    /// 507 — how many times a switch actually moved this viewport (idempotent switches stay 0).
+    public private(set) var anchorPlacementCount = 0
+
     /// 430 — put the photo the loupe was showing in the **middle** of the grid, not merely inside it.
     ///
     /// `.nearest…` would leave it at the edge, so a one-row change would look like nothing happened.
@@ -1222,14 +1288,11 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// to four columns the user was not editing, trading "my photo is centred" for "the page jumped
     /// sideways". The row is the axis the loupe transition actually changes.
     ///
+    /// 507 — the placement is now the direct one (`placeAnchorInViewport()`); the rule did not move.
     /// Called by `WorkspaceRootView` once per `loupe → grid` switch, never on a metadata refresh, so
     /// a scroll the user made is not undone.
     public func centerOnAnchorIfNeeded() {
-        guard isViewLoaded, let session, let id = session.anchorID,
-              let index = session.assets.firstIndex(where: { $0.id == id }),
-              collectionView.numberOfItems(inSection: 0) > index else { return }
-        collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)],
-                                     scrollPosition: .centeredVertically)
+        placeAnchorInViewport()
     }
 
     /// 303 — after an edit, re-ask for the one photo that moved. Only a cell that is **on screen**
@@ -1879,10 +1942,9 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     }
 
     public func showAnchor() {
-        guard let session, let id = session.anchorID,
-              let index = session.assets.firstIndex(where: { $0.id == id }) else { return }
-        let path = IndexPath(item: index, section: 0)
-        collectionView.scrollToItems(at: [path], scrollPosition: .nearestHorizontalEdge)
+        // 507 — one placement rule for both entries (the smoke's "show anchor" and the loupe → grid
+        // switch): direct, never a scroll-then-create.
+        placeAnchorInViewport()
     }
 
     @objc private func handleDoubleClick(_ recognizer: NSClickGestureRecognizer) {
