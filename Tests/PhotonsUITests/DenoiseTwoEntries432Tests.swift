@@ -306,14 +306,22 @@ final class DenoiseTwoEntries432Tests: XCTestCase {
         }
     }
 
-    /// A② 的另一半 —— 「正在跑」不是「缺依赖」：跑着的时候两条都灰，但那句话是
-    /// `已有一次模型降噪在进行`，两条都不许改说「缺模型 / 缺工具」。
+    /// A② 的另一半 —— 「正在跑」不是「缺依赖」：跑着的时候这一行灰，但那句话是运行态的
+    /// 一句（432 的原文是 `已有一次模型降噪在进行`，510 起是「正在降噪」），两条都不许改说
+    /// 「缺模型 / 缺工具」。
+    ///
+    /// 510 — 那句 notice 的**口径**变了：它现在说的是「**这张照片自己**在跑」（「正在降噪」），
+    /// 而不再是「全应用有活在跑」。本条的牙齿因此升级成两组：
+    ///   · 正在跑的这张：仍然灰、仍然是**运行态**那句（不是缺依赖）；
+    ///   · **别的照片**：行必须可点，点下去只是入队 —— `lastDenoiseError` 必须是 nil，
+    ///     队列深度 +1。这就是「不再全局灰」的机器可验证形式。
     func testRunningIsItsOwnNoticeAndDoesNotBecomeADependencyNotice() throws {
-        _ = try makeSession()
+        let assets = try makeSession(dngCount: 2)
         try installFakeAnsel(on: session)
         try installNLMFModel(on: session)
         let surfaces = makeSurfaces()
-        let asset = try XCTUnwrap(session.assets.first)
+        let asset = try XCTUnwrap(assets.first)
+        let other = try XCTUnwrap(assets.last)
         session.selectOnly(asset.id)
         pump(0.1)
 
@@ -336,10 +344,44 @@ final class DenoiseTwoEntries432Tests: XCTestCase {
         for name in ["grid", "filmstrip", "browser"] {
             for row in rows(in: try XCTUnwrap(menus[name])) {
                 print("A② 运行中 [\(name)] \(row.title)：enabled=\(row.isEnabled) tooltip=\(row.toolTip ?? "nil")")
-                XCTAssertFalse(row.isEnabled, "\(name)：同时只跑一个")
-                XCTAssertEqual(row.toolTip, "已有一次模型降噪在进行",
+                XCTAssertFalse(row.isEnabled, "\(name)：这张正在跑，行必须灰")
+                // 510 — 「正在跑」的句子从 432 的全局口径（`已有一次模型降噪在进行`）细化成
+                // 「这张照片自己在跑」（`正在降噪`）。本条的意图不变：**运行态不许被说成缺依赖**。
+                XCTAssertEqual(row.toolTip, DenoiseNotices.runningThisPhoto,
                                "\(name)：运行态不许被说成缺依赖")
             }
+        }
+
+        // ---- 510 的另一半：别的照片**不该**被这个运行态挡住 ----
+        let depthBefore = session.denoiseQueueDepth
+        session.selectOnly(other.id)
+        let otherMenus = try self.menus(surfaces)
+        for name in ["grid", "filmstrip", "browser"] {
+            for row in rows(in: try XCTUnwrap(otherMenus[name])) {
+                print("510 别的照片 [\(name)] \(row.title)：enabled=\(row.isEnabled) tooltip=\(row.toolTip ?? "nil")")
+                XCTAssertTrue(row.isEnabled, "\(name)：别的照片在跑不许把这一行灰掉")
+            }
+        }
+        XCTAssertEqual(session.denoiseSelection(engine: .nonlocal), [other.id], "别的照片应当入队")
+        XCTAssertNil(session.lastDenoiseError, "入队不是错误：lastDenoiseError 必须是 nil")
+        XCTAssertEqual(session.denoiseQueueDepth, depthBefore + 1, "队列深度必须 +1")
+        XCTAssertTrue(session.lastDenoiseQueueNotice?.contains("队列") ?? false,
+                      "入队要说清「已加入降噪队列」")
+
+        // 同一张再来一次 ⇒ 仍然是它自己的那句；已排队的那张 ⇒ 「已在队列中」。
+        session.selectOnly(asset.id)
+        XCTAssertEqual(session.denoiseSelection(engine: .nonlocal), [])
+        XCTAssertEqual(session.lastDenoiseError, DenoiseNotices.runningThisPhoto)
+        session.selectOnly(other.id)
+        XCTAssertEqual(session.denoiseSelection(engine: .nonlocal), [])
+        XCTAssertEqual(session.lastDenoiseError, DenoiseNotices.alreadyQueued)
+        XCTAssertEqual(session.denoiseQueueDepth, depthBefore + 1, "同一张永不会有第二个排队请求")
+
+        // 收尾：两条都放行，别把 60 s 的等待留给拆除阶段。
+        gate.signal(); gate.signal()
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline, session.denoiseQueueDepth > 0 || session.isDenoiseRunning {
+            pump(0.01)
         }
     }
 
