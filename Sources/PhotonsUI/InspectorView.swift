@@ -1609,10 +1609,29 @@ public struct InspectorView: View {
         .accessibilityIdentifier("inspector.color.auto")
     }
 
-    /// 496 — the help string, named once so the waiting and ready states cannot disagree.
-    private var autoColorHelp: String {
-        autoAdjustWaitingForDecode ? Loc.t("等待解码…")
-                                   : Loc.t("自动颜色：按画面的色度分布安排自然饱和（只加不减）")
+    /// 496b — the help string, named once so the waiting and ready states cannot disagree.
+    ///
+    /// 501 deleted `LoupeController.autoColorHelpText` together with the right-click 「自动颜色」 row,
+    /// so the "why was this 0" explanation now rides the same observable the menu reads:
+    /// `lastAutoColorNoOpReasonForTesting`. A press that moved (or no press yet) leaves it `nil`,
+    /// which is exactly the "here is what I do" text.
+    var autoColorHelp: String {
+        Self.autoColorHelpText(for: loupe?.lastAutoColorNoOpReasonForTesting,
+                               waitingForDecode: autoAdjustWaitingForDecode)
+    }
+
+    /// The mapping itself, static so the test reads the same strings the button shows instead of a copy.
+    static func autoColorHelpText(for reason: LoupeController.AutoColorNoOpReason?,
+                                  waitingForDecode: Bool) -> String {
+        if waitingForDecode { return Loc.t("等待解码…") }
+        switch reason {
+        case .tooGrey:
+            return Loc.t("自动颜色：画面几乎没有颜色，未写入")
+        case .alreadySaturated:
+            return Loc.t("自动颜色：这张已经足够饱和，两个参数都保持 0")
+        case nil:
+            return Loc.t("自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度")
+        }
     }
 
     /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.

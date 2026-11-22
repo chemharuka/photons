@@ -138,7 +138,13 @@ final class AutoColorCard496Tests: XCTestCase {
         XCTAssertEqual(after.light.whites, before.light.whites)
         XCTAssertEqual(after.light.blacks, before.light.blacks)
         XCTAssertEqual(after.light.blackOffset, before.light.blackOffset, "blackOffset 逐位不变")
-        XCTAssertEqual(after.color.saturation, before.color.saturation, "saturation 不变")
+        // 498（d10faa0，在本 lane 基点 8fe5062 之后合入）把自动颜色升成**两自由度**：
+        // p50 → vibrance、p95 → saturation（`AutoColorAll490Tests.testAutoColorAloneWritesBothColorSliders…`
+        // 是 main 上的既有断言）。所以「色彩卡只动一个字段」这句口径从 498 起不成立 ——
+        // 色彩卡管的是**两个色彩滑块**，跨卡的隔离仍然必须逐位成立。
+        XCTAssertGreaterThan(after.color.vibrance, before.color.vibrance, "vibrance 变")
+        XCTAssertGreaterThanOrEqual(after.color.saturation, before.color.saturation,
+                                    "saturation 只加不减（498 的护栏）")
         XCTAssertEqual(after.detail, before.detail, "detail 整组不变")
         XCTAssertEqual(after.sharpen, before.sharpen, "sharpen 整组不变")
         XCTAssertEqual(after.effects, before.effects, "effects 整组不变")
@@ -350,6 +356,52 @@ final class AutoColorCard496Tests: XCTestCase {
         session.setSortOrder(.newestFirst)
         session.setSelection([asset.id], anchor: asset.id)
         return session
+    }
+
+    // MARK: - ⑦ help 文案说明「为什么是 0」（501 删掉 autoColorHelpText 之后的新来源）
+
+    func testTheHelpTextExplainsWhyNothingWasWritten() throws {
+        let url = try rawFixture()
+        let session = CatalogSession()
+        let loupe = try makeController(url: url, identity: "496b-help", session: session)
+        let view = InspectorView(session: session, loupe: loupe)
+
+        // 点前：还没按过 ⇒ reason 是 nil ⇒「我做什么」那句。
+        XCTAssertNil(loupe.lastAutoColorNoOpReasonForTesting)
+        let idle = view.autoColorHelp
+        print("496b help · 点前 (reason nil) = \(idle)")
+        XCTAssertEqual(idle, Loc.t("自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度"))
+
+        // 第一次按：文档的 vibrance 低于 plan 目标 ⇒ 真的写了 ⇒ reason 回到 nil。
+        session.applyEdit { $0.color.vibrance = -20 }
+        XCTAssertTrue(session.commitEdit(label: "原照"))
+        XCTAssertNotNil(loupe.autoColor(), "第一次按必须写")
+        pump(0.05)
+        let moved = view.autoColorHelp
+        print("496b help · 点后 (vibrance \(session.edit.color.vibrance), reason nil) = \(moved)")
+        XCTAssertNil(loupe.lastAutoColorNoOpReasonForTesting, "写进去了就不该有 no-op 原因")
+        XCTAssertEqual(moved, idle, "写过之后回到「我做什么」那句")
+
+        // 第二次按：两个色彩滑块都顶到 100（plan 只能「只加不减」地抬，抬不动）⇒ 合法的 0 + 0，
+        // 必须说明而不是静默。这也是 490 那条「第二次是 no-op」的状态，只是这里直接压在饱和端。
+        session.applyEdit {
+            $0.color.vibrance = 100
+            $0.color.saturation = 100
+        }
+        XCTAssertTrue(session.commitEdit(label: "顶到 100"))
+        XCTAssertNil(loupe.autoColor(), "抬不动就不写")
+        XCTAssertEqual(loupe.lastAutoColorNoOpReasonForTesting, .alreadySaturated)
+        let settled = view.autoColorHelp
+        print("496b help · 点后 (reason alreadySaturated, sat \(session.edit.color.saturation)) = \(settled)")
+        XCTAssertEqual(settled, Loc.t("自动颜色：这张已经足够饱和，两个参数都保持 0"))
+
+        // .tooGrey：本仓没有「几乎无颜色」的 RAW 样片，所以这一行按按钮自己调用的那张映射表测，
+        // 用的是管线在 画面几乎没有颜色 时写入的那个 case。
+        let grey = InspectorView.autoColorHelpText(for: .tooGrey, waitingForDecode: false)
+        let waiting = InspectorView.autoColorHelpText(for: .tooGrey, waitingForDecode: true)
+        print("496b help · tooGrey = \(grey) | waiting = \(waiting)")
+        XCTAssertEqual(grey, Loc.t("自动颜色：画面几乎没有颜色，未写入"))
+        XCTAssertEqual(waiting, Loc.t("等待解码…"), "等待解码压过 no-op 原因")
     }
 
     // MARK: - helpers
