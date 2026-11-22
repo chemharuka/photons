@@ -25,6 +25,24 @@ public struct NLMFDenoiseOptions: Sendable, Equatable {
     /// that texture leaves a high-ISO frame's grain half-removed, and half-removed
     /// grain reads as detail. Set it explicitly only to override that.
     public var strength: Double?
+    /// How much of the blend weight to give up towards the highlights, and where
+    /// that happens, in normalised linear RAW brightness.
+    ///
+    /// `strength` is one number for the whole frame; the detail the network takes
+    /// away is not spread evenly, it concentrates where the signal is strong.
+    /// `highlightTaper = q` scales the blend by
+    /// `1 − q·smoothstep(taperLow, taperHigh, x)`: shadows keep the whole
+    /// `strength` (bit for bit below `taperLow`), highlights keep
+    /// `strength·(1 − q)`.
+    ///
+    /// The knees are *linear scene* values, not what the eye calls bright — a
+    /// tone curve lifts shadows 2–4×, so 0.18 here reads as ~0.46 on screen. A
+    /// dark frame can put its brightest detail below 0.18 and then nothing
+    /// happens; 0.05–0.25 was measured to reach a museum interior's gold while
+    /// staying above a bright outdoor frame's midtones.
+    public var highlightTaper: Double = 0
+    public var taperLow: Double = 0.18
+    public var taperHigh: Double = 0.60
     /// Border to discard from each tile, in plane pixels (8 mosaic pixels).
     ///
     /// The network's tile edges are seams — it conditioned its answer on a
@@ -59,6 +77,9 @@ public struct NLMFDenoiseReport: Sendable, Equatable {
     public let tiles: Int
     /// Strength actually applied (the option, or the value derived from σ).
     public let strength: Double
+    /// Blend weight left at the highlight end of the taper; equal to `strength`
+    /// when `highlightTaper` is 0.
+    public let highlightStrength: Double
     /// Green-plane σ at 5 % brightness behind that choice.
     public let sigma: Double
     public let seconds: Double
@@ -120,6 +141,9 @@ public struct NLMFDenoiseService: Sendable {
             a: options.noiseA,
             b: options.noiseB,
             strength: options.strength,
+            strengthTaper: options.highlightTaper,
+            taperLow: options.taperLow,
+            taperHigh: options.taperHigh,
             crop: options.crop,
             estimateNoise: options.measureNoise,
             checkerboardNoise: options.checkerboardNoise)
@@ -133,6 +157,7 @@ public struct NLMFDenoiseService: Sendable {
                 cfa: report.cfa,
                 tiles: report.tiles,
                 strength: report.strength,
+                highlightStrength: report.strengthHighlight,
                 sigma: report.sigma,
                 seconds: report.seconds,
                 inferenceSeconds: report.inferenceSeconds,

@@ -27,6 +27,12 @@ final class NLMFDenoiseJobTests: XCTestCase {
     ///  - `crop 4` (plane px = 8 mosaic px): a tile edge is a seam, and grids
     ///    anchored differently disagree there at 9x the interior rate at 0–1 px.
     ///  - checkerboard sampling: halves the noise-estimate cost for 3.6 % on `a`.
+    ///  - `highlightTaper 0.18` over `0.05–0.25`: the blend weight gives up 18 %
+    ///    towards the highlights, and only there — at or below 0.05 it is the
+    ///    unmodified `strength`, bit for bit. The knees are linear RAW values, and
+    ///    0.18–0.60 (mid-grey and up) measured as 0.2 % of a dark museum frame
+    ///    because that frame's gold sits *below* 0.18; 0.05–0.25 reaches 4 % of it
+    ///    and 21 % of a bright outdoor crop.
     func testShippedOptionsAreTheMeasuredOnes() {
         let job = NLMFDenoiseJob()
         let options = job.options(modelURL: URL(fileURLWithPath: "/tmp/model.mlpackage"))
@@ -35,6 +41,12 @@ final class NLMFDenoiseJobTests: XCTestCase {
         XCTAssertEqual(options.crop, 4, "crop is in plane pixels; 4 = 8 mosaic pixels")
         XCTAssertTrue(options.measureNoise, "the shipped defaults are wrong by ~1.8x at high ISO")
         XCTAssertTrue(options.checkerboardNoise, "halves the estimate cost; on by product decision")
+        XCTAssertEqual(options.highlightTaper, 0.18, accuracy: 1e-9,
+                       "18 % of the blend is given up in the highlights")
+        XCTAssertEqual(options.taperLow, 0.05, accuracy: 1e-9,
+                       "linear RAW: at or below this the blend weight is untouched")
+        XCTAssertEqual(options.taperHigh, 0.25, accuracy: 1e-9,
+                       "0.18–0.60 acts on 0.2 % of a dark frame; this reaches its gold")
     }
 
     /// Only the 256 model ships. The 512 one is real and measured but 14 % slower
