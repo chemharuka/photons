@@ -424,8 +424,9 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         // 383 — **布局不再是居中 door。** 332 当年在这里补了一次「第一个真实视口出现后再居中」，
         // 但布局随时会发生（另一面换了选中、缩略图落地、窗格拖动），而锚点可能是**另一面**刚选中的
         // 那张 —— 实测（③ 的 6 次单击）：layout → `centerAnchorIfChanged` 还会自己滚 3 次，把
-        // 「单击不居中」打回去。居中的入口只剩显式动作：双击 / Return / ←→、编辑落地，以及 ⇧/⌘ 的
-        // 范围手势（`handleSelectionClick`）。快照还没落地时 `centerAnchor()` 自己会 `deferCenterOnce()`。
+        // 「单击不居中」打回去。居中的入口只剩显式动作：双击 / Return / ←→、编辑落地。
+        // 519 — ⇧/⌘ 的范围手势（`handleSelectionClick`）也属于「只改选择」，不居中。
+        // 快照还没落地时 `centerAnchor()` 自己会 `deferCenterOnce()`。
     }
 
     /// `scrollDirection = .horizontal` does **not** mean "one row". A horizontal
@@ -1125,7 +1126,10 @@ public final class FilmstripController: NSViewController, NSCollectionViewDataSo
         collectionView.window?.makeFirstResponder(collectionView)
         updateSelectionAndActive()
         scheduleThumbnailReconcile()
-        centerAnchorIfChanged()
+        // 519 — ⇧/⌘ 多选与单击同一类：**只改选择**，不居中。以前这里调 `centerAnchorIfChanged()`，
+        // 于是每 ⌘ 点一次、每 ⇧ 拉一次范围都把刚点的照片滚到中间。现在与单击门同口径记为已结算，
+        // 居中的入口仍然只有双击 / Return（`centreForLoupeEntry()`）与编辑落地（`centerAnchor()`）。
+        markAnchorSettled()
         return true
     }
 
