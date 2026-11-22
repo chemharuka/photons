@@ -279,6 +279,8 @@ public struct InspectorView: View {
     @State private var autoBlackHovered = false
     /// 422 — the same for the Light card's 自动调节 icon.
     @State private var autoLightHovered = false
+    /// 496 — and for the Color card's 自动颜色 icon (the same control family).
+    @State private var autoColorHovered = false
 
     /// **Which cards are on screen** (派单 073).
     ///
@@ -1530,6 +1532,9 @@ public struct InspectorView: View {
         if spec.section == .light {
             // 422 — the 明暗 card's 自动调节, drawn exactly like 黑电平's 自动 (one button family).
             autoLightButton
+        } else if spec.section == .color {
+            // 496 — the 色彩 card's 自动颜色, the third member of the same wand-button family.
+            autoColorButton
         } else if spec.section == .correction, let note = autoProfileNote {
             Text(note)
                 .font(.system(size: 9))
@@ -1574,6 +1579,59 @@ public struct InspectorView: View {
                                           : Loc.t("自动调节：按纹理损失安排曝光、高光、白色、黑色与对比"))
         .accessibilityLabel(Loc.t("自动调节"))
         .accessibilityIdentifier("inspector.light.auto")
+    }
+
+    /// 496 — 「色彩」标题行右侧的 自动颜色, the same bare-icon family as 自动调节 / 自动黑电平.
+    ///
+    /// Geometry, hover, hit area and probe are copied item for item from `autoLightButton`; the only
+    /// differences are the label and the verb. The action is `LoupeController.autoColor()` — the same
+    /// path the right-click row and 「全部自动」 use, so there is no second plan to drift.
+    ///
+    /// A detached panel has no loupe; the button stays visible and is disabled rather than hiding a
+    /// control the user went looking for (the Light card keeps its wand visible too).
+    private var autoColorButton: some View {
+        Button {
+            _ = loupe?.autoColor()
+        } label: {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 14))
+                .foregroundStyle(autoColorHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 18)
+                .contentShape(Rectangle())
+                .background(LightAutoProbeHost())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, -2)
+        .onHover { autoColorHovered = $0 }
+        .disabled(loupe == nil || autoAdjustWaitingForDecode)
+        .help(autoColorHelp)
+        .accessibilityLabel(Loc.t("自动颜色"))
+        .accessibilityIdentifier("inspector.color.auto")
+    }
+
+    /// 496b — the help string, named once so the waiting and ready states cannot disagree.
+    ///
+    /// 501 deleted `LoupeController.autoColorHelpText` together with the right-click 「自动颜色」 row,
+    /// so the "why was this 0" explanation now rides the same observable the menu reads:
+    /// `lastAutoColorNoOpReasonForTesting`. A press that moved (or no press yet) leaves it `nil`,
+    /// which is exactly the "here is what I do" text.
+    var autoColorHelp: String {
+        Self.autoColorHelpText(for: loupe?.lastAutoColorNoOpReasonForTesting,
+                               waitingForDecode: autoAdjustWaitingForDecode)
+    }
+
+    /// The mapping itself, static so the test reads the same strings the button shows instead of a copy.
+    static func autoColorHelpText(for reason: LoupeController.AutoColorNoOpReason?,
+                                  waitingForDecode: Bool) -> String {
+        if waitingForDecode { return Loc.t("等待解码…") }
+        switch reason {
+        case .tooGrey:
+            return Loc.t("自动颜色：画面几乎没有颜色，未写入")
+        case .alreadySaturated:
+            return Loc.t("自动颜色：这张已经足够饱和，两个参数都保持 0")
+        case nil:
+            return Loc.t("自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度")
+        }
     }
 
     /// The card's own frame probe — a background, so it inherits the card's size and cannot change it.
