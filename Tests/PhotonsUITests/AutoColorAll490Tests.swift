@@ -94,8 +94,9 @@ final class AutoColorAll490Tests: XCTestCase {
 
         XCTAssertEqual(buttons.count, 8, "顶栏按钮从 7 个变成 8 个")
         XCTAssertTrue(buttons.contains { $0 === autoAll })
-        XCTAssertEqual(autoAll.title, "全部自动")
-        XCTAssertEqual(autoAll.image?.accessibilityDescription, "全部自动")
+        // 482（用户 2026-11-21）：顶栏那颗从「全部自动」改名成「自动调整」，与右键/编辑菜单同名。
+        XCTAssertEqual(autoAll.title, "自动调整")
+        XCTAssertEqual(autoAll.image?.accessibilityDescription, "自动调整")
 
         // 仍在「排序 |」那一组里、与后台并列；后台仍是最后一个按钮。
         XCTAssertEqual(autoAll.frame.maxX + TopBarView.itemGap, background.frame.minX, accuracy: 0.001,
@@ -117,7 +118,7 @@ final class AutoColorAll490Tests: XCTestCase {
         let autoWidth = autoAll.intrinsicContentSize.width
         let backgroundWidth = background.intrinsicContentSize.width
         let font = try! XCTUnwrap(autoAll.font)
-        let textDelta = (("全部自动" as NSString).size(withAttributes: [.font: font]).width
+        let textDelta = (("自动调整" as NSString).size(withAttributes: [.font: font]).width
                          - ("后台" as NSString).size(withAttributes: [.font: font]).width)
         // 同一套 padding + 图标宽度 + 6 pt：宽度差就是文字差 + 图标差。
         XCTAssertEqual(autoWidth - backgroundWidth, textDelta + (autoIcon.width - backgroundIcon.width),

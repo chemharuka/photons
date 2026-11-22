@@ -231,10 +231,11 @@ public final class TopBarView: NSView, NSPopoverDelegate {
     /// 454 P1 — 排序右侧的「后台」入口。它和排序之间还有一条分隔线（`排序 | 后台`）。
     private let backgroundButton = ToolButton(title: Loc.t("后台"),
                                                symbol: "square.stack.3d.down.right")
-    /// 490 — 「全部自动」sits beside 「后台」 in the same right-hand group. Its intrinsic icon footprint
+    /// 490/482 — 「自动调整」sits beside 「后台」 in the same right-hand group. Its intrinsic icon footprint
     /// is the same family as 后台's (`wand.and.stars` 16×14 vs `square.stack.3d.down.right` 15×19 at
-    /// 12 pt); the title is the user's four-character 「全部自动」, so the text run is wider.
-    private let autoAllButton = ToolButton(title: Loc.t("全部自动"), symbol: "wand.and.stars")
+    /// 12 pt); the title is the user's four-character 「自动调整」(482：用户 2026-11-21「顶部全部自动
+    /// 改成自动调整」—— 与右键/编辑菜单里同一个动词同名), so the text run is wider.
+    private let autoAllButton = ToolButton(title: Loc.t("自动调整"), symbol: "wand.and.stars")
     /// 右上角那一块状态文本（已选 · 张数 · 库名 · 版本号），四段的字体/颜色/高度/顺序和
     /// 右对齐规则都在 `TopBarStatusCluster` 里，这里只负责把它钉在顶栏右边距上。
     public let statusCluster = TopBarStatusCluster()
@@ -301,7 +302,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
 
         autoAllButton.target = self
         autoAllButton.action = #selector(autoAllTapped)
-        autoAllButton.toolTip = Loc.t("全部自动：黑电平、明暗与颜色一次完成")
+        autoAllButton.toolTip = Loc.t("自动调整：黑电平、明暗与颜色一次完成")
 
         modeButton.target = self
         modeButton.action = #selector(modeTapped(_:))
@@ -404,7 +405,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
 
     /// 排序按钮本体。测试要量它的 frame / 字体 / 图标，`--ui-smoke` 可以读它的字。
     public var sortButtonView: ToolButton { sortButton }
-    /// 490 —— 顶栏第 8 个按钮「全部自动」。
+    /// 490 / 482 —— 顶栏第 8 个按钮「自动调整」。
     public var autoAllButtonView: ToolButton { autoAllButton }
     /// 490 —— 一行里的全部按钮，按左到右的布局顺序（按钮计数器用）。
     public var toolButtonsForTesting: [ToolButton] {
@@ -490,7 +491,7 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         separators[1].frame = NSRect(x: x, y: (h - WorkspaceLayout.toolSeparatorHeight) / 2,
                                      width: 1, height: WorkspaceLayout.toolSeparatorHeight)
         x += Self.separatorGapOut
-        // 490 — 「全部自动」与「后台」并列，后台仍是最后一个按钮（预算线不变）。
+        // 490 — 「自动调整」与「后台」并列，后台仍是最后一个按钮（预算线不变）。
         place(autoAllButton, width: autoAllButton.intrinsicContentSize.width)
         x += Self.itemGap
         place(backgroundButton, width: backgroundButton.intrinsicContentSize.width)
@@ -889,7 +890,7 @@ public final class WorkspaceRootView: NSView {
             self.updateTopBar()
             self.beginSortSettling()
         }
-        // 490 —— 「全部自动」：一次文档写、一条历史行。与右键「自动调整」共用 loupe 的流水。
+        // 490 —— 「自动调整」：一次文档写、一条历史行。与右键同名项共用 loupe 的流水。
         topBar.onAutoAll = { [weak self] in self?.autoAllAction(nil) }
 
         // 072 §E1/§E2 — 裁切 mode takes the inspector's event layer away and hands it back on exit.
@@ -1018,7 +1019,7 @@ public final class WorkspaceRootView: NSView {
         })
     }
 
-    /// 490 — the two entries that have no 编辑-menu item: the top bar's 「全部自动」 and the right-click
+    /// 490 — the two entries that have no 编辑-menu item: the top bar's 「自动调整」 and the right-click
     /// 「自动颜色」. Both need the loupe's frame graph; from a browser they open the single anchor first.
     @objc public func autoAllAction(_ sender: Any?) {
         guard prepareAutoAction() else { return }

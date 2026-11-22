@@ -176,4 +176,27 @@ final class ThumbFingerprintScope405Tests: XCTestCase {
                           "version segment lost \(stage.rawValue)")
         }
     }
+
+    // MARK: - ⑧ 506-C: the HD key names the thumbnail's decode policy, not the document's request
+
+    /// The grid never decodes through Apple's ML (v9) stage, so a document that asks for `9.dng`
+    /// must produce the **same** HD key as a neutral one — and every key carries the policy token.
+    ///
+    /// Both halves matter: if the key still spelled `ver=9.dng`, a v9 document would re-render
+    /// thumbnails that cannot differ (and each rebuild is another pass through the decoder), and the
+    /// key would claim pixels the pipeline never produced.
+    func testTheHDKeySpellsTheThumbnailDecoderPolicyNotTheDocumentsVersion() {
+        var neural = EditModel.neutral
+        neural.decoderVersion = "9.dng"
+        XCTAssertEqual(neural.decodeInputs.versionComponent, "ver=9.dng",
+                       "fixture must actually ask for v9, or this test proves nothing")
+        XCTAssertEqual(ThumbRecipe.editFingerprint(neural),
+                       ThumbRecipe.editFingerprint(.neutral))
+        XCTAssertTrue(ThumbRecipe.fingerprintMaterial(.neutral)
+                        .contains("|\(ThumbDecoderProfile.token)"),
+                      "every HD key must name the policy that produced its pixels")
+        // …and the policy token is the *only* version spelling in it: no `ver=` may survive.
+        XCTAssertFalse(ThumbRecipe.fingerprintMaterial(neural).contains("ver="),
+                       "the document's decoder request must not reach the HD key any more")
+    }
 }

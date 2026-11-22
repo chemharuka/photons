@@ -125,13 +125,30 @@ public struct DecodeOptions: Sendable {
     /// `detailAmount`). `.identity` assigns none of them, which is the pre-031 decode byte for byte.
     public var detail: DetailSettings
 
+    /// 506-C — **this decode must not enter Apple's ML (v9) RAW stage**; the decoder picks the
+    /// widest non-ML spelling the file offers (`DecoderCapabilities.widestClassicVersion`).
+    ///
+    /// Why it exists: the v9 stage is `CIImageProcessorKernel` → `CIEspressoWrapper` → E5RT/ANE, and
+    /// the E5RT program table is **process-wide**. Nine `CIContext`s driving it at once (the HD
+    /// thumbnail pool) crashed three times in `Espresso::__hash_table<…>::__copy_construct` on
+    /// `ANEServicesThread` — a UAF on Apple's side, triggered by our concurrency
+    /// (`docs/tasks/506-raw-decode-ane-concurrency.md`). The thumbnail pool is the only caller that
+    /// keeps that many decodes in flight, so it — and only it — asks for the classic decoder.
+    ///
+    /// This option **is** the version policy for that decode: do not also pass a
+    /// `decoderVersion` you want honoured. A file that offers no classic version keeps
+    /// `decoderVersion` / the automatic rule (a body with only `9` cannot be pulled off the ANE
+    /// without changing what the picture is).
+    public var avoidNeuralStage: Bool
+
     public init(decoderVersion: String? = nil,
                 exposureEV: Float = 0,
                 scale: Float = 1,
                 draft: Bool = false,
                 colorSpace: LinearColorSpace = .extendedLinearSRGB,
                 whiteBalance: WhiteBalance = .asShot,
-                detail: DetailSettings = .identity) {
+                detail: DetailSettings = .identity,
+                avoidNeuralStage: Bool = false) {
         self.decoderVersion = decoderVersion
         self.exposureEV = exposureEV
         self.scale = scale
@@ -139,6 +156,7 @@ public struct DecodeOptions: Sendable {
         self.colorSpace = colorSpace
         self.whiteBalance = whiteBalance
         self.detail = detail
+        self.avoidNeuralStage = avoidNeuralStage
     }
 }
 
@@ -927,6 +945,17 @@ public final class RAWDecoder {
         var resolvedRequest = options.decoderVersion
         if !measurement, options.decoderVersion == nil {
             resolvedRequest = autoVersion
+        }
+
+        // ── 506-C: 缩略图这条路从不进 ML 阶段 ────────────────────────────────────────────────
+        // `options.avoidNeuralStage` 是一个**策略**，不是一次请求：它把版本钉到「这个文件自己
+        // offer 的最宽非 ML 拼写」（实测每台机身都是 v8），因为自动规则（409）会把高 ISO 的
+        // 文件升到 v9，而 v9 是 ANE。缩略图池是唯一把这条路径开到 8–9 路并发的地方，三份崩溃
+        // 报告（11-18 / 11-21 / 11-22）都死在那张进程级 E5RT 程序表上（见
+        // docs/tasks/506-raw-decode-ane-concurrency.md）。文件只 offer v9 时保持原请求 —— 换
+        // 版本会换画，那不是这个选项能替用户决定的事。
+        if options.avoidNeuralStage, !measurement {
+            resolvedRequest = DecoderCapabilities.widestClassicVersion(offered: offered) ?? resolvedRequest
         }
 
         // ── 前置 ① D2′: v8 default + read-back assert ────────────────────────────────────────

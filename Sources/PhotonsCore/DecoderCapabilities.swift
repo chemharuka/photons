@@ -110,6 +110,36 @@ public struct DecoderCapabilities: Sendable, Equatable {
     /// Every version identifier the SDK can hand out (`CIRAWDecoderVersion` constants).
     public static let knownVersions: [String] = ["6", "6.dng", "7", "7.dng", "8", "8.dng", "9", "9.dng"]
 
+    /// 506-C — **is this spelling the ML stage?**
+    ///
+    /// Apple's v9 decode is where `CIRAWFilter` runs a `CIImageProcessorKernel` that calls
+    /// `CIEspressoWrapper` (RawCamera.bundle) and lands requests on the ANE. That stage is the one
+    /// three Photons crash reports died in — `Espresso __hash_table<shared_ptr<
+    /// E5RT::ExecutionStreamOperationInternal>>::__copy_construct` on `ANEServicesThread`, a UAF in
+    /// Apple's process-wide E5RT program table whenever many `CIContext`s drive it at once
+    /// (`docs/tasks/506-raw-decode-ane-concurrency.md`). v6–v8 are the classic demosaic path and do
+    /// not touch the ANE.
+    ///
+    /// The list is `knownVersions`' rule, not a new literal: everything in the `9` family is the
+    /// neural one, everything below it is not.
+    public static func usesNeuralStage(_ version: String) -> Bool {
+        version.hasPrefix("9")
+    }
+
+    /// 506-C — the widest non-ML decoder this **file** offers (`nil` = it only offers the neural one).
+    ///
+    /// Order, not "highest number wins": `8` first because it is Apple's own default on every body
+    /// measured here (and `preferredDefault` prefers it too), then `8.dng` (the spelling DNG bodies
+    /// whitelist), then `7` / `7.dng`, then `6` / `6.dng`. A body that offers none of them answers
+    /// `nil`, and the caller keeps whatever it had — no invented spelling, because assigning a
+    /// version a body does not whitelist is a silent no-op that reads back something else.
+    public static func widestClassicVersion(offered: [String]) -> String? {
+        for candidate in ["8", "8.dng", "7", "7.dng", "6", "6.dng"] where offered.contains(candidate) {
+            return candidate
+        }
+        return offered.last { !usesNeuralStage($0) }
+    }
+
     /// D2′ default: v8 when the file offers it, otherwise whatever Apple defaults to.
     public static func preferredDefault(offered: [String], filterDefault: String) -> String {
         if offered.contains("8") { return "8" }

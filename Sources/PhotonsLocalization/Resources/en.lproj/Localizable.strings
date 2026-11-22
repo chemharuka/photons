@@ -735,7 +735,7 @@
 "自动黑电平：把解码后的线性数据拉到非负" = "Automatic black level: shift decoded linear data to nonnegative values";
 "自动调整" = "Auto Adjust";
 "全部自动" = "Auto Everything";
-"全部自动：黑电平、明暗与颜色一次完成" = "Auto Everything: black level, light and color in one pass";
+"自动调整：黑电平、明暗与颜色一次完成" = "Auto Adjust: black level, light and color in one pass";
 "自动（灰世界）· %@ · 画面均值 RGB %@%@" = "Auto (gray world) · %@ · Mean image RGB %@%@";
 "自定义" = "Custom";
 "自定义比例" = "Custom ratio";

@@ -193,7 +193,12 @@ public final class ThumbnailProvider: @unchecked Sendable {
     ///
     /// So the ceiling follows the machine and leaves one core for the main thread / compositing.
     /// A fixed 3/4/8 was right for one lane's sample size and wrong for every other machine.
-    public static let defaultConcurrency = max(2, ProcessInfo.processInfo.activeProcessorCount - 1)
+    ///
+    /// 506-C took the last core back too: `activeProcessorCount - 2`. That is the owner's number,
+    /// chosen together with "the grid never decodes through the ANE" — the crash class this pool
+    /// triggered (`docs/tasks/506-raw-decode-ane-concurrency.md`) lives in a process-wide Apple
+    /// table, so the margin is deliberate rather than measured.
+    public static let defaultConcurrency = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
 
     public let cache: ThumbnailCache
     /// The one scheduler. Public so a probe can read `stats()`/`pendingCount`; no view should
@@ -896,7 +901,10 @@ public final class ThumbnailProvider: @unchecked Sendable {
     /// is paid once per such file, not per scroll.
     private func renderedThumbnail(_ decoder: RAWDecoder, url: URL, longEdge: Int,
                                    identity: String) -> CGImage? {
-        guard let scaled = try? decoder.decode(url, options: DecodeOptions(scale: 0.25)),
+        // 506-C — the same classic-decoder pin as `renderHD`: this fallback is still the thumbnail
+        // pipeline, and a 12-file prefetch would otherwise put a dozen decodes on the ANE.
+        guard let scaled = try? decoder.decode(url, options: DecodeOptions(scale: 0.25,
+                                                                          avoidNeuralStage: true)),
               let graph = try? RenderGraph(input: RenderInput(image: scaled, identity: identity,
                                                               sourceURL: url)) else { return nil }
         let w = Double(scaled.width), h = Double(scaled.height)
@@ -988,16 +996,23 @@ public final class ThumbnailProvider: @unchecked Sendable {
         }
         let edge = sourceEdge ?? longEdge
         let decodeScale = min(1, max(0.25, Double(longEdge) / Double(max(1, edge))))
-        // The HD thumbnail is our own graph, so it must ask for the document's whole development:
-        // version and detail are decode inputs too (the key's `editFingerprint` carries them, and
-        // omitting them here would file a v8 picture under a v9 key).
+        // The HD thumbnail asks for the document's development where the grid can honour it: the
+        // settled white balance and the four NR/detail amounts are decode inputs, and the key's
+        // `editFingerprint` carries both — write one of them here without it being in the key and a
+        // buffer lands under a key that names different pixels. The **version** is the exception and
+        // it is deliberate: 506-C pins the grid to the classic decoder, and the key spells that
+        // policy instead of the document's request.
         let inputs = document.decodeInputs
         let decodeStart = CACurrentMediaTime()
+        // 506-C — the grid's decode never enters Apple's ML (v9) RAW stage, whatever the document
+        // asks for: `avoidNeuralStage` pins the version to the widest classic decoder this file
+        // offers. The key already spells that policy (`ThumbDecoderProfile.token`), so the two
+        // cannot disagree about which pixels a cached thumbnail holds.
         let decoded = try decoder.decode(source, options: DecodeOptions(
-            decoderVersion: inputs.decoderVersion,
             scale: Float(decodeScale),
             whiteBalance: inputs.whiteBalance,
-            detail: inputs.detail))
+            detail: inputs.detail,
+            avoidNeuralStage: true))
         let rawDecodeMs = (CACurrentMediaTime() - decodeStart) * 1000
         let w = decoded.width, h = decoded.height
         let scale = min(1, Double(longEdge) / Double(max(w, h, 1)))

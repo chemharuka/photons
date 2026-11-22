@@ -9,7 +9,7 @@ import Foundation
 /// the parallel part. This test therefore pins the two facts that *are* stable:
 ///
 ///   · `ThumbnailService.Config()` — the default a caller gets without thinking — is
-///     `max(2, activeProcessorCount - 1)`, not a literal 3/4/8;
+///     `max(2, activeProcessorCount - 2)`, not a literal 3/4/8 (506-C moved it from `- 1`);
 ///   · with 24 jobs of a known 50 ms each, the service runs exactly `maxConcurrency` of them at once
 ///     and finishes 24 jobs in ≈ ⌈24/k⌉ × 50 ms. A hardcoded ceiling of 3 would take 8 rounds.
 final class ThumbnailConcurrencyCeilingTests: XCTestCase {
@@ -41,10 +41,10 @@ final class ThumbnailConcurrencyCeilingTests: XCTestCase {
     }
 
     func testServiceDefaultCeilingFollowsTheMachine() {
-        let expected = max(2, ProcessInfo.processInfo.activeProcessorCount - 1)
+        let expected = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
         XCTAssertEqual(ThumbnailService.Config().maxConcurrency, expected)
         // The app's provider default must not drift from it either.
-        XCTAssertEqual(max(2, ProcessInfo.processInfo.activeProcessorCount - 1), expected)
+        XCTAssertEqual(max(2, ProcessInfo.processInfo.activeProcessorCount - 2), expected)
     }
 
     private func run(jobs: Int, concurrency: Int, delay: TimeInterval) throws -> (wall: Double, peak: Int) {

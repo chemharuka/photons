@@ -226,8 +226,9 @@ public final class ThumbnailService: @unchecked Sendable {
 
         /// 308 — the *service* default follows the machine too, so a caller that builds a service
         /// without a config cannot silently reinstate the old 3. The app always goes through
-        /// `ThumbnailProvider.defaultConcurrency`; this is the floor under it.
-        public init(maxConcurrency: Int = max(2, ProcessInfo.processInfo.activeProcessorCount - 1),
+        /// `ThumbnailProvider.defaultConcurrency`; this is the floor under it. 506-C moved both to
+        /// `activeProcessorCount - 2` (one core for the main thread, one margin for the decode pool).
+        public init(maxConcurrency: Int = max(2, ProcessInfo.processInfo.activeProcessorCount - 2),
                     queueDepthLimit: Int = 0,
                     producerDeadline: TimeInterval = 30) {
             self.maxConcurrency = max(1, maxConcurrency)

@@ -156,7 +156,10 @@ final class GraphThumbProducer: ThumbnailProducer {
         // Decode at the coarsest ladder step that still covers the target: decoding finer loses 0.5 s
         // and 480 MB, decoding coarser resamples twice (same rule as `photonsctl render`).
         let decodeScale = min(1.0, Double(decodeScaleLadder(target)))
-        let image = try decoder.decode(source, options: DecodeOptions(scale: Float(decodeScale)))
+        // 506-C — the thumbnail pipeline pins the classic decoder (no ANE): this CLI runs the same
+        // pool the app does, and its keys are the app's keys, so it must produce the same pixels.
+        let image = try decoder.decode(source, options: DecodeOptions(scale: Float(decodeScale),
+                                                                      avoidNeuralStage: true))
         let renderScale = min(1.0, target / decodeScale)
 
         let graph = try RenderGraph(input: RenderInput(image: image, identity: key.digest))

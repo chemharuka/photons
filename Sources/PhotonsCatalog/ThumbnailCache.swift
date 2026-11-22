@@ -135,6 +135,31 @@ public enum ThumbFingerprintBaseline {
     ]
 }
 
+/// 506-C — the thumbnail pipeline's **own** decoder-version policy, and the token it puts in every
+/// HD key.
+///
+/// The grid never decodes through Apple's ML (v9) RAW stage. That decision is the owner's, taken
+/// after three crashes in `Espresso`'s ANE program registry (`ANEServicesThread`, 11-18 / 11-21 /
+/// 11-22 — see `docs/tasks/506-raw-decode-ane-concurrency.md`): the v9 stage is what puts requests
+/// on the ANE, and the E5RT program table it fills is process-wide, so eight or nine concurrent HD
+/// decodes were the amplifier. `RAWDecoder` implements this by pinning the version to the widest
+/// non-ML spelling the **file** offers (`DecodeOptions.avoidNeuralStage`).
+///
+/// Why the key spells a *policy* and not a number: the resolved spelling is per file (`8` on every
+/// body measured here, `7` on an old one, `8.dng` on a DNG that only whitelists the suffixed form),
+/// so a literal `ver=8` in the key would be a lie for the next body. `tdec=classic` says what the
+/// pipeline did — "the file's widest classic decoder" — which is exactly what the pixels are.
+///
+/// Consequence, stated where it will be read: **a document's decoder-version choice no longer moves
+/// the grid.** The loupe and the exporter still honour `9.dng`; the thumbnail shows the classic
+/// decode. That is the accepted trade of 506-C (the alternative was 8–9 concurrent ANE users). The
+/// media never touch a key: `scale` is the tier, `detail` still applies at v8 and stays in the
+/// material.
+public enum ThumbDecoderProfile {
+    /// What `ThumbRecipe.fingerprintMaterial` appends, always.
+    public static let token = "tdec=classic"
+}
+
 /// The constants that decide pixels, plus the digest that enters the cache key.
 ///
 /// D1/D2′ froze the **legacy preview** recipe: its placeholder/preview keys carry no document at all,
@@ -178,10 +203,11 @@ public enum ThumbRecipe {
     /// the file parameters (1920/q75/10-bit/Display P3 PQ/HEIC) and the arithmetic generation
     /// even if a future stage list forgets them.
     ///
-    /// The decode inputs that are **not** render stages — the decoder version and the four
-    /// NR/detail amounts — are appended last, and only when non-default. A neutral document keeps
-    /// every pre-change HD key byte for byte; a `9.dng` / adjusted-detail document gets a new key,
-    /// which is what makes the grid rebuild instead of serving the default decoder's picture.
+    /// The decode inputs that are **not** render stages: the four NR/detail amounts are appended
+    /// last, and only when non-default; the decoder version is not the document's at all
+    /// (`ThumbDecoderProfile.token`, 506-C). A neutral document keeps every pre-change HD key byte
+    /// for byte; an adjusted-detail document gets a new key, which is what makes the grid rebuild
+    /// instead of serving a different development's picture.
     ///
     /// 405 — **the version of a stage the document does not run comes from `ThumbFingerprintBaseline`,
     /// not from `StageAlgorithmVersion`.** A dehaze bump must evict only the thumbnails that carry
@@ -214,8 +240,12 @@ public enum ThumbRecipe {
         let versionSegment = RenderStage.order.map { "\($0.rawValue)=\(v($0))" }.joined(separator: ";")
         var material = "\(stageKeys)|\(versionSegment)|\(spec.rawValue)"
             + "|sv\(spec.schemaVersion)"
+        // 506-C: the decode version the grid actually ran is a **policy**, not the document's
+        // request — `ThumbDecoderProfile` says why. Spelling the document's `ver=9.dng` here would
+        // name pixels that no HD thumbnail ever had (the pipeline pins to the file's classic
+        // decoder), and would let a v9 document re-render a thumbnail that cannot differ.
+        material += "|\(ThumbDecoderProfile.token)"
         let inputs = document.decodeInputs
-        if let version = inputs.versionComponent { material += "|\(version)" }
         if let detail = inputs.detailComponent { material += "|\(detail)" }
         return material
     }
