@@ -27,11 +27,16 @@ final class AutoColor498Tests: XCTestCase {
         return (v.x, v.y, v.z)
     }
 
-    /// 70 % muted at half the p50 target, 30 % at 70 % of the p95 target: the median is below the
+    /// 70 % muted at 70 % of the p50 target, 30 % at 50 % of the p95 target: the median is below the
     /// p50 target and the tail is below the p95 target, so both degrees of freedom have work to do.
+    ///
+    /// 511: the 70 % / 50 % numbers are chosen so the normal-sample replacement assertion of §3.3
+    /// applies — `coloredFraction ≥ 0.15` and `gap = target / p50 − 1 ≈ 0.43 ≤ 0.65` — instead of the
+    /// old fixture's exact `gap = 1`, which is the endpoint case (v = 9, p50' = 0.72 × target) and
+    /// therefore lives in `AutoColor511Tests` as its own assertion.
     private func typicalGrid() -> LinearSample {
-        let low = AutoColor.targetChromaP50 * 0.50
-        let high = AutoColor.targetChromaP95 * 0.40
+        let low = AutoColor.targetChromaP50 * 0.70
+        let high = AutoColor.targetChromaP95 * 0.50
         return sample(60, 40) { x, y in
             let tail = (x + y) % 10 >= 7
             // 2.4 rad ≈ 137°: deliberately outside the 50°–70° skin band.
@@ -77,9 +82,13 @@ final class AutoColor498Tests: XCTestCase {
         XCTAssertGreaterThan(plan.saturation, 0, "p95 低于目标 ⇒ saturation 必须动")
         XCTAssertLessThanOrEqual(plan.vibrance, AutoColor.maxVibrance)
         XCTAssertLessThanOrEqual(plan.saturation, AutoColor.maxSaturation)
-        XCTAssertGreaterThan(plan.predictedChromaP50, AutoColor.targetChromaP50 * 0.95)
-        XCTAssertLessThan(plan.predictedChromaP50, AutoColor.targetChromaP50 * 1.05)
-        XCTAssertLessThanOrEqual(plan.predictedChromaP95, AutoColor.targetChromaP95 * 1.05)
+        // 511 replaced the 498 "lands on target ±5 %" pair: the normal-sample band is now
+        // `target × [0.75, 1.10]` (实测 0.85 before the GPU replay). p95 is raised but deliberately
+        // **not** solved to the target — that is the whole point of bounded additive.
+        XCTAssertGreaterThanOrEqual(plan.predictedChromaP50, AutoColor.targetChromaP50 * 0.75)
+        XCTAssertLessThanOrEqual(plan.predictedChromaP50, AutoColor.targetChromaP50 * 1.10)
+        XCTAssertLessThan(plan.predictedChromaP95, AutoColor.targetChromaP95,
+                          "有界加法：不再解到 p95 目标")
 
         // The kernel simulation agrees with the plan's prediction, not just with itself.
         let after = render(grid, vibrance: plan.vibrance, saturation: plan.saturation)
@@ -87,9 +96,10 @@ final class AutoColor498Tests: XCTestCase {
         print(String(format: "498 TYPICAL AFTER · p50 %.4f p95 %.4f (targets %.4f / %.4f)",
                      m2.chromaP50, m2.chromaP95,
                      AutoColor.targetChromaP50, AutoColor.targetChromaP95))
-        XCTAssertGreaterThan(m2.chromaP50, AutoColor.targetChromaP50 * 0.95)
-        XCTAssertLessThan(m2.chromaP50, AutoColor.targetChromaP50 * 1.05)
-        XCTAssertLessThanOrEqual(m2.chromaP95, AutoColor.targetChromaP95 * 1.05)
+        XCTAssertGreaterThanOrEqual(m2.chromaP50, AutoColor.targetChromaP50 * 0.75)
+        XCTAssertLessThanOrEqual(m2.chromaP50, AutoColor.targetChromaP50 * 1.10)
+        XCTAssertLessThan(m2.chromaP95, AutoColor.targetChromaP95,
+                          "有界加法：不再解到 p95 目标")
     }
 
     /// Reverse gate 1: drop the `s` term and the p95 assertion must fail. This is the picture the
@@ -104,9 +114,13 @@ final class AutoColor498Tests: XCTestCase {
         let p95With = AutoColor.metrics(from: withS).chromaP95
         print(String(format: "498 REVERSE s · p95 without s %.4f · with s %.4f · target %.4f",
                      p95Without, p95With, AutoColor.targetChromaP95))
-        XCTAssertLessThan(p95Without, AutoColor.targetChromaP95 * 0.95,
-                          "去掉 s 项 ⇒ p95 断言必红")
-        XCTAssertLessThanOrEqual(p95With, AutoColor.targetChromaP95 * 1.05)
+        // 511: the old pair ("without s misses the target" / "with s ≤ target × 1.05") is replaced.
+        // The reverse gate now says: the s term still raises p95, but bounded additive deliberately
+        // stops short of the target. Dropping s makes the two numbers equal ⇒ the first assertion red.
+        XCTAssertGreaterThan(p95With, p95Without,
+                             "去掉 s 项 ⇒ p95 不再变化，这条必红")
+        XCTAssertLessThan(p95With, AutoColor.targetChromaP95,
+                          "有界加法：不再解到 p95 目标")
     }
 
     func testAlreadySaturatedPictureGetsZeroAndZero() {
@@ -132,11 +146,13 @@ final class AutoColor498Tests: XCTestCase {
     // MARK: - clipping guard / reverse gate 2
 
     func testClippingGuardRefusesNewClippedPixels() {
-        // Half muted, half a near-clamp red. Without the guard the tail does not need much `s` to
-        // cross 1.0, so the unguarded plan would clip; the guarded plan must not.
+        // 70 % muted, 30 % a near-clamp red. 511's automatic saturation is capped at 8, so the tail
+        // has to start closer to 1.0 than the 498 fixture (0.075) for the guard to be the binding
+        // constraint at all; the assertions below are unchanged.
         let grid = sample(60, 40) { x, y in
-            (x + y) % 2 == 0 ? oklch(0.62, AutoColor.targetChromaP50 * 0.5, 2.4)
-                             : (0.85, 0.075, 0.075)
+            let tail = (x + y) % 10 >= 7
+            return tail ? (0.85, 0.01, 0.01)
+                        : oklch(0.62, AutoColor.targetChromaP50 * 0.5, 2.4)
         }
         let m = AutoColor.metrics(from: grid)
         let plan = AutoColor.plan2D(m, targetP95: 0.50)

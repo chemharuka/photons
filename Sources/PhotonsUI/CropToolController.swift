@@ -870,6 +870,18 @@ public final class CropToolController {
     /// the mode, the draft, the history and the camera cannot take three different routes out.
     @discardableResult
     public func finish(_ outcome: TransformFinish) -> Bool {
+        // **505 — ↵ 和 应用 are the same door, and 「应用当前解」 is what that door does.** When the
+        // card still shows a guide-line solution the document no longer holds (a ⌘Z, a card reset —
+        // any command that moved the numbers after the fit), the confirm re-applies it through the
+        // one write door, auto crop included. When the document already holds it this is a no-op, so
+        // the ordinary case stays exactly one row (the fit's own) and a frame the user has adjusted
+        // since is never re-cut.
+        switch outcome {
+        case .confirm, .done:
+            applyPendingGuideLineSolution()
+        case .cancel:
+            break
+        }
         // 328 — 画线拉直 is this session's view state: leaving the tool puts the crosshair away and
         // drops any line, whatever the door (↵ 应用 / 完成 / Esc).
         cancelDrawStraighten()
@@ -1250,7 +1262,9 @@ public final class CropToolController {
         writeStraighten(raw)
         let applied = draft.straighten
         drawnStraightenCount += 1
-        _ = commitStraighten()
+        // 505 — 画线拉直 is one of the two doors the user named, so its release takes the auto crop
+        // with it (one apply, one row).
+        _ = commitStraighten(autoCrop: true)
         return applied
     }
 
@@ -1712,6 +1726,26 @@ public final class CropToolController {
         closeToolSession(label: label)
         let before = session.edit.geometry
         let stored = lines.map(Self.stored)
+        // **505 — the same gesture owns the auto crop.** A fit is one user action, so the frame it
+        // leaves behind is the largest one that does not leave the picture, computed from the
+        // numbers this write is about to put on the document and written **inside the same
+        // `applyEdit`** — one row, so ⌘Z takes the keystone, the lines and the frame back together
+        // and never in two steps (505 §2.3.1). A `nil`/all-zero solution asks for no crop: the
+        // document keeps the frame it has, and `autoCropTarget` is the one place that decides.
+        let crop: (rect: NormalizedRect, space: CropSpace)? = solution.flatMap { solution in
+            autoCropTarget(perspective: PerspectiveMap(vertical: solution.vertical,
+                                                       horizontal: solution.horizontal,
+                                                       shear: solution.shear,
+                                                       aspect: before.perspectiveAspect),
+                           angle: CropTool.clampStraighten(solution.straighten),
+                           document: before)
+        }
+        // The draft carries the frame **before** the write, for the same reason `commitStraighten`
+        // does: the write's observers key the low-res picture and the overlay from the draft.
+        if let crop {
+            draft.crop = CropRect(crop.rect)
+            draft.cropSpace = crop.space
+        }
         session.applyEdit {
             if let solution {
                 $0.geometry.perspectiveVertical = solution.vertical
@@ -1731,6 +1765,10 @@ public final class CropToolController {
                 $0.geometry.perspectiveHorizontal = 0
             }
             $0.geometry.guideLines = stored
+            if let crop {
+                $0.geometry.crop = crop.rect
+                $0.geometry.cropSpace = crop.space
+            }
         }
         guard session.edit.geometry != before else { return }
         _ = session.commitEdit(label: label, coalesce: false)
@@ -1751,6 +1789,27 @@ public final class CropToolController {
         // toggle, no canvas change — the canvas is still the AABB (330).
         inscribeIntoPixelsIfNeeded()
         draftChanged()
+    }
+
+    /// **505 — 「应用当前解」**: the solution on the card is the picture's state, so a confirm that
+    /// finds the document **no longer holding it** applies it again — through
+    /// `writeGuideLineSolution`, the one write door, auto crop included and one row.
+    ///
+    /// The guard is the whole point: when the four numbers the solution asks for are already the
+    /// document's there is nothing pending, and re-writing would (a) mint a row for a confirm that
+    /// wrote nothing and (b) re-cut a frame the user has dragged since the fit. Both doors that mean
+    /// 「确认」 (↵ → `applyCropTool` → `finish(.confirm)`, the footer 应用 → `completeCropTool` →
+    /// `finish(.done)`) call this, so there is no second spelling of it anywhere.
+    private func applyPendingGuideLineSolution() {
+        guard let solution = guideLineSolution, let session else { return }
+        let document = session.edit.geometry
+        let same = abs(document.perspectiveVertical - solution.vertical) < 1e-9
+            && abs(document.perspectiveHorizontal - solution.horizontal) < 1e-9
+            && abs(document.perspectiveShear - solution.shear) < 1e-9
+            && abs(CropTool.clampStraighten(document.straightenDegrees)
+                    - CropTool.clampStraighten(solution.straighten)) < 1e-9
+        guard !same else { return }
+        writeGuideLineSolution(solution, lines: guideLines)
     }
 
     /// The document's `(v, h)` — the fit's starting point (§2b.3 初值取当前) and the value an
@@ -2134,13 +2193,35 @@ public final class CropToolController {
     /// Order matters: the document write is what asks the loupe for the one re-render, and it is what
     /// the row records — so it comes first, then the close.
     @discardableResult
-    public func commitStraighten() -> Bool {
+    public func commitStraighten(autoCrop: Bool = false) -> Bool {
         guard isActive, let session else { return false }
         let angle = CropTool.clampStraighten(draft.straighten)
-        session.applyEdit { $0.geometry.rotationDegrees = angle }
+        // **505 — 画线拉直's release is one gesture and the auto crop is part of it** (the user named
+        // two doors: 引导线 and 画线拉直). The plain 拉直 slider does **not** crop — its release keeps
+        // the frame the user set, which is 190's contract (`45° 重排不改 crop`) and the reason this is
+        // a parameter rather than unconditional. A level document, and 「不出像素」, come back `nil`;
+        // the one place that decides is `autoCropTarget`.
+        let crop = autoCrop ? autoCropTarget(perspective: livePerspective, angle: angle,
+                                             document: session.edit.geometry) : nil
+        // **The draft first, the document second.** The low-res backdrop and the overlay are keyed
+        // from the draft while the write's own observers run (`commitEdit` → revision → refresh), so
+        // a draft still holding the pre-crop frame would file the picture under a key the document
+        // never had.
+        if let crop {
+            draft.crop = CropRect(crop.rect)
+            draft.cropSpace = crop.space
+        }
+        session.applyEdit {
+            $0.geometry.rotationDegrees = angle
+            if let crop {
+                $0.geometry.crop = crop.rect
+                $0.geometry.cropSpace = crop.space
+            }
+        }
         // 356 — one door, and it never asks the history which case it is: a session that is open
         // (the mouse-down's) records `base → edit`; with none, the same one row is committed.
         let committed = closeGestureSession(label: Loc.t("转动"))
+        if crop != nil { draftChanged() }
         // 317 — 「改角度之后」: the released 转动 gets the one-shot question too (the bare slider's
         // `setAngle` asks it per move; this is the gesture's `.inside`-rotate twin).
         inscribeIntoPixelsIfNeeded()
@@ -2298,18 +2379,17 @@ public final class CropToolController {
     /// A picture that is already level (no straighten, no keystone) is left **byte-identical**: the
     /// largest rectangle is the whole picture, but the user's crop is their composition, and the
     /// ticket's own boundary case says so. Returning `false` writes nothing and mints no row.
+    /// 「不出像素」 on is the same answer for a different reason: that switch promises 「只平移、
+    /// 不改尺寸」, so a size change is not its business (505 §2.3.4).
     @discardableResult
     public func autoCrop() -> Bool {
         guard isActive, let session else { return false }
         let angle = CropTool.clampStraighten(draft.straighten)
-        let perspective = livePerspective
-        guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return false }
-        let space = liveCropSpace
-        let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
-        guard let rect = AutoCropSolver.maximumRectangle(in: polygon) else { return false }
+        guard let target = autoCropTarget(perspective: livePerspective, angle: angle,
+                                          document: session.edit.geometry) else { return false }
         var group = draft.geometry(flipsOf: session.edit.geometry)
-        group.crop = rect
-        group.cropSpace = space
+        group.crop = target.rect
+        group.cropSpace = target.space
         closeToolSession(label: Loc.t("裁切与旋转"))
         session.applyEdit { $0.geometry = group }
         let committed = session.commitEdit(label: Loc.t("自动裁剪"), coalesce: false)
@@ -2319,29 +2399,223 @@ public final class CropToolController {
         return committed
     }
 
-    /// The picture's valid region in the crop's own normalized coordinates. `.canvas` walks the
-    /// document map (`P → R → AABB`, the same matrix the exporter uses); `.source` applies `P` and
-    /// then the straighten about the photograph's centre, in the turned frame's pixels.
+    /// **505 — the rect 自动裁剪 would write, and the space it is measured in**, for a document
+    /// about to hold `perspective` at `angle`.
+    ///
+    /// `nil` is the whole answer to 「should this gesture crop at all?」 and covers both boundaries:
+    /// a level picture (no keystone, no turn — 489's 「留用户构图」) and 「不出像素」 on (translation
+    /// only). Both callers that fold the crop into a larger write (`writeGuideLineSolution`,
+    /// `commitStraighten`) and `autoCrop()` itself read this one function, so the three doors cannot
+    /// disagree about when a crop is implied.
+    ///
+    /// The answer is inset by **one output pixel** on every side. The solver's rectangle is exactly
+    /// tangent — its edges lie on the picture's edges — and a pixel whose centre sits on the edge is
+    /// half outside it; without the inset the render keeps a one-pixel black fringe on the tangent
+    /// sides (measured: 6 black pixels on the shear fixture at `k = −0.052`, 0 after).
+    private func autoCropTarget(perspective: PerspectiveMap?, angle: Double,
+                                document: GeometryGroup)
+        -> (rect: NormalizedRect, space: CropSpace)? {
+        guard !staysInsidePixelsStorage else { return nil }
+        guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return nil }
+        let space: CropSpace = perspective?.hasWarp == true ? .canvas : document.cropSpace
+        let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
+        // **505 — two answers, both feasible, the larger wins.** `AutoCropSolver` is the solver, but
+        // its edge enumeration cannot express a rectangle whose side is supported by an
+        // **axis-parallel** edge (see `bandRectangle`), and that is every keystoned document at 0° of
+        // straighten — the commonest keystone there is. It answers `nil` there, so the frame used to
+        // keep its black corners. The band rectangle is the same problem's other half; both are
+        // verified inside the polygon, so the maximum of the two is inside it too.
+        let solved = AutoCropSolver.maximumRectangle(in: polygon)
+        let band = Self.bandRectangle(in: polygon)
+        guard let rect = [solved, band].compactMap({ $0 }).max(by: {
+            Double($0.width * $0.height) < Double($1.width * $1.height)
+        }) else { return nil }
+        let plane = space == .canvas
+            ? CropMath.documentCanvas(source: sourceSize, straightenDegrees: angle,
+                                      perspective: perspective).size
+            : sourceSize
+        var inset = CropRect(rect)
+        inset.left += 1 / Double(max(plane.width, 1))
+        inset.right -= 1 / Double(max(plane.width, 1))
+        inset.top += 1 / Double(max(plane.height, 1))
+        inset.bottom -= 1 / Double(max(plane.height, 1))
+        guard inset.width > 1e-6, inset.height > 1e-6 else { return nil }
+        return (inset.normalizedRect, space)
+    }
+
+    /// 505 — the picture's valid region in the crop's own normalized coordinates, **sampled along
+    /// every edge** and handed over as a convex hull.
+    ///
+    /// The map is the pipeline's own `P → R`: `.canvas` walks `CropMath.documentCanvas` (`P → R →
+    /// AABB`, the matrix the exporter uses); `.source` applies `P` and then the straighten about the
+    /// photograph's centre, in the turned frame's pixels. Each of the four sides contributes
+    /// `edgeSamples + 1` points — 17 per side, 68 in all — instead of its two corners.
+    ///
+    /// Today the map is a single homography, so an edge's images are collinear and the hull of those
+    /// 68 points has exactly the four corners of the corner-only quad (pinned by
+    /// `AutoCropAfterStraighten505Tests`, which also prints the hull's vertex count). The sampling
+    /// is kept anyway because the polygon must describe **the map the renderer uses**, not an
+    /// assumption about it: the moment a side stops being straight (a per-axis radius, a lens term),
+    /// the corner-only polygon would cut inside the picture on the bowed side and the crop would
+    /// leave black — the exact failure the ticket reports. `AutoCropSolver`'s mathematics is
+    /// untouched; only what is fed to it changed.
     private func autoCropPolygon(space: CropSpace, angle: Double,
                                  perspective: PerspectiveMap?) -> [NormalizedPoint] {
-        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
-        if space == .canvas {
-            let document = CropMath.documentCanvas(source: sourceSize,
-                                                   straightenDegrees: angle,
-                                                   perspective: perspective)
-            return corners.map { corner in
-                let p = PerspectiveMap.apply(document.forward, x: corner.0, y: corner.1)
-                return NormalizedPoint(p.x, p.y)
-            }
-        }
+        let edges = 16
+        let canvas = space == .canvas
+            ? CropMath.documentCanvas(source: sourceSize, straightenDegrees: angle,
+                                      perspective: perspective)
+            : nil
         let w = Double(max(sourceSize.width, 1)), h = Double(max(sourceSize.height, 1))
         let rotation = CropGeometry.RotationMatrix(degrees: angle)
-        return corners.map { corner in
-            var p = (x: corner.0, y: corner.1)
-            if let perspective { p = perspective.forward(x: p.x, y: p.y) }
-            let turned = rotation.apply(x: (p.x - 0.5) * w, y: (p.y - 0.5) * h)
-            return NormalizedPoint(0.5 + turned.x / w, 0.5 + turned.y / h)
+        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        var samples: [NormalizedPoint] = []
+        samples.reserveCapacity(4 * (edges + 1))
+        for i in corners.indices {
+            let a = corners[i], b = corners[(i + 1) % corners.count]
+            for step in 0...edges {
+                let t = Double(step) / Double(edges)
+                let x = a.0 + (b.0 - a.0) * t
+                let y = a.1 + (b.1 - a.1) * t
+                if let canvas {
+                    let p = PerspectiveMap.apply(canvas.forward, x: x, y: y)
+                    samples.append(NormalizedPoint(p.x, p.y))
+                } else {
+                    var p = (x: x, y: y)
+                    if let perspective { p = perspective.forward(x: p.x, y: p.y) }
+                    let turned = rotation.apply(x: (p.x - 0.5) * w, y: (p.y - 0.5) * h)
+                    samples.append(NormalizedPoint(0.5 + turned.x / w, 0.5 + turned.y / h))
+                }
+            }
         }
+        return Self.convexHull(samples)
+    }
+
+    /// **505 — the full-band answer, for the polygons `AutoCropSolver` declines.**
+    ///
+    /// The solver's enumeration writes one linear row per side of the answer (`[a, 0, b, 0, c]` for
+    /// `left`, …), which names `left` only when that supporting edge's `a ≠ 0`. A quad with an
+    /// **axis-parallel** side therefore has no expressible assignment: measured, the `+30 / 0°`
+    /// fixture and a synthetic trapezoid `(0,0) (1,0) (0.97,1) (0.03,1)` both came back `nil`, while
+    /// the same trapezoid rotated by `3°` solved to area `0.878` and the `+30 / −20 / 8°` fixture to
+    /// `0.577`. Every keystone at 0° of straighten lands in that blind spot, which is why 「自动裁切
+    /// 没有考虑透视」 — it wrote **nothing** there and the frame kept its black corners.
+    ///
+    /// The largest rectangle in such a quad is the one spanning the polygon's whole y-range: it must
+    /// sit inside every horizontal chord of the band, so its width is the **narrowest** chord. The
+    /// chords' left and right ends are linear in `y` between vertices, so their extremes are reached
+    /// at the vertices' own `y` values — the band is computed exactly, not sampled.
+    ///
+    /// The solver itself is untouched. This is a second, independent *candidate*: its four corners
+    /// are checked with the same containment the solver uses, and the caller takes the larger of the
+    /// two (both are inside the picture, so the larger one is too).
+    private static func bandRectangle(in polygon: [NormalizedPoint]) -> NormalizedRect? {
+        guard polygon.count >= 3 else { return nil }
+        let ys = Set(polygon.map(\.y)).sorted()
+        guard ys.count >= 2 else { return nil }
+        var best: NormalizedRect?
+        var bestArea = 0.0
+        for i in ys.indices {
+            for j in (i + 1)..<ys.count {
+                let top = ys[i], bottom = ys[j]
+                guard bottom - top > 1e-9 else { continue }
+                var left = -Double.infinity
+                var right = Double.infinity
+                for y in ys[i...j] {
+                    guard let chord = horizontalChord(polygon, at: y) else { left = .nan; break }
+                    left = max(left, chord.left)
+                    right = min(right, chord.right)
+                }
+                guard left.isFinite, right.isFinite, right - left > 1e-9 else { continue }
+                let corners = [NormalizedPoint(left, top), NormalizedPoint(right, top),
+                               NormalizedPoint(right, bottom), NormalizedPoint(left, bottom)]
+                guard corners.allSatisfy({ CropMath.quadContains(polygon, x: $0.x, y: $0.y) })
+                else { continue }
+                let area = (right - left) * (bottom - top)
+                guard area > bestArea else { continue }
+                bestArea = area
+                best = NormalizedRect(x: left, y: top, width: right - left, height: bottom - top)
+            }
+        }
+        return best
+    }
+
+    /// The polygon's horizontal chord at `y` — the x's of every edge crossing that row.
+    private static func horizontalChord(_ polygon: [NormalizedPoint], at y: Double)
+        -> (left: Double, right: Double)? {
+        var xs: [Double] = []
+        for i in polygon.indices {
+            let a = polygon[i], b = polygon[(i + 1) % polygon.count]
+            if abs(b.y - a.y) < 1e-15 {
+                if abs(y - a.y) < 1e-12 { xs.append(a.x); xs.append(b.x) }
+                continue
+            }
+            let t = (y - a.y) / (b.y - a.y)
+            if t >= -1e-12, t <= 1 + 1e-12 { xs.append(a.x + (b.x - a.x) * t) }
+        }
+        guard let lo = xs.min(), let hi = xs.max(), hi >= lo else { return nil }
+        return (lo, hi)
+    }
+
+    /// Andrew's monotone chain, then a collinearity pass: the convex hull of `points`, one winding,
+    /// with vertices that sit **on** the segment between their neighbours removed.
+    ///
+    /// The second pass is not cosmetic. Mapping 17 samples of a straight side through a homography
+    /// lands them on a line only up to a few ulps, so the raw chain keeps a dozen vertices whose
+    /// edges are `1e-16` long — and the solver then enumerates edge assignments over segments that
+    /// are numerically indistinguishable from points (measured: the `+30` canvas fixture solved to
+    /// `nil` with 11 such vertices, and to the expected rectangle with 4). A `1e-9` perpendicular
+    /// distance is 4 orders of magnitude above the noise and far below anything a picture can show.
+    ///
+    /// A degenerate set (fewer than three distinct, non-collinear points) comes back short, which
+    /// `AutoCropSolver` reads as 「nothing to solve」 — no crop, no write.
+    private static func convexHull(_ points: [NormalizedPoint]) -> [NormalizedPoint] {
+        var hull = monotoneChain(points)
+        guard hull.count > 3 else { return hull }
+        var index = 0
+        while hull.count > 3, index < hull.count {
+            let previous = hull[(index + hull.count - 1) % hull.count]
+            let next = hull[(index + 1) % hull.count]
+            let dx = next.x - previous.x, dy = next.y - previous.y
+            let length = (dx * dx + dy * dy).squareRoot()
+            let cross = dx * (hull[index].y - previous.y) - dy * (hull[index].x - previous.x)
+            let distance = length > 0 ? abs(cross) / length : 0
+            if distance <= 1e-9 {
+                hull.remove(at: index)
+                index = 0
+            } else {
+                index += 1
+            }
+        }
+        return hull
+    }
+
+    /// The raw hull, no collinearity pass.
+    private static func monotoneChain(_ points: [NormalizedPoint]) -> [NormalizedPoint] {
+        let sorted = points.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }
+        guard sorted.count >= 3 else { return sorted }
+        func cross(_ o: NormalizedPoint, _ a: NormalizedPoint, _ b: NormalizedPoint) -> Double {
+            (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+        }
+        var lower: [NormalizedPoint] = []
+        for p in sorted {
+            while lower.count >= 2,
+                  cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(p)
+        }
+        var upper: [NormalizedPoint] = []
+        for p in sorted.reversed() {
+            while upper.count >= 2,
+                  cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(p)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        return lower + upper
     }
 
     /// 489 — keep an open draft on the same pixels when the **menu** performs a discrete orientation
