@@ -161,8 +161,9 @@ final class AutoColorAll490Tests: XCTestCase {
                 expected = plan.apply(to: expected)
                 passChanged = true
             }
-            if let vibrance = loupe.colorVibranceCandidate(from: expected) {
-                expected.color.vibrance = vibrance
+            if let color = loupe.colorCandidate(from: expected) {
+                expected.color.vibrance = color.vibrance
+                expected.color.saturation = color.saturation
                 passChanged = true
             }
             if !passChanged { break }
@@ -179,6 +180,8 @@ final class AutoColorAll490Tests: XCTestCase {
         XCTAssertEqual(session.edit.light.blacks, expected.light.blacks)
         XCTAssertEqual(session.edit.light.contrast, expected.light.contrast)
         XCTAssertEqual(session.edit.color.vibrance, expected.color.vibrance)
+        XCTAssertEqual(session.edit.color.saturation, expected.color.saturation,
+                       "498: 自动颜色 writes saturation too")
         XCTAssertEqual(session.edit, expected, "the committed document is the staged pipeline, field for field")
         XCTAssertNotEqual(session.edit, before, "全部自动 really moved the document")
 
@@ -206,16 +209,22 @@ final class AutoColorAll490Tests: XCTestCase {
         XCTAssertTrue(loupe.autoAll())
         let settled = session.edit
         XCTAssertGreaterThan(settled.color.vibrance, 0, "the colour step really raised vibrance")
+        XCTAssertGreaterThanOrEqual(loupe.lastAutoCompositePassCountForTesting, 1)
+        XCTAssertLessThanOrEqual(loupe.lastAutoCompositePassCountForTesting, 4,
+                                 "498 fixed point stays within four passes")
+        print("498 PASSES · \(loupe.lastAutoCompositePassCountForTesting)")
         let history = session.history.count
 
         XCTAssertFalse(loupe.autoAll(), "a converged document must not be written again")
         XCTAssertEqual(session.edit, settled, "文档不变")
         XCTAssertEqual(session.history.count, history, "历史不增")
+        XCTAssertEqual(loupe.lastAutoColorNoOpReasonForTesting, .alreadySaturated,
+                       "498: 0+0 says why instead of doing nothing silently")
     }
 
     // MARK: - ④ 自动颜色的独立入口
 
-    func testAutoColorAloneWritesOnlyVibranceWithItsOwnRow() throws {
+    func testAutoColorAloneWritesBothColorSlidersWithItsOwnRow() throws {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "490-color", session: session)
@@ -228,14 +237,13 @@ final class AutoColorAll490Tests: XCTestCase {
 
         let before = session.edit
         let historyBefore = session.history.count
-        let metrics = { () -> AutoColor.Metrics? in
-            _ = loupe.autoColor()
-            return loupe.lastAutoColorMetricsForTesting
-        }()
-        let measured = try XCTUnwrap(metrics)
-        let expected = AutoColor.plan(measured)
+        _ = loupe.autoColor()
+        let measured = try XCTUnwrap(loupe.lastAutoColorMetricsForTesting)
+        let plan = try XCTUnwrap(loupe.lastAutoColorPlanForTesting)
 
-        XCTAssertEqual(session.edit.color.vibrance, expected, "vibrance = AutoColor.plan")
+        XCTAssertGreaterThan(measured.sampleCount, 0)
+        XCTAssertEqual(session.edit.color.vibrance, plan.vibrance, "vibrance = 498 plan")
+        XCTAssertEqual(session.edit.color.saturation, plan.saturation, "saturation = 498 plan")
         XCTAssertEqual(session.edit.light, before.light, "自动颜色 must not touch 明暗")
         XCTAssertEqual(session.edit.light.blackOffset, before.light.blackOffset,
                        "自动颜色 must not touch 黑电平")

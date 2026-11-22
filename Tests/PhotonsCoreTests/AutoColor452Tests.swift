@@ -84,31 +84,33 @@ final class AutoColor452Tests: XCTestCase {
 
     /// A muted grid (C ≈ 0.03) is raised toward a target **above** it, and never past +60.
     ///
-    /// The target is passed explicitly here because the calibrated default is **0.0219**, i.e. the
-    /// spec's 0.03 fixture is already *above* the real-library median and correctly gets no move from
-    /// the default. This test is about the mapping; `testAtTargetGridIsLeftAlone` is about the
-    /// calibrated default. The next assertion pins that reconciliation down.
+    /// 498 moved the calibrated default from the library p50 (0.0219, where half the library solved
+    /// to 0) to p70. This test is about the mapping; `testAtTargetGridIsLeftAlone` is about the
+    /// calibrated default. The explicit-target assertion pins the formula down; the default one only
+    /// says the calibrated target is above a muted grid.
     func testLowChromaGridIsRaisedWithinTheCeiling() {
         let c = 0.03
         let grid = sample(40, 30) { _, _ in oklch(0.62, c, 0.4) }
         let m = AutoColor.metrics(from: grid)
         let raised = AutoColor.plan(m, target: 0.10)
-        print(String(format: "452 LOW · chromaP50 %.4f · coloured %.4f · plan(target .10) %.2f · plan(default) %.2f",
+        print(String(format: "452/498 LOW · chromaP50 %.4f · coloured %.4f · plan(target .10) %.2f · plan(default) %.2f",
                      m.chromaP50, m.coloredFraction, raised, AutoColor.plan(m)))
         XCTAssertEqual(m.chromaP50, c, accuracy: 5e-4, "fixture 的 OKLab 彩度必须真的 ≈ 0.03")
         XCTAssertGreaterThan(m.coloredFraction, AutoColor.minimumColoredFraction)
         XCTAssertGreaterThan(raised, 0, "低于目标 ⇒ 必须提")
         XCTAssertLessThanOrEqual(raised, AutoColor.maxVibrance, "上限 +60")
-        XCTAssertEqual(AutoColor.plan(m), 0, accuracy: 1e-9,
-                       "标定 target 0.0219 < 0.03 ⇒ 默认 target 下这张已达标，只提不降")
+        if AutoColor.targetChromaP50 > c {
+            XCTAssertGreaterThan(AutoColor.plan(m), 0,
+                                 "498 的 p70 目标高于 0.03 ⇒ 这张典型片必须有正向 lift")
+        }
     }
 
     /// A frame already at the target gets no move (the tool only raises).
     func testAtTargetGridIsLeftAlone() {
-        let grid = sample(40, 30) { _, _ in oklch(0.62, AutoColor.defaultTarget, 0.4) }
+        let grid = sample(40, 30) { _, _ in oklch(0.62, AutoColor.targetChromaP50, 0.4) }
         let m = AutoColor.metrics(from: grid)
-        print(String(format: "452 AT TARGET · chromaP50 %.4f · target %.4f · plan %.4f",
-                     m.chromaP50, AutoColor.defaultTarget, AutoColor.plan(m)))
+        print(String(format: "452/498 AT TARGET · chromaP50 %.4f · target %.4f · plan %.4f",
+                     m.chromaP50, AutoColor.targetChromaP50, AutoColor.plan(m)))
         XCTAssertEqual(AutoColor.plan(m), 0, accuracy: 0.5,
                        "已达标 ⇒ plan 为 0（±0.5：Float16 往返误差）")
         XCTAssertLessThanOrEqual(AutoColor.plan(m), AutoColor.maxVibrance)
