@@ -53,4 +53,53 @@ final class AutoColor511Tests: XCTestCase {
         XCTAssertEqual(session.history.count, history, "历史行数不变")
         XCTAssertEqual(loupe.lastAutoColorNoOpReasonForTesting, .alreadySaturated)
     }
+
+    /// **518** — a document the owner has already pushed **above** the automatic ceiling survives
+    /// 全部自动: `vibrance = 80` / `saturation = 40` may stay put or rise, never fall back to 60 / 25.
+    ///
+    /// The plan is recomputed from the metrics the controller actually measured instead of reading
+    /// `lastAutoColorPlanForTesting`: that property is deliberately overwritten with the values
+    /// **written**, and `colorCandidate`'s own `max(source, plan)` loop already floors them, which
+    /// would mask a floor clamped inside `plan2D`. This is the seam where 511's ceiling-clamped floor
+    /// is observable — with it restored, the plan reads `vibrance = 60`.
+    func testDocumentAboveTheCeilingIsNotLoweredByAutoAll() throws {
+        let url = try rawFixture()
+        let session = CatalogSession()
+        let loupe = try makeController(url: url, identity: "518-above-ceiling", session: session)
+
+        session.applyEdit {
+            $0.color.vibrance = 80
+            $0.color.saturation = 40
+        }
+        XCTAssertTrue(session.commitEdit(label: "手动调到上限之上"))
+        let before = session.edit
+        let historyBefore = session.history.count
+
+        _ = loupe.autoAll()
+        if loupe.lastAutoColorPlanForTesting == nil { _ = loupe.autoDevelop() }
+
+        let metrics = try XCTUnwrap(loupe.lastAutoColorMetricsForTesting,
+                                    "自动颜色必须真的量了一次")
+        let plan = AutoColor.plan2D(metrics,
+                                    currentVibrance: 80, currentSaturation: 40,
+                                    floorVibrance: 80, floorSaturation: 40)
+        print(String(format: "518 UI · plan v %.0f s %.0f · doc v %.0f s %.0f · passes %d",
+                     plan.vibrance, plan.saturation,
+                     session.edit.color.vibrance, session.edit.color.saturation,
+                     loupe.lastAutoCompositePassCountForTesting))
+        XCTAssertGreaterThanOrEqual(plan.vibrance, 80, "plan 的地板不许被 maxVibrance 60 夹掉")
+        XCTAssertGreaterThanOrEqual(plan.saturation, 40, "plan 的地板不许被 maxSaturation 25 夹掉")
+        XCTAssertGreaterThanOrEqual(session.edit.color.vibrance, 80, "写回后 vibrance 不许下调")
+        XCTAssertGreaterThanOrEqual(session.edit.color.saturation, 40, "写回后 saturation 不许下调")
+
+        if session.history.count > historyBefore {
+            let row = try XCTUnwrap(session.history.snapshots.last, "新增的历史行必须可读")
+            XCTAssertGreaterThanOrEqual(row.edit.color.vibrance, before.color.vibrance,
+                                        "历史行里的 vibrance 不许下调")
+            XCTAssertGreaterThanOrEqual(row.edit.color.saturation, before.color.saturation,
+                                        "历史行里的 saturation 不许下调")
+        } else {
+            XCTAssertEqual(session.edit, before, "没有历史行 ⇒ 文档逐位不变，而不是下降")
+        }
+    }
 }

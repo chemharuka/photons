@@ -196,6 +196,49 @@ final class AutoColor511Tests: XCTestCase {
         XCTAssertGreaterThanOrEqual(plan.saturation, floorS, "只加不减")
     }
 
+    // MARK: - 518 — the floor is above the automatic ceiling
+
+    /// 518 ① — a document already **above** `maxVibrance` / `maxSaturation` must not be pulled down.
+    /// 511 clamped the floor to those ceilings, so `vibrance = 80` came back as 60: a silent −20.
+    func testFloorAboveTheAutomaticCeilingIsNeverLowered() {
+        let metrics = AutoColor.metrics(from: normalB())
+        let floorV = 80.0, floorS = 40.0
+        let plan = AutoColor.plan2D(metrics,
+                                    currentVibrance: floorV, currentSaturation: floorS,
+                                    floorVibrance: floorV, floorSaturation: floorS)
+        print(String(format: "518 FLOOR>CEILING · floor v %.0f s %.0f → v %.0f s %.0f",
+                     floorV, floorS, plan.vibrance, plan.saturation))
+        XCTAssertGreaterThanOrEqual(plan.vibrance, floorV, "地板高于自动上限时也不许下调 vibrance")
+        XCTAssertGreaterThanOrEqual(plan.saturation, floorS, "地板高于自动上限时也不许下调 saturation")
+    }
+
+    /// 518 ② — the original floor (12 / 6, below both ceilings) still returns **exactly** what it did
+    /// before 518: 12 / 6. This is the regression guard for the two-line product change.
+    func testFloorBelowTheAutomaticCeilingIsBitIdentical() {
+        let metrics = AutoColor.metrics(from: normalB())
+        let floorV = 12.0, floorS = 6.0
+        let plan = AutoColor.plan2D(metrics,
+                                    currentVibrance: floorV, currentSaturation: floorS,
+                                    floorVibrance: floorV, floorSaturation: floorS)
+        print(String(format: "518 FLOOR<CEILING · floor v %.0f s %.0f → v %.1f s %.1f",
+                     floorV, floorS, plan.vibrance, plan.saturation))
+        XCTAssertEqual(plan.vibrance, 12, "改动前逐位相同：v = 12")
+        XCTAssertEqual(plan.saturation, 6, "改动前逐位相同：s = 6")
+    }
+
+    /// 518 ③ — a grey frame has no plan to preserve: the floor must not resurrect one.
+    func testGreyFrameStaysZeroEvenWithAFloor() {
+        let metrics = AutoColor.metrics(from: greyCard())
+        XCTAssertLessThan(metrics.coloredFraction, AutoColor.minimumColoredFraction,
+                          "前提：灰帧低于有色比例阈值")
+        let plan = AutoColor.plan2D(metrics,
+                                    currentVibrance: 80, currentSaturation: 40,
+                                    floorVibrance: 80, floorSaturation: 40)
+        print(String(format: "518 GREY · coloured %.3f · plan v %.0f s %.0f",
+                     metrics.coloredFraction, plan.vibrance, plan.saturation))
+        XCTAssertEqual(plan, .zero, "灰帧 ⇒ 0 + 0，地板不参与")
+    }
+
     // MARK: - §3.2.6 clipping / skin rails (same thresholds as 498)
 
     func testClippingGuardStillBinds() {

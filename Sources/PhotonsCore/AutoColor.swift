@@ -31,7 +31,7 @@ import Foundation
 // `AutoColor511Tests` pins the formula: `gap = target / measured − 1`, then
 //
 //     lift = cap · (1 − exp(−responseK · gap)) · dampFraction · dampUniform
-//     vibrance = max(floorV, liftV.rounded())      // whole slider units, a total value
+//     vibrance = max(floorV, min(maxVibrance, liftV.rounded()))   // total value, never below floor
 //
 // The two damping terms are the ticket's behavioural core: `dampFraction` says "grey haze is
 // scattered light, not missing saturation" and `dampUniform` says "a picture whose p95/p50 is
@@ -299,9 +299,12 @@ public enum AutoColor {
 
     /// The two sliders one 自动颜色 press writes, plus what the guard did.
     public struct Plan: Sendable, Equatable {
-        /// Total `color.vibrance` to write (clamped to `0 ... maxVibrance`).
+        /// Total `color.vibrance` to write: **never below the floor** the caller passed in. The
+        /// `maxVibrance` ceiling bounds this press's **lift**, not the total, so a document already
+        /// above the ceiling keeps its value instead of being pulled down.
         public var vibrance: Double
-        /// Total `color.saturation` to write (clamped to `0 ... maxSaturation`).
+        /// Total `color.saturation` to write: same contract as `vibrance` (`maxSaturation` bounds the
+        /// lift, the floor is a hard lower bound).
         public var saturation: Double
         /// The saturation the p95 solve asked for **before** the clipping/skin guard.
         public var unguardedSaturation: Double
@@ -328,9 +331,15 @@ public enum AutoColor {
     /// 511 changed *what the two numbers mean*: they are a **total slider value** derived from a
     /// bounded, damped gap, not the result of solving the picture onto an absolute target. See the
     /// formula in the file header: `lift = cap · (1 − e^(−k·gap)) · dampF · dampU`, then
-    /// `max(floor, lift.rounded())`. Whole slider units make a second press a fixed point: the
-    /// measurement already contains the first lift, so its gap (and therefore its lift) is smaller,
-    /// and `max(floor, …)` returns the value the document already has.
+    /// `max(floor, min(maxVibrance, lift.rounded()))`. Whole slider units make a second press a fixed
+    /// point: the measurement already contains the first lift, so its gap (and therefore its lift) is
+    /// smaller, and `max(floor, …)` returns the value the document already has.
+    ///
+    /// **518 — the ceiling bounds the lift, never the floor.** A document may legitimately sit above
+    /// `maxVibrance` / `maxSaturation` (the sliders go to 100), so clamping the floor to the automatic
+    /// ceiling would turn "only raise" into a silent 20-point **decrease** on the next press. The
+    /// returned totals are `max(floor, min(ceiling, lift))`: the floor is a hard lower bound, and the
+    /// ceiling only caps what this press adds.
     ///
     /// `currentVibrance` / `currentSaturation` describe the picture that was measured (the sample
     /// already includes them, so they are inverted back to base first for the clipping/skin replay).
@@ -352,8 +361,11 @@ public enum AutoColor {
         // light, not missing saturation" and "no colourful tail, no lift" brakes.
         let measuredV = min(maxVibrance, max(0, currentVibrance))
         let measuredS = min(maxSaturation, max(0, currentSaturation))
-        let floorV = min(maxVibrance, max(0, floorVibrance ?? currentVibrance))
-        let floorS = min(maxSaturation, max(0, floorSaturation ?? currentSaturation))
+        // 518: the floor is a **hard** lower bound — no ceiling here. The automatic ceiling below
+        // caps only this press's lift; clamping the floor to it would lower a document already above
+        // `maxVibrance` / `maxSaturation`, which is exactly the "never lower" contract broken.
+        let floorV = max(0, floorVibrance ?? currentVibrance)
+        let floorS = max(0, floorSaturation ?? currentSaturation)
 
         let gapV = max(0, targetP50 / max(m.chromaP50, 1e-6) - 1)
         let gapS = max(0, targetP95 / max(m.chromaP95, 1e-6) - 1)
@@ -366,8 +378,8 @@ public enum AutoColor {
         // so the whole-unit totals above are the absent-double-count absolute values they consume.
         let pixels = m.pixels.isEmpty ? m.pixels
             : basePixels(m.pixels, vibrance: measuredV, saturation: measuredS)
-        var vibrance = min(maxVibrance, max(floorV, liftV.rounded()))
-        var saturation = min(maxSaturation, max(floorS, liftS.rounded()))
+        var vibrance = max(floorV, min(maxVibrance, liftV.rounded()))
+        var saturation = max(floorS, min(maxSaturation, liftS.rounded()))
         var unguarded = saturation
         var newClipped = 0
 

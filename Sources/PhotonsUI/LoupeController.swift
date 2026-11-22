@@ -5099,24 +5099,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 自动调整 (453)
 
-    /// 453/498 — 自动颜色：measure the picture's OKLab chroma and return the suggested vibrance.
+    /// 453/498 — 自动颜色：measure the picture's OKLab chroma and decide both sliders.
     ///
-    /// Kept as a Double for older callers; the product path uses `colorCandidate`, which also carries
-    /// 498's saturation and the guard's verdict. `nil` means there is no frame or nothing would move.
-    public func colorVibranceCandidate() -> Double? {
-        colorVibranceCandidate(from: nil)
-    }
-
-    /// `from` is the staged document: 自动调整 measures colour **after** 明暗 changed the picture, still
-    /// without writing it. A standalone call reads the live document.
-    func colorVibranceCandidate(from document: EditModel?) -> Double? {
-        guard let session else { return nil }
-        let source = document ?? session.edit
-        guard let candidate = colorCandidate(from: document),
-              candidate.vibrance > source.color.vibrance + 1e-9 else { return nil }
-        return candidate.vibrance
-    }
-
+    /// 518 removed the old `colorVibranceCandidate()` Double wrapper (and its `from:` overload): it had
+    /// no callers and its "only raise" `guard` was dead policy sitting beside the live one. The live
+    /// decision is `colorCandidate`, which carries both sliders and the plan's verdict.
     func colorCandidate() -> ColorCandidate? {
         colorCandidate(from: nil)
     }
