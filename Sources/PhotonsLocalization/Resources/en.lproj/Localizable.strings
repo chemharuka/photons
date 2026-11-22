@@ -731,7 +731,9 @@
 "自动调节" = "Auto";
 "自动调节：按纹理损失安排曝光、高光、白色、黑色与对比" = "Auto: arrange exposure, highlights, whites, blacks and contrast by texture loss";
 "自动颜色" = "Auto Color";
-"自动颜色：按画面的色度分布安排自然饱和（只加不减）" = "Auto Color: arrange Vibrance by the picture's chroma distribution (raise only)";
+"自动颜色：画面几乎没有颜色，未写入" = "Auto Color: the picture has almost no colour, nothing written";
+"自动颜色：这张已经足够饱和，两个参数都保持 0" = "Auto Color: this picture is already saturated enough; both sliders stay at 0";
+"自动颜色：按彩度中位数与 95 分位同时调整自然饱和度与饱和度" = "Auto Color: sets vibrance from the median chroma and saturation from the 95th percentile";
 "自动黑电平" = "Automatic black level";
 "自动黑电平：把解码后的线性数据拉到非负" = "Automatic black level: shift decoded linear data to nonnegative values";
 "自动调整" = "Auto Adjust";

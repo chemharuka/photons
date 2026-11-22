@@ -106,13 +106,19 @@ final class AutoDevelop453Tests: XCTestCase {
         let metrics = try XCTUnwrap(loupe.lastAutoColorMetricsForTesting,
                                     "自动颜色 must have run inside the same press")
         XCTAssertGreaterThan(metrics.sampleCount, 0)
-        // 452's AutoColor only raises, toward a calibrated target (0.0219). This fixture's median
-        // chroma is above it, so the honest answer is 0 — and the composite still commits black+light.
-        if AutoColor.plan(metrics) > 0 {
-            XCTAssertNotEqual(session.edit.color.vibrance, before.color.vibrance,
-                              "a positive auto-colour plan must be written")
+        // 498: the plan carries both sliders. Whichever one the calibrated targets moved must be in
+        // the committed document; a slider the picture already satisfies may legitimately stay put.
+        let plan = try XCTUnwrap(loupe.lastAutoColorPlanForTesting)
+        if plan.vibrance > before.color.vibrance {
+            XCTAssertEqual(session.edit.color.vibrance, plan.vibrance,
+                           "a positive auto-colour plan must be written")
         } else {
             XCTAssertEqual(session.edit.color.vibrance, before.color.vibrance)
+        }
+        if plan.saturation > before.color.saturation {
+            XCTAssertEqual(session.edit.color.saturation, plan.saturation)
+        } else {
+            XCTAssertEqual(session.edit.color.saturation, before.color.saturation)
         }
         XCTAssertNotEqual(session.edit, before)
     }
