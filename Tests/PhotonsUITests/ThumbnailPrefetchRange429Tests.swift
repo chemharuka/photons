@@ -329,6 +329,10 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
         // still +5/+10/+0), so this is a key/size mismatch, not LRU pressure — do not hide it by
         // growing the cache.
+        // 502 (main line) — the bound above is only meaningful if the band itself is bounded, so the
+        // velocity widening gets its own ceiling here: the cap is 30 units, and a band past it would
+        // be a runaway prefetch hiding behind a self-referential assertion.
+        XCTAssertLessThanOrEqual(stripPrefetch, 30, "the velocity band never exceeds its 30-cell cap")
         XCTAssertLessThanOrEqual(stripAfter.diskHits - stripBefore.diskHits,
                                  stripPrefetch + stripVisible,
                                  "the strip re-reads at most the cells its band asked for")
@@ -357,6 +361,7 @@ final class ThumbnailPrefetchRange429Tests: XCTestCase {
         // own display size (`.resizeAspectFill`) so it never shares the grid's entries, and raising
         // `memoryByteLimit` to 384 MB or `memoryCountLimit` to 2048 changed nothing (both probes
         // still +5/+10/+0) — do not hide this by growing the cache.
+        XCTAssertLessThanOrEqual(panePrefetch, 30, "the velocity band never exceeds its 30-row cap")
         XCTAssertLessThanOrEqual(paneAfter.diskHits - paneBefore.diskHits,
                                  panePrefetch + paneVisible,
                                  "the list re-reads at most the rows its band asked for")
