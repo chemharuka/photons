@@ -583,7 +583,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// The tests derive their expected band from this value instead of repeating `4`, so tuning the
     /// number again does not touch three test files. `wantedIndexes()`, `coreWantedIndexes()` and
     /// `reconcileThumbnails` all read it — it is the single source of truth.
-    static let coreSlackRows: CGFloat = 10
+    /// 502 — the resting slack of the **core** band, in rows; `ScrollVelocityBand.base`. It is the
+    /// trailing side always, and both sides at v = 0. The leading side can grow to
+    /// `ScrollVelocityBand.cap` (30) — see `updateVelocityBand()`.
+    static let coreSlackRows = CGFloat(ScrollVelocityBand.base)
 
     /// 437 — how far past the viewport the **warm** band reaches, in rows. A photo in this extra
     /// ring is only asked for if its 1920 px JPEG is already on disk (or in the memory LRU), so the
@@ -606,6 +609,39 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// pass budget ran out. Pruned to the current band every pass, so scrolling away drops them.
     private var warmBacklog: Set<Int> = []
     private var warmContinuationScheduled = false
+
+    // MARK: 502 — the direction-aware band
+
+    /// 502 — samples `bounds.origin.y` against a monotonic clock, once per reconcile pass, and turns
+    /// the displacement into a direction-aware band. The resting state (`previousOffset == nil`, a
+    /// stop, a jump) yields ±`coreSlackRows`, i.e. exactly the pre-502 answer.
+    private var velocitySampler = ScrollVelocityBand.Sampler()
+
+    /// 502 — the band **this** pass used, in rows above and below the viewport. Stored rather than
+    /// recomputed so `coreWantedIndexes()` / `wantedIndexes()` / the cancellation ring all describe
+    /// one sample; sampling again per read would decay the smoothed speed against itself.
+    private var bandAboveRows = coreSlackRows
+    private var bandBelowRows = coreSlackRows
+
+    /// 502 — the cancellation ring's half-widths. At rest these are ±`warmSlackRows` (12), the ring
+    /// 449 shipped; a widening band pushes the leading side out to `band + base` so the pass cannot
+    /// issue and condemn the same ask.
+    private var ringAboveRows = warmSlackRows
+    private var ringBelowRows = warmSlackRows
+
+    /// 502 — velocity-extension asks a pass deferred because it hit the budget. Pruned to the current
+    /// band every pass and drained by the next one, like `warmBacklog`.
+    private var coreBacklog: Set<Int> = []
+
+    /// 502 — the per-pass cap on **new** core asks, counted only over the rows the velocity
+    /// extension adds: the resting ±10 band is the 429/437 contract and is never deferred. One screen
+    /// of cells, doubled, is the reference (`一屏 ≈ 可见格数 × 2`). Settable so the budget acceptance
+    /// can lower it instead of building a twenty-row-tall window.
+    var coreBudgetPerPass: Int {
+        get { coreBudgetOverride ?? max(1, visibleCellCount * 2) }
+        set { coreBudgetOverride = newValue }
+    }
+    private var coreBudgetOverride: Int?
 
     /// 437 — `peek` answers, by key digest. `fileExists` measured ~0.4 ms a call on the demo
     /// library's cache (72 cold calls = 29–37 ms), so A⑧'s "> 3 ms ⇒ add a cache" branch is the one
@@ -1293,13 +1329,20 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
 
         let display = displayPixels
-        let core = bandIndexes(rows: Self.coreSlackRows)
-        let wide = bandIndexes(rows: Self.warmSlackRows)
-        let warm = warmEligibleIndexes(in: wide.subtracting(core), provider: provider, display: display)
+        // 502 — one sample per pass. This is the only place the speed is sampled: every geometry
+        // read below (`core`, `wide`, `wantedIndexes()`, the ring) has to describe the same turn.
+        updateVelocityBand()
+        let core = bandIndexes(above: bandAboveRows, below: bandBelowRows)
+        let wide = bandIndexes(above: ringAboveRows, below: ringBelowRows)
+        let warmRing = bandIndexes(above: Self.warmSlackRows, below: Self.warmSlackRows)
+        let warm = warmEligibleIndexes(in: warmRing.subtracting(core), provider: provider,
+                                       display: display)
         let wanted = core.union(warm)
         // 437 — a pass is also due when a budget-deferred warm backlog is still waiting, even if
         // the band itself has not moved. Everything else keeps 429's "only when wanted changed".
-        if !force, wanted == lastWanted, warmBacklog.isEmpty { return }
+        // 502 — same for the core backlog: a wide band's leftovers must not be dropped just because
+        // the scroll paused for one pass.
+        if !force, wanted == lastWanted, warmBacklog.isEmpty, coreBacklog.isEmpty { return }
         lastWanted = wanted
         reconcilePasses += 1
         lastReconcileWarmRequests = 0
@@ -1311,8 +1354,34 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         // is sorted; the resulting request order is the thing A⑤ asserts (visible before prefetch).
         requestBand(visible.sorted(), priority: .onScreen, session: session, provider: provider,
                     display: display)
-        requestBand(core.subtracting(visible).sorted(), priority: .prefetch, session: session,
+        // 502 — the resting ±`coreSlackRows` band is asked for unconditionally: it is the band 429
+        // and 437 were written against, and widening the *leading* side must not shrink it. Only the
+        // rows the velocity extension adds are budgeted, so a 30-row forward band cannot hand 400
+        // asks to the queue in one turn on a fast flick.
+        let resting = bandIndexes(above: Self.coreSlackRows, below: Self.coreSlackRows)
+        requestBand(resting.subtracting(visible).sorted(), priority: .prefetch, session: session,
                     provider: provider, display: display)
+
+        var coreDeferred: Set<Int> = []
+        var coreIssued = 0
+        // 502 — asks an earlier pass deferred are still wanted while the ring still covers them, and
+        // they go **first**: a wide band's tail must not be dropped just because the next sample was
+        // taken at a standstill (that is the "band got wider but nothing came of it" failure). Only
+        // rows the ring has genuinely left are pruned — 449's rule for a request that scrolled away.
+        let carried = coreBacklog.intersection(wide).subtracting(visible).subtracting(resting)
+        let fresh = core.subtracting(resting).subtracting(visible).subtracting(carried)
+        for index in Array(carried).sorted() + Array(fresh).sorted() {
+            if coreIssued >= coreBudgetPerPass {
+                coreDeferred.insert(index)
+                continue
+            }
+            if issue(index: index, priority: .prefetch, session: session, provider: provider,
+                     display: display) {
+                coreIssued += 1
+            }
+        }
+        coreBacklog = coreDeferred.filter { thumbRequests[$0] == nil }
+        if !coreBacklog.isEmpty { scheduleBandContinuation() }
 
         var deferred: Set<Int> = []
         var warmIssued = 0
@@ -1329,17 +1398,18 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         }
         lastReconcileWarmRequests = warmIssued
         warmBacklog = deferred
-        if !deferred.isEmpty { scheduleWarmContinuation() }
+        if !deferred.isEmpty { scheduleBandContinuation() }
 
         // 437 — the cancellation moved **after** the asks so a pass ends with exactly `wanted`
         // queued: issue the new band first, then condemn what it left. (Nothing can land in
         // between: this whole function runs synchronously on the main actor.)
         //
-        // 449 — condemn only what left the **outer ring** (±`warmSlackRows` = ±12 rows), not the
-        // narrow core (±`coreSlackRows` = ±10): a continuous scroll moves by a few rows, and
-        // cancelling those asks dropped bytes that had just been produced
-        // (`ThumbnailService.suppressWrite`). §3 fixes this value at `warmSlackRows`; the request
-        // band itself is unchanged.
+        // 449 — condemn only what left the **outer ring**, not the narrow core.
+        //
+        // 502 — the ring is the velocity ring: at rest it is still ±`warmSlackRows` (±12) exactly as
+        // 449 shipped, and once the band widens its leading side is `band + base`, so the pass that
+        // issued a 30-row forward ask never condemns it in the same turn. The ring is always ≥ the
+        // band (`ScrollVelocityBand.cancellationRing`).
         for (index, token) in thumbRequests where !wide.contains(index) {
             token.cancel()
             thumbRequests.removeValue(forKey: index)
@@ -1458,9 +1528,10 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
         return key
     }
 
-    /// 437 — a pass that hit `warmBudgetPerPass` leaves the rest in `warmBacklog`; this is the
-    /// "下一 pass 继续" half, coalesced into one item so a jump does not pile up continuations.
-    private func scheduleWarmContinuation() {
+    /// 437 — a pass that hit `warmBudgetPerPass` leaves the rest in `warmBacklog`, and 502 added a
+    /// second deferral (`coreBacklog`, the velocity extension); this is the "下一 pass 继续" half for
+    /// both, coalesced into one item so a jump does not pile up continuations.
+    private func scheduleBandContinuation() {
         guard !warmContinuationScheduled else { return }
         warmContinuationScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
@@ -1488,28 +1559,109 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Internal, not private, so the 429 acceptance can read the band's size off the live view
     /// (`wantedIndexes().count`) instead of recomputing the arithmetic in a test.
     func wantedIndexes() -> Set<Int> {
-        let core = bandIndexes(rows: Self.coreSlackRows)
+        let core = coreWantedIndexes()
         guard let provider = provider(), !core.isEmpty else { return core }
         let display = displayPixels
-        let wide = bandIndexes(rows: Self.warmSlackRows)
+        let wide = bandIndexes(above: Self.warmSlackRows, below: Self.warmSlackRows)
         return core.union(warmEligibleIndexes(in: wide.subtracting(core), provider: provider,
                                               display: display))
     }
 
+    /// 502 — the resting band (±`coreSlackRows`), always asked for and never budgeted.
+    func restingWantedIndexes() -> Set<Int> {
+        bandIndexes(above: Self.coreSlackRows, below: Self.coreSlackRows)
+    }
+
     /// 437 — the widest band this controller may hold, **without** the cache filter. This is the
     /// new meaning of "outside the window": the reverse gate (429 ⑧d) and `--ui-smoke` ask "is
-    /// anything queued beyond ±`warmSlackRows`?", not "beyond the ±`coreSlackRows`-row core?".
-    func wideWantedIndexes() -> Set<Int> { bandIndexes(rows: Self.warmSlackRows) }
+    /// anything queued beyond the ring?", not "beyond the ±`coreSlackRows`-row core?".
+    ///
+    /// 502 — the ring is the velocity ring: ±`warmSlackRows` at rest (bit-identical to 437's ±12),
+    /// `band + base` on the leading side once the scroll is moving.
+    func wideWantedIndexes() -> Set<Int> {
+        bandIndexes(above: ringAboveRows, below: ringBelowRows)
+    }
 
-    /// 429 — the geometry half of `wantedIndexes()`, shared by both bands.
-    private func bandIndexes(rows: CGFloat) -> Set<Int> {
+    /// 429 — the geometry half of `wantedIndexes()`, shared by every band. `above`/`below` are rows
+    /// past the viewport on each side; equal values give the symmetric band 429 shipped.
+    ///
+    /// 502 — asymmetric on purpose: the leading side takes `bandAboveRows`/`bandBelowRows` from the
+    /// velocity sampler, the trailing side stays at the resting slack.
+    private func bandIndexes(above: CGFloat, below: CGFloat) -> Set<Int> {
         guard let scroll = collectionView.enclosingScrollView else { return [] }
         let bounds = scroll.contentView.bounds
-        let expanded = bounds.insetBy(dx: 0, dy: -max(24, metrics.rowHeight) * rows)
+        let pitch = rowPitch
+        let expanded = CGRect(x: bounds.minX,
+                             y: bounds.minY - pitch * above,
+                             width: bounds.width,
+                             height: bounds.height + pitch * (above + below))
         guard let attributes = collectionView.collectionViewLayout?.layoutAttributesForElements(in: expanded)
         else { return [] }
         return Set(attributes.compactMap { $0.indexPath?.item })
     }
+
+    /// 502 — points per row, the unit the band is counted in (and the unit `ScrollVelocityBand`
+    /// converts a `bounds` displacement into).
+    private var rowPitch: CGFloat { max(24, metrics.rowHeight) }
+
+    /// 502 — take this pass's velocity sample and store the band it implies. Runs once per
+    /// `reconcileThumbnails`; the reads (`coreWantedIndexes()`, `wideWantedIndexes()`,
+    /// `wantedIndexes()`) then describe that sample instead of sampling again.
+    private func updateVelocityBand() {
+        guard let scroll = collectionView.enclosingScrollView else {
+            bandAboveRows = Self.coreSlackRows
+            bandBelowRows = Self.coreSlackRows
+            ringAboveRows = Self.warmSlackRows
+            ringBelowRows = Self.warmSlackRows
+            return
+        }
+        let bounds = scroll.contentView.bounds
+        let sample = velocitySampler.sample(offset: bounds.origin.y,
+                                            time: CACurrentMediaTime(),
+                                            unitPoints: rowPitch,
+                                            viewportSpan: bounds.height)
+        let trailing = CGFloat(sample.backward)
+        let leading = CGFloat(sample.forward)
+        switch sample.direction {
+        case .forward:
+            bandAboveRows = trailing
+            bandBelowRows = leading
+        case .backward:
+            bandAboveRows = leading
+            bandBelowRows = trailing
+        case .none:
+            bandAboveRows = trailing
+            bandBelowRows = trailing
+        }
+
+        let ring = CGFloat(ScrollVelocityBand.cancellationRing(
+            forward: sample.forward, restingRing: Int(Self.warmSlackRows)))
+        let restingRing = Self.warmSlackRows
+        switch sample.direction {
+        case .forward:
+            ringAboveRows = restingRing
+            ringBelowRows = max(ring, restingRing)
+        case .backward:
+            ringAboveRows = max(ring, restingRing)
+            ringBelowRows = restingRing
+        case .none:
+            ringAboveRows = restingRing
+            ringBelowRows = restingRing
+        }
+    }
+
+    /// 502 — seed the sampler as if the previous pass had been taken `offsetDelta` points ago, at
+    /// `seconds` before now, moving at `previousRowsPerSecond`. Acceptance only.
+    func primeVelocityForTesting(offsetDelta: CGFloat, seconds: TimeInterval,
+                                 previousRowsPerSecond: Double) {
+        guard let scroll = collectionView.enclosingScrollView else { return }
+        velocitySampler.prime(offset: scroll.contentView.bounds.origin.y - offsetDelta,
+                              time: CACurrentMediaTime() - seconds,
+                              speed: previousRowsPerSecond)
+    }
+
+    /// 502 — the asks a pass deferred because the velocity extension hit `coreBudgetPerPass`.
+    var deferredCoreIndexesForTesting: Set<Int> { coreBacklog }
 
     // MARK: thumbnail probes (used by `--ui-smoke`)
 
@@ -1570,9 +1722,13 @@ public final class AssetGridController: NSViewController, NSCollectionViewDataSo
     /// Start a fresh request-order reading. The acceptance calls this after the bands settle.
     func resetRequestLogForTesting() { requestLog.removeAll() }
 
-    /// The **core** band (±`coreSlackRows` rows) without the warm filter — the set a library with
-    /// an empty disk cache must degrade to.
-    func coreWantedIndexes() -> Set<Int> { bandIndexes(rows: Self.coreSlackRows) }
+    /// The **core** band without the warm filter — the set a library with an empty disk cache must
+    /// degrade to. 502 — it is the direction-aware band: ±10 at rest, `+base` on the leading side
+    /// once the scroll moves.
+    func coreWantedIndexes() -> Set<Int> {
+        bandIndexes(above: bandAboveRows, below: bandBelowRows)
+    }
+
 
     /// The provider this grid draws from — `--ui-smoke` asserts it is the filmstrip's too.
     public var thumbnailProviderForSmoke: ThumbnailProvider? { provider() }
