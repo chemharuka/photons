@@ -61,6 +61,25 @@ public struct DenoiseRequest {
     /// histogram before choosing these.
     public var taperLow: Double
     public var taperHigh: Double
+    /// The mirror of `strengthTaper` at the bottom of the range: how much blend
+    /// weight to give up where the signal is at the floor.
+    ///
+    /// A pixel whose value is comparable to its own noise (x ≈ σ(x)) carries no
+    /// detail the network can separate from grain — but the network still
+    /// flattens it, and since it *is* the picture there, the result is mush.
+    /// `shadowTaper = q` scales the blend by
+    /// `1 − q·(1 − smoothstep(shadowLow, shadowHigh, x))`: at or below
+    /// `shadowLow` it keeps `strength·(1 − q)`, and at or above `shadowHigh` the
+    /// weight is the unmodified `strength` — bit for bit.
+    ///
+    /// Measured on L1030479 (a 13-stop-underexposed church interior, 79 % of its
+    /// area at x ≈ 0.0007): keeping 26 % of the block high-frequency content at
+    /// full strength, 61 % with the blend at 0.40 and the same σ. Halving σ
+    /// instead bought 28 %, which is why this is a weight knob and not a noise
+    /// knob.
+    public var shadowTaper: Double
+    public var shadowLow: Double
+    public var shadowHigh: Double
     /// Unreliable border to discard from each tile, in **plane** pixels.
     ///
     /// The network's edge pixels disagree with a differently-anchored grid
@@ -87,6 +106,7 @@ public struct DenoiseRequest {
                 a: [Double], b: [Double], strength: Double? = nil,
                 strengthTaper: Double = 0,
                 taperLow: Double = 0.18, taperHigh: Double = 0.60,
+                shadowTaper: Double = 0, shadowLow: Double = 0.002, shadowHigh: Double = 0.02,
                 crop: Int = 0, estimateNoise: Bool = false,
                 checkerboardNoise: Bool = false, dualRaw: Bool = false) {
         self.input = input
@@ -98,6 +118,9 @@ public struct DenoiseRequest {
         self.strengthTaper = strengthTaper
         self.taperLow = taperLow
         self.taperHigh = taperHigh
+        self.shadowTaper = shadowTaper
+        self.shadowLow = shadowLow
+        self.shadowHigh = shadowHigh
         self.crop = crop
         self.estimateNoise = estimateNoise
         self.checkerboardNoise = checkerboardNoise
@@ -124,6 +147,9 @@ public struct DenoiseReport: Sendable {
     /// Blend weight at the highlight end of the taper (`strength·(1 − q)`);
     /// equal to `strength` when `strengthTaper` is 0.
     public let strengthHighlight: Double
+    /// Blend weight at the floor (`strength·(1 − q)` of `shadowTaper`); equal to
+    /// `strength` when `shadowTaper` is 0.
+    public let strengthShadow: Double
     /// Green-plane σ at 5 % brightness that the strength was derived from.
     public let sigma: Double
     public let writerTiles: Int
@@ -225,10 +251,16 @@ public enum DenoisePipeline {
         progress?(String(format: "strength %.2f (σ(0.05)=%.5f%@)", strength, sigma,
                          request.strength == nil ? ", derived from the frame" : ""))
         let strengthHighlight = strength * (1 - max(0, request.strengthTaper))
+        let strengthShadow = strength * (1 - max(0, request.shadowTaper))
         if request.strengthTaper > 0 {
             progress?(String(format: "  blend tapers %.2f → %.2f over raw %.2f–%.2f (q=%.2f)",
                              strength, strengthHighlight, request.taperLow, request.taperHigh,
                              request.strengthTaper))
+        }
+        if request.shadowTaper > 0 {
+            progress?(String(format: "  blend holds back to %.2f below raw %.3f, full again at %.3f (q=%.2f)",
+                             strengthShadow, request.shadowLow, request.shadowHigh,
+                             request.shadowTaper))
         }
 
         // 4. denoise, tile by tile
@@ -386,10 +418,18 @@ public enum DenoisePipeline {
         out.withUnsafeMutableBufferPointer { outPtr in
             mosaic.withUnsafeBufferPointer { mosaicPtr in
                 let sBase = Float(strength)
-                // Per-pixel reduction of the blend weight towards the highlights;
-                // `0` reproduces the frame-wide `strength` exactly.
+                // Per-pixel reduction of the blend weight towards the highlights
+                // and towards the floor; `0` on both reproduces the frame-wide
+                // `strength` exactly.
                 let taperQ = Float(max(0, request.strengthTaper))
                 let k0 = Float(request.taperLow), k1 = Float(max(request.taperHigh, request.taperLow + 1e-6))
+                let shadowQ = Float(max(0, request.shadowTaper))
+                let s0 = Float(request.shadowLow), s1 = Float(max(request.shadowHigh, request.shadowLow + 1e-6))
+                @inline(__always) func smoothstep(_ x: Float, _ a: Float, _ b: Float) -> Float {
+                    var t = (x - a) / (b - a)
+                    t = t < 0 ? 0 : (t > 1 ? 1 : t)
+                    return t * t * (3 - 2 * t)
+                }
                 for i in 0..<n {
                     let w = wsum[i]
                     // No tile reached this pixel (only possible when `crop` pushes
@@ -398,10 +438,14 @@ public enum DenoisePipeline {
                     if d < 0 { d = 0 } else if d > 1 { d = 1 }
                     let inputValue = mosaicPtr[i]
                     var s = sBase
-                    if taperQ > 0 {
-                        var t = (inputValue - k0) / (k1 - k0)
-                        t = t < 0 ? 0 : (t > 1 ? 1 : t)
-                        s = sBase * (1 - taperQ * (t * t * (3 - 2 * t)))
+                    if taperQ > 0 || shadowQ > 0 {
+                        var factor: Float = 1
+                        // Highlights: 1 → (1 − q) as x rises.
+                        if taperQ > 0 { factor *= 1 - taperQ * smoothstep(inputValue, k0, k1) }
+                        // Floor: (1 − q) → 1 as x rises; exactly 1 at or above `s1`,
+                        // so nothing above the knee can move.
+                        if shadowQ > 0 { factor *= 1 - shadowQ * (1 - smoothstep(inputValue, s0, s1)) }
+                        s = sBase * factor
                     }
                     outPtr[i] = s == 1 ? d : inputValue + s * (d - inputValue)
                 }
@@ -450,9 +494,82 @@ public enum DenoisePipeline {
             outputBytes: written.byteCount,
             strength: strength,
             strengthHighlight: strengthHighlight,
+            strengthShadow: strengthShadow,
             sigma: sigma,
             writerTiles: written.tileCount,
             hasAlternate: written.hasAlternate,
             alternateBytes: written.alternateByteCount)
+    }
+
+    /// What a `dumpNormalisedMosaic` produced: the size, and the black/white
+    /// levels it was normalised with, so a caller never has to trust a file's
+    /// tags twice.
+    public struct MosaicDump: Sendable {
+        public let width: Int
+        public let height: Int
+        public let black: [Double]
+        public let white: Double
+        public let cfa: String
+    }
+
+    /// Debug door: the mosaic the network actually sees, before any denoising.
+    ///
+    /// This exists because a render is not evidence about the data. A developed
+    /// TIFF has been through black subtraction, a tone curve and the decoder's
+    /// own noise reduction, so "the shadows lost detail" can mean three
+    /// different things there — and the decoder's black handling is not
+    /// observable at all. Comparing two files in this domain answers the
+    /// question the render cannot: is the difference in the mosaic, or in what
+    /// happens after it.
+    ///
+    /// Layout: `width * height` little-endian `Float32`, row-major, the value
+    /// the model is fed. Sidecar `<out>.txt`:
+    /// `width height black… white cfa`.
+    @discardableResult
+    public static func dumpNormalisedMosaic(_ input: URL, to out: URL) throws -> MosaicDump {
+        let data: Data
+        let doc: SourceDNG
+        let decoded: (samples: [UInt16], width: Int, height: Int)
+        do {
+            data = try Data(contentsOf: input, options: .alwaysMapped)
+            doc = try SourceDNG(data: data)
+            decoded = try doc.readMosaic(data: data)
+        } catch let e as SourceDNG.ReadError {
+            if case .noRawSubIFD = e { throw PipelineError.notCFA(input.lastPathComponent) }
+            throw PipelineError.decode(e.description)
+        } catch {
+            throw PipelineError.decode("\(error)")
+        }
+        let width = decoded.width, height = decoded.height
+        guard width > 0, height > 0, decoded.samples.count == width * height else {
+            throw PipelineError.badMosaic("\(width)×\(height), \(decoded.samples.count) samples")
+        }
+        let norm = try DNGMetadata.normalization(of: doc)
+        let cfa = try DNGMetadata.cfa(of: doc, width: width, height: height)
+
+        var floats = [Float](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let row = y * width
+            for x in 0..<width {
+                floats[row + x] = norm.normalize(decoded.samples[row + x], row: y, col: x)
+            }
+        }
+        var payload = Data(capacity: floats.count * 4)
+        floats.withUnsafeBufferPointer { buf in
+            payload.append(UnsafeRawBufferPointer(start: buf.baseAddress,
+                                                  count: buf.count * MemoryLayout<Float>.size)
+                .bindMemory(to: UInt8.self))
+        }
+        do {
+            try payload.write(to: out)
+            let sidecar = "\(width) \(height) "
+                + norm.blackByPhase.map { String(format: "%.6f", $0) }.joined(separator: " ")
+                + " " + String(format: "%.6f", norm.white) + " " + cfa.filePattern + "\n"
+            try sidecar.write(to: out.appendingPathExtension("txt"), atomically: true, encoding: .utf8)
+        } catch {
+            throw PipelineError.write("\(error)")
+        }
+        return MosaicDump(width: width, height: height,
+                          black: norm.blackByPhase, white: norm.white, cfa: cfa.filePattern)
     }
 }

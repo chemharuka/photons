@@ -43,6 +43,14 @@ public struct NLMFDenoiseOptions: Sendable, Equatable {
     public var highlightTaper: Double = 0
     public var taperLow: Double = 0.18
     public var taperHigh: Double = 0.60
+    /// Mirror of `highlightTaper` at the floor: where x is comparable to its own
+    /// noise the network has nothing to separate, but flattens it anyway, and the
+    /// flattening *is* the picture there. `shadowTaper = q` keeps
+    /// `strength·(1 − q)` at or below `shadowLow` and the unmodified `strength`
+    /// at or above `shadowHigh` (bit for bit).
+    public var shadowTaper: Double = 0
+    public var shadowLow: Double = 0.002
+    public var shadowHigh: Double = 0.02
     /// Border to discard from each tile, in plane pixels (8 mosaic pixels).
     ///
     /// The network's tile edges are seams — it conditioned its answer on a
@@ -80,6 +88,8 @@ public struct NLMFDenoiseReport: Sendable, Equatable {
     /// Blend weight left at the highlight end of the taper; equal to `strength`
     /// when `highlightTaper` is 0.
     public let highlightStrength: Double
+    /// Blend weight left at the floor; equal to `strength` when `shadowTaper` is 0.
+    public let shadowStrength: Double
     /// Green-plane σ at 5 % brightness behind that choice.
     public let sigma: Double
     public let seconds: Double
@@ -144,6 +154,9 @@ public struct NLMFDenoiseService: Sendable {
             strengthTaper: options.highlightTaper,
             taperLow: options.taperLow,
             taperHigh: options.taperHigh,
+            shadowTaper: options.shadowTaper,
+            shadowLow: options.shadowLow,
+            shadowHigh: options.shadowHigh,
             crop: options.crop,
             estimateNoise: options.measureNoise,
             checkerboardNoise: options.checkerboardNoise)
@@ -158,6 +171,7 @@ public struct NLMFDenoiseService: Sendable {
                 tiles: report.tiles,
                 strength: report.strength,
                 highlightStrength: report.strengthHighlight,
+                shadowStrength: report.strengthShadow,
                 sigma: report.sigma,
                 seconds: report.seconds,
                 inferenceSeconds: report.inferenceSeconds,

@@ -33,6 +33,21 @@ func parseDoubles(_ s: String) -> [Double] {
 
 let mlpackage = args[0]
 let inputPath = args[1]
+
+// `--dump-mosaic <path>`: write the mosaic the network would be fed and stop.
+// Used to compare two files in the data domain, where a render cannot look.
+if let dumpPath = flag("--dump-mosaic") {
+    do {
+        let dump = try DenoisePipeline.dumpNormalisedMosaic(
+            URL(fileURLWithPath: inputPath), to: URL(fileURLWithPath: dumpPath))
+        print("dumped \(dump.width)×\(dump.height) \(dump.cfa) "
+              + "black=\(dump.black.map { String(format: "%.0f", $0) }) white=\(Int(dump.white))")
+        exit(0)
+    } catch {
+        die("error: \(error)")
+    }
+}
+
 guard let outPath = flag("--out") else { die("missing --out") }
 
 // Defaults are the ones the reference tool ships for a full-frame sensor; the
@@ -51,6 +66,11 @@ let strengthTaper = flag("--strength-taper").flatMap(Double.init) ?? 0
 let knee = flag("--taper-knee").map(parseDoubles) ?? []
 let taperLow = knee.count == 2 ? knee[0] : 0.18
 let taperHigh = knee.count == 2 ? knee[1] : 0.60
+// `--shadow-taper q --shadow-knee lo,hi`: the mirror at the bottom of the range.
+let shadowTaper = flag("--shadow-taper").flatMap(Double.init) ?? 0
+let sknee = flag("--shadow-knee").map(parseDoubles) ?? []
+let shadowLow = sknee.count == 2 ? sknee[0] : 0.002
+let shadowHigh = sknee.count == 2 ? sknee[1] : 0.02
 let crop = flag("--crop").flatMap(Int.init) ?? 0
 // `--measure-noise` estimates the sensor's Poisson-Gaussian curve from this
 // frame and ignores --a/--b. Without it, or with explicit values, the CLI
@@ -69,7 +89,8 @@ let request = DenoiseRequest(
     output: URL(fileURLWithPath: outPath),
     mlpackage: mlpackage,
     a: a, b: b, strength: strength, strengthTaper: strengthTaper,
-    taperLow: taperLow, taperHigh: taperHigh, crop: crop,
+    taperLow: taperLow, taperHigh: taperHigh,
+    shadowTaper: shadowTaper, shadowLow: shadowLow, shadowHigh: shadowHigh, crop: crop,
     estimateNoise: measureNoise, checkerboardNoise: checkerboardNoise,
     dualRaw: dualRaw)
 
