@@ -3495,6 +3495,13 @@ public final class CatalogSession {
             do {
                 if let linked = try catalog.propagateDenoiseEdit(document, fromAsset: id) {
                     adoptCommittedDocument(document, save: linked)
+                    // 525 — the sibling's `develop_json` moved too, so its `ThumbKey` (which carries
+                    // the edit fingerprint) is a new file. 487's contract is that both members hold
+                    // the same document; without this the expanded stack kept drawing the original
+                    // on its pre-edit key, because the only refresh signals named the edited photo
+                    // (`persistCount` and `editedAssetID`). One more call on the channel the three
+                    // browsers already observe — not a second notification system.
+                    notifyEditObservers(assetID: linked.assetId)
                 }
             } catch {
                 lastPersistError = "\(error)"
