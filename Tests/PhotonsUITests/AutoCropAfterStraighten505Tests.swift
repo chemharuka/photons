@@ -716,6 +716,127 @@ final class AutoCropAfterStraighten505Tests: XCTestCase {
         return (values.min() ?? 0, values.max() ?? 0)
     }
 
+    // MARK: - ⑨ 522 — 比例锁: 自动裁切 = 该比例下的最大面积
+
+    /// 522 — with 3:2 selected, 自动裁切 must crop (the three doors share `autoCropTarget`) and the
+    /// written frame's **pixel** ratio must be exactly 3:2, not merely close. The frame must also be
+    /// a fixed point of the two clamps the drag path uses, so the very next drag does not move it.
+    func testAspectLockedAutoCropKeepsTheRatioExactly() throws {
+        let (session, tool) = try makeTool { geometry in
+            geometry.rotationDegrees = 30
+        }
+        // The panel door: the ratio the user just clicked lives in the draft until 应用.
+        tool.setAspect(.threeTwo, source: Self.source)
+        tool.setStraighten(30)
+        let rows = session.history.snapshots.count
+        XCTAssertTrue(tool.autoCrop(), "522 3:2 锁 + 拉直 30°: 应求出矩形")
+        XCTAssertEqual(session.history.snapshots.count, rows + 1, "522 自动裁切 = 一条历史")
+        XCTAssertEqual(session.history.snapshots.last?.label, "自动裁剪")
+        XCTAssertEqual(tool.draft.crop.normalizedRect, session.edit.geometry.crop,
+                       "522 草稿与文档必须同一个框")
+        XCTAssertEqual(session.edit.geometry.aspectLock, .threeTwo,
+                       "522 自动裁切同时把面板上的锁写进文档")
+
+        let written = session.edit.geometry
+        let rect = CropRect(written.crop)
+        let pixelWidth = Double(rect.width) * Double(Self.source.width)
+        let pixelHeight = Double(rect.height) * Double(Self.source.height)
+        let pixelRatio = pixelWidth / pixelHeight
+        note(String(format: "522 ⑨ 3:2 锁 + 拉直 30° · 框 L%.6f T%.6f R%.6f B%.6f"
+                     + " · 像素比 %.15f · 面积 %.6f · 历史 %d → %d · 行「%@」",
+                     rect.left, rect.top, rect.right, rect.bottom, pixelRatio,
+                     Double(rect.width * rect.height), rows, session.history.snapshots.count,
+                     session.history.snapshots.last?.label ?? "—"))
+        XCTAssertEqual(written.cropSpace, .source, "522 纯拉直量在转正的照片上")
+        XCTAssertEqual(pixelRatio, 3.0 / 2.0, accuracy: 1e-9, "522 写出的框像素比必须严格 3:2")
+        XCTAssertLessThan(Double(rect.width * rect.height), 0.999, "522 必须真的裁了")
+
+        // 四边各 32 点逆映射回源图 — 约束不能把框推到照片外。
+        let canvas = CropMath.documentCanvas(source: Self.source, straightenDegrees: 30,
+                                             perspective: nil)
+        let sides: [((x: Double, y: Double), (x: Double, y: Double))] = [
+            ((rect.left, rect.top), (rect.right, rect.top)),
+            ((rect.right, rect.top), (rect.right, rect.bottom)),
+            ((rect.right, rect.bottom), (rect.left, rect.bottom)),
+            ((rect.left, rect.bottom), (rect.left, rect.top)),
+        ]
+        var worst = 0.0
+        for (a, b) in sides {
+            for step in 0...31 {
+                let t = Double(step) / 31
+                let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+                let photo = photoPoint(p, space: written.cropSpace, angle: 30,
+                                       perspective: nil, canvas: canvas)
+                worst = max(worst, -photo.x, photo.x - 1, -photo.y, photo.y - 1)
+            }
+        }
+        XCTAssertLessThanOrEqual(worst, 1e-6, "522 四边逆映射必须全部落在源图内 (最外 \(worst))")
+
+        // The drag clamps must accept the answer unchanged (132 + the lock's own fit).
+        let clamped = CropMath.clampedToRotatedFrame(rect, in: Self.source, degrees: 30,
+                                                     keepsInsideRotatedFrame: true)
+        let locked = CropMath.lockedCrop(.threeTwo, in: rect, source: Self.source)
+        note(String(format: "522 ⑨ 钳位 · 132 差 %.3e · 比例锁差 %.3e · 128 点最外 %.3e",
+                     maxEdgeDelta(rect, clamped), maxEdgeDelta(rect, locked), worst))
+        XCTAssertEqual(clamped.left, rect.left, accuracy: 1e-9, "522 132 钳位不许动左")
+        XCTAssertEqual(clamped.top, rect.top, accuracy: 1e-9, "522 132 钳位不许动上")
+        XCTAssertEqual(clamped.right, rect.right, accuracy: 1e-9, "522 132 钳位不许动右")
+        XCTAssertEqual(clamped.bottom, rect.bottom, accuracy: 1e-9, "522 132 钳位不许动下")
+        XCTAssertEqual(locked.left, rect.left, accuracy: 1e-9, "522 比例钳位不许动左")
+        XCTAssertEqual(locked.top, rect.top, accuracy: 1e-9, "522 比例钳位不许动上")
+        XCTAssertEqual(locked.right, rect.right, accuracy: 1e-9, "522 比例钳位不许动右")
+        XCTAssertEqual(locked.bottom, rect.bottom, accuracy: 1e-9, "522 比例钳位不许动下")
+    }
+
+    /// 522's regression boundary: `.original` (自由) is still the 520 free answer, byte for byte.
+    func testFreeAutoCropStillMatchesThe520Answer() throws {
+        let (session, tool) = try makeTool { geometry in
+            geometry.rotationDegrees = 30
+        }
+        XCTAssertTrue(tool.autoCrop(), "522 自由 + 拉直 30°: 应求出矩形")
+        let written = session.edit.geometry
+        let rect = CropRect(written.crop)
+        let exact = try XCTUnwrap(MaxInscribedRect.maximumRectangle(in: rotatedPicture(angle: 30)),
+                                  "522 独立自由解")
+        let plane = (w: Double(Self.source.width), h: Double(Self.source.height))
+        let expected = CropRect(left: exact.x + 1 / plane.w,
+                                top: exact.y + 1 / plane.h,
+                                right: exact.x + exact.width - 1 / plane.w,
+                                bottom: exact.y + exact.height - 1 / plane.h)
+        note(String(format: "522 自由 · 框 L%.9f T%.9f R%.9f B%.9f (面积 %.9f) · 520 解面积 %.9f",
+                     rect.left, rect.top, rect.right, rect.bottom,
+                     Double(rect.width * rect.height),
+                     Double(expected.width * expected.height)))
+        XCTAssertEqual(rect.left, expected.left, accuracy: 1e-9, "522 自由路径必须逐位等于 520 (左)")
+        XCTAssertEqual(rect.top, expected.top, accuracy: 1e-9, "522 自由路径必须逐位等于 520 (上)")
+        XCTAssertEqual(rect.right, expected.right, accuracy: 1e-9, "522 自由路径必须逐位等于 520 (右)")
+        XCTAssertEqual(rect.bottom, expected.bottom, accuracy: 1e-9, "522 自由路径必须逐位等于 520 (下)")
+        XCTAssertNil(written.aspectLock.ratio, "522 自由 = .original，无比例约束")
+    }
+
+    /// 521 (already merged) + 522: 「不出像素」 still crops, and the lock is still exact.
+    func testStaysInsidePixelsWithAnAspectLockStillCropsAtThatRatio() throws {
+        let (session, tool) = try makeTool(staysInsidePixels: true) { geometry in
+            geometry.aspectLock = .threeTwo
+            geometry.rotationDegrees = 30
+        }
+        let rows = session.history.snapshots.count
+        XCTAssertTrue(tool.autoCrop(), "521 + 522: 勾上「不出像素」仍要裁")
+        XCTAssertEqual(session.history.snapshots.count, rows + 1, "521 + 522: 一条历史")
+        let rect = CropRect(session.edit.geometry.crop)
+        let pixelRatio = Double(rect.width) * Double(Self.source.width)
+            / (Double(rect.height) * Double(Self.source.height))
+        note(String(format: "522 ⑨ 不出像素 + 3:2 · 面积 %.6f · 像素比 %.15f",
+                     Double(rect.width * rect.height), pixelRatio))
+        XCTAssertLessThan(Double(rect.width * rect.height), 0.999, "521 + 522: 仍要真的裁")
+        XCTAssertEqual(pixelRatio, 3.0 / 2.0, accuracy: 1e-9, "521 + 522: 比例仍严格 3:2")
+    }
+
+    private func maxEdgeDelta(_ a: CropRect, _ b: CropRect) -> Double {
+        max(abs(a.left - b.left), abs(a.top - b.top),
+            abs(a.right - b.right), abs(a.bottom - b.bottom))
+    }
+
     private func ramp() -> LinearImage {
         let size = Self.source
         var rgba = [Float16](repeating: 0, count: size.width * size.height * 4)

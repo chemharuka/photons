@@ -2433,31 +2433,70 @@ public final class CropToolController {
         guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return nil }
         let space: CropSpace = perspective?.hasWarp == true ? .canvas : document.cropSpace
         let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
+        let plane = space == .canvas
+            ? CropMath.documentCanvas(source: sourceSize, straightenDegrees: angle,
+                                      perspective: perspective).size
+            : sourceSize
+        // **522 — the aspect lock is part of the question, not a post-processing step.** The lock's
+        // ratio is in **pixels** (width / height of the cropped output), so it is converted against
+        // `plane`, the pixel grid this crop is measured in. `.original` carries no ratio and takes
+        // the 520 free path byte for byte — that is this ticket's regression boundary.
+        //
+        // The source is the **draft's** lock, not `document.aspectLock`: the ratio popup writes
+        // `draft.lock` and only reaches the document on 应用 (or on this very command, through
+        // `Draft.geometry(flipsOf:)`). Reading the document here would answer the *previous* visit's
+        // lock — the user picks 3:2 and presses 自动裁剪 in the same visit. `begin()` seeds the
+        // draft from the document, so an untouched session still sees the document's lock.
+        let lock = draft.lock.ratio
         // **520 — the exact answer comes first.** `MaxInscribedRect` maximizes `width · height`
         // directly, using the convexity lemma (`top` concave, `bot` convex), so it expresses the
         // axis-parallel side 489's `edges⁴` enumeration could not, and it is not tied to a vertex-y
         // band the way 505's patch was. Pixel area is a constant multiple of normalized `w·h` in both
         // crop spaces (both extents are constants), so comparing `w·h` here is comparing pixels.
         //
+        // 522: with a lock, the same solver returns the widest rectangle whose pixel ratio is
+        // exactly the lock's; with `.original` it is the untouched 520 call.
+        //
         // The two older candidates are a **fallback only** — not the answer. They remain because a
         // degenerate or numerically awkward polygon may leave the exact solver `nil`, and returning
         // the old feasible rectangle is better than returning nothing; both are verified inside the
         // polygon, so their maximum is inside it too.
-        let exact = MaxInscribedRect.maximumRectangle(in: polygon)
+        let exact: NormalizedRect?
+        if let lock {
+            exact = MaxInscribedRect.maximumRectangle(in: polygon, aspect: lock, pixelSize: plane)
+        } else {
+            exact = MaxInscribedRect.maximumRectangle(in: polygon)
+        }
         let legacy = [AutoCropSolver.maximumRectangle(in: polygon), Self.bandRectangle(in: polygon)]
             .compactMap { $0 }.max(by: {
                 Double($0.width * $0.height) < Double($1.width * $1.height)
             })
         guard let rect = exact ?? legacy else { return nil }
-        let plane = space == .canvas
-            ? CropMath.documentCanvas(source: sourceSize, straightenDegrees: angle,
-                                      perspective: perspective).size
-            : sourceSize
         var inset = CropRect(rect)
         inset.left += 1 / Double(max(plane.width, 1))
         inset.right -= 1 / Double(max(plane.width, 1))
         inset.top += 1 / Double(max(plane.height, 1))
         inset.bottom -= 1 / Double(max(plane.height, 1))
+        // **522 — the one-pixel inset must not break the lock.** Insetting moves both edges of each
+        // axis inward, so the pixel ratio changes by ~2 px worth; the renderer (`renderCrop`) would
+        // then re-fit the rect on the next pass and the frame would "jump" after 自动裁剪. Shrink the
+        // **longer** side about the rect's centre back onto the exact ratio. The result stays inside
+        // the inset rect, hence inside the polygon, and the pixel ratio is exact to `1e-15`.
+        if let lock, inset.width > 0, inset.height > 0 {
+            let w = Double(max(plane.width, 1)), h = Double(max(plane.height, 1))
+            let pixelWidth = inset.width * w, pixelHeight = inset.height * h
+            if pixelWidth > 0, pixelHeight > 0 {
+                if pixelWidth / pixelHeight > lock {
+                    let width = lock * pixelHeight / w
+                    inset = CropRect(left: inset.centerX - width / 2, top: inset.top,
+                                     right: inset.centerX + width / 2, bottom: inset.bottom)
+                } else {
+                    let height = pixelWidth / lock / h
+                    inset = CropRect(left: inset.left, top: inset.centerY - height / 2,
+                                     right: inset.right, bottom: inset.centerY + height / 2)
+                }
+            }
+        }
         guard inset.width > 1e-6, inset.height > 1e-6 else { return nil }
         return (inset.normalizedRect, space)
     }

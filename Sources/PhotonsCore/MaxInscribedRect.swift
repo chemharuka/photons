@@ -55,6 +55,91 @@ public enum MaxInscribedRect {
     /// either, and a convex polygon clipped by a box stays convex, so the lemma still holds.
     public static func maximumRectangle(in polygon: [NormalizedPoint],
                                         bounds: CropRect = .full) -> NormalizedRect? {
+        freeRectangle(in: polygon, bounds: bounds)
+    }
+
+    /// **522 — the same maximum-area rectangle at a required **pixel** aspect ratio.**
+    ///
+    /// `aspect` is `width / height` in **pixels** (`AspectLock.ratio`); `pixelSize` is the pixel grid
+    /// the polygon's normalized coordinates are measured on (the source for a `.source` crop, the
+    /// document canvas for a `.canvas` one). `aspect == nil` is the free answer and is delegated to
+    /// the 520 path **unchanged** — that is the regression boundary of this ticket.
+    ///
+    /// The reduction avoids a two-dimensional search. For a rectangle of normalized width `wn` and
+    /// height `hn = wn / rNorm` (where `rNorm = aspect · H / W`), the area is `wn² / rNorm`, which is
+    /// strictly increasing in `wn`. So the fixed-ratio optimum is the **widest feasible `wn`**.
+    ///
+    /// Feasibility at a width `w` is `∃a: Hmax(a, w) ≥ w / rNorm` with 520's chord lemma
+    /// `Hmax(a, w) = min(top(a), top(a+w)) − max(bot(a), bot(a+w))`. It is monotone in `w`: for
+    /// `w' < w`, concavity of `top` and convexity of `bot` give `Hmax(a, w') ≥ Hmax(a, w)`, so a
+    /// bisection on `w` is exact. At a fixed `w`, `Hmax(·, w)` is piecewise linear with breakpoints at
+    /// the hull vertex x's, their shifts by `−w`, and the crossings of an edge at `a` with an edge at
+    /// `a + w`; evaluating those `O(n²)` candidates is the exact maximum, not a sampled one.
+    ///
+    /// The returned height is `w / rNorm`, so the pixel ratio is exactly `aspect` (to floating
+    /// point), and the four corners are checked against the polygon before returning.
+    public static func maximumRectangle(in polygon: [NormalizedPoint],
+                                        bounds: CropRect = .full,
+                                        aspect: Double?,
+                                        pixelSize: ImageSize) -> NormalizedRect? {
+        guard let aspect else { return freeRectangle(in: polygon, bounds: bounds) }
+        guard aspect.isFinite, aspect > 0 else { return freeRectangle(in: polygon, bounds: bounds) }
+
+        let clipped = clip(polygon, to: bounds)
+        guard clipped.count >= 3, abs(signedArea(clipped)) > 1e-12 else { return nil }
+        let width = Double(max(pixelSize.width, 1))
+        let height = Double(max(pixelSize.height, 1))
+        let normalizedAspect = aspect * height / width
+        guard normalizedAspect.isFinite, normalizedAspect > 0 else { return nil }
+
+        guard let xmin = clipped.map(\.x).min(),
+              let xmax = clipped.map(\.x).max(),
+              xmax - xmin > 1e-12 else { return nil }
+
+        // A valid upper bound for *any* inscribed rectangle's width. (It must not be the free
+        // answer's width: a maximizer of area can be narrower than a feasible fixed-ratio rectangle,
+        // e.g. a very flat hull at a large ratio.)
+        let widest = xmax - xmin
+        var low = 0.0
+        var high = widest
+        for _ in 0..<80 {
+            let mid = (low + high) / 2
+            let best = bestHeight(forWidth: mid, polygon: clipped, xmin: xmin, xmax: xmax)
+            if best.height >= mid / normalizedAspect - 1e-13 {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+
+        // The bisection keeps a feasible `low`; the corner check below is the acceptance test, and a
+        // few tiny shrinks cover a worst-case tie where the maximizing `a` sits on a boundary.
+        var w = low
+        for attempt in 0..<4 {
+            guard w > 1e-12 else { return nil }
+            let best = bestHeight(forWidth: w, polygon: clipped, xmin: xmin, xmax: xmax)
+            let h = w / normalizedAspect
+            if best.height >= h - 1e-12,
+               let ca = chord(clipped, at: best.left),
+               let cb = chord(clipped, at: best.left + w) {
+                let bottom = max(ca.lo, cb.lo)
+                let top = min(ca.hi, cb.hi)
+                let corners = [NormalizedPoint(best.left, top),
+                               NormalizedPoint(best.left + w, top),
+                               NormalizedPoint(best.left + w, bottom),
+                               NormalizedPoint(best.left, bottom)]
+                if corners.allSatisfy({ contains(clipped, $0) }) {
+                    return NormalizedRect(x: best.left, y: bottom, width: w, height: h)
+                }
+            }
+            w *= 1 - (attempt == 0 ? 1e-12 : 1e-7)
+        }
+        return nil
+    }
+
+    /// 520's free (unconstrained) answer, kept byte-for-byte.
+    private static func freeRectangle(in polygon: [NormalizedPoint],
+                                      bounds: CropRect) -> NormalizedRect? {
         let clipped = clip(polygon, to: bounds)
         guard clipped.count >= 3, abs(signedArea(clipped)) > 1e-12 else { return nil }
 
@@ -87,6 +172,59 @@ public enum MaxInscribedRect {
             }
         }
         return best
+    }
+
+    // MARK: - 522 · the fixed-ratio maximum of `Hmax(·, w)`
+
+    /// The largest `Hmax(a, w)` over `a`, and the `a` that attains it.
+    ///
+    /// `Hmax(a, w) = min(top(a), top(a+w)) − max(bot(a), bot(a+w))` is piecewise linear in `a`.
+    /// Its breakpoints are the hull vertex x's, those x's shifted by `−w` (where `a + w` crosses a
+    /// vertex), and the crossings of an edge at `a` with an edge at `a + w` (where `min`/`max` swap
+    /// branches or the chosen edge changes inside a slice). A piecewise linear function attains its
+    /// maximum at a breakpoint, so those candidates are exhaustive.
+    private static func bestHeight(forWidth w: Double, polygon: [NormalizedPoint],
+                                   xmin: Double, xmax: Double) -> (height: Double, left: Double) {
+        let highest = xmax - w
+        guard highest >= xmin else { return (-Double.infinity, xmin) }
+        var candidates: [Double] = [xmin, highest]
+        candidates.reserveCapacity(16 + polygon.count * polygon.count)
+        for point in polygon {
+            candidates.append(point.x)
+            candidates.append(point.x - w)
+        }
+        for i in polygon.indices {
+            let a = polygon[i], b = polygon[(i + 1) % polygon.count]
+            let dx = b.x - a.x
+            guard abs(dx) > 1e-15 else { continue }
+            let m1 = (b.y - a.y) / dx
+            let c1 = a.y - m1 * a.x
+            for j in polygon.indices {
+                let c = polygon[j], d = polygon[(j + 1) % polygon.count]
+                let dx2 = d.x - c.x
+                guard abs(dx2) > 1e-15 else { continue }
+                let m2 = (d.y - c.y) / dx2
+                let c2 = c.y - m2 * c.x
+                let denominator = m1 - m2
+                guard abs(denominator) > 1e-12 else { continue }
+                let crossing = (m2 * w + c2 - c1) / denominator
+                if crossing.isFinite { candidates.append(crossing) }
+            }
+        }
+
+        var bestHeight = -Double.infinity
+        var bestLeft = xmin
+        for raw in candidates {
+            let left = min(max(raw, xmin), highest)
+            guard let ca = chord(polygon, at: left),
+                  let cb = chord(polygon, at: left + w) else { continue }
+            let h = min(ca.hi, cb.hi) - max(ca.lo, cb.lo)
+            if h > bestHeight {
+                bestHeight = h
+                bestLeft = left
+            }
+        }
+        return (bestHeight, bestLeft)
     }
 
     // MARK: - the pieces
