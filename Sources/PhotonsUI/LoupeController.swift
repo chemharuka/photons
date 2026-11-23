@@ -304,6 +304,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             /// single-flight — one render at a time, at most one follow-up at the final size — while a
             /// *live* drag (which is the storm) asks for nothing at all.
             case resize
+
+            /// 532 — the spelling `presentRecords` carries, so a sequence can say *which* request a
+            /// frame answered.
+            var label: String {
+                switch self {
+                case .scheduled: return "scheduled"
+                case .view: return "view"
+                case .edit: return "edit"
+                case .resize: return "resize"
+                }
+            }
         }
 
         let kind: Kind
@@ -2511,6 +2522,125 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 只有 `show` / `hold` 两处写入和两个 `*ForTesting` 访问器。先让状态「写得对」，
     /// 让状态机做决定是 P2。
     private var presentation = CanvasPresentation()
+
+    // MARK: 532 — the monotonic present gate (cache frame → target frame, never through 0.5)
+    //
+    // The photo switch has three hops today: the 434 cache frame (full canvas, sharp), then the
+    // first rung the new photo's ladder lands (`.previewScale` = 0.5, upscaled and visibly soft),
+    // then the target rung. The user's 「缓存正常读取 + 变模糊一点点 + 加载真正的屏幕像素」 is the
+    // middle hop: a frame with fewer pixels than the one already on the screen.
+    //
+    // This gate is **one direction only**: within one cache-hit window (same photo, same camera)
+    // a candidate whose `decodeScale` is *below* the frame already on the layer is held back, while
+    // the development it arrived for keeps running. The target frame (or anything at least as sharp)
+    // passes, and so does every frame after a 10 s deadline — a development that never lands must not
+    // freeze the canvas on the cached frame. `enforcesMonotonicPresentScale` is the reverse gate: off
+    // reproduces the 0.5 sandwich, so the acceptance can be shown to go red for the reason it names.
+    struct MonotonicPresentGate {
+        let photo: String
+        let camera: LoupeViewState
+        /// The `decodeScale` of the frame the cache put on the layer.
+        let floorScale: Float
+        let armedAt: CFAbsoluteTime
+        /// The sharpest frame the gate held back, kept for the deadline (10 s) present.
+        var held: (frame: FrameResult, state: LoupeViewState)?
+        var fallback: DispatchWorkItem?
+    }
+
+    private var monotonicGate: MonotonicPresentGate?
+    /// Reverse gate for `CanvasCacheMonotonic532Tests`; `true` in the app.
+    var enforcesMonotonicPresentScale = true
+    /// 532 ③ — the deadline that releases a held frame when the target rung never arrives. A healthy
+    /// 60 MP development is 0.5–3 s on this machine, so 10 s is the number that never turns a slow
+    /// decode into the blur this ticket removes; a development that is genuinely dead (failed,
+    /// cancelled, file gone) still releases the soft frame in bounded time. A var so the fallback
+    /// test does not wait 10 s.
+    var monotonicPresentTimeout: CFAbsoluteTime = LoupeController.monotonicPresentTimeoutDefault
+    static let monotonicPresentTimeoutDefault: CFAbsoluteTime = 10
+    /// Frames held back by the gate (the middle hop 532 removes), and frames the deadline released.
+    public private(set) var monotonicSuppressedPresents = 0
+    public private(set) var monotonicFallbackPresents = 0
+    /// The present sequence `CanvasCacheMonotonic532Tests` asserts on: `(kind, decodeScale,
+    /// fromCanvasCache)` for every frame that actually reached the layer. Capped at 512 so a long
+    /// session cannot grow it without bound; the tests snapshot `count` per switch. (The geometry log
+    /// above is `presentRecords`; this one is about the *rung* each present carried.)
+    public struct FramePresentRecord: Equatable, Sendable {
+        public let photo: String
+        public let kind: String
+        public let decodeScale: Float
+        public let fromCanvasCache: Bool
+    }
+    public private(set) var framePresentLog: [FramePresentRecord] = []
+
+    /// Arm the gate on a canvas-cache present. The floor is the rung the cache answered with — the
+    /// pixels now on the layer.
+    private func armMonotonicPresentGate(photo: String, scale: Float, camera: LoupeViewState) {
+        guard enforcesMonotonicPresentScale, scale > 0 else { return }
+        disarmMonotonicPresentGate()
+        monotonicGate = MonotonicPresentGate(photo: photo, camera: camera, floorScale: scale,
+                                             armedAt: CFAbsoluteTimeGetCurrent(),
+                                             held: nil, fallback: nil)
+    }
+
+    /// Test seam — arm the gate without driving a whole switch (the fallback test's "the target rung
+    /// never returns" window is otherwise indistinguishable from a real one).
+    func armMonotonicPresentGateForTesting(photo: String, scale: Float,
+                                           camera: LoupeViewState = .fit) {
+        armMonotonicPresentGate(photo: photo, scale: scale, camera: camera)
+    }
+
+    /// End the window. A held frame nobody can present any more goes back to the pool it came from.
+    private func disarmMonotonicPresentGate(recycleHeld: Bool = true) {
+        guard let gate = monotonicGate else { return }
+        monotonicGate = nil
+        gate.fallback?.cancel()
+        if recycleHeld, let held = gate.held {
+            OwnedCanvasTexture(texture: held.frame.texture, owner: held.frame.owner)
+                .recycle(on: queue)
+        }
+    }
+
+    /// `true` when this candidate is *softer* than the frame on the layer, in the same window.
+    /// Everything else — a sharper frame, the same rung redrawn, another camera, another photo — is
+    /// allowed through; the gate is one-directional by construction.
+    private func monotonicGateHolds(_ frame: FrameResult, state: LoupeViewState) -> Bool {
+        guard enforcesMonotonicPresentScale, let gate = monotonicGate else { return false }
+        guard CFAbsoluteTimeGetCurrent() - gate.armedAt < monotonicPresentTimeout else {
+            return false
+        }
+        guard frame.photo == gate.photo, state == gate.camera else { return false }
+        return frame.decodeScale < gate.floorScale - 1e-4
+    }
+
+    /// Hold the soft frame and arm the deadline. Replacing a held frame (a second arrival in the same
+    /// window) recycles the one it supersedes instead of leaking it into the graph's pool forever.
+    private func holdForMonotonicGate(_ frame: FrameResult, state: LoupeViewState) {
+        guard var gate = monotonicGate else { return }
+        if let previous = gate.held {
+            OwnedCanvasTexture(texture: previous.frame.texture, owner: previous.frame.owner)
+                .recycle(on: queue)
+        }
+        gate.held = (frame, state)
+        gate.fallback?.cancel()
+        let delay = max(0, monotonicPresentTimeout
+                            - (CFAbsoluteTimeGetCurrent() - gate.armedAt))
+        let photo = gate.photo
+        let item = DispatchWorkItem { [weak self] in
+            self?.monotonicFallbackFired(photo: photo)
+        }
+        gate.fallback = item
+        monotonicGate = gate
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// The target rung never came (a failed / cancelled development, or one still running after the
+    /// deadline). Release the sharpest held frame — the canvas must move on, soft or not.
+    private func monotonicFallbackFired(photo: String) {
+        guard let gate = monotonicGate, gate.photo == photo, let held = gate.held else { return }
+        disarmMonotonicPresentGate(recycleHeld: false)
+        monotonicFallbackPresents += 1
+        present(frame: held.frame, renderMilliseconds: 0, state: held.state, origin: "fallback")
+    }
 
     /// 054: where the photograph sat inside `canvasTexture`, in canvas pixels, and the canvas it was
     /// normalised against. `cancelZoomBridge` re-presents that same texture with `window: .whole`; without
@@ -6732,7 +6862,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                     ? self.canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale))
                     : nil
                 self.present(frame: frame, renderMilliseconds: ms, state: job.state,
-                             storeKey: storeKey)
+                             storeKey: storeKey, origin: job.kind.label)
                 switch job.kind {
                 case .edit:
                     self.editRenderCount += 1
@@ -6931,6 +7061,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // Nothing that was in flight belongs to the camera that is now on screen: a bridge would
         // carry the old picture over the new one, and a held frame is for a photo nobody is looking at.
         cancelZoomBridge()
+        // 532 — a cache-hit window belongs to the photo (and camera) leaving the screen; its held soft
+        // frame must not outlive it.
+        disarmMonotonicPresentGate()
         // The pointer's reading is a pixel of the picture that is going away: clear the row rather
         // than let it keep reporting a brightness nobody is looking at.
         pointerExited()
@@ -8114,7 +8247,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 // 443 — the cache's key is the only thing that knows whose canvas this is; the frame
                 // must carry that photo too, exactly as a rendered frame carries its own.
                 present(frame: cached.frameResult(photo: key.photo), renderMilliseconds: 0,
-                        state: job.state, fromCanvasCache: true, cachePhoto: key.photo)
+                        state: job.state, fromCanvasCache: true, cachePhoto: key.photo,
+                        origin: "cache")
+                // 532 — the frame on the layer is the *full* canvas. From here until the target rung
+                // lands, a 0.5 preview is not allowed to replace it (the user's 「变模糊一点点」).
+                armMonotonicPresentGate(photo: key.photo, scale: Float(predictedScale),
+                                        camera: job.state)
                 if !rendersAfterCanvasCacheHit { return }
             }
         }
@@ -9204,10 +9342,26 @@ public final class LoupeController: NSViewController, HeadroomSource {
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
                          storeKey: CanvasFrameCache.Key? = nil,
                          fromCanvasCache: Bool = false,
-                         cachePhoto: String? = nil) {
+                         cachePhoto: String? = nil,
+                         origin: String = "render") {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
+        }
+        // 532 — **the monotonic resolution gate**, before any work: inside a cache-hit window a frame
+        // with fewer pixels than the one on the layer is held, not drawn. It is released by the target
+        // rung (or anything at least as sharp) or by the 10 s deadline, and only ever when the photo and
+        // camera are the ones the window was armed for. A cache present itself bypasses the gate: it is
+        // what arms it.
+        if !fromCanvasCache {
+            if monotonicGateHolds(frame, state: state) {
+                monotonicSuppressedPresents += 1
+                holdForMonotonicGate(frame, state: state)
+                return
+            }
+            // Any other frame ends the window (the target landed, the camera moved, or the deadline
+            // passed); its held soft frame is no longer needed.
+            disarmMonotonicPresentGate()
         }
         // 440 — the ownership travels **with** the texture. `makeFrame` stamped `.graph(the graph)`;
         // a canvas-cache hit's `frameResult()` carries `.cacheCopy`. Nothing below decides it again.
@@ -9481,6 +9635,16 @@ public final class LoupeController: NSViewController, HeadroomSource {
             secondFrameMilliseconds = renderMilliseconds
         }
         if let caps = frame.capabilities { session?.recordCapabilities(caps) }
+        // 532 — the frame is on the layer: record which frame it was, in order. The sequence is the
+        // acceptance's evidence (cache frame → target frame, with no softer frame in between) and it
+        // is written here, on the one path every present goes through.
+        lastPresentedScale = frame.decodeScale
+        framePresentLog.append(FramePresentRecord(photo: frame.photo, kind: origin,
+                                                  decodeScale: frame.decodeScale,
+                                                  fromCanvasCache: fromCanvasCache))
+        if framePresentLog.count > 512 {
+            framePresentLog.removeFirst(framePresentLog.count - 512)
+        }
         canvasView.metalLayer.setNeedsDisplay()
     }
 
