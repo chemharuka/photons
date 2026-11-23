@@ -802,6 +802,19 @@ public final class CatalogSession {
     }
 
     public func reload() {
+        guard catalog != nil else { return }
+        loadProjection()
+        reconcileSelectionAfterReload()
+    }
+
+    /// The query half of `reload()`: roots, folder tree, albums and the visible projection
+    /// (`assets` = stack tops only, plus `stacksByTopID`).
+    ///
+    /// Split out for 524: a denoise item finishes while the user is looking at the library, and the
+    /// new stack must appear **without** `reload()`'s selection reconciliation moving the user's
+    /// selection onto the product. `reloadKeepingSelection` below runs this half and then writes the
+    /// captured selection back; every other caller still uses `reload()` and gets both halves.
+    private func loadProjection() {
         guard let c = catalog else { return }
         do {
             let loadedRoots: [SourceRoot]
@@ -883,6 +896,11 @@ public final class CatalogSession {
             lastPersistError = "\(error)"
             NSLog("photons: reload failed, keeping the last good tree: \(error)")
         }
+    }
+
+    /// The selection half of `reload()`: drop what the projection no longer shows, hand a dead
+    /// anchor to its successor, and load the anchor's document.
+    private func reconcileSelectionAfterReload() {
         // Drop selections that no longer exist (a reload can follow an import).
         let ids = Set(assets.map(\.id))
         selection.formIntersection(ids)
@@ -900,6 +918,64 @@ public final class CatalogSession {
         if selection.isEmpty, let first = anchorID { selection = [first] }
         // A fresh library (or a new root) can leave `edit` pointing at the previous document; load
         // the anchor's stored document now instead of waiting for the next selection change.
+        if let a = anchorAsset, loadedEditAssetID != a.id { loadEditForAnchor() }
+    }
+
+    /// The four selection fields, captured across a reload that must not move them (524).
+    private struct SelectionSnapshot {
+        let selection: Set<String>
+        let anchorID: String?
+        let selectionBase: String?
+        let rangeFocus: String?
+    }
+
+    /// 524 — a reload for the denoise finish paths: the new stack becomes visible, the user's
+    /// selection does not move.
+    ///
+    /// `reload()` narrows the four selection fields to the **visible projection**. A denoise product
+    /// is a stack top and the photo it was made from becomes a hidden member, so the ids the user
+    /// had selected leave `assets` even though their rows are still in the library. Two things are
+    /// therefore forbidden here: letting `reload()` throw that selection away, and selecting the
+    /// product instead (529 — that is what pulled the foreground away and made later edits land in
+    /// the denoised file). So the projection is queried first and the captured fields are written
+    /// back.
+    ///
+    /// `topByID` handles the single-photo path: the one selected original is drawn as its stack's
+    /// top, so the selection follows that top (visually the same cell) rather than jumping elsewhere.
+    /// An id whose row is **really gone** (deleted / unlinked) keeps `reload()`'s own fallback; this
+    /// never invents a selection.
+    private func reloadKeepingSelection(topByID: [String: String] = [:]) {
+        guard catalog != nil else { return }
+        let snapshot = SelectionSnapshot(selection: selection, anchorID: anchorID,
+                                         selectionBase: selectionBase, rangeFocus: rangeFocus)
+        let started = Date().timeIntervalSinceReferenceDate
+        loadProjection()
+        lastDenoiseItemReloadSeconds = Date().timeIntervalSinceReferenceDate - started
+        // The empty start is the documented exception: there is nothing to keep, and `reload()`'s
+        // own fallback (the first visible row, which may be the new product) is allowed to land.
+        guard !snapshot.selection.isEmpty else {
+            reconcileSelectionAfterReload()
+            return
+        }
+        guard let catalog else { return }
+        func inLibrary(_ id: String) -> Bool { (try? catalog.asset(id: id)) != nil }
+        guard snapshot.selection.allSatisfy(inLibrary) else {
+            // A row really disappeared while the batch ran: answer exactly like every other reload.
+            reconcileSelectionAfterReload()
+            return
+        }
+        func followed(_ id: String?) -> String? {
+            guard let id, inLibrary(id) else { return nil }
+            return topByID[id] ?? id
+        }
+        selection = Set(snapshot.selection.compactMap(followed))
+        if let anchor = snapshot.anchorID { anchorID = followed(anchor) }
+        selectionBase = followed(snapshot.selectionBase)
+        rangeFocus = followed(snapshot.rangeFocus)
+        // Do not switch the open document. A restored anchor that the projection hides (the batch
+        // case) must leave `edit` / `loadedEditAssetID` exactly where the user had them — loading the
+        // fallback anchor here is what let a pending edit reach the product. Only the single path's
+        // visible stack top needs its document loaded.
         if let a = anchorAsset, loadedEditAssetID != a.id { loadEditForAnchor() }
     }
 
@@ -1421,6 +1497,10 @@ public final class CatalogSession {
     /// 起了几次 / 完成了几次。测试等第二个数字，不靠 sleep。
     public private(set) var denoiseRunCount = 0
     public private(set) var denoiseCompletionCount = 0
+
+    /// 524 — 上一次「一项完成就刷新」那次 `loadProjection()` 的实测秒数。
+    /// 派单要求把这个成本量出来：若单次超过 16 ms 才考虑增量刷新。只读接缝，行为不被它影响。
+    public private(set) var lastDenoiseItemReloadSeconds: TimeInterval = 0
 
     /// worker 进入阻塞体时看到的值。`nil` = 还没跑过；`false` 意味着跑在主线程（§3 ⑥ 要抓的 bug）。
     public private(set) var denoiseRanOffMain: Bool?
@@ -2043,7 +2123,6 @@ public final class CatalogSession {
         var completed = 0
         var failures = 0
         var successes = 0
-        var lastOutputAssetID: String?
         var cancelled = false
     }
 
@@ -2241,9 +2320,12 @@ public final class CatalogSession {
         }
     }
 
-    /// One item is done. Book-keeping is the single path's, minus stopping `isDenoiseRunning` and
-    /// minus selecting each product: the batch reloads once at the end (with 40 photos, selecting
-    /// each intermediate stack top would fight the user's own selection 40 times).
+    /// One item is done. Book-keeping is the single path's, minus stopping `isDenoiseRunning`.
+    ///
+    /// 524 — a successful item refreshes the library **now**, so its new stack is on screen while
+    /// the rest of the batch keeps running (the user's ask: 「完成一张堆叠一张」). The refresh is
+    /// `reloadKeepingSelection`, not `selectOnly` of the product: with 40 photos, putting each
+    /// intermediate product in front would fight the user's own selection 40 times (529).
     private func finishDenoiseBatchItem(_ run: DenoiseRun, itemIndex: Int, taskID: UUID) {
         guard var batch = denoiseBatch, batch.taskID == taskID,
               itemIndex == batch.completed, itemIndex < batch.nextIndex else { return }
@@ -2251,7 +2333,6 @@ public final class CatalogSession {
 
         batch.completed += 1
         if succeeded { batch.successes += 1 } else { batch.failures += 1 }
-        if succeeded, let assetID = run.assetID { batch.lastOutputAssetID = assetID }
         denoiseBatch = batch
 
         denoiseCompletionCount += 1
@@ -2285,6 +2366,10 @@ public final class CatalogSession {
         }
         backgroundTasks.advance(id: taskID, completed: batch.completed)
 
+        // 524 — 每张完成就刷新一次投影：堆叠已在后台那一半建好，这里只让它立刻可见。
+        // 选择/锚点/范围基点由这次刷新原样放回，绝不选产物（529）。
+        if succeeded { reloadKeepingSelection() }
+
         if batch.cancelled {
             // The item that was running when 取消 arrived has just been consumed; no new item starts.
             finishDenoiseBatch()
@@ -2310,12 +2395,8 @@ public final class CatalogSession {
                                    state: batch.successes > 0 ? .finished : .failed,
                                    failureCount: batch.failures)
         }
-        if batch.successes > 0 {
-            reload()
-            if let last = batch.lastOutputAssetID, assets.contains(where: { $0.id == last }) {
-                selectOnly(last)
-            }
-        }
+        // 524 — no closing reload and no `selectOnly(last)`: every successful item already refreshed
+        // the projection when it finished, and the batch must not move the user's selection (529).
         // 510 — the batch's row is closed; whoever is waiting behind it starts now.
         pumpDenoiseQueue()
     }
@@ -2536,9 +2617,17 @@ public final class CatalogSession {
         metadataRevision &+= 1
         lastStackError = nil
         lastStackAffectedRows = run.stackCount
-        reload()
-        // 产物是置顶，也就是投影里这一行代表的那张 —— 选中它，用户立刻看到降噪结果。
-        if assets.contains(where: { $0.id == assetID }) { selectOnly(assetID) }
+        // 524 — 原图变成堆叠成员、格子上画的是产物（顶点）。用户选中的 id 是**原图**，所以要让
+        // 选择跟着它现在代表的那一格走：把这条堆叠的全部成员都映射到顶点。没有堆叠时
+        // （`stackTopID` 为 nil）产物自己就是那一行。选择不空时由 helper 原样放回，空选择才走
+        // reload 的兜底。不许跳到别的照片，也不许切模式 / 激活窗口。
+        var topByID: [String: String] = [assetID: run.stackTopID ?? assetID]
+        if let top = run.stackTopID, let catalog,
+           let stackID = (try? catalog.stackID(ofAsset: top)) ?? nil,
+           let members = try? catalog.stackMembers(stackID: stackID) {
+            for member in members { topByID[member.id] = top }
+        }
+        reloadKeepingSelection(topByID: topByID)
         if let output = run.output {
             lastDenoiseReport = DenoiseReport(output: output,
                                               source: run.source ?? output,
