@@ -256,10 +256,10 @@ public final class TopBarView: NSView, NSPopoverDelegate {
         }
     }
 
-    /// 510 — 「清空队列」 on the panel. The header owns the store, the session owns the queue, so
-    /// the workspace hands the action in here and the header forwards it to the popover.
-    public var onClearDenoiseQueue: (() -> Void)? {
-        didSet { backgroundTasksPopoverController.onClearDenoiseQueue = onClearDenoiseQueue }
+    /// 526 — 「清空已完成」 on the panel. The header owns the store, the session owns the producer,
+    /// so the workspace hands the clear action in here and the header forwards it to the popover.
+    public var onClearFinished: (() -> Void)? {
+        didSet { backgroundTasksPopoverController.onClearFinished = onClearFinished }
     }
     private lazy var backgroundTasksPopoverController = BackgroundTasksPopover(store: backgroundTaskStore)
     private let backgroundTasksPopover = NSPopover()
@@ -761,9 +761,10 @@ public final class WorkspaceRootView: NSView {
             fileURLForAsset: { [weak session] asset in
                 session?.fileURL(for: asset)
             })
-        // 510 — the panel's 「清空队列」 drops waiting requests only; the executing one keeps going.
-        self.topBar.onClearDenoiseQueue = { [weak session] in
-            session?.clearDenoiseQueue()
+        // 526 — the panel's 「清空已完成」 drops terminal rows only; running/queued keep going. The
+        // workspace connects it straight to the live store, which is the same object the header draws.
+        self.topBar.onClearFinished = { [weak session] in
+            session?.backgroundTasks.clearFinished()
         }
         self.browserPane = browserPane
         self.gridController = gridController
