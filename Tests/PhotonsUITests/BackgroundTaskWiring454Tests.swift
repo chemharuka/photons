@@ -190,7 +190,7 @@ final class BackgroundTaskWiring454Tests: XCTestCase {
         print("① 降噪任务 title=\(task.title) state=\(task.state.rawValue) "
               + "\(task.completed)/\(task.total) error=\(session.lastDenoiseError ?? "nil")")
         XCTAssertEqual(task.kind, .denoise)
-        XCTAssertEqual(task.title, asset.filename)
+        XCTAssertEqual(task.title, "降噪 · IMG_0000.dng")
         XCTAssertEqual(task.total, 1)
         XCTAssertEqual(task.state, .finished)
         XCTAssertEqual(task.completed, 1)
