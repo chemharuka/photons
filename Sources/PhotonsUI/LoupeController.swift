@@ -490,6 +490,49 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// (命中只决定先看到什么，不决定做不做工作).
     var rendersAfterCanvasCacheHit = true
 
+    /// 535 — why a frame that reached the present path did not enter the window cache.
+    ///
+    /// The user's report was **intermittent** (「多试几次后发现有缓存」), so a boolean is not
+    /// evidence: every attempt names the one component that stopped it. The first four are the
+    /// settledness/quality gates the writer already had; the last four are `present`'s early exits,
+    /// where the frame is not drawn at all and therefore had nowhere to be copied from.
+    public enum CanvasCacheStoreSkipReason: String, CaseIterable, Sendable, Hashable {
+        /// `.edit` (a slider drag), or a `.view` that is neither cacheable nor the settled camera.
+        case notSettledKind
+        /// The frame on screen is a coarser rung than the job's target.
+        case belowTarget
+        /// A 细节 drag's preview rung: by design not the document's settled canvas.
+        case previewTarget
+        /// The zoom bridge is still moving and holds the frame for its end.
+        case heldByZoomBridge
+        /// 532's monotonic gate held a softer frame than the one already on screen.
+        case heldByMonotonicGate
+        /// A live resize/gesture froze the canvas.
+        case heldByFrozenCanvas
+        /// The frame was rendered for another canvas and drawn frozen/stretched.
+        case staleCanvas
+        /// The GPU copy failed (no device/queue/buffer or a refused blit).
+        case copyFailed
+    }
+
+    /// 535 — the last refusal, with the facts the user's reproduction needs to attribute it.
+    public struct CanvasCacheStoreSkip: Equatable, Sendable {
+        public let reason: CanvasCacheStoreSkipReason
+        public let kind: String
+        public let decodeScale: Float
+        public let target: Float
+        public let camera: String
+    }
+
+    /// 535 — one count per attempt that reached a real frame (cache-hit presents are not attempts).
+    public private(set) var canvasCacheStoreAttempts = 0
+    /// 535 — refusals by cause. A dictionary so a test can say `skips[.belowTarget] == 0`.
+    public private(set) var canvasCacheStoreSkips: [CanvasCacheStoreSkipReason: Int] = [:]
+    /// 535 — the most recent refusal, for the "which one blocked it this time" line.
+    public private(set) var canvasCacheLastSkip: CanvasCacheStoreSkip?
+    /// 535 — `CanvasFrameCache.stores` under the name the acceptance uses.
+    public var canvasCacheStores: Int { canvasFrameCache.stores }
+
     /// The decoded buffers of the photo on screen, keyed by rung (§11.10). A single `(key, buffer)`
     /// slot here is what made `fit → 1:1 → fit → 1:1` develop the same 60 MP file three times: the
     /// preview rung and the full rung evicted each other, so every visit to either paid ImageIO
@@ -2528,7 +2571,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// geometry is at the target. Not a dropped frame — the generation gate upstream has already
     /// decided it is the current one.
     private var pendingFrame: (frame: FrameResult, canvas: OwnedCanvasTexture, milliseconds: Double,
-                               state: LoupeViewState)?
+                               state: LoupeViewState, storeKey: CanvasFrameCache.Key?,
+                               attempt: CanvasCacheStoreAttempt?)?
     /// Which bridge the completion timer belongs to: a superseded one must present nothing.
     private var zoomBridgeSerial = 0
     /// The canvas size the bridge was armed against; a resize invalidates it.
@@ -2797,6 +2841,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
             pending.canvas.recycle(on: queue)
             pendingFrame = nil
             zoomBridgePendingDrops += 1
+            // 535 — this frame never reached the layer, so its write is genuinely lost (a newer
+            // camera's render replaces it). Name that, so a skipped write is never silent.
+            if let attempt = pending.attempt, attempt.reason == nil {
+                recordCanvasCacheStoreSkip(.heldByZoomBridge, attempt)
+            }
         }
         zoomBridge = bridge
         zoomBridgeArmedCount += 1
@@ -2890,7 +2939,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         if let pending = pendingFrame {
             pendingFrame = nil
-            present(frame: pending.frame, renderMilliseconds: pending.milliseconds, state: pending.state)
+            // 535 — the held frame is reaching the layer now, so this is where its cache write
+            // belongs. `pending.attempt` is not passed: it was already counted when the frame was
+            // first offered to `present`.
+            present(frame: pending.frame, renderMilliseconds: pending.milliseconds,
+                    state: pending.state, storeKey: pending.storeKey)
             return
         }
         // Nothing waiting: sit on the stop. (The ticker normally got there already; this covers Reduce
@@ -3047,6 +3100,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if let pending = pendingFrame {
             pending.canvas.recycle(on: queue)
             zoomBridgePendingDrops += 1
+            // 535 — dropped before it could reach the layer: the write is lost with the frame.
+            if let attempt = pending.attempt, attempt.reason == nil {
+                recordCanvasCacheStoreSkip(.heldByZoomBridge, attempt)
+            }
         }
         pendingFrame = nil
         zoomBridgeSerial += 1
@@ -6882,13 +6939,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 // 434 — a settled frame for the whole document goes into the window canvas cache.
                 // A pan (`.view` without `cacheable`), a slider drag (`.edit`) and a preview rung
                 // (detail drag / a 0.5 rung on the way to the full one) do not.
-                let settledKind = job.kind == .scheduled || job.kind == .resize || job.cacheable
-                let atTarget = frame.decodeScale >= job.target - 1e-4
-                let storeKey: CanvasFrameCache.Key? = (settledKind && atTarget && !job.previewTarget)
-                    ? self.canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale))
-                    : nil
+                //
+                // 535 — the decision is now one named value, so a frame that did not make it says
+                // *why* (`canvasCacheLastSkip`) instead of leaving the user's intermittent
+                // 「多试几次才有缓存」 unexplained.
+                let attempt = self.canvasCacheStoreAttempt(for: job, frame: frame)
                 self.present(frame: frame, renderMilliseconds: ms, state: job.state,
-                             storeKey: storeKey, origin: job.kind.label)
+                             storeKey: attempt.key, storeAttempt: attempt,
+                             origin: job.kind.label)
                 switch job.kind {
                 case .edit:
                     self.editRenderCount += 1
@@ -8443,6 +8501,73 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: 434 — the window canvas cache's wiring
 
+    /// 535 — one present's relationship to the window cache, decided on the main thread.
+    ///
+    /// `reason` is non-nil when the frame is entitled to reach the layer but not entitled to be
+    /// kept; `key` is the key it would have been stored under, and is what a held frame needs to
+    /// keep so the write can happen when it finally reaches the layer.
+    struct CanvasCacheStoreAttempt {
+        let kind: String
+        let decodeScale: Float
+        let target: Float
+        let camera: String
+        let reason: CanvasCacheStoreSkipReason?
+        let key: CanvasFrameCache.Key?
+    }
+
+    /// 535 — is this `.view` job the **settled** camera? A pan/zoom tick asks for a frame at the
+    /// camera it snapshotted; only the one whose camera is still the controller's and that has no
+    /// newer view request waiting is the hand-stopped frame the user means by 「落定」. Deciding
+    /// this at present time is what keeps a drag's intermediate frames out of the ten slots
+    /// without adding a render to announce the end of the gesture.
+    private func isSettledViewportJob(_ job: RenderJob) -> Bool {
+        guard job.kind == .view, !job.cacheable else { return false }
+        guard job.state == viewState else { return false }
+        return !viewPending
+    }
+
+    /// 434/535 — what this frame is allowed to contribute to the window cache.
+    ///
+    /// 535 §5 — **the frame on screen is the cache entry**, whatever rung it was rendered from.
+    /// Requiring `decodeScale >= target` made the 0.5 frame wait for the whole 60 MP development:
+    /// the screen frame is viewport-sized and ready long before the whole picture is, so a switch
+    /// that happened in that window wrote nothing (「多试几次后发现有缓存」). The key already
+    /// carries the rung, so a 0.5 entry describes exactly its own pixels.
+    ///
+    /// The two noise exclusions stay: a slider drag (`.edit`) and a 细节 preview rung
+    /// (`previewTarget`) are streams, not the settled canvas. `.view` is eligible when it is
+    /// cacheable (a rung arrival) or when it is the settled camera — no new request is made for
+    /// either; the write is a by-product of the frame that was going to be drawn anyway.
+    private func canvasCacheStoreAttempt(for job: RenderJob,
+                                         frame: FrameResult) -> CanvasCacheStoreAttempt {
+        let camera = Self.canvasCacheCameraToken(job.state)
+        let reason: CanvasCacheStoreSkipReason?
+        if job.previewTarget {
+            reason = .previewTarget
+        } else if job.kind == .edit
+                    || !(job.kind == .scheduled || job.kind == .resize || job.cacheable
+                         || isSettledViewportJob(job)) {
+            reason = .notSettledKind
+        } else {
+            reason = nil
+        }
+        let key = reason == nil
+            ? canvasFrameCacheKey(for: job, decodeScale: Double(frame.decodeScale))
+            : nil
+        return CanvasCacheStoreAttempt(kind: job.kind.label, decodeScale: frame.decodeScale,
+                                       target: job.target, camera: camera, reason: reason, key: key)
+    }
+
+    /// 535 — one refusal, counted and named. Called once per attempt, on the main thread.
+    private func recordCanvasCacheStoreSkip(_ reason: CanvasCacheStoreSkipReason,
+                                            _ attempt: CanvasCacheStoreAttempt) {
+        canvasCacheStoreSkips[reason, default: 0] += 1
+        canvasCacheLastSkip = CanvasCacheStoreSkip(reason: reason, kind: attempt.kind,
+                                                   decodeScale: attempt.decodeScale,
+                                                   target: attempt.target,
+                                                   camera: attempt.camera)
+    }
+
     /// The rung this job will render from *if it renders now*: the biggest resident rung at or below
     /// the target. Before the first development of a photo it is the target itself — the value the
     /// stored key will have once that development lands.
@@ -9502,12 +9627,22 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     private func present(frame: FrameResult, renderMilliseconds: Double, state: LoupeViewState,
                          storeKey: CanvasFrameCache.Key? = nil,
+                         storeAttempt: CanvasCacheStoreAttempt? = nil,
                          fromCanvasCache: Bool = false,
                          cachePhoto: String? = nil,
                          origin: String = "render") {
         guard let presenter else {
             lastPresentError = "no Metal presenter"
             return
+        }
+        // 535 — this frame is on its way to the layer, so it is one store attempt. A refusal that
+        // the request already decided (edit drag / preview rung / coarser rung) is counted here,
+        // once; the early exits below count themselves only when the frame was otherwise eligible.
+        if let storeAttempt {
+            canvasCacheStoreAttempts += 1
+            if let reason = storeAttempt.reason {
+                recordCanvasCacheStoreSkip(reason, storeAttempt)
+            }
         }
         // 532 — **the monotonic resolution gate**, before any work: inside a cache-hit window a frame
         // with fewer pixels than the one on the layer is held, not drawn. It is released by the target
@@ -9517,6 +9652,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if !fromCanvasCache {
             if monotonicGateHolds(frame, state: state) {
                 monotonicSuppressedPresents += 1
+                // 535 — an otherwise-storable frame was held by 532's gate: name it, but do not
+                // keep its key. The frame already on the layer is sharper, and storing this one
+                // would replace that entry (the soft identity is the same).
+                if let storeAttempt, storeAttempt.reason == nil {
+                    recordCanvasCacheStoreSkip(.heldByMonotonicGate, storeAttempt)
+                }
                 holdForMonotonicGate(frame, state: state)
                 return
             }
@@ -9561,7 +9702,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 if old.state != state { zoomBridgePendingDrops += 1 }
                 old.canvas.recycle(on: queue)
             }
-            pendingFrame = (frame, frameCanvas, renderMilliseconds, state)
+            pendingFrame = (frame, frameCanvas, renderMilliseconds, state, storeKey: storeKey,
+                            attempt: storeAttempt)
             zoomBridgeCoveredPresents += 1
             return
         }
@@ -9634,6 +9776,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if !forceStaleCanvasPresent, isCanvasGeometryFrozen, frozenFrame != nil {
             framesHeldDuringGesture += 1
             frameCanvas.recycle(on: queue)
+            // 535 — the hand is still moving; the frame is dropped before the layer, so there is
+            // nothing to copy. The release's own frame will make a fresh attempt.
+            if let storeAttempt, storeAttempt.reason == nil {
+                recordCanvasCacheStoreSkip(.heldByFrozenCanvas, storeAttempt)
+            }
             return
         }
         // 066's stale-canvas rule, kept (067 does not make it unnecessary): a frame rendered for another
@@ -9648,7 +9795,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // this canvas is requested on top; only if one can be made, since re-requesting the same canvas
         // would be a loop.
         let staleCanvas = !forceStaleCanvasPresent && canvas != frame.canvas
-        if staleCanvas { canvasMismatchDrops += 1 }
+        if staleCanvas {
+            canvasMismatchDrops += 1
+            // 535 — a stretched redraw of another canvas' pixels is not this canvas' frame.
+            if let storeAttempt, storeAttempt.reason == nil {
+                recordCanvasCacheStoreSkip(.staleCanvas, storeAttempt)
+            }
+        }
         // The frame that is about to be replaced: it stays out of the render pool until this one's
         // drawable is committed (the bridge may still be sampling it), and is recycled then.
         let replaced = canvasTexture
@@ -9778,9 +9931,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         recordMeasurements(frame)
         // 434 — the frame is on the layer and this is a settled canvas: keep a copy. A stale-canvas
         // frozen present is a stretched redraw, not this canvas' pixels, so it is never stored.
-        if let storeKey, !staleCanvas, !fromCanvasCache,
-           canvasFrameCache.store(frame, key: storeKey) {
-            settledFramePresents += 1
+        if !fromCanvasCache, !staleCanvas, let key = storeKey ?? storeAttempt?.key {
+            if canvasFrameCache.store(frame, key: key) {
+                settledFramePresents += 1
+            } else if let storeAttempt {
+                recordCanvasCacheStoreSkip(.copyFailed, storeAttempt)
+            }
         }
         lastTimings = FrameTimings(decode: frame.decodeMilliseconds,
                                    render: frame.renderMilliseconds,
