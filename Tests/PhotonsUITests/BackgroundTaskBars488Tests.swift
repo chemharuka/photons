@@ -105,9 +105,10 @@ final class BackgroundTaskBars488Tests: XCTestCase {
     // MARK: - ③ three tasks: vertical 3 pt, centred, a 0 % line is all grey
 
     /// 510 — the third line used to be a `.queued` task (488 drew it as a grey line). 510 puts queued
-    /// requests in the **panel** only (`「排队中（前面还剩 N 个）」`) and keeps the header for
-    /// 「正在执行的那条 + 已完成未过期的」, so the grey line here is now a running task at 0/5 —
-    /// the geometry and the all-grey claim are unchanged, the membership rule is asserted at the end.
+    /// requests in the **panel** only (the row reads 「排队中」 since the 2026-11-23 wording change)
+    /// and keeps the header for 「正在执行的那条 + 已完成未过期的」, so the grey line here is now a
+    /// running task at 0/5 — the geometry and the all-grey claim are unchanged, the membership rule
+    /// is asserted at the end.
     func testThreeTasksStackThreePointsApartCentredWithQueuedAllGrey() {
         let store = BackgroundTaskStore()
         let first = store.begin(BackgroundTask(kind: .denoise, title: "降噪 40 张", total: 40,
@@ -142,7 +143,7 @@ final class BackgroundTaskBars488Tests: XCTestCase {
               + "blue=\(bars.blueFractionsForTesting.map { String(format: "%.2f", $0) })")
 
         // 510 — a **queued** request draws no header line at all: it lives in the panel, where its
-        // text can say 「排队中（前面还剩 N 个）」. This also keeps the four slots for real progress.
+        // row reads 「排队中」. This also keeps the four slots for real progress.
         let queued = store.begin(BackgroundTask(kind: .denoise, title: "排队中", total: 5,
                                                 startedAt: Date(timeIntervalSince1970: 4),
                                                 state: .queued,

@@ -1987,6 +1987,8 @@ public final class CatalogSession {
     }
 
     /// 队里每一行的「前面还剩几个」。正在跑的那个算 1 个 —— 所以队头读数是 1，不是 0。
+    /// 「口径修正（覆盖 510 §④）」— 面板行现在只写「排队中」，这个数字只在队列簿记里保持正确
+    /// （`setQueuedAhead` / 510 的断言仍在读它），不再出现在界面上。
     private func refreshDenoiseQueueRows() {
         let running = isDenoiseRunning ? 1 : 0
         for (index, request) in pendingDenoiseRequests.enumerated() {

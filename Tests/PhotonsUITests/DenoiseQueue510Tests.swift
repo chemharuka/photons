@@ -324,9 +324,12 @@ final class DenoiseQueue510Tests: XCTestCase {
         XCTAssertEqual(gate.peakConcurrency, 1)
     }
 
-    // MARK: - ④ 面板行文本「排队中（前面还剩 N 个）」；顶栏条只画执行中/已完成的
+    // MARK: - ④ 面板行文本「排队中」；顶栏条只画执行中/已完成的
 
-    func testPanelShowsQueuePositionAndTopBarSkipsQueued() throws {
+    /// 「口径修正（覆盖 510 §④）」— owner's 2026-11-23 wording: a waiting row says only 「排队中」.
+    /// The 510 parenthetical 「（前面还剩 N 个）」 was clipped by the row's text width, so the
+    /// structural assertion is now «the row ends with 排队中 and carries no queue-position text».
+    func testPanelShowsQueuedStateAndTopBarSkipsQueued() throws {
         let fixture = try makeSession(dngCount: 3)
         let session = fixture.session
         try installNLMFModel(on: session)
@@ -348,10 +351,14 @@ final class DenoiseQueue510Tests: XCTestCase {
         let allRows = (0..<session.backgroundTasks.displayTasks.count)
             .compactMap { panel.rowTextForTesting(at: $0) }
         print("④ 面板行：\(allRows)")
-        XCTAssertTrue(allRows.contains { $0.contains("排队中（前面还剩 1 个）") },
-                      "队头那行必须写「前面还剩 1 个」（正在跑的那个算 1）")
-        XCTAssertTrue(allRows.contains { $0.contains("排队中（前面还剩 2 个）") },
-                      "第二个排队项写「前面还剩 2 个」")
+        let queuedRows = allRows.filter { $0.contains("排队中") }
+        XCTAssertEqual(queuedRows.count, 2, "两条排队项各占一行")
+        for row in queuedRows {
+            XCTAssertTrue(row.hasSuffix("排队中"),
+                          "排队那行的状态就是「排队中」两个字（口径修正 2026-11-23）：\(row)")
+            XCTAssertFalse(row.contains("前面还剩"),
+                           "队列位置不再写进行文本（会被截断）：\(row)")
+        }
 
         // 顶栏：排队项不画条，只有正在执行的那一条。
         let bars = BackgroundTaskBars()

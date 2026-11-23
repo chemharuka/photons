@@ -53,8 +53,9 @@ public struct BackgroundTask: Identifiable, Equatable, Sendable {
     public var state: State
     public var failureCount: Int
     /// 510 — how many requests still have to finish before this one may start. Only meaningful
-    /// while `state == .queued`; the panel reads it as 「排队中（前面还剩 N 个）」. A running row
-    /// keeps whatever value it had — the panel never draws it once the state is `.running`.
+    /// while `state == .queued`. 「口径修正（覆盖 510 §④）」— the panel no longer draws this number:
+    /// a waiting row says only 「排队中」 (the parenthetical was clipped). The value stays because
+    /// the session's queue bookkeeping and its tests still assert the order it encodes.
     public var queuedAhead: Int?
 
     public init(id: UUID = UUID(),

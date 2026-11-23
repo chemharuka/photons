@@ -438,11 +438,12 @@ private final class BackgroundTaskRowView: NSTableCellView {
             let success = max(0, task.total - task.failureCount)
             text += " · 成功 \(success) / 失败 \(task.failureCount)"
         case .queued:
-            // 510 — a waiting request says where it stands. `queuedAhead` counts the running
-            // request (1) plus every request queued before it, so the head of the queue reads
-            // 「前面还剩 1 个」 while another request is executing.
-            text += " · " + Loc.t("排队中（前面还剩 {0} 个）",
-                                  String(describing: (task.queuedAhead ?? 0)))
+            // 「口径修正（覆盖 510 §④）」— the owner's 2026-11-23 wording: a waiting row says only
+            // 「排队中」. The 510 form 「排队中（前面还剩 N 个）」 ran past the row's text width and
+            // was clipped mid-parenthesis (「排队中，前面还剩……」), so the count is no longer drawn
+            // here. `queuedAhead` stays on the value type and in the session's bookkeeping — the
+            // panel is just not a reader of it any more.
+            text += " · " + Loc.t("排队中")
         case .running:
             break
         }
