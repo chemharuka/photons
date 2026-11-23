@@ -139,6 +139,18 @@ public struct NLMFDenoiseJob: Sendable {
     ///   is what makes them look bright. 0.05–0.25 moves 4 % of that frame's gold
     ///   crop while lifting the bright crop of an outdoor frame from 8.8 % to 21 %.
     ///   On both, everything at or below 0.05 keeps its blend weight bit for bit.
+    /// - `shadowTaper 0.50 / 0.002–0.02`: the mirror at the floor. Below raw 0.002
+    ///   the blend keeps `strength·0.5`, and at or above 0.02 it is untouched — bit
+    ///   for bit, so nothing above the knee moves.
+    ///
+    ///   Why the floor needs it: measured in the mosaic domain on six SL3 frames,
+    ///   every one keeps only 15–26 % of its block HF below x≈0.01 and 60–91 %
+    ///   above 0.05. L1030479 puts 79 % of its area in that bottom bin, and the
+    ///   lever there is the weight, not σ — dropping the blend 0.766→0.40 restores
+    ///   26 %→61 % of the HF, halving σ buys 26 %→28 %. On that frame the +7 EV
+    ///   render (each file with its own auto-black offset) goes from correlation
+    ///   0.71 to 0.94 in the carved stone, at the cost of the grain that *is* the
+    ///   picture at that signal level.
     public func options(modelURL: URL) -> NLMFDenoiseOptions {
         var o = NLMFDenoiseOptions(modelURL: modelURL)
         o.strength = nil
@@ -148,6 +160,9 @@ public struct NLMFDenoiseJob: Sendable {
         o.highlightTaper = 0.18
         o.taperLow = 0.05
         o.taperHigh = 0.25
+        o.shadowTaper = 0.50
+        o.shadowLow = 0.002
+        o.shadowHigh = 0.02
         return o
     }
 
