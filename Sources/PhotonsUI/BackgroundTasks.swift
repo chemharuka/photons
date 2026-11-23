@@ -315,12 +315,18 @@ public final class BackgroundTaskStore {
         cancelActions.removeValue(forKey: id)
     }
 
-    /// Remove every terminal task (finished, cancelled, failed); in-flight tasks stay.
-    public func clearFinished() {
+    /// 526 — 「清空已完成」: remove every terminal task (finished / cancelled / failed) and return
+    /// how many went. In-flight tasks (`running` / `queued`) are never touched, so the executing
+    /// request keeps its row, its progress and its cancel handle.
+    @discardableResult
+    public func clearFinished() -> Int {
+        let removed = tasks.reduce(0) { $0 + ($1.state.isTerminal ? 1 : 0) }
+        guard removed > 0 else { return 0 }
         tasks.removeAll { $0.state.isTerminal }
         pruneCancelActions()
         // 504 — the earliest deadline may have belonged to a row just removed.
         rescheduleExpiryTimer()
+        return removed
     }
 
     /// `8/40` — the spelling the header row uses. Pure: reads only the value it is given.
