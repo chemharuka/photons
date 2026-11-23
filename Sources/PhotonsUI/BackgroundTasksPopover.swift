@@ -430,7 +430,15 @@ private final class BackgroundTaskRowView: NSTableCellView {
                    onCancel: (() -> Void)?,
                    thumbnailLoader: @escaping ThumbnailLoader) {
         self.onCancel = onCancel
-        var text = "\(task.title) · \(BackgroundTaskStore.countText(for: task))"
+        // 「口径修正（覆盖 510 §④）」— the owner's 2026-11-23 wording, two steps:
+        // ① a waiting row says only 「排队中」 (the 510 form 「排队中（前面还剩 N 个）」 ran past the
+        //    row's text width and was clipped mid-parenthesis, 「排队中，前面还剩……」);
+        // ② it shows the request's **张数** instead of 「0/N」 progress, which is always zero while
+        //    waiting: 「文件名 · 3 张 · 排队中」. `queuedAhead` stays on the value type and in the
+        //    session's bookkeeping — the panel is just not a reader of it any more.
+        var text = task.state == .queued
+            ? "\(task.title) · \(BackgroundTaskStore.tallyText(for: task))"
+            : "\(task.title) · \(BackgroundTaskStore.countText(for: task))"
         switch task.state {
         case .cancelled:
             text += " · \(Loc.t("已取消"))"
@@ -438,11 +446,6 @@ private final class BackgroundTaskRowView: NSTableCellView {
             let success = max(0, task.total - task.failureCount)
             text += " · 成功 \(success) / 失败 \(task.failureCount)"
         case .queued:
-            // 「口径修正（覆盖 510 §④）」— the owner's 2026-11-23 wording: a waiting row says only
-            // 「排队中」. The 510 form 「排队中（前面还剩 N 个）」 ran past the row's text width and
-            // was clipped mid-parenthesis (「排队中，前面还剩……」), so the count is no longer drawn
-            // here. `queuedAhead` stays on the value type and in the session's bookkeeping — the
-            // panel is just not a reader of it any more.
             text += " · " + Loc.t("排队中")
         case .running:
             break

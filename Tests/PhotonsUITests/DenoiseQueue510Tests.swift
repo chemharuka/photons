@@ -354,10 +354,12 @@ final class DenoiseQueue510Tests: XCTestCase {
         let queuedRows = allRows.filter { $0.contains("排队中") }
         XCTAssertEqual(queuedRows.count, 2, "两条排队项各占一行")
         for row in queuedRows {
-            XCTAssertTrue(row.hasSuffix("排队中"),
-                          "排队那行的状态就是「排队中」两个字（口径修正 2026-11-23）：\(row)")
+            XCTAssertTrue(row.hasSuffix("· 1 张 · 排队中"),
+                          "排队行读作「文件名 · 张数 · 排队中」（口径修正 2026-11-23）：\(row)")
             XCTAssertFalse(row.contains("前面还剩"),
                            "队列位置不再写进行文本（会被截断）：\(row)")
+            XCTAssertFalse(row.contains("0/1"),
+                           "排队行不写进度（永远是 0/N），写张数：\(row)")
         }
 
         // 顶栏：排队项不画条，只有正在执行的那一条。

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PhotonsLocalization
 
 /// 454 P1 — the value type behind 顶栏「排序 | 后台」 and the future background-task panel.
 ///
@@ -283,6 +284,13 @@ public final class BackgroundTaskStore {
     /// `8/40` — the spelling the header row uses. Pure: reads only the value it is given.
     public nonisolated static func countText(for task: BackgroundTask) -> String {
         "\(task.completed)/\(task.total)"
+    }
+
+    /// `3 张` — 「口径修正（覆盖 510 §④）」2026-11-23: a **waiting** row shows how many photos the
+    /// request covers instead of its progress, which is `0/N` for the whole time it waits. Pure,
+    /// like `countText`；`countText` keeps its meaning for every other state.
+    public nonisolated static func tallyText(for task: BackgroundTask) -> String {
+        Loc.t("{0} 张", String(describing: task.total))
     }
 
     /// `0…1`. A zero-total finished task counts as complete; everything else with no total is 0.
