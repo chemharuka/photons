@@ -6,9 +6,10 @@ import PhotonsCore
 
 /// 526 — 后台面板的「清空已完成」+ 底部按钮不再压住末行进度条。
 ///
-/// The reverse gates live in the assertions: clearing by queue semantics (`clearDenoiseQueue`)
-/// leaves the finished rows in place, so case ① / ② go red; moving `scrollView` back to `y: 8`
-/// puts case ③'s `minY ≥ button.maxY` under 24 and goes red.
+/// The reverse gates live in the assertions, and 526b measured them: restoring the old button
+/// semantics leaves case ② red («清空后立刻隐藏» — cases ① and ④ call `store.clearFinished()`
+/// directly, so they never pass through the button); moving `scrollView` back to `y: 8` puts
+/// case ③'s `minY ≥ button.maxY` at 8 < 24 and goes red. Evidence: `docs/tasks/526b-reverse-gate-evidence.md`.
 @MainActor
 final class BackgroundPanelClear526Tests: XCTestCase {
 

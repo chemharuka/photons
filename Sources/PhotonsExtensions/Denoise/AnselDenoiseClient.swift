@@ -108,8 +108,27 @@ public enum AnselDenoiseVariant: String, Sendable, CaseIterable {
     }
 }
 
+/// Which conditioning the tool is asked to use.
+public enum AnselDenoiseLook: String, Sendable, Equatable, CaseIterable {
+    /// Let the tool measure **this** frame's Poisson-Gaussian curve and derive the blend weight
+    /// and the brightness tapers itself (`--look nlmf`): the same conditioning Photons' nonlocal
+    /// denoiser runs, so the two engines hand back comparable results.
+    ///
+    /// Why this is the default: the shipped `noiseA`/`noiseB` are one camera's numbers. On an SL3
+    /// at ISO 100 they over-state sigma by ~6x once `sigmaScale` is applied, which flattens the
+    /// shadows; the measured curve costs ~3 s and removes that guesswork entirely.
+    case nlmf
+    /// Send the caller's `noiseA`/`noiseB`/`sigmaScale`/`strength` verbatim — the pre-`--look`
+    /// contract, kept so an experiment (or an older tool binary) can still pin every number.
+    case classic
+}
+
 public struct AnselDenoiseOptions: Sendable, Equatable {
     public var variant: AnselDenoiseVariant = .quarter
+    /// Conditioning passed to the tool. `.nlmf` (default) sends `--look nlmf` and none of the
+    /// numbers below; `.classic` sends them. The float32-mosaic entry point always sends the
+    /// numbers: that path exists for experiments that pin every input.
+    public var look: AnselDenoiseLook = .nlmf
     /// CFA at the mosaic's top-left, row-major, e.g. "rggb".
     public var cfa: String = "rggb"
     /// Per-channel Poisson-Gaussian coefficients such that `Var = a·x + b` on values normalized
@@ -139,6 +158,9 @@ public struct AnselDenoiseOptions: Sendable, Equatable {
     /// adjacent-difference variance, both numbers are printed by
     /// `AnselDenoiseStrength396Tests`; the value is a **default only** — the range check and the
     /// CLI parsing are untouched, so a caller that passes `strength:` explicitly still gets it.
+    ///
+    /// 口径修正（覆盖 §396 ①）：这条只在 `look == .classic` 时被发出去。默认的 `.nlmf` 由工具按
+    /// 本帧测得的 σ 自己定力度（0.70–0.85），所以 app 的默认路径不再发 `--strength 0.50`。
     public var strength: Double = 0.50
 
     public init() {}
@@ -312,19 +334,26 @@ public struct AnselDenoiseClient: Sendable {
                              options: AnselDenoiseOptions = AnselDenoiseOptions()) throws -> AnselDenoiseDNGReport {
         precondition(input.pathExtension.lowercased() == "dng", "input must be a .dng")
         precondition(output.pathExtension.lowercased() == "dng", "output must be a .dng")
-        precondition(options.noiseA.count == 3 && options.noiseB.count == 3,
-                     "noiseA/noiseB must each have 3 channel values")
+        // With `--look nlmf` the host sends no coefficients at all; requiring them would make the
+        // default configuration trap on its own precondition.
+        precondition(options.look == .nlmf || (options.noiseA.count == 3 && options.noiseB.count == 3),
+                     "noiseA/noiseB must each have 3 channel values when look == .classic")
 
-        var arguments = [
-            "image", model.path, input.path,
-            "--a", options.noiseA.map { String(format: "%.9g", $0) }.joined(separator: ","),
-            "--b", options.noiseB.map { String(format: "%.9g", $0) }.joined(separator: ","),
-            "--sigma-scale", options.sigmaScale.map { String(format: "%.9g", $0) }.joined(separator: ","),
-            "--strength", String(format: "%.9g", options.strength),
-            "--json",
-            "--out", output.path,
-        ]
-        if options.useGPU { arguments.insert("--gpu", at: 3) }
+        var arguments = ["image", model.path, input.path]
+        if options.useGPU { arguments.append("--gpu") }
+        switch options.look {
+        case .nlmf:
+            // The tool measures the curve from the file, derives the weight from it and applies
+            // the same brightness tapers the nonlocal path uses. Nothing about this frame's noise
+            // is guessed on the host side — `--a/--b` are not sent at all.
+            arguments += ["--look", "nlmf"]
+        case .classic:
+            arguments += ["--a", Self.csv(options.noiseA),
+                          "--b", Self.csv(options.noiseB),
+                          "--sigma-scale", Self.csv(options.sigmaScale),
+                          "--strength", String(format: "%.9g", options.strength)]
+        }
+        arguments += ["--json", "--out", output.path]
 
         let response = try runJSON(arguments: arguments)
         guard let report = AnselDenoiseDNGReport(response: response, output: output) else {
@@ -343,6 +372,9 @@ public struct AnselDenoiseClient: Sendable {
     }
 
     /// Denoise a whole mosaic in one call.
+    ///
+    /// This entry point always sends explicit `--a/--b` (whatever `look` says): it exists for
+    /// experiments and benchmarks that pin every input, and its caller already holds the numbers.
     ///
     /// Everything about fitting the image into memory happens on the other side of the process
     /// boundary: the tool decides whether the frame goes through in one pass or has to be cut, how
@@ -406,6 +438,11 @@ public struct AnselDenoiseClient: Sendable {
                                   singlePass: response["singlePass"] as? Bool ?? true,
                                   peakBytes: response["peakBytes"] as? Int ?? 0,
                                   milliseconds: ms, backend: backend, cfa: cfa)
+    }
+
+    /// Comma-separated, at the precision the CLI parses back without rounding drift.
+    private static func csv(_ values: [Double]) -> String {
+        values.map { String(format: "%.9g", $0) }.joined(separator: ",")
     }
 
     private func runJSON(arguments: [String]) throws -> [String: Any] {
