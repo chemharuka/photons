@@ -1531,6 +1531,32 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// `true` while the stand-in is on screen and no frame has replaced it.
     public var firstFramePlaceholderVisible: Bool { canvasView.isShowingFirstFramePlaceholder }
 
+    // MARK: 533 — where the stand-in path went (counters, never timings)
+    //
+    // The user's 「缓存丢了以后切图只剩背景色」 can only be one of four branches. They are counted
+    // here so the acceptance can say *which* one fired instead of guessing from a screenshot:
+    //   · `standinArmSkips` — the idempotent guard saw this photo as already presented;
+    //   · `standinArmReuses` — the same photo's stand-in is already up / on its way;
+    //   · `standinCacheMisses` — the cache-only read had nothing;
+    //   · `standinFallbackRefusals` — the 1024 fallback was not asked for (`size <= 1024`, no URL);
+    //   · `standinRefusedAfterPresented` — an image arrived but a present had claimed the photo;
+    //   · `standinRefusedForOtherPhoto` — the photo changed while the thumbnail was being read.
+    public private(set) var standinArmCalls = 0
+    public private(set) var standinArmSkips = 0
+    public private(set) var standinArmReuses = 0
+    public private(set) var standinCacheMisses = 0
+    /// 533 — the exact (photo, document) key missed but the photo's one 1920 HD file was found by
+    /// content hash, so the switch still showed the picture the user expects.
+    public private(set) var standinHDRecoveries = 0
+    public private(set) var standinFallbackRefusals = 0
+    public private(set) var standinFallbackRequests = 0
+    public private(set) var standinInstalls = 0
+    public private(set) var standinRefusedAfterPresented = 0
+    public private(set) var standinRefusedForOtherPhoto = 0
+    /// Hops that changed the canvas from a frame/backdrop back to a stand-in or to nothing while
+    /// this photo had no frame — the "picture replaced by background" the ticket is about.
+    public private(set) var standinWithdraws = 0
+
     /// The photo the stand-in belongs to, and the request that may still be fetching one.
     private var firstFramePlaceholderPhoto: String?
     private var firstFramePlaceholderToken: ThumbnailRequest?
@@ -7256,6 +7282,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // The tests and the bench name their photo through `frameSource`; this stand-in is the
         // catalog path (grid/filmstrip thumbnails keyed by an `Asset`).
         guard frameSource == nil, let session, let asset = session.anchorAsset else { return }
+        standinArmCalls += 1
         // 463 — a missing file has no picture to stand in for. The cached 1920 JPEG is exactly what
         // the user mistook for a healthy photo; the banner is the honest answer instead.
         guard !asset.isMissing else {
@@ -7269,9 +7296,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         let identity = ladderIdentity(asset)
         // A frame for this photo is already on the layer, or the stand-in is already up/on its way.
-        guard presentedPhoto != identity else { return }
+        //
+        // 533 — **the guard asks whose frame it is.** A frame of the *previous* photo is exactly the
+        // picture the switch must not keep showing (`clearsPresentedFrameOnPhotoSwitch` drops the
+        // ownership, but the layer's last drawable and `presentation` still name it until the cover
+        // and the first present). Treating "a frame exists" as idempotence — the pre-fix shape, kept
+        // behind `armStandInIdempotentGuardIgnoresPhoto` — is what left the canvas on the matte after
+        // a switch whose window-cache entry had been lost to a zoom/pan.
+        guard !frameOnCanvasClaims(identity) else {
+            standinArmSkips += 1
+            return
+        }
         if firstFramePlaceholderPhoto == identity,
            canvasView.isShowingFirstFramePlaceholder || firstFramePlaceholderToken != nil {
+            standinArmReuses += 1
             return
         }
         // A new photo invalidates the previous stand-in immediately; the old completion is guarded by
@@ -7282,32 +7320,50 @@ public final class LoupeController: NSViewController, HeadroomSource {
         firstFramePlaceholderPixelSize = nil
         firstFramePlaceholderOrientation = nil
         canvasView.hideFirstFramePlaceholder()
+        standinWithdraws += 1
         presentation.show(.empty, reason: "standin withdrawn")
         let started = CACurrentMediaTime()
         guard let cache = session.thumbnailCache else { return }
         let provider = ThumbnailProvider.shared(for: cache)
-        // 344 — ask for **this document's** 1920 file now, before the cache read: a photo the user has
-        // just switched to usually has no HD file for the document it opens with, and nothing else on
-        // this path asks for one (`warmAnchorHDPreview` was a commit's door only). Whatever the read
-        // below finds — the 1024 fallback or nothing at all — the 1920 is already on its way.
-        upgradeStandIn(photo: identity, startedAt: started, image: nil)
-        if let image = provider.cachedCanvasPlaceholder(for: asset, document: session.edit) {
+        // 533 — read first, ask after: when the photo's 1920 file is on disk the stand-in *is* the
+        // HD picture and a warm would be a 60 MP render for nothing (and on a switch-heavy session,
+        // one per switch). The ask still happens before the **fallback** request below, so a cold
+        // switch overlaps the 1920 render with the 512 preview it is about to ask for.
+        let exact = provider.cachedCanvasPlaceholder(for: asset, document: session.edit)
+        var image = exact
+        // The exact-key read may itself have fallen back to a 1024/512 legacy preview while the
+        // photo's 1920 file sits under another document's key; the 1920 is the picture the stand-in
+        // promises (308/311), so it wins over the smaller preview.
+        if image == nil || max(image!.width, image!.height) < ThumbSpec.hdJPEG.longEdge {
+            if let hd = cachedHDStandIn(for: asset) {
+                image = hd
+                standinHDRecoveries += 1
+            }
+        }
+        if let image {
             installFirstFramePlaceholder(image, photo: identity, startedAt: started)
             // 344 — 1920 is the stand-in's **stable** size (308/311). A photo that has never been
             // rendered at the document it opens with has no HD file yet, so the read above fell back
             // to the 1024 preview; that fallback is transient only if someone asks for the 1920, and
             // on a plain 切图 nobody does (`warmAnchorHDPreview` used to be called only by a commit).
-            // Ask now — one render + one encode, background, `prefetch` — and swap the stand-in the
-            // moment the file lands.
+            // `upgradeStandIn` is a no-op once the image is already the HD size.
             upgradeStandIn(photo: identity, startedAt: started, image: image)
             return
         }
+        standinCacheMisses += 1
+        // A photo with no picture in any cache: ask for the 1920 file now, before the cheap preview,
+        // so the two renders can overlap (`upgradeStandIn(nil)` is the un-sized ask).
+        upgradeStandIn(photo: identity, startedAt: started, image: nil)
         // Cache is cold (a library's first scan): ask for the cheap embedded preview. It shares the
         // grid's service, so this is an `onScreen` request, not a competing decode of its own. A row
         // with a handful of bytes cannot carry a preview (the fixture libraries use such rows), so it
         // asks for nothing rather than queueing a decode that can only fail.
-        guard asset.size > 1024, let url = session.fileURL(for: asset) else { return }
+        guard asset.size > 1024, let url = session.fileURL(for: asset) else {
+            standinFallbackRefusals += 1
+            return
+        }
         let tier = ThumbnailProvider.effectiveTier(requested: .t1024, ext: asset.ext).tier
+        standinFallbackRequests += 1
         firstFramePlaceholderToken = provider.request(index: 0, asset: asset, fileURL: url,
                                                       document: session.edit, tier: tier,
                                                       spec: .legacy, priority: .onScreen) {
@@ -7316,12 +7372,21 @@ public final class LoupeController: NSViewController, HeadroomSource {
             if self.firstFramePlaceholderPhoto == identity { self.firstFramePlaceholderToken = nil }
             guard let image else { return }
             self.installFirstFramePlaceholder(image, photo: identity, startedAt: started)
+            // 344/533 — the cheap preview is a transient: keep the 1920 ask attached to it as well,
+            // in case the first (un-sized) warm was coalesced or refused.
+            self.upgradeStandIn(photo: identity, startedAt: started, image: image)
         }
     }
 
     /// **344 reverse gate — never false in the app.** With it off, a 1024 fallback stays on the canvas
     /// for the whole development (the pre-344 behaviour), which is what 验收 ④ must catch.
     nonisolated(unsafe) static var armsColdStartUpgrade = true
+
+    /// **533 reverse gate — never true in the app.** The pre-fix idempotent guard treated a photo
+    /// switch as "the same photo" (it was written for a re-arm, not for a switch), so the stand-in
+    /// was never even looked for and the canvas stayed the background colour for the whole
+    /// development. With this on, `CanvasStandInAfterCacheLoss533Tests` ① must go red.
+    nonisolated(unsafe) static var armStandInIdempotentGuardIgnoresPhoto = false
 
     /// 344 — the stand-in's 1024 fallback is a **transient**, not the answer.
     ///
@@ -7343,8 +7408,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let document = session.edit
         provider.warmHDPreview(for: asset, fileURL: session.fileURL(for: asset),
                                document: document) { [weak self] in
-            guard let self, self.firstFramePlaceholderPhoto == photo,
-                  self.presentedPhoto != photo else { return }
+            // 533 — `installFirstFramePlaceholder` decides whether the stand-in is still owed (this
+            // photo's frame must be *on the canvas*, not merely named by a present).
+            guard let self, self.firstFramePlaceholderPhoto == photo else { return }
             guard let upgraded = provider.cachedCanvasPlaceholder(for: asset, document: document)
             else { return }
             self.installFirstFramePlaceholder(upgraded, photo: photo, startedAt: startedAt)
@@ -7370,10 +7436,105 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            document: session.edit)
     }
 
+    /// 533 — **whose** frame the layer is carrying, for the arming decision.
+    ///
+    /// The shipped answer is "`presentedPhoto == identity`": a frame of this picture owns the layer,
+    /// so there is nothing to stand in for. The reverse gate
+    /// (`armStandInIdempotentGuardIgnoresPhoto`) is the pre-fix answer the user hit: *any* frame on
+    /// the canvas satisfies the guard, so a switch inherits the previous photo's idempotence and its
+    /// stand-in is never armed.
+    private func frameOnCanvasClaims(_ identity: String) -> Bool {
+        if Self.armStandInIdempotentGuardIgnoresPhoto {
+            // The pre-fix answer: **a picture is on the canvas**, never mind whose.
+            return presentedPhoto != nil || !canvasHasNoFramePixels
+        }
+        return presentedPhoto == identity
+    }
+
+    /// `true` when the layer has no picture of its own — only the matte, or a stand-in. Both
+    /// `.frame` and `.lowRes` mean real pixels were presented (a backdrop is adopted **behind** the
+    /// frame), so they count as "a picture is on the canvas" for the guards above.
+    private var canvasHasNoFramePixels: Bool {
+        switch presentation.content {
+        case .empty, .placeholder: return true
+        case .frame, .lowRes: return false
+        }
+    }
+
+    /// 533 — the photo's **one** 1920 HD JPEG, whatever document it was rendered under.
+    ///
+    /// `cachedCanvasPlaceholder` asks for the key of the document on screen, and since 308 the three
+    /// browsers write the HD family instead of legacy previews, so the old 1024/512 ladder is empty
+    /// in a current library. The HD tree is sharded by **content hash** (`thumbs/hd/<ch0..2>/<ch2..4>/`),
+    /// so every document of one photo sits in one directory; a photo whose document moved (an edit
+    /// whose warm has not landed, a switch right after one) still has its 1920 picture there. This
+    /// reads it cache-only — one `readdir` and one decode, never a render — so the switch shows the
+    /// picture instead of the matte. The first real frame replaces it as usual.
+    ///
+    /// The file is the *photo's*, not the document's: a stand-in does not claim the unsaved document,
+    /// and `warmHDPreview` (already asked above) puts the current document's file in place next.
+    private func cachedHDStandIn(for asset: Asset) -> CGImage? {
+        guard let cache = session?.thumbnailCache else { return nil }
+        let dir = cache.root
+            .appendingPathComponent(ThumbNamespace.hd, isDirectory: true)
+            .appendingPathComponent(String(asset.contentHash.prefix(2)), isDirectory: true)
+            .appendingPathComponent(String(asset.contentHash.dropFirst(2).prefix(2)), isDirectory: true)
+        let suffix = "." + ThumbSpec.hdJPEG.fileExtension
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else {
+            return nil
+        }
+        let files = names
+            .filter { $0.hasSuffix(suffix) && !$0.hasPrefix(".") }
+            .map { dir.appendingPathComponent($0) }
+            // A content shard is four hex characters, so a real library has shards shared by several
+            // photos. The cache tags every HD file with its owner (`ThumbnailCache.store`), and that
+            // tag — not the directory — is what says this file is *this* photo's: picking the newest
+            // file in a shared shard could stand in with another picture's pixels, the exact class of
+            // bug 373 removed.
+            .filter { Self.hdOwner(ofFileAt: $0.path) == asset.contentHash }
+            .sorted { a, b in
+                let ma = (try? FileManager.default.attributesOfItem(atPath: a.path))?[.modificationDate]
+                    as? Date ?? .distantPast
+                let mb = (try? FileManager.default.attributesOfItem(atPath: b.path))?[.modificationDate]
+                    as? Date ?? .distantPast
+                return ma > mb
+            }
+        for file in files {
+            guard let data = try? Data(contentsOf: file) else { continue }
+            if let image = ThumbnailProvider.decodeHDForPlaceholder(data) { return image }
+        }
+        return nil
+    }
+
+    /// The owner tag `ThumbnailCache.store` writes on every HD file (`com.photons.contentHash`).
+    /// Mirrors `ThumbnailCache.hdOwnerAttribute`, which is not public; the on-disk name is the
+    /// contract (308's one-file-per-photo prune keys on it too).
+    private static func hdOwner(ofFileAt path: String) -> String? {
+        let name = "com.photons.contentHash"
+        let size = getxattr(path, name, nil, 0, 0, 0)
+        guard size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size + 1)
+        let read = getxattr(path, name, &buffer, size, 0, 0)
+        guard read > 0 else { return nil }
+        return String(decoding: buffer.prefix(read).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
     private func installFirstFramePlaceholder(_ image: CGImage, photo: String,
                                               startedAt: CFTimeInterval) {
         // The photo may have moved on while the thumbnail was being read or generated.
-        guard firstFramePlaceholderPhoto == photo, presentedPhoto != photo else { return }
+        guard firstFramePlaceholderPhoto == photo else {
+            standinRefusedForOtherPhoto += 1
+            return
+        }
+        // 533 — refuse only when **this photo's** frame is really on the canvas. A present that
+        // claimed the photo but left the canvas empty (a refused drawable, a present that drew
+        // nothing) must not be allowed to keep the stand-in down: with no real pixels to look at,
+        // the stand-in is the only picture there is.
+        if presentedPhoto == photo, !canvasHasNoFramePixels {
+            standinRefusedAfterPresented += 1
+            return
+        }
+        standinInstalls += 1
         firstFramePlaceholderToken = nil
         // 284 — a legacy preview (and the empty-cache path's generated JPEG) is 8-bit sRGB. Redraw
         // it into Display P3 so every stand-in bitmap is in the same space as the HD cache; the
