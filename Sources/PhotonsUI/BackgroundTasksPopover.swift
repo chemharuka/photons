@@ -58,14 +58,14 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyLabel = NSTextField(labelWithString: Loc.t("没有后台任务"))
-    /// 510 — 「清空队列」. Only queued requests are dropped; the request that is executing keeps
-    /// running. Hidden whenever no row is waiting, so the panel looks unchanged without a queue.
-    private let clearQueueButton = NSButton(title: Loc.t("清空队列"), target: nil, action: nil)
+    /// 526 — 「清空已完成」. Only terminal rows (`finished` / `failed` / `cancelled`) are dropped; the
+    /// running and queued rows keep their progress. Hidden whenever the panel has no terminal row.
+    private let clearFinishedButton = NSButton(title: Loc.t("清空已完成"), target: nil, action: nil)
     private let bridge = ObservationBridge()
 
-    /// 510 — set by the top bar from the live session. The panel owns the store, not the producer,
-    /// so the queue action has to be handed in.
-    public var onClearDenoiseQueue: (() -> Void)? {
+    /// 526 — set by the top bar (the workspace forwards the live session's store action). A bare
+    /// panel with no wiring clears its own injected store, which is what the acceptance tests build.
+    public var onClearFinished: (() -> Void)? {
         didSet { reload() }
     }
 
@@ -117,14 +117,14 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
         emptyLabel.setAccessibilityIdentifier("backgroundTasks.empty")
         root.addSubview(emptyLabel)
 
-        clearQueueButton.bezelStyle = .inline
-        clearQueueButton.controlSize = .small
-        clearQueueButton.font = .systemFont(ofSize: 11)
-        clearQueueButton.target = self
-        clearQueueButton.action = #selector(clearQueueTapped)
-        clearQueueButton.setAccessibilityIdentifier("backgroundTasks.clearQueue")
-        clearQueueButton.isHidden = true
-        root.addSubview(clearQueueButton)
+        clearFinishedButton.bezelStyle = .inline
+        clearFinishedButton.controlSize = .small
+        clearFinishedButton.font = .systemFont(ofSize: 11)
+        clearFinishedButton.target = self
+        clearFinishedButton.action = #selector(clearFinishedTapped)
+        clearFinishedButton.setAccessibilityIdentifier("backgroundTasks.clearFinished")
+        clearFinishedButton.isHidden = true
+        root.addSubview(clearFinishedButton)
 
         reload()
         layoutContents()
@@ -145,24 +145,43 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
 
     private func layoutContents() {
         let bounds = view.bounds
-        let footer: CGFloat = clearQueueButton.isHidden ? 0 : Self.footerHeight
-        scrollView.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16),
-                                  height: max(0, bounds.height - 16 - footer))
+        let footer: CGFloat = clearFinishedButton.isHidden ? 0 : Self.footerHeight
+        // 526 — the footer is real space, not a reduced height with an unchanged origin: the list's
+        // bottom edge sits **above** the button (root coordinates, unflipped), so the last row's
+        // progress bar can never slide under 「清空已完成」. `footerHeight` and `buttonHeight` share
+        // one source.
+        let bottom = Self.contentInset + footer
+        scrollView.frame = NSRect(x: Self.contentInset, y: bottom,
+                                  width: max(0, bounds.width - Self.contentInset * 2),
+                                  height: max(0, bounds.height - Self.contentInset - bottom))
         let labelHeight: CGFloat = 20
         emptyLabel.frame = NSRect(x: 12,
                                   y: ((bounds.height - labelHeight) / 2).rounded(),
                                   width: max(0, bounds.width - 24),
                                   height: labelHeight)
-        let buttonWidth: CGFloat = 78
-        clearQueueButton.frame = NSRect(x: bounds.width - 8 - buttonWidth, y: 6,
-                                        width: buttonWidth, height: 18)
+        clearFinishedButton.frame = NSRect(x: bounds.width - Self.contentInset - Self.buttonWidth,
+                                           y: Self.buttonBottomInset,
+                                           width: Self.buttonWidth,
+                                           height: Self.buttonHeight)
     }
 
-    private static let footerHeight: CGFloat = 24
+    private static let contentInset: CGFloat = 8
+    private static let buttonWidth: CGFloat = 78
+    private static let buttonHeight: CGFloat = 18
+    private static let buttonBottomInset: CGFloat = 6
+    /// 526 — the gap between the button's top edge and the list's bottom edge.
+    private static let footerGap: CGFloat = 6
+    /// `buttonBottomInset + buttonHeight + footerGap` == 30, so `scrollView.minY` is 38 while the
+    /// button ends at 24.
+    private static var footerHeight: CGFloat { buttonBottomInset + buttonHeight + footerGap }
 
-    /// 510 — drop the waiting requests only. The executing one keeps its row and its progress.
-    @objc private func clearQueueTapped() {
-        onClearDenoiseQueue?()
+    /// 526 — 「清空已完成」: terminal rows only. The executing and waiting rows keep their progress.
+    @objc private func clearFinishedTapped() {
+        if let onClearFinished {
+            onClearFinished()
+        } else {
+            backgroundTaskStore.clearFinished()
+        }
         reload()
     }
 
@@ -174,19 +193,32 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
         let isEmpty = backgroundTaskStore.tasks.isEmpty
         emptyLabel.isHidden = !isEmpty
         scrollView.isHidden = isEmpty
-        clearQueueButton.isHidden = !hasQueuedDenoiseTasks
+        clearFinishedButton.isHidden = !hasFinishedTasks
         tableView.reloadData()
         view.needsLayout = true
     }
 
-    /// 510 — «is there anything waiting», i.e. is 「清空队列」 worth a button.
+    /// 526 — «is there a terminal row worth a button». Reads the same retention-filtered order the
+    /// table draws, so an already-expired row does not keep 「清空已完成」 alive.
+    public var hasFinishedTasks: Bool {
+        backgroundTaskStore.queueOrderedTasks.contains { $0.state.isTerminal }
+    }
+
+    /// 510 — «is there anything waiting». Kept because the session's queue bookkeeping still asks
+    /// this question; it no longer governs the panel's button.
     public var hasQueuedDenoiseTasks: Bool {
         backgroundTaskStore.tasks.contains { $0.kind == .denoise && $0.state == .queued }
     }
 
-    public var isClearQueueButtonVisibleForTesting: Bool { !clearQueueButton.isHidden }
+    public var isClearFinishedButtonVisibleForTesting: Bool { !clearFinishedButton.isHidden }
+    public var clearFinishedButtonTitleForTesting: String { clearFinishedButton.title }
+    public var clearFinishedButtonAccessibilityIdentifierForTesting: String? {
+        clearFinishedButton.accessibilityIdentifier()
+    }
+    public var scrollViewFrameForTesting: NSRect { scrollView.frame }
+    public var clearFinishedButtonFrameForTesting: NSRect { clearFinishedButton.frame }
 
-    public func clearQueueForTesting() { clearQueueTapped() }
+    public func clearFinishedForTesting() { clearFinishedTapped() }
 
     public var emptyStateText: String { emptyLabel.stringValue }
     public var isShowingEmptyState: Bool { !emptyLabel.isHidden }

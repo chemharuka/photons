@@ -2524,8 +2524,15 @@ public final class CatalogSession {
             progress(Loc.t("继承编辑…"))
             do {
                 let inherited = try catalog.copySettings(fromAsset: participantID)
+                let sourceDocument = try catalog.develop(forAsset: participantID)
                 let current = try catalog.develop(forAsset: importedID)
                 var payload = inherited.applied(to: current)
+
+                // 528 — 引导线不进 `EditSnapshot`（那是「复制设置」的剪贴板契约，395 的
+                // `testTheClipboardsBoundaryIsTheKnownGap` 钉着这条边界），但产物是同一个栈里
+                // 的另一份文件、同一份文档：原图有的引导线必须原样跟过来。所以在这里单独补写
+                // 一次，仍然和上面的继承共用**同一次** `appendDevelop`（一条历史、一个 undo 步骤）。
+                payload.geometry.guideLines = sourceDocument.geometry.guideLines
 
                 // 396 B — 产物默认走 **v9.dng**（用户的取舍：v9 下 Apple 的三根 no-op 滑杆关掉，
                 // 让模型降噪的结果不被解码器二次处理）。**只有文件自己列了这个版本才写**：裸
@@ -2545,6 +2552,20 @@ public final class CatalogSession {
 
                 try catalog.appendDevelop(payload, label: Self.denoiseInheritLabel,
                                           forAsset: importedID)
+
+                // 528 — 用户口径：「xml 中要有引导线位置的记录」。`DNGRawWriter` 先把源文件的
+                // tag 700（XMP）原样复制到产物里（`DNGRawWriter.write` 的 preserved 列表），
+                // 所以顺序是：**先**抄源 XMP，**后**在这里把继承后的文档合并进去。
+                // `DNGXMP.writeDocument` 只替换 `photons:document` 这一个属性，源文件里别的
+                // `crs:*` 字节不动；没有引导线时**不写**，也不写空数组 —— 产物文件保持降噪器
+                // 写出的样子（tag 700 逐字节不变，文件不因为这一步增长）。
+                if !payload.geometry.guideLines.isEmpty {
+                    let text = try Catalog.encode(payload)
+                    let existing = (try? DNGXMP.documentString(at: outcome.output)) ?? nil
+                    if existing != text {
+                        try DNGXMP.writeDocument(text, to: outcome.output)
+                    }
+                }
             } catch {
                 run.inheritFailure = error.localizedDescription
             }
