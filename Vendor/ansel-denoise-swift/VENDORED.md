@@ -1,8 +1,7 @@
 # ansel-denoise-swift — vendored
 
 Source copy of https://github.com/chemharuka/ansel-denoise-swift at commit
-`9ab1143` ("fix(dng): read the raw from SubIFDs, matching ImageIO, so dual-raw
-files are re-readable").
+`7919bb8` ("feat(host): the client asks for the measured curve by default").
 
 This tool is **GPL-3.0**, so unlike the MIT denoiser next door it is *not* linked
 into Photons. It is built to its own executable and driven over a pipe
@@ -31,4 +30,4 @@ rsync -a --delete --exclude .build --exclude .git --exclude .DS_Store \
 
 then update the commit hash above and commit the diff.
 
-Last synced: 2026-11-20 (`9ab1143`).
+Last synced: 2026-11-23 (`7919bb8`).
