@@ -309,7 +309,7 @@ final class BatchDenoise474Tests: XCTestCase {
         XCTAssertFalse(session.isDenoiseRunning)
     }
 
-    // MARK: - ② 当前照片 / 缩略图；整批结束后清空
+    // MARK: - ② 当前照片 / 缩略图；整批结束后停在末张
 
     func testCurrentPhotoAndThumbnailFollowTheRunningItem() throws {
         let fixture = try makeSession(dngCount: 3)
@@ -338,9 +338,10 @@ final class BatchDenoise474Tests: XCTestCase {
         print("② 当前照片：state=\(done.state.rawValue) currentAssetID=\(done.currentAssetID ?? "nil") "
               + "currentThumbKey=\(done.currentThumbKey ?? "nil")")
         XCTAssertEqual(done.state, .finished)
-        // 本单写死这一种：整批结束后没有「当前照片」（面板不再画一个已经不在跑的照片）。
-        XCTAssertNil(done.currentAssetID)
-        XCTAssertNil(done.currentThumbKey)
+        // 527 — 整批结束后行停在末张（缩略图方块保留，不再清空）。
+        let lastAsset = try XCTUnwrap(byID[participants[2]])
+        XCTAssertEqual(done.currentAssetID, lastAsset.id)
+        XCTAssertEqual(done.currentThumbKey, ThumbnailProvider.hdJPEGKey(for: lastAsset).keyString)
     }
 
     // MARK: - ③ 取消：当前这张跑完，下一张不开始
@@ -463,7 +464,7 @@ final class BatchDenoise474Tests: XCTestCase {
         XCTAssertEqual(done.kind, .denoise)
         XCTAssertEqual(done.total, 1)
         XCTAssertEqual(BackgroundTaskStore.countText(for: done), "1/1")
-        XCTAssertEqual(done.title, asset.filename)
+        XCTAssertEqual(done.title, "降噪 · IMG_0000.dng")
         XCTAssertEqual(done.state, .finished)
     }
 

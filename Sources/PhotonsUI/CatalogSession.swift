@@ -1927,7 +1927,7 @@ public final class CatalogSession {
         let first = assets.first { $0.id == assetIDs.first }
         let title = assetIDs.count >= 2
             ? Loc.t("降噪 {0} 张（{1}）", String(describing: (assetIDs.count)), engine.displayName)
-            : (first?.filename ?? Loc.t("降噪"))
+            : Loc.t("降噪 · {0}", first?.filename ?? "")
         let thumbKey = first.map { ThumbnailProvider.hdJPEGKey(for: $0).keyString }
         return backgroundTasks.begin(BackgroundTask(kind: .denoise,
                                                     title: title,
@@ -2384,9 +2384,18 @@ public final class CatalogSession {
         isDenoiseRunning = false
         denoiseAssetID = nil
         backgroundTasks.forgetCancel(id: batch.taskID)
-        // The panel's square describes 「正在跑的那张」, so it disappears with the run. (A single
-        // run keeps P2a's behaviour and leaves `currentAssetID` on its one photo.)
-        backgroundTasks.clearCurrent(id: batch.taskID)
+        // 527 — the square stays on the last photo the batch worked on (成功或失败都算) instead of
+        // disappearing when the row closes. A cancelled batch keeps the item that was running when
+        // 取消 arrived: `startNextDenoiseBatchItem` already pinned it, and no later item starts.
+        // Only a normal completion needs a final write, so the last item is pinned even if a
+        // progress report never landed; when the last item has no key (theoretical edge), the
+        // previous pinned photo stays.
+        if !batch.cancelled,
+           let last = batch.items.last(where: { !$0.thumbKey.isEmpty }) {
+            backgroundTasks.advance(id: batch.taskID,
+                                    currentAssetID: last.assetID,
+                                    currentThumbKey: last.thumbKey)
+        }
         if batch.cancelled {
             backgroundTasks.finish(id: batch.taskID, state: .cancelled,
                                    failureCount: batch.failures)
