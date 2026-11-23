@@ -47,6 +47,12 @@ final class NLMFDenoiseJobTests: XCTestCase {
                        "linear RAW: at or below this the blend weight is untouched")
         XCTAssertEqual(options.taperHigh, 0.25, accuracy: 1e-9,
                        "0.18–0.60 acts on 0.2 % of a dark frame; this reaches its gold")
+        XCTAssertEqual(options.shadowTaper, 0.50, accuracy: 1e-9,
+                       "half the blend is given up where signal and noise are one")
+        XCTAssertEqual(options.shadowLow, 0.002, accuracy: 1e-9,
+                       "at or below this the blend is held back, bit for bit")
+        XCTAssertEqual(options.shadowHigh, 0.02, accuracy: 1e-9,
+                       "above this the new taper is exactly the identity")
     }
 
     /// Only the 256 model ships. The 512 one is real and measured but 14 % slower
