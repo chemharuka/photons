@@ -591,6 +591,12 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
     /// same is true of `light.highlightRecovery`: the panel has no 高光恢复 row, so a new capture
     /// does not carry it. Pinning the gap here is the honest option: if the clipboard grows, this
     /// test goes red and ② can be extended instead of the report quietly ageing.
+    ///
+    /// **528 (2026-11-23)** carved out exactly one exception on the *product* side: `runDenoise`
+    /// copies `geometry.guideLines` into the same `appendDevelop` payload, because a denoise product
+    /// is another file of the same stack and the user asked for the lines (and their XMP) to travel.
+    /// The clipboard itself is unchanged, so this test still pins 「`EditSnapshot` 不带 guideLines」
+    /// — just no longer through the product's document.
     func testTheClipboardsBoundaryIsTheKnownGap() throws {
         var doc = richDocument()
         doc.detailSettings.detail = 6
@@ -622,17 +628,22 @@ final class DenoiseInheritEdits395Tests: XCTestCase {
                        "边界：修复画笔根本不在 document 里（EditSnapshot 不带它）")
         XCTAssertTrue(docDiffs.contains { $0.hasPrefix("detailSettings.detail") },
                       "边界：042 的四个细节轴没有过去（EditSnapshot 不带 detailSettings）")
-        XCTAssertTrue(docDiffs.contains { $0.hasPrefix("geometry.guideLines") },
-                      "边界：354 的辅助线没有过去（EditSnapshot 不带 guideLines）")
         XCTAssertTrue(docDiffs.contains { $0.hasPrefix("healSpots") },
                       "边界：修复画笔没有过去（EditSnapshot 不带 healSpots）")
-        // 516 — 第四条不是回归：325 把 Light 卡的「高光恢复」行摘掉后，⌘C/继承 就不再携带它
-        // （`EditSnapshot.capture` 在 964 行把它留成 nil）。它属于「已知缺口」，与上面三条同权。
+        // 516 — 第三条不是回归：325 把 Light 卡的「高光恢复」行摘掉后，⌘C/继承 就不再携带它
+        // （`EditSnapshot.capture` 在 964 行把它留成 nil）。它属于「已知缺口」，与上面两条同权。
         XCTAssertTrue(docDiffs.contains { $0.hasPrefix("light.highlightRecovery") },
                       "边界：325 之后 高光恢复 不再被 ⌘C/继承 携带（已知缺口）")
-        XCTAssertEqual(docDiffs.count, 4,
-                       "边界：除这四条之外**没有任何**别的差异 —— 全部实拍差异都在这里点名了：\(docDiffs)")
+        XCTAssertEqual(docDiffs.count, 3,
+                       "边界：除这三条之外**没有任何**别的差异 —— 全部实拍差异都在这里点名了：\(docDiffs)")
         XCTAssertEqual(try stored(productID).healSpots.count, 0, "修复画笔没有过去（已知缺口）")
         XCTAssertNil(try stored(productID).detailSettings.detail, "042 的四个细节轴没有过去（已知缺口）")
+        // 528 — 引导线是那个唯一的例外：剪贴板仍然不带它，但 `runDenoise` 单独补写进了产物。
+        let snapshotJSON = String(decoding: try JSONEncoder().encode(
+            try catalog.copySettings(fromAsset: source.id)), as: UTF8.self)
+        XCTAssertFalse(snapshotJSON.contains("guideLines"),
+                       "528：copySettings 的 EditSnapshot 仍然不带引导线")
+        XCTAssertEqual(try stored(productID).geometry.guideLines.count, 1,
+                       "528：产物仍然拿到了源图那一条（单独补写，不是剪贴板）")
     }
 }
