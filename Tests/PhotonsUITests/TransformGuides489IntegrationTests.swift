@@ -63,9 +63,10 @@ extension TransformGuides489IntegrationTests {
 
         let levelHistory = editor.session.history.snapshots.count
         let levelCrop = editor.session.edit.geometry.crop
-        // 505 — 自动裁剪 now honours 「不出像素」 (a size change is not that switch's business), and
-        // the preference is process-wide: a suite that ticked it earlier would decide this test's
-        // answer. Pin it off for the fixture.
+        // 521 — 自动裁剪 no longer honours 「不出像素」 in the old 505 §2.3.4 sense: that switch only
+        // constrains drags, while this command's rect is inside the pixels by construction, so the
+        // preference cannot decide the answer here. Pinned off anyway so a suite that ticked it
+        // earlier does not leak the process-wide preference into this fixture.
         _ = tool.setCropStaysInsidePixels(false)
         XCTAssertFalse(tool.autoCrop(), "a level picture is left byte-identical")
         XCTAssertEqual(editor.session.history.snapshots.count, levelHistory)

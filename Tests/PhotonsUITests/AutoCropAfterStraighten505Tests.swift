@@ -152,8 +152,8 @@ final class AutoCropAfterStraighten505Tests: XCTestCase {
     func testAGuideLineFitWritesTheAutoCropInTheSameHistoryRow() throws {
         let (session, tool) = try makeTool { _ in }
         XCTAssertTrue(tool.setGuideLinesArmed(true))
-        // 505 — auto crop reads 「不出像素」, a process-wide preference; every fixture here needs it
-        // off (the ⑥ case is the one that ticks it).
+        // 521 — 自动裁切 no longer reads 「不出像素」 (the switch constrains drags), but the preference
+        // is process-wide: pin it off so an earlier ⑥ fixture cannot leak into this one.
         _ = tool.setCropStaysInsidePixels(false)
         let pair = convergingPair(vertical: 40)
         let rowsBefore = session.history.snapshots.count
@@ -307,37 +307,115 @@ final class AutoCropAfterStraighten505Tests: XCTestCase {
         note("⑤ 已水平 · autoCrop false · 松手提交 false · 历史 \(rows) · 文档字节未变")
     }
 
-    // MARK: - ⑥ §2.3.4 「不出像素」勾上 ⇒ 跳过
+    // MARK: - ⑥ 521 「不出像素」勾上 ⇒ 自动裁切照常，裁到最大内接矩形
 
-    func testStaysInsidePixelsSkipsTheAutoCrop() throws {
+    /// 521 — the user's 2026-11-22 wording (「选择不出像素后自动裁切失效，修复」) overrides 505
+    /// §2.3.4: 「不出像素」 constrains **drags**, not an explicit command, and the crop's answer is
+    /// inside the pixels by construction. The rect must therefore be the exact
+    /// `MaxInscribedRect` answer (inset by the render's one output pixel) and every point of its four
+    /// edges must map back into the source photograph.
+    func testStaysInsidePixelsStillCropsToTheMaxInscribedRect() throws {
         let (session, tool) = try makeTool(staysInsidePixels: true) { _ in }
         tool.setStraighten(8)
-        XCTAssertFalse(tool.autoCrop(), "⑥ 勾上「不出像素」时自动裁切必须让步")
-        let before = session.edit.geometry.crop
-        XCTAssertTrue(tool.commitStraighten(), "⑥ 松手仍然提交角度")
-        let after = session.edit.geometry
-        // What 317/307's one-shot inscription produces — the same answer this commit had before 505,
-        // i.e. the auto crop did not touch it.
-        let inscribed = CropMath.clampedToRotatedFrame(.full, in: Self.source, degrees: 8,
-                                                       keepsInsideRotatedFrame: true)
-        note(String(format: "⑥ 不出像素 · autoCrop false · 松手后 框 L%.4f T%.4f R%.4f B%.4f (面积 %.4f)"
-                     + " · 内切答案 L%.4f T%.4f R%.4f B%.4f (面积 %.4f) · 角度 %.1f°",
-                     after.crop.x, after.crop.y,
-                     after.crop.x + after.crop.width, after.crop.y + after.crop.height,
-                     Double(after.crop.width * after.crop.height),
-                     inscribed.left, inscribed.top, inscribed.right, inscribed.bottom,
-                     Double(inscribed.width * inscribed.height), after.rotationDegrees))
-        XCTAssertEqual(after.crop, before,
-                       "⑥ 自动裁切没有写进文档 —— 裁切框仍是草稿的事（应用时才提交）")
-        XCTAssertEqual(tool.draft.crop.normalizedRect, inscribed.normalizedRect,
-                       "⑥ 307/317 的内切仍按原样落在草稿上")
+        let rows = session.history.snapshots.count
+        XCTAssertTrue(tool.autoCrop(), "⑥ 不出像素不许再让自动裁切让步")
+
+        // Exactly one history row, and the document and the draft hold the same frame.
+        XCTAssertEqual(session.history.snapshots.count, rows + 1, "⑥ 自动裁切 = 一条历史")
+        XCTAssertEqual(session.history.snapshots.last?.label, "自动裁剪")
+        let written = session.edit.geometry
+        let rect = CropRect(written.crop)
+        XCTAssertEqual(written.cropSpace, .source, "⑥ 纯拉直量在转正的照片上")
+        XCTAssertEqual(tool.draft.crop.normalizedRect, written.crop, "⑥ 草稿与文档必须同一个框")
+
+        let area = Double(rect.width * rect.height)
+        XCTAssertGreaterThan(area, 0, "⑥ 面积必须大于 0")
+        XCTAssertLessThan(area, 0.999, "⑥ 必须真的裁了")
+
+        // 四边各 32 点逆映射回源图 —— 「不出像素」的本质要求。
+        let canvas = CropMath.documentCanvas(source: Self.source, straightenDegrees: 8,
+                                             perspective: nil)
+        let sides: [((x: Double, y: Double), (x: Double, y: Double))] = [
+            ((rect.left, rect.top), (rect.right, rect.top)),
+            ((rect.right, rect.top), (rect.right, rect.bottom)),
+            ((rect.right, rect.bottom), (rect.left, rect.bottom)),
+            ((rect.left, rect.bottom), (rect.left, rect.top)),
+        ]
+        var worst = 0.0
+        for (a, b) in sides {
+            for step in 0...31 {
+                let t = Double(step) / 31
+                let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+                let photo = photoPoint(p, space: written.cropSpace, angle: 8,
+                                       perspective: nil, canvas: canvas)
+                worst = max(worst, -photo.x, photo.x - 1, -photo.y, photo.y - 1)
+            }
+        }
+
+        // The same convex hull the tool feeds the solver: a pure straighten's four turned corners.
+        let polygon = rotatedPicture(angle: 8)
+        let exact = try XCTUnwrap(MaxInscribedRect.maximumRectangle(in: polygon), "⑥ 独立解")
+        // The tool insets the exact rectangle by one output pixel on every side.
+        let plane = (w: Double(Self.source.width), h: Double(Self.source.height))
+        let expected = CropRect(left: exact.x + 1 / plane.w,
+                                top: exact.y + 1 / plane.h,
+                                right: exact.x + exact.width - 1 / plane.w,
+                                bottom: exact.y + exact.height - 1 / plane.h)
+        note(String(format: "⑥ 不出像素 · autoCrop true · 框 L%.6f T%.6f R%.6f B%.6f (面积 %.6f)"
+                     + " · MaxInscribedRect L%.6f T%.6f R%.6f B%.6f (面积 %.6f) · 128 点最外 %.3e",
+                     rect.left, rect.top, rect.right, rect.bottom, area,
+                     expected.left, expected.top, expected.right, expected.bottom,
+                     Double(expected.width * expected.height), worst))
+        XCTAssertLessThanOrEqual(worst, 1e-6, "⑥ 四边逆映射必须全部落在源图内 (最外 \(worst))")
+        XCTAssertEqual(rect.left, expected.left, accuracy: 1e-9, "⑥ 与最大内接矩形一致 (左)")
+        XCTAssertEqual(rect.top, expected.top, accuracy: 1e-9, "⑥ 与最大内接矩形一致 (上)")
+        XCTAssertEqual(rect.right, expected.right, accuracy: 1e-9, "⑥ 与最大内接矩形一致 (右)")
+        XCTAssertEqual(rect.bottom, expected.bottom, accuracy: 1e-9, "⑥ 与最大内接矩形一致 (下)")
+    }
+
+    /// 521 — the fix is one function, but the ticket demands the other two doors really take it: the
+    /// drawn-line straighten release and the guide-line fit, both with 「不出像素」 on.
+    func testStaysInsidePixelsAlsoCropsThroughTheOtherTwoDoors() throws {
+        // 画线拉直's release (`commitStraighten(autoCrop: true)`).
+        let (session, tool) = try makeTool(staysInsidePixels: true) { _ in }
+        tool.setStraighten(8)
+        let rows = session.history.snapshots.count
+        XCTAssertTrue(tool.commitStraighten(autoCrop: true), "§2 画线拉直松手必须提交")
+        XCTAssertEqual(session.history.snapshots.count, rows + 1, "§2 画线拉直 = 一条行")
+        let drawn = CropRect(session.edit.geometry.crop)
+        note(String(format: "521 画线拉直 · 框 L%.4f T%.4f R%.4f B%.4f · 面积 %.4f",
+                     drawn.left, drawn.top, drawn.right, drawn.bottom,
+                     Double(drawn.width * drawn.height)))
+        XCTAssertTrue(drawn.width * drawn.height > 0)
+        XCTAssertLessThan(Double(drawn.width * drawn.height), 0.999,
+                          "§2 勾上「不出像素」画线拉直也必须裁")
+        XCTAssertEqual(tool.draft.crop.normalizedRect, session.edit.geometry.crop,
+                       "§2 草稿与文档同一个框")
+
+        // 引导线's fit (`writeGuideLineSolution`).
+        let (session2, tool2) = try makeTool(staysInsidePixels: true) { _ in }
+        XCTAssertTrue(tool2.setGuideLinesArmed(true))
+        let pair = convergingPair(vertical: 40)
+        let rows2 = session2.history.snapshots.count
+        XCTAssertNil(try draw(tool2, pair[0].0, pair[0].1), "§2 一条线还解不出来")
+        XCTAssertNotNil(try draw(tool2, pair[1].0, pair[1].1), "§2 两条线应当解出来")
+        XCTAssertEqual(session2.history.snapshots.count, rows2 + 1, "§2 引导线 = 一条行")
+        let fit = CropRect(session2.edit.geometry.crop)
+        note(String(format: "521 引导线 · 框 L%.4f T%.4f R%.4f B%.4f · 面积 %.4f",
+                     fit.left, fit.top, fit.right, fit.bottom,
+                     Double(fit.width * fit.height)))
+        XCTAssertTrue(fit.width * fit.height > 0)
+        XCTAssertLessThan(Double(fit.width * fit.height), 0.999,
+                          "§2 勾上「不出像素」引导线拟合也必须裁")
+        XCTAssertEqual(tool2.draft.crop.normalizedRect, session2.edit.geometry.crop,
+                       "§2 草稿与文档同一个框")
     }
 
     // MARK: - harness
 
     /// The controller gets its **own** preferences suite: 「不出像素」 is a process-wide preference
-    /// (`AppPreferences.store`) and 505 makes 自动裁切 read it, so a test that ticks it would
-    /// otherwise decide the answer for every later test in the same run.
+    /// (`AppPreferences.store`). 521 removed 自动裁切's dependence on it, but a suite that ticks it
+    /// would still decide the drag laws for every later test in the same run.
     private func makeTool(staysInsidePixels: Bool? = nil,
                           document: (inout GeometryGroup) -> Void)
         throws -> (CatalogSession, CropToolController) {
@@ -434,8 +512,8 @@ final class AutoCropAfterStraighten505Tests: XCTestCase {
         XCTAssertTrue(CropUITestSupport.openCropTool(loupe, editor.session))
         CropUITestSupport.pump(0.05)
         XCTAssertTrue(tool.setGuideLinesArmed(true))
-        // 505 — auto crop reads 「不出像素」, a process-wide preference; every fixture here needs it
-        // off (the ⑥ case is the one that ticks it).
+        // 521 — 自动裁切 no longer reads 「不出像素」 (the switch constrains drags), but the preference
+        // is process-wide: pin it off so an earlier ⑥ fixture cannot leak into this one.
         _ = tool.setCropStaysInsidePixels(false)
         let source = ImageSize(width: Int(loupe.cropTool.sourceSize.width),
                                height: Int(loupe.cropTool.sourceSize.height))
