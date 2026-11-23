@@ -459,11 +459,16 @@ public final class CanvasFrameCache {
         // 458 — one canvas has one entry. Replacing by the **soft** identity evicts a variant stored
         // under a display reading that was never notified (a silent EDR/primaries move): the new
         // frame's display facts are the only ones that may be served from now on.
+        //
+        // 535 — the same replacement is how a preview rung gives way to the full rung of the same
+        // camera (the screen frame is written first, the sharper one later). That is **one** logical
+        // canvas, not two entries, so `stores` counts the entry's creation and not each blit.
+        let replacingExisting = entries.contains { $0.key.softIdentity == key.softIdentity }
         if let existing = entries.firstIndex(where: { $0.key.softIdentity == key.softIdentity }) {
             entries.remove(at: existing)
         }
         entries.append(Entry(key: key, value: value))
-        stores += 1
+        if !replacingExisting { stores += 1 }
         displayChangePending = false
         enforceCapacity()
         return true
