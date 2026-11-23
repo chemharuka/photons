@@ -294,9 +294,11 @@ public struct AnselDenoiseJob: Sendable {
         }
 
         var options = self.options
-        // 噪声参数：本单先用默认（`Var = a·x + b`），ISO 自适应留给下一单（§2.1）。
-        if options.noiseA.isEmpty { options.noiseA = [0.0004, 0.0003, 0.0004] }
-        if options.noiseB.isEmpty { options.noiseB = [3e-6, 1e-6, 1e-6] }
+        // `--look nlmf`（默认）由工具从文件里测曲线，宿主不再猜噪声参数；只有 classic 路径需要填。
+        if options.look == .classic {
+            if options.noiseA.isEmpty { options.noiseA = [0.0004, 0.0003, 0.0004] }
+            if options.noiseB.isEmpty { options.noiseB = [3e-6, 1e-6, 1e-6] }
+        }
 
         let finalURL = Self.outputURL(for: source, fileManager: fm)
         let temp = finalURL.deletingLastPathComponent()

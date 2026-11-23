@@ -4,6 +4,11 @@ import Foundation
 
 /// §396 A —— 「模型降噪的默认强度修改为0.50，即 `--strength 0.50`」。
 ///
+/// **口径修正（覆盖 §396 ①）**：默认路径改成 `--look nlmf` —— 工具按本帧测得的 σ 自己定力度和
+/// 逐像素 taper，宿主不再发 `--strength 0.50`。§396 的意图没被删掉：`look == .classic` 时那套
+/// 数字仍然一个不差地发出去，下面的用例改成显式走 classic 来钉住它；另加一条钉住默认 argv
+/// 里是 `--look nlmf` 且没有 `--strength`/`--a`。
+///
 /// 判据（规格 §3 ①，以及 §5 风险 3 要求的那两个数）：
 ///
 ///   ① `AnselDenoiseOptions().strength == 0.50`，**并且**工具真的收到 `--strength 0.5`。
@@ -51,8 +56,32 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
         let defaults = AnselDenoiseOptions()
         print("① AnselDenoiseOptions().strength = \(defaults.strength) "
               + "(String(format: \"%.9g\", …) = \(String(format: "%.9g", defaults.strength)))")
-        XCTAssertEqual(defaults.strength, 0.50, "① 默认强度必须是 0.50（用户口径）")
+        // 这个数现在只在 classic 路径上被发出去；它仍是 0.50，改回 0.85 这条必须红。
+        XCTAssertEqual(defaults.strength, 0.50, "① classic 路径的默认强度必须是 0.50（用户口径）")
         XCTAssertNotEqual(defaults.strength, 0.85, "① 反向门：改回 0.85 这条必须红")
+        // 而默认走出来的是 `--look nlmf`（口径修正）。
+        XCTAssertEqual(defaults.look, .nlmf, "① 默认必须是 .nlmf")
+    }
+
+    /// 口径修正后的默认 argv：`--look nlmf`，且 **不** 出现 `--strength` / `--a` / `--b`。
+    ///
+    /// 这一条是「宿主不猜噪声」的可观测证据：只要有人把默认改回 classic，或者把固定 a/b 又拼
+    /// 回来，它立刻红。
+    func testTheDefaultArgvAsksForTheMeasuredCurve() throws {
+        let tool = try installRecordingTool()
+        let client = AnselDenoiseClient(executableURL: tool)
+        _ = try client.denoiseImage(model: try makeDummyModel(), input: Self.fixtureURL,
+                                   output: workDir.appendingPathComponent("look-out.dng"),
+                                   options: AnselDenoiseOptions())
+        let argv = try recordedArgv()
+        print("① 默认 argv = \(argv)")
+        XCTAssertEqual(argv.first, "image")
+        let look = try XCTUnwrap(argv.firstIndex(of: "--look"), "默认 argv 缺 --look")
+        XCTAssertEqual(argv[safe: look + 1], "nlmf")
+        for forbidden in ["--strength", "--a", "--b", "--sigma-scale"] {
+            XCTAssertFalse(argv.contains(forbidden),
+                           "默认路径不该再发 \(forbidden)（工具自己测曲线、自己定力度）")
+        }
     }
 
     /// ① 后半句 — **the argv the child process actually received**.
@@ -66,6 +95,7 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
         let output = workDir.appendingPathComponent("argv-out.dng")
 
         var options = AnselDenoiseOptions()
+        options.look = .classic                     // 口径修正：这条钉的是 classic 路径
         options.noiseA = [0.0004, 0.0003, 0.0004]
         options.noiseB = [3e-6, 1e-6, 1e-6]
         _ = try client.denoiseImage(model: try makeDummyModel(), input: Self.fixtureURL,
@@ -89,6 +119,7 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
         let tool = try installRecordingTool()
         let client = AnselDenoiseClient(executableURL: tool)
         var options = AnselDenoiseOptions()
+        options.look = .classic
         options.noiseA = [0.0004, 0.0003, 0.0004]
         options.noiseB = [3e-6, 1e-6, 1e-6]
         options.strength = 0.85
@@ -166,6 +197,7 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
 
         func denoise(at strength: Double) throws -> Block {
             var options = AnselDenoiseOptions()
+            options.look = .classic                 // 口径修正：这两个数只在 classic 下可比
             options.strength = strength
             let job = AnselDenoiseJob(location: AnselDenoiseLocation(executableURL: location.executableURL,
                                                                      modelURL: model),
@@ -207,8 +239,9 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
 
     /// A stand-in that records the argv it was handed and then copies the DNG through.
     ///
-    /// It also **fails loudly when `--strength` is missing**, so the reverse gate (⑧) cannot pass by
-    /// the client silently dropping the flag: the run itself breaks.
+    /// It also **fails loudly when neither `--strength` nor `--look` is present**, so the reverse
+    /// gates cannot pass by the client silently sending no conditioning at all: the run breaks.
+    /// (口径修正后，默认路径的证据是 `--look nlmf`；classic 路径的证据仍是 `--strength`。)
     private func installRecordingTool() throws -> URL {
         let tool = workDir.appendingPathComponent("record-ansel-denoise-swift")
         let log = argvFile.path
@@ -219,16 +252,20 @@ final class AnselDenoiseStrength396Tests: XCTestCase {
           echo '{"tool":{"name":"ansel-denoise-swift","protocol":2},"gpu":"Fake GPU","features":["image","image-dng","gpu"]}'
           exit 0
         fi
-        # the whole point: no --strength on the command line ⇒ this run is not evidence
+        # the whole point: no conditioning on the command line ⇒ this run is not evidence
         found=0
-        for a in "$@"; do if [ "$a" = "--strength" ]; then found=1; fi; done
-        if [ "$found" = "0" ]; then echo "error: argv 里没有 --strength" >&2; exit 9; fi
+        look=0
         input="$3"
         out=""
-        while [ $# -gt 0 ]; do
-          if [ "$1" = "--out" ]; then out="$2"; shift 2; continue; fi
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "--strength" ]; then found=1; fi
+          if [ "$1" = "--look" ]; then look=1; fi
+          if [ "$1" = "--out" ]; then out="$2"; shift; fi
           shift
         done
+        if [ "$found" = "0" ] && [ "$look" = "0" ]; then
+          echo "error: argv 里既没有 --strength 也没有 --look" >&2; exit 9
+        fi
         if [ -z "$out" ] || [ ! -f "$input" ]; then exit 3; fi
         cp "$input" "$out" || exit 4
         echo '{"width":1024,"height":1024,"cfa":"rggb","mosaicCfa":"rggb","pieces":1,"columns":1,"rows":1,"seams":0,"seconds":0.01,"readSeconds":0.0,"inferenceSeconds":0.01,"writeSeconds":0.0,"backend":"fake","outputBytes":1}'
