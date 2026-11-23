@@ -2199,8 +2199,9 @@ public final class CropToolController {
         // **505 — 画线拉直's release is one gesture and the auto crop is part of it** (the user named
         // two doors: 引导线 and 画线拉直). The plain 拉直 slider does **not** crop — its release keeps
         // the frame the user set, which is 190's contract (`45° 重排不改 crop`) and the reason this is
-        // a parameter rather than unconditional. A level document, and 「不出像素」, come back `nil`;
-        // the one place that decides is `autoCropTarget`.
+        // a parameter rather than unconditional. A level document comes back `nil`; the one place
+        // that decides is `autoCropTarget`. (521 — 「不出像素」 no longer comes back `nil` there: the
+        // switch constrains drags, not this command.)
         let crop = autoCrop ? autoCropTarget(perspective: livePerspective, angle: angle,
                                              document: session.edit.geometry) : nil
         // **The draft first, the document second.** The low-res backdrop and the overlay are keyed
@@ -2379,8 +2380,15 @@ public final class CropToolController {
     /// A picture that is already level (no straighten, no keystone) is left **byte-identical**: the
     /// largest rectangle is the whole picture, but the user's crop is their composition, and the
     /// ticket's own boundary case says so. Returning `false` writes nothing and mints no row.
-    /// 「不出像素」 on is the same answer for a different reason: that switch promises 「只平移、
-    /// 不改尺寸」, so a size change is not its business (505 §2.3.4).
+    ///
+    /// **521 — 「不出像素」 does not skip this.** 505 §2.3.4 read the switch as 「只平移、不改尺寸」,
+    /// so it made 自动裁切 step aside. That reason only holds for a **drag** (move/scale) — the code
+    /// that keeps a drag inside the pixels is `drag.handle == .inside` and the
+    /// `clampedToRotatedFrame(..., keepsInsideRotatedFrame:)` presses, none of which depend on this
+    /// function. An explicit command may resize, and the rect this function returns is inside the
+    /// pixels **by construction**, so ticking the box and cropping to the largest area are the same
+    /// promise, not opposites. The user's 2026-11-22 wording (「选择不出像素后自动裁切失效」) overrides
+    /// 505 §2.3.4.
     @discardableResult
     public func autoCrop() -> Bool {
         guard isActive, let session else { return false }
@@ -2402,11 +2410,11 @@ public final class CropToolController {
     /// **505 — the rect 自动裁剪 would write, and the space it is measured in**, for a document
     /// about to hold `perspective` at `angle`.
     ///
-    /// `nil` is the whole answer to 「should this gesture crop at all?」 and covers both boundaries:
-    /// a level picture (no keystone, no turn — 489's 「留用户构图」) and 「不出像素」 on (translation
-    /// only). Both callers that fold the crop into a larger write (`writeGuideLineSolution`,
-    /// `commitStraighten`) and `autoCrop()` itself read this one function, so the three doors cannot
-    /// disagree about when a crop is implied.
+    /// `nil` is the whole answer to 「should this gesture crop at all?」 and covers the one boundary:
+    /// a level picture (no keystone, no turn — 489's 「留用户构图」). 521 removed the second boundary
+    /// (「不出像素」 on) — see `autoCrop()`. Both callers that fold the crop into a larger write
+    /// (`writeGuideLineSolution`, `commitStraighten`) and `autoCrop()` itself read this one function,
+    /// so the three doors cannot disagree about when a crop is implied.
     ///
     /// The answer is inset by **one output pixel** on every side. The solver's rectangle is exactly
     /// tangent — its edges lie on the picture's edges — and a pixel whose centre sits on the edge is
@@ -2415,7 +2423,13 @@ public final class CropToolController {
     private func autoCropTarget(perspective: PerspectiveMap?, angle: Double,
                                 document: GeometryGroup)
         -> (rect: NormalizedRect, space: CropSpace)? {
-        guard !staysInsidePixelsStorage else { return nil }
+        // **521 — 「不出像素」 is not a gate here.** The switch constrains **drags** (the `.inside`
+        // translation at `drag.handle == .inside` and the `clampedToRotatedFrame(..., keepsInside…)`
+        // presses at the three pixel laws), never an explicit command. The rect this function
+        // returns is inside the pixels by construction — the polygon *is* the picture's valid region,
+        // so its largest inscribed rectangle cannot leave it. Ticking the box and cropping to the
+        // largest area are therefore the same promise. The 2026-11-22 user wording (「选择不出像素后
+        // 自动裁切失效，修复」) overrides 505 §2.3.4's skip, which was only ever right for a drag.
         guard abs(angle) > 1e-9 || perspective?.hasWarp == true else { return nil }
         let space: CropSpace = perspective?.hasWarp == true ? .canvas : document.cropSpace
         let polygon = autoCropPolygon(space: space, angle: angle, perspective: perspective)
