@@ -404,6 +404,116 @@ public final class CatalogSession {
     /// reported number includes the 50 ms debounce window rather than hiding it.
     public private(set) var lastEditChangedAt: CFAbsoluteTime = 0
 
+    // MARK: 530 — the document-load timeline
+    //
+    // The user's report is 「编辑数值有时要等照片加载完再加载」. Three candidates were named before
+    // any change (main-thread DB read, selection deferred behind the decode, or the view not being
+    // told). These fields are the measurement, in the same read-only style as `lastEditChangedAt`:
+    // they are written by the selection/document path and read by the tests. Nothing branches on
+    // them.
+
+    /// One photo switch, from the selection write to the first frame that photo presented.
+    public struct EditLoadTimeline: Sendable, Equatable {
+        public var assetID: String
+        /// The click/selection entry (before the selection fields are written).
+        public var selectionAt: CFAbsoluteTime
+        /// The two catalog reads, each bracketed; equal when a read was skipped.
+        public var developBeganAt: CFAbsoluteTime
+        public var developEndedAt: CFAbsoluteTime
+        public var historyBeganAt: CFAbsoluteTime
+        public var historyEndedAt: CFAbsoluteTime
+        /// After `edit` / `loadedEditAssetID` / `history` are in place.
+        public var assignedAt: CFAbsoluteTime
+        /// The first frame the loupe published for this asset, `nil` until it lands.
+        public var firstFrameAt: CFAbsoluteTime?
+
+        public var selectionToAssignedMilliseconds: Double {
+            (assignedAt - selectionAt) * 1000
+        }
+        public var developMilliseconds: Double {
+            (developEndedAt - developBeganAt) * 1000
+        }
+        /// The background history read, or 0 while it is still running.
+        public var historyMilliseconds: Double {
+            guard historyEndedAt > 0 else { return 0 }
+            return (historyEndedAt - historyBeganAt) * 1000
+        }
+        public var assignedToFirstFrameMilliseconds: Double? {
+            firstFrameAt.map { ($0 - assignedAt) * 1000 }
+        }
+    }
+
+    /// The last switch measured by `loadEditForAnchor`.
+    public private(set) var lastEditLoadTimeline: EditLoadTimeline?
+    /// Wall-clock cost of the last background history read (0 until it lands).
+    public private(set) var lastEditHistoryLoadMilliseconds: Double = 0
+    /// Number of switches measured — a cheap "the seam ran" fact for tests.
+    public private(set) var editLoadCount = 0
+    /// When the loupe last published a new photo's frame, and for which asset.
+    public private(set) var lastFirstFrameAt: CFAbsoluteTime = 0
+    public private(set) var lastFirstFrameAssetID: String?
+    /// The selection-entry clock `loadEditForAnchor` measures from.
+    private var selectionChangedAt: CFAbsoluteTime = 0
+
+    private func markSelectionChanged() {
+        selectionChangedAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// When a switch's document is not assigned synchronously (the 530 fix moves the reads to a
+    /// task), the old document must not stay readable under the new anchor. This test-only door
+    /// re-opens the pre-530 order — assign only when the first frame lands — so the acceptance's
+    /// reverse gate can prove the synchronous path is load-bearing. Production leaves it `false`.
+    public var defersDocumentUntilFirstFrameForTesting = false
+
+    /// Test-only delay in front of the background history read, so a fixture can make 「等照片加载」
+    /// arbitrarily long without a decoder. Production is 0.
+    public var editHistoryLoadDelayForTesting: TimeInterval = 0
+
+    /// Test-only reproduction of the pre-530 order (both reads on the main actor). The benchmark
+    /// turns it on to measure the baseline on the same machine; production is `false`.
+    public var loadsEditHistorySynchronouslyForTesting = false
+
+    /// A switch whose document read has finished but whose history read is still on a background
+    /// queue. Anything that *writes* history calls `flushPendingEditHistory()` first: the user's
+    /// undo stack must be the stored one before a snapshot is appended, never a one-row baseline
+    /// that would truncate the persisted stack.
+    private final class EditHistoryLoadBox: @unchecked Sendable {
+        let semaphore = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var stored: EditHistory?
+
+        func finish(_ stack: EditHistory?) {
+            lock.lock()
+            stored = stack
+            lock.unlock()
+            semaphore.signal()
+        }
+
+        var result: EditHistory? {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    private struct PendingEditHistoryLoad {
+        let assetID: String
+        let token: Int
+        let box: EditHistoryLoadBox
+    }
+
+    private var pendingEditHistory: PendingEditHistoryLoad?
+    private var editHistoryLoadToken = 0
+
+    /// A deferred (reverse-gate) switch: everything is read, nothing is written until the frame.
+    private struct DeferredEditLoad {
+        let asset: Asset
+        let model: EditModel
+        let stack: EditHistory?
+        let timeline: EditLoadTimeline
+        let installsHistoryNow: Bool
+    }
+    private var pendingDeferredEditLoad: DeferredEditLoad?
+
     /// The undo stack (D10: snapshots plus a cursor, not a command log). Seeded with the state the
     /// document was opened in, so the floor of undo is "Original", never "neutral".
     public private(set) var history = EditHistory()
@@ -627,7 +737,27 @@ public final class CatalogSession {
     /// `left/right` rim offsets with the landscape ratio and the ellipse renders half again as wide as
     /// the hand drew it. Written once per presented photo by the loupe, keyed by asset id so a photo
     /// switch cannot inherit the previous picture's frame before its own decode lands.
-    public internal(set) var ingestedSourceFrame: (assetID: String, size: ImageSize)?
+    public internal(set) var ingestedSourceFrame: (assetID: String, size: ImageSize)? {
+        didSet {
+            // 530 — the loupe publishes exactly one frame per presented photo. A new photo's first
+            // frame closes that switch's timeline, which is the second number the acceptance asks
+            // for (「edit 已赋值 → 首帧」).
+            guard let frame = ingestedSourceFrame,
+                  oldValue?.assetID != frame.assetID else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            lastFirstFrameAt = now
+            lastFirstFrameAssetID = frame.assetID
+            if let pending = pendingDeferredEditLoad, pending.asset.id == frame.assetID {
+                pendingDeferredEditLoad = nil
+                applyEditLoad(pending)
+            }
+            if var timeline = lastEditLoadTimeline, timeline.assetID == frame.assetID,
+               timeline.firstFrameAt == nil {
+                timeline.firstFrameAt = now
+                lastEditLoadTimeline = timeline
+            }
+        }
+    }
 
     /// 290 — the EXIF orientation the import recorded for `assetID`, or `nil` when the row has no
     /// metadata (or no orientation). The first-frame stand-in runs **before** the first ingest
@@ -2962,6 +3092,7 @@ public final class CatalogSession {
     }
 
     public func setSelection(_ ids: Set<String>, anchor: String? = nil) {
+        markSelectionChanged()
         selection = ids
         if let anchor {
             anchorID = anchor
@@ -2979,6 +3110,7 @@ public final class CatalogSession {
     /// A plain click / non-⇧ keyboard landing: this photo is the selection, the anchor **and** the
     /// range base, so the next ⇧ click starts here.
     public func selectOnly(_ id: String) {
+        markSelectionChanged()
         selection = [id]
         anchorID = id
         selectionBase = id
@@ -2993,6 +3125,7 @@ public final class CatalogSession {
     /// and removing the anchor hands the anchor back to the range base (or, with no base left, to
     /// the last remaining photo in display order).
     public func toggle(_ id: String) {
+        markSelectionChanged()
         if selection.contains(id) {
             selection.remove(id)
             if selectionBase == id {
@@ -3023,6 +3156,7 @@ public final class CatalogSession {
     /// range base and `id`, replacing the current selection. `adding` is ⇧⌘ (union instead of
     /// replace). The anchor and the base do not move — that is the whole point of the gesture.
     public func selectRange(to id: String, adding: Bool = false) {
+        markSelectionChanged()
         guard let base = selectionBase else {
             // No base yet (first ⇧ after a programmatic selection): a plain selection is the only
             // honest answer, and it establishes the base.
@@ -3221,6 +3355,8 @@ public final class CatalogSession {
     /// without changing a value is not an edit and does not switch; entering happens on the first
     /// tick that writes, and the following ticks of the same drag continue in the loupe.
     public func applyEdit(_ mutate: (inout EditModel) -> Void) {
+        // Not `flushPendingEditHistory()`: a drag only writes `edit`, and the values must not wait
+        // for a history read. The stack is pulled forward at the commit/undo doors below.
         if mode == .grid, catalog != nil {
             applyEditFromGrid(mutate)
             return
@@ -3303,6 +3439,7 @@ public final class CatalogSession {
     ///   是**一个动作**，不许折进它前面那次拖动里（详见 `EditHistory.commit`）。
     @discardableResult
     public func commitEdit(label: String = "", coalesce: Bool = true) -> Bool {
+        flushPendingEditHistory()
         let committed = history.commit(MaskViewState.documentOnly(edit), label: label,
                                        coalesce: coalesce) != nil
         if committed { persist() }
@@ -3321,6 +3458,7 @@ public final class CatalogSession {
         // the undo and commit `base → edit`, resurrecting the state ⌘Z had just stepped away from.
         // Closing first is a no-op when nothing is open, so the door is the same either way.
         endToolSession()
+        flushPendingEditHistory()
         guard let model = history.undo() else { return false }
         restore(model)
         persist()
@@ -3336,6 +3474,7 @@ public final class CatalogSession {
     /// truncates it — which is the user's 「如果继续操作了，恢复点后面的操作就没了」.
     @discardableResult
     public func jumpToHistory(seq: Int) -> Bool {
+        flushPendingEditHistory()
         guard let index = history.index(of: seq), index != history.cursor else { return false }
         guard let model = history.jump(to: seq) else { return false }
         restore(model)
@@ -3378,6 +3517,7 @@ public final class CatalogSession {
     /// Begin a tool session (077): from here to `endToolSession` the history records **nothing**, so
     /// a crop/rotate gesture is one row however many handle positions it went through.
     public func beginToolSession(_ tool: String, label: String? = nil) {
+        flushPendingEditHistory()
         history.beginSession(tool, label: label)
     }
 
@@ -3392,6 +3532,7 @@ public final class CatalogSession {
     /// gives back — independent of it.
     public func beginToolGesture(tool: String, label: String) {
         endToolSession()                        // no-op when nothing is open
+        flushPendingEditHistory()
         history.beginSession(tool, label: label)
     }
 
@@ -3412,6 +3553,7 @@ public final class CatalogSession {
     /// 应用: close the session with exactly one snapshot (`base → edit`), or none if nothing moved.
     @discardableResult
     public func endToolSession(label: String? = nil) -> Bool {
+        flushPendingEditHistory()
         let committed = history.endSession(MaskViewState.documentOnly(edit), label: label) != nil
         if committed { persist() }
         return committed
@@ -3423,6 +3565,7 @@ public final class CatalogSession {
     /// the document), but a control that *does* write inside a session (裁切 bar's flips) must not
     /// survive a cancel with no history row to undo it. One render, no snapshot.
     public func cancelToolSession() {
+        flushPendingEditHistory()
         let base = history.activeSession?.base
         history.cancelSession()
         guard let base, !EditHistory.isSemanticallyIdentical(edit, base) else { return }
@@ -3455,6 +3598,7 @@ public final class CatalogSession {
     @discardableResult
     public func redo() -> Bool {
         endToolSession()            // 356 — same rule as `undo()`: a command closes the gesture's session
+        flushPendingEditHistory()
         guard let model = history.redo() else { return false }
         restore(model)
         persist()
@@ -3482,6 +3626,7 @@ public final class CatalogSession {
     /// checks a save against. A no-op commit therefore cannot throw "the blob disagrees with the
     /// cursor" just because a double moved by less than `EditHistory.dirtyTolerance`.
     private func persist() {
+        flushPendingEditHistory()
         guard let catalog, let id = loadedEditAssetID ?? anchorAsset?.id else { return }
         var stack = history
         if stack.isEmpty {
@@ -3549,12 +3694,16 @@ public final class CatalogSession {
     /// Without it, re-selecting the same photo keeps the live edit *and its history* — a selection
     /// change must not silently throw away the undo stack.
     ///
-    /// The document comes from `Catalog.develop(forAsset:)` (D9: `develop_json` is the truth; a
-    /// damaged blob is quarantined and reads as `.neutral`), and the stack from
-    /// `Catalog.editHistory(forAsset:)` so ⌘Z survives a relaunch. A library that has no rows yet
-    /// gets `EditHistory(baseline:)`, i.e. the floor is the document as it was opened.
+    /// D9 still holds — `develop_json` is the truth — but the selection path reads the copy the
+    /// library query already loaded into `assets` instead of a second database round trip: the
+    /// document is O(document) and lands synchronously, so the inspector's numbers never wait for a
+    /// frame. The stack (`Catalog.editHistory(forAsset:)`, which decodes every snapshot) moves to a
+    /// background queue; a library with no rows yet gets the `EditHistory(baseline:)` floor until it
+    /// lands. `force` keeps the old authoritative synchronous read for 「外部保存改了这个 blob」.
     public func loadEditForAnchor(force: Bool = false) {
         guard let a = anchorAsset else {
+            pendingEditHistory = nil
+            pendingDeferredEditLoad = nil
             edit = .neutral
             history = EditHistory(baseline: .neutral)
             loadedEditAssetID = nil
@@ -3568,32 +3717,131 @@ public final class CatalogSession {
         // the flag too. Offline roots are skipped inside the catalog method.
         recheckAvailability(assetID: a.id)
         if !force, loadedEditAssetID == a.id { return }
+        // A switch supersedes any history still in flight for the photo we just left: its result
+        // names another asset, so it could only be dropped later anyway.
+        pendingEditHistory = nil
+        editHistoryLoadToken &+= 1
+        let selectionAt = selectionChangedAt == 0 ? CFAbsoluteTimeGetCurrent() : selectionChangedAt
+        var timeline = EditLoadTimeline(assetID: a.id, selectionAt: selectionAt,
+                                        developBeganAt: 0, developEndedAt: 0,
+                                        historyBeganAt: 0, historyEndedAt: 0,
+                                        assignedAt: 0, firstFrameAt: nil)
+        // 530 — measured on the demo library (659 photos, histories up to 393 rows):
+        // `develop(forAsset:)` costs ~1 ms, while `editHistory(forAsset:)` costs 15–20 ms p50 and
+        // ~80 ms p95 in a quiet run (up to ~875 ms when the open's other reads contend), because
+        // that call decodes every snapshot. So the **history** read is what holds the main
+        // thread, not the document. The document is therefore still assigned synchronously (it is
+        // the in-memory `develop_json` the library query already carried), and only the history
+        // moves to a background queue. `force` keeps the old authoritative synchronous read: it is
+        // the explicit "an external save changed this blob" door, not the selection path.
         var model: EditModel
         var stack: EditHistory?
-        if let catalog {
+        let synchronous = force || loadsEditHistorySynchronouslyForTesting
+        let installsHistoryNow = synchronous
+        timeline.developBeganAt = CFAbsoluteTimeGetCurrent()
+        if synchronous, let catalog {
             model = (try? catalog.develop(forAsset: a.id)) ?? .neutral
-            stack = try? catalog.editHistory(forAsset: a.id)
         } else if let data = a.developJson.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode(EditModel.self, from: data) {
             model = decoded
+        } else if let catalog {
+            // A row without a usable blob (or a library opened without the projection): one
+            // document-sized read, still O(document), never the history.
+            model = (try? catalog.develop(forAsset: a.id)) ?? .neutral
         } else {
             model = .neutral
         }
+        timeline.developEndedAt = CFAbsoluteTimeGetCurrent()
+        if synchronous {
+            timeline.historyBeganAt = timeline.developEndedAt
+            stack = try? catalog?.editHistory(forAsset: a.id)
+            timeline.historyEndedAt = CFAbsoluteTimeGetCurrent()
+        }
         // The overlay is view state: a stored document that carries one is stale by definition.
         model = MaskViewState.documentOnly(model)
-        edit = model
-        if let stack, !stack.isEmpty {
+        let load = DeferredEditLoad(asset: a, model: model, stack: stack, timeline: timeline,
+                                    installsHistoryNow: installsHistoryNow)
+        if defersDocumentUntilFirstFrameForTesting {
+            pendingDeferredEditLoad = load
+            return
+        }
+        applyEditLoad(load)
+    }
+
+    /// Put one switch's document (and, when already read, its history) in place. Split out so the
+    /// reverse-gate door can defer exactly this step until a frame lands.
+    private func applyEditLoad(_ load: DeferredEditLoad) {
+        var timeline = load.timeline
+        edit = load.model
+        if load.installsHistoryNow, let stack = load.stack, !stack.isEmpty {
             history = stack
         } else {
-            history = EditHistory(baseline: model)
+            // A usable floor immediately; the stored stack replaces it when the background read
+            // lands (or `flushPendingEditHistory()` pulls it forward before a write).
+            history = EditHistory(baseline: load.model)
         }
-        loadedEditAssetID = a.id
+        loadedEditAssetID = load.asset.id
         selectedMaskID = edit.masks.first?.id
         maskTool = .off
         // A document change retires the pending shape and the previous photo's histogram: both
         // describe the picture that is no longer on screen.
         pendingMaskShape = nil
         recordHistogram(nil)
+        timeline.assignedAt = CFAbsoluteTimeGetCurrent()
+        if !load.installsHistoryNow {
+            timeline.historyBeganAt = timeline.assignedAt
+            lastEditLoadTimeline = timeline
+            scheduleHistoryLoad(assetID: load.asset.id)
+        } else {
+            lastEditLoadTimeline = timeline
+        }
+        editLoadCount += 1
+    }
+
+    private func scheduleHistoryLoad(assetID: String) {
+        guard let catalog else { return }
+        editHistoryLoadToken &+= 1
+        let token = editHistoryLoadToken
+        let box = EditHistoryLoadBox()
+        pendingEditHistory = PendingEditHistoryLoad(assetID: assetID, token: token, box: box)
+        let delay = editHistoryLoadDelayForTesting
+        DispatchQueue.global(qos: .userInitiated).async {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            let started = CFAbsoluteTimeGetCurrent()
+            let stack = try? catalog.editHistory(forAsset: assetID)
+            let milliseconds = (CFAbsoluteTimeGetCurrent() - started) * 1000
+            box.finish(stack)
+            Task { @MainActor [weak self] in
+                self?.installPendingHistory(token: token, milliseconds: milliseconds)
+            }
+        }
+    }
+
+    private func installPendingHistory(token: Int, milliseconds: Double) {
+        guard let pending = pendingEditHistory, pending.token == token else { return }
+        pendingEditHistory = nil
+        lastEditHistoryLoadMilliseconds = milliseconds
+        guard loadedEditAssetID == pending.assetID else { return }
+        if let stack = pending.box.result, !stack.isEmpty { history = stack }
+        if var timeline = lastEditLoadTimeline, timeline.assetID == pending.assetID {
+            timeline.historyEndedAt = CFAbsoluteTimeGetCurrent()
+            lastEditLoadTimeline = timeline
+        }
+    }
+
+    /// A write that appends to / moves the undo stack must see the stored one first. Waiting here is
+    /// free in practice (the read has landed long before a user's first edit); it exists so a very
+    /// fast 「选图→拖滑块」 cannot commit onto a one-row baseline and truncate `asset_history`.
+    private func flushPendingEditHistory() {
+        guard let pending = pendingEditHistory else { return }
+        pending.box.semaphore.wait()
+        pendingEditHistory = nil
+        guard loadedEditAssetID == pending.assetID else { return }
+        if let stack = pending.box.result, !stack.isEmpty { history = stack }
+        if var timeline = lastEditLoadTimeline, timeline.assetID == pending.assetID {
+            timeline.historyEndedAt = CFAbsoluteTimeGetCurrent()
+            lastEditLoadTimeline = timeline
+        }
     }
 
     /// 249 — convert a legacy (`canvasV1`) heal document to S1 source coordinates once the **exact**
@@ -3604,6 +3852,7 @@ public final class CatalogSession {
     /// Returns `true` when anything moved.
     @discardableResult
     public func migrateHealSpots(sourceSize: ImageSize) -> Bool {
+        flushPendingEditHistory()
         var next = edit
         guard next.migrateHealSpots(sourceSize: sourceSize) else { return false }
         edit = next
@@ -3621,6 +3870,7 @@ public final class CatalogSession {
     /// the point). A keystone-free document returns `false` and its bytes do not move.
     @discardableResult
     public func migrateCropToCanvasSpace(sourceSize: ImageSize) -> Bool {
+        flushPendingEditHistory()
         var next = edit
         guard next.migrateCropToCanvasSpace(sourceSize: sourceSize) else { return false }
         edit = next
