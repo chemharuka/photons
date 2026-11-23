@@ -141,16 +141,58 @@ public final class BackgroundTaskStore {
 
     private var expiryTimer: Timer?
 
-    /// Newest-first view for every surface that draws a list (顶栏 1–4 条 and the panel table).
+    /// Newest-first view for the surfaces that draw a flat history list (顶栏 1–4 条).
     /// This is the **only** place the stored append order is flipped; reversing again in a view
     /// would silently turn the list back into oldest-first.
     ///
     /// 504 — rows past `finishedRetention` are filtered here too, so a read that lands between two
     /// timer ticks never draws a row that is already due; the timer is what removes it for good.
+    ///
+    /// 「口径修正（覆盖 504 的『面板也读 displayTasks』）」2026-11-23 — the **panel** no longer reads
+    /// this property: its rows follow the queue order in `queueOrderedTasks`. 顶栏 keeps newest-first,
+    /// because a 3 pt line has no state text and the newest job is what a glance should catch.
     public var displayTasks: [BackgroundTask] {
         let instant = now()
         return Array(tasks.reversed())
             .filter { !$0.isExpired(at: instant, retention: Self.finishedRetention) }
+    }
+
+    /// 「口径修正（覆盖 504）」2026-11-23 — the owner's panel order:
+    /// **正在进行 → 排队中（先派的在前）→ 已完成（刚完成的在前）**.
+    ///
+    /// Same rows as `displayTasks` (same retention filter), different reading order. Running and
+    /// queued rows keep the stored dispatch order (`tasks` is append order, so `offset` is
+    /// 「谁先派的」); terminal rows sort by `finishedAt` descending, which is the order the panel
+    /// shows them in after a batch drains. A terminal row with no `finishedAt` cannot exist through
+    /// `begin`/`finish` (both stamp it), so the fallback is only there to keep the sort total.
+    public var queueOrderedTasks: [BackgroundTask] {
+        let instant = now()
+        let rows = tasks.enumerated()
+            .filter { !$0.element.isExpired(at: instant, retention: Self.finishedRetention) }
+
+        func group(_ state: BackgroundTask.State) -> Int {
+            switch state {
+            case .running: return 0
+            case .queued: return 1
+            case .finished, .cancelled, .failed: return 2
+            }
+        }
+
+        return rows.sorted { lhs, rhs in
+            let left = group(lhs.element.state)
+            let right = group(rhs.element.state)
+            if left != right { return left < right }
+            switch left {
+            case 0, 1:
+                // 先派的在前：执行中的那一行本来就是队头，后面的排队项按派发顺序排。
+                return lhs.offset < rhs.offset
+            default:
+                let l = lhs.element.finishedAt ?? .distantPast
+                let r = rhs.element.finishedAt ?? .distantPast
+                if l != r { return l > r }
+                return lhs.offset > rhs.offset
+            }
+        }.map(\.element)
     }
 
     /// How many terminal rows may stay: `max(0, 5 − in-flight)`, capped by the same five.

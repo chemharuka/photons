@@ -223,8 +223,10 @@ public final class BackgroundTasksPopover: NSViewController, NSTableViewDataSour
         rowView(at: row)?.isShowingPlaceholderForTesting
     }
 
-    /// Newest-first, the store's one display order. The panel never reverses `tasks` by itself.
-    private var displayTasks: [BackgroundTask] { backgroundTaskStore.displayTasks }
+    /// 「口径修正（覆盖 504）」2026-11-23 — the panel reads `queueOrderedTasks`:
+    /// 正在进行 → 排队中（先派的在前）→ 已完成（刚完成的在前）。The panel still never reorders
+    /// `tasks` itself; the store owns the order.
+    private var displayTasks: [BackgroundTask] { backgroundTaskStore.queueOrderedTasks }
 
     private func rowView(at row: Int) -> BackgroundTaskRowView? {
         loadViewIfNeeded()

@@ -348,7 +348,7 @@ final class DenoiseQueue510Tests: XCTestCase {
         XCTAssertEqual(session.denoiseSelection(engine: .nonlocal), [c.id])
 
         let panel = BackgroundTasksPopover(store: session.backgroundTasks)
-        let allRows = (0..<session.backgroundTasks.displayTasks.count)
+        let allRows = (0..<session.backgroundTasks.queueOrderedTasks.count)
             .compactMap { panel.rowTextForTesting(at: $0) }
         print("④ 面板行：\(allRows)")
         let queuedRows = allRows.filter { $0.contains("排队中") }
@@ -460,5 +460,45 @@ final class DenoiseQueue510Tests: XCTestCase {
         gate.permits.signal(); gate.permits.signal()
         waitUntil("队列没有清空") { !session.isDenoiseRunning }
         XCTAssertEqual(gate.startedCount, 2, "去重之后只跑两张，不会多跑一次")
+    }
+
+    // MARK: - ⑥ 面板顺序：正在进行 → 排队中（先派的在前）→ 已完成（刚完成的在前）
+
+    /// 「口径修正（覆盖 504）」2026-11-23 — 用户原话：「正在进行的放在队列的第一个，排队的任务
+    /// 按旧派（优先）→新派（后面处理）顺序来，已完成的按刚刚完成→以前完成来」。
+    /// 用假时钟写 `finishedAt`，这样「刚完成」是可断言的数字而不是运气。
+    func testPanelOrdersRunningThenQueuedThenMostRecentlyFinished() {
+        var instant = Date(timeIntervalSince1970: 1_000)
+        let store = BackgroundTaskStore()
+        store.now = { instant }
+
+        // 先派的一批：A 执行中，B、C 排队（入队顺序 = 派发顺序）。
+        let a = store.begin(BackgroundTask(kind: .denoise, title: "A-执行中", total: 1,
+                                           startedAt: instant))
+        _ = store.begin(BackgroundTask(kind: .denoise, title: "B-排队早", total: 1,
+                                       startedAt: instant, state: .queued, queuedAhead: 1))
+        _ = store.begin(BackgroundTask(kind: .denoise, title: "C-排队晚", total: 1,
+                                       startedAt: instant, state: .queued, queuedAhead: 2))
+
+        // 两条已完成：D 先完成，E 后完成（5 行上限：3 在飞 + 2 终态 = 5，两条都保留）。
+        func completed(_ title: String) {
+            let id = store.begin(BackgroundTask(kind: .export, title: title, total: 2,
+                                                startedAt: instant))
+            store.advance(id: id, completed: 2)
+            store.finish(id: id)
+        }
+        completed("D-早完成")
+        instant = instant.addingTimeInterval(60)
+        completed("E-刚完成")
+
+        let panel = BackgroundTasksPopover(store: store)
+        panel.loadViewIfNeeded()
+        panel.reload()
+        let titles = (0..<panel.tableRowCountForTesting)
+            .compactMap { panel.rowTextForTesting(at: $0)?.components(separatedBy: " · ").first }
+        print("⑩ 面板顺序：\(titles) 执行中=\(a)")
+        XCTAssertEqual(titles, ["A-执行中", "B-排队早", "C-排队晚", "E-刚完成", "D-早完成"],
+                       "正在进行 → 排队中（先派的在前）→ 已完成（刚完成的在前）")
+        XCTAssertEqual(store.queueOrderedTasks.map(\.title), titles)
     }
 }
