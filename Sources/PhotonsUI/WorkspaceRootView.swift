@@ -1369,6 +1369,9 @@ public final class WorkspaceRootView: NSView {
         do {
             try session.open(url)
             window?.title = "Photons — \(url.deletingPathExtension().lastPathComponent)"
+            // 539 — the open-panel path does not go through `EditorWindowController.openLibrary`,
+            // so it warms here too; the switch and the readouts are the controller's.
+            loupeController.prewarmV9ForAnchor()
         } catch {
             let alert = NSAlert(error: error)
             alert.runModal()

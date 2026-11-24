@@ -7,6 +7,22 @@ import Metal
 import PhotonsCore
 import PhotonsCatalog
 
+/// 539 — whether opening a library warms the anchor photo's v9 development in the background.
+///
+/// One switch, one constant. `PHOTONS_WARM_V9=0` (or any leading `0`) turns it off; absent means on,
+/// which is the owner's default. When off, the open path makes no decode request here at all — the
+/// bytes and the behaviour are exactly the pre-539 ones.
+public enum V9PrewarmConfiguration {
+    public static let environmentKey = "PHOTONS_WARM_V9"
+    /// The default the owner chose: an open library warms one photo.
+    public static let enabledByDefault = true
+
+    public static func isEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        guard let raw = environment[environmentKey] else { return enabledByDefault }
+        return !raw.hasPrefix("0")
+    }
+}
+
 /// Fits or zooms the anchor photo through `RenderGraph` and presents the S4 texture.
 ///
 /// One ladder, keyed on `LoupeViewState` (a camera position in **source pixels**) and on the
@@ -442,6 +458,56 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// owns `RAWDecoder`, the render queue owns `RenderGraph`, and the only thing they share is the
     /// ladder's buffers (guarded by its own lock).
     private let decodeQueue = DecodeQueue(label: "photons.loupe.decode")
+
+    // MARK: - 539 · v9 prewarm
+
+    /// The switch the open path reads. Initialised from `PHOTONS_WARM_V9`; tests set it before an
+    /// open to pin either side, and the app never changes it.
+    public var warmsV9OnLibraryOpen = V9PrewarmConfiguration.isEnabled()
+
+    /// Test seam: hold the prewarm inside the **same** `develop` path long enough for a switch to
+    /// happen. Production leaves it at 0, so the closure below is exactly `Self.develop`.
+    public var v9PrewarmDelayForTesting: TimeInterval = 0
+
+    /// All prewarm state is written from the main thread (trigger and completion) and read by the
+    /// render queue when a frame asks whether the user is reusing the decode, so it lives behind one
+    /// lock. The ladder has its own.
+    private struct PrewarmState {
+        /// The rung identity whose background development is on the queue right now.
+        var activeIdentity: String?
+        /// The rung identity that has landed in the ladder and can answer a first frame.
+        var readyIdentity: String?
+        var startedAt: CFAbsoluteTime?
+        var finishedAt: CFAbsoluteTime?
+        /// How many first frames reused a prewarm. Cumulative across libraries in this controller.
+        var reused = 0
+        /// A prewarm is reused once, not once per frame of the same visit.
+        var reuseCounted = false
+        var failures = 0
+        /// Switches that made a running prewarm give way (the acceptance's cancellation reading).
+        var gaveWay = 0
+    }
+    private let prewarmLock = NSLock()
+    private var prewarmState = PrewarmState()
+
+    private func lockedPrewarm<T>(_ body: (inout PrewarmState) -> T) -> T {
+        prewarmLock.lock(); defer { prewarmLock.unlock() }
+        return body(&prewarmState)
+    }
+
+    /// The moment the last background warm was requested — `nil` when `PHOTONS_WARM_V9` is off or no
+    /// library has opened yet.
+    public var v9PrewarmStartedAt: CFAbsoluteTime? { lockedPrewarm { $0.startedAt } }
+    /// The moment it succeeded **or** failed. `nil` while it is still on the queue.
+    public var v9PrewarmFinishedAt: CFAbsoluteTime? { lockedPrewarm { $0.finishedAt } }
+    /// First frames that were answered by a prewarm instead of a second development.
+    public var v9PrewarmReused: Int { lockedPrewarm { $0.reused } }
+    /// Failed warms. One count, no alert: a library whose anchor cannot decode still opens.
+    public var v9PrewarmFailureCount: Int { lockedPrewarm { $0.failures } }
+    /// Switches that cancelled a warm (its slots were handed back to the photo on screen).
+    public var v9PrewarmGaveWayCount: Int { lockedPrewarm { $0.gaveWay } }
+    public var isV9Prewarming: Bool { lockedPrewarm { $0.activeIdentity != nil } }
+
     private var presenter: CanvasPresenter?
     /// The layer's presenter, for a test that asserts on what reached the drawable (068). Read-only and
     /// `nil` only before `viewDidLoad` — the app never reaches for it.
@@ -7061,22 +7127,31 @@ public final class LoupeController: NSViewController, HeadroomSource {
         } else if !plan.isResident {
             pendingDetailPreviewIdentity = nil
         }
+        // 539 — the full rung already resident is the prewarm being reused; no request is made at all.
+        if plan.isResident {
+            noteV9PrewarmReuse(identity: job.identity, scale: job.target)
+        }
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
             // 067: counted where the request is made, not where the queue accepts it — a joined
             // request is still a request, and "twelve resizes, no decode storm" needs the number that
             // a dedupe would hide.
             decodeRequests += 1
-            decodeQueue.request(identity: job.identity, scale: scale, generation: job.generation,
-                                work: { try Self.develop(url: job.url,
-                                                         scale: scale,
-                                                         inputs: job.edit.decodeInputs) },
-                                completion: { [weak self] result, generation in
+            let outcome = decodeQueue.request(identity: job.identity, scale: scale,
+                                              generation: job.generation,
+                                              work: { try Self.develop(url: job.url,
+                                                                       scale: scale,
+                                                                       inputs: job.edit.decodeInputs) },
+                                              completion: { [weak self] result, generation in
                 guard let self else { return }
                 DispatchQueue.main.async {
                     self.rungArrived(result, identity: job.identity, generation: generation,
                                      url: job.url)
                 }
             })
+            // 539 — a request that joined the background warm is the first frame reusing it.
+            if outcome == .coalesced {
+                noteV9PrewarmReuse(identity: job.identity, scale: scale)
+            }
         }
     }
 
@@ -7211,8 +7286,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         histogramLock.unlock()
         histogramMeasuredKey = nil
         lastFrameState = nil
-        if let identity = frameSource.map({ $0.edit.decodeInputs.appending(to: $0.identity) })
-            ?? session?.anchorAsset.map({ currentRungIdentity($0) }) {
+        let identity = frameSource.map({ $0.edit.decodeInputs.appending(to: $0.identity) })
+            ?? session?.anchorAsset.map({ currentRungIdentity($0) })
+        // 539 — entering the warmed photo must **join** its background development, not cancel it,
+        // while any other photo (or leaving the loupe) makes it give way. `giveWayToV9Prewarm`
+        // decides; the ordinary cancel below then handles every non-prewarm development as before.
+        giveWayToV9Prewarm(incoming: identity, leaving: session?.mode != .loupe)
+        if let identity, !isV9PrewarmActive(identity) {
             decodeQueue.cancel(identity: identity)
         }
         // 258 — a switch keeps the matte cover (the new photo has not presented yet); leaving the
@@ -8726,6 +8806,135 @@ public final class LoupeController: NSViewController, HeadroomSource {
     }
 
     // MARK: frame
+
+    // MARK: - 539 · v9 prewarm
+
+    /// Warm the anchor photo once, after a library has opened successfully.
+    ///
+    /// The point is the **first** v9 development of the process: the ML program table load costs
+    /// seconds on a 60 MP file and is paid again for the first frame the user opens. This starts that
+    /// development on the loupe's own decode queue while the grid is up, through the same
+    /// `Self.develop` every frame uses — no second decoder, no second develop path — and stores the
+    /// full rung in the ladder without rendering or presenting it.
+    ///
+    /// Called by the two library-open wiring points (`EditorWindowController.openLibrary` and the
+    /// open panel). A failed or absent anchor is a no-op, and a failed decode only increments a count.
+    public func prewarmV9ForAnchor() {
+        guard warmsV9OnLibraryOpen, let session, session.isOpen,
+              let asset = session.anchorAsset, let url = session.fileURL(for: asset) else { return }
+        prewarmV9(asset: asset, url: url, edit: session.edit)
+    }
+
+    /// Start the background development for one photo. Returns `false` when the switch is off, a warm
+    /// is already running, or this exact rung is already ready — so a second open never duplicates.
+    @discardableResult
+    public func prewarmV9(asset: Asset, url: URL, edit: EditModel? = nil) -> Bool {
+        guard warmsV9OnLibraryOpen else { return false }
+        // A row whose original moved away is a **failure count**, not a file handed to ImageIO:
+        // `CIRAWFilter(imageURL:)` on a missing path does not return promptly on this machine, and a
+        // background warm must never pin the decode queue on it.
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            let now = CFAbsoluteTimeGetCurrent()
+            lockedPrewarm { state in
+                state.startedAt = now
+                state.finishedAt = now
+                state.failures += 1
+            }
+            return true
+        }
+        let inputs = (edit ?? session?.edit ?? .neutral).decodeInputs
+        let identity = Self.rungIdentity(ladderIdentity(asset), inputs: inputs)
+
+        // Opening another library while a warm is still running: the old anchor's development is
+        // waste, and the new library deserves its own warm. Same identity is a join, not a cancel.
+        let stale = lockedPrewarm { state -> String? in
+            guard let active = state.activeIdentity, active != identity else { return nil }
+            state.activeIdentity = nil
+            state.gaveWay += 1
+            return active
+        }
+        if let stale { decodeQueue.cancel(identity: stale) }
+
+        let accepted = lockedPrewarm { state -> Bool in
+            if state.activeIdentity != nil || state.readyIdentity == identity { return false }
+            state.activeIdentity = identity
+            state.readyIdentity = nil
+            state.startedAt = CFAbsoluteTimeGetCurrent()
+            state.finishedAt = nil
+            state.reuseCounted = false
+            return true
+        }
+        guard accepted else { return false }
+
+        let generation = self.generation
+        let delay = v9PrewarmDelayForTesting
+        decodeQueue.request(identity: identity, scale: DecodeLadder.fullScale,
+                            generation: generation, work: { [delay] in
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            return try Self.develop(url: url, scale: DecodeLadder.fullScale, inputs: inputs)
+        }, completion: { [weak self] result, _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.finishV9Prewarm(result, identity: identity)
+            }
+        })
+        return true
+    }
+
+    /// The warm landed (or failed). A buffer is stored only for the photo this loupe would still show;
+    /// a failure is one count and nothing else — opening a library must never depend on it.
+    private func finishV9Prewarm(_ result: Result<DecodeRung, Error>, identity: String) {
+        prewarmLock.lock()
+        guard prewarmState.activeIdentity == identity else {
+            prewarmLock.unlock()
+            return
+        }
+        prewarmState.activeIdentity = nil
+        prewarmState.finishedAt = CFAbsoluteTimeGetCurrent()
+        switch result {
+        case .failure:
+            prewarmState.failures += 1
+            prewarmLock.unlock()
+        case .success(let rung):
+            let stillWanted = isCurrentPhoto(identity)
+            if stillWanted { prewarmState.readyIdentity = identity }
+            prewarmLock.unlock()
+            if stillWanted, ladder.resident(identity: identity, scale: rung.scale) == nil {
+                ladder.store(rung, identity: identity)
+            }
+        }
+    }
+
+    /// Count one user first frame that was served by a prewarm, at most once per warm.
+    private func noteV9PrewarmReuse(identity: String, scale: Float) {
+        guard scale == DecodeLadder.fullScale else { return }
+        lockedPrewarm { state in
+            guard !state.reuseCounted,
+                  state.readyIdentity == identity || state.activeIdentity == identity else { return }
+            state.reuseCounted = true
+            state.reused += 1
+        }
+    }
+
+    /// Hand a running warm back when the user asks for a different photo (or leaves the loupe).
+    /// `DecodeQueue.cancel` is the existing mechanism; its queued work is skipped and an in-flight
+    /// ImageIO call finishes but is never delivered. The ML slot therefore never has two owners.
+    private func giveWayToV9Prewarm(incoming: String?, leaving: Bool) {
+        prewarmLock.lock()
+        guard let active = prewarmState.activeIdentity,
+              leaving || incoming == nil || incoming != active else {
+            prewarmLock.unlock()
+            return
+        }
+        prewarmState.activeIdentity = nil
+        prewarmState.gaveWay += 1
+        prewarmLock.unlock()
+        decodeQueue.cancel(identity: active)
+    }
+
+    private func isV9PrewarmActive(_ identity: String) -> Bool {
+        lockedPrewarm { $0.activeIdentity == identity }
+    }
 
     /// One development, wrapped as a rung.
     ///

@@ -846,6 +846,27 @@ public final class CatalogSession {
     /// What the last decode actually used — v9 or a silent v8 downgrade (§11.1).
     public private(set) var capabilities: DecoderCapabilities?
 
+    /// The photo `capabilities` describes. The decoder facts come from a frame, which can outlive
+    /// the selection that asked for it (443); this is what keeps 540's per-photo write from
+    /// attributing one picture's as-shot pair to the next one.
+    private var capabilitiesAssetID: String?
+
+    /// 540 — the **loaded photo's** as-shot white balance, available as soon as `edit` is assigned.
+    ///
+    /// It is the stored catalog row on a switch (`Catalog.storedAsShotWhiteBalance`), and the first
+    /// frame's value on a first visit. `nil` means "no value yet" — the rows keep today's behaviour
+    /// (as shot without a number) instead of borrowing the previous photo's pair.
+    public private(set) var asShotWhiteBalance: WhiteBalance?
+
+    /// 540 — how many times a stored pair disagreed with the first frame that landed. A mismatch is
+    /// corrected immediately, but it is counted so a decoder/archive drift is visible rather than
+    /// silently rewritten.
+    public private(set) var asShotMismatchCount = 0
+
+    /// 540 — successful as-shot catalog writes made by this session (a row that already matches is
+    /// not rewritten, so the counter staying put is proof the first frame changed no facts).
+    public private(set) var asShotStoreWriteCount = 0
+
     private var catalog: Catalog?
 
     /// 451 — test seam for the reload guard. When set, `reload()` reads the source roots through
@@ -3759,6 +3780,8 @@ public final class CatalogSession {
             edit = .neutral
             history = EditHistory(baseline: .neutral)
             loadedEditAssetID = nil
+            capabilitiesAssetID = nil
+            asShotWhiteBalance = nil
             selectedMaskID = nil
             pendingMaskShape = nil
             recordHistogram(nil)
@@ -3842,6 +3865,10 @@ public final class CatalogSession {
             history = EditHistory(baseline: load.model)
         }
         loadedEditAssetID = load.asset.id
+        // 540 — the as-shot pair is read with the document, not with the first frame. One indexed
+        // settings row, synchronous, so the two white-balance rows are ready at the same moment as
+        // every other slider (530). A miss stays `nil`: the first frame fills it in below.
+        asShotWhiteBalance = catalog?.storedAsShotWhiteBalance(forAsset: load.asset.id)
         selectedMaskID = edit.masks.first?.id
         maskTool = .off
         // A document change retires the pending shape and the previous photo's histogram: both
@@ -4052,9 +4079,39 @@ public final class CatalogSession {
 
     public func recordCapabilities(_ c: DecoderCapabilities) {
         // Equality-guarded: every presented frame reports the same facts, and an unconditional write
-        // would re-render the SwiftUI inspector once per slider frame for no information.
-        guard capabilities != c else { return }
+        // would re-render the SwiftUI inspector once per slider frame for no information. The photo
+        // id is part of the guard because the same facts may describe two different photos (a stack
+        // of identical files): the as-shot row below is still per asset.
+        guard capabilities != c || capabilitiesAssetID != loadedEditAssetID else { return }
         capabilities = c
+        capabilitiesAssetID = loadedEditAssetID
+
+        // 540 — persist the file's own pair on the first development and correct an old row. The
+        // first frame is the truth; a stored value that disagrees is rewritten exactly once and
+        // counted. A frame that reports no pair leaves a stored one alone (it cannot be a correction)
+        // and a photo with neither stays at "no value".
+        let frame = c.asShotWhiteBalance
+        guard frame.temperature != nil || frame.tint != nil else { return }
+        guard let id = loadedEditAssetID, let catalog else {
+            asShotWhiteBalance = frame
+            return
+        }
+        // 443/540 — attribute the pair only to a frame this session actually ingested for the
+        // loaded photo. The frame itself carries no asset id, so `ingestedSourceFrame` is the one
+        // published identity that can refuse a late frame of the photo we just left; without it a
+        // stale pair could be written into the new photo's row.
+        guard ingestedSourceFrame?.assetID == id else { return }
+        if let stored = catalog.storedAsShotWhiteBalance(forAsset: id) {
+            if stored != frame {
+                asShotMismatchCount &+= 1
+                if catalog.storeAsShotWhiteBalance(frame, forAsset: id) {
+                    asShotStoreWriteCount &+= 1
+                }
+            }
+        } else if catalog.storeAsShotWhiteBalance(frame, forAsset: id) {
+            asShotStoreWriteCount &+= 1
+        }
+        asShotWhiteBalance = frame
     }
 
     // MARK: measured facts — the histogram and the clipping warning

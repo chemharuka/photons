@@ -2470,10 +2470,11 @@ public struct InspectorView: View {
                         range: WhiteBalance.tintRange, format: "%+.0f"),
     ]
 
-    /// The file's own white balance, as the decode reported it. `nil` until the first development
-    /// lands (`session.capabilities`), which is why the row can say "as shot" without a number.
+    /// The file's own white balance, as the decode reported it. 540: the session now reads the
+    /// persisted pair with the document, so this is ready on a switch instead of only after the
+    /// first development; `nil` still means "no value yet", never another photo's number.
     private var asShotWhiteBalance: WhiteBalance {
-        session.capabilities?.asShotWhiteBalance ?? .asShot
+        session.asShotWhiteBalance ?? .asShot
     }
 
     /// The document's pair, which is what the menu and the dropper reason about.
