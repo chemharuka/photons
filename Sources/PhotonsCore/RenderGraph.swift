@@ -1149,7 +1149,9 @@ private struct DehazeParamsU {
 
 private struct DisplayParams {
     var m: simd_float4x4
-    var a: SIMD4<Float>   // identityMatrix, headroom, 503 picture ceiling (0 = caller predates 503)
+    // identityMatrix, headroom, 503 picture ceiling (0 = caller predates 503),
+    // 544 presentation-exit flag (1 = no headroom clamp here; present.metal applies it)
+    var a: SIMD4<Float>
 }
 
 // MARK: - heal uniforms (mirror of s1_9_heal.metal, byte for byte)
@@ -4578,10 +4580,17 @@ public final class RenderGraph {
             // and here (对比度 / 饱和度 / 分级 / 清晰度 / 颗粒) can put a pixel back over it. `0` means
             // "caller predates 503" and leaves the historical behaviour; a real ceiling is `2^0 = 1`
             // at the lowest (`HighlightCeiling.evRange`), so the sentinel is unambiguous.
+            //
+            // 544 — `.w` is the presentation-exit flag: a **canvas** frame that is going to a
+            // drawable (`wantsPixels == false`) leaves the panel's headroom to `present.metal`, so
+            // its texture is independent of the live display reading. A file export, a thumbnail and
+            // a measurement still clamp here (`headroom = 1` is the historical hard clip).
+            let presentationExit = options.canvas != nil && !options.wantsPixels
             var params = DisplayParams(m: matrix,
                                        a: SIMD4(ColorPrimaries.working == target ? 1 : 0,
                                                 Float(options.display.headroom),
-                                                Float(options.display.highlightCeiling), 0))
+                                                Float(options.display.highlightCeiling),
+                                                presentationExit ? 1 : 0))
             let enc = try encoder(cb, p, in: src, out: out)
             enc.setBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: 0)
             dispatch(enc, p, plan.canvas)

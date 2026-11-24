@@ -427,9 +427,14 @@ public final class CanvasPresenter {
     /// A layer that refuses a 16-bit drawable (`nextDrawable()` returning nil) falls back to the
     /// 8-bit sRGB path **once**, and keeps that choice: silently retrying every frame would halve the
     /// frame rate on exactly the machines where it failed.
+    ///
+    /// 544 — `headroom` is the live display reading at the moment of the draw. It is applied by the
+    /// fragment in linear light, not by S4, so the same frame texture is reused across a headroom
+    /// change. The default keeps every pre-544 caller (which clamped in S4) unbounded here.
     @discardableResult
     public func present(_ request: PresentRequest, in layer: CAMetalLayer, wantsEDR: Bool = false,
-                        drawableSize: ImageSize? = nil, onComplete: (() -> Void)? = nil) -> Bool {
+                        drawableSize: ImageSize? = nil, headroom: Double = .infinity,
+                        onComplete: (() -> Void)? = nil) -> Bool {
         if let drawableSize, drawableSize != request.canvas {
             droppedStaleFrameCount += 1
             lastFailure = "request is for a \(request.canvas.keyString) canvas, drawable is "
@@ -472,7 +477,7 @@ public final class CanvasPresenter {
 
         do {
             try draw(request, into: enc, linearize: storage == .linear16,
-                     format: drawable.texture.pixelFormat)
+                     format: drawable.texture.pixelFormat, headroom: headroom)
             enc.endEncoding()
         } catch {
             enc.endEncoding()
@@ -503,7 +508,7 @@ public final class CanvasPresenter {
     /// the same pipeline and the same `PresentParams` the drawable gets, not a test-only copy.
     @discardableResult
     public func render(_ request: PresentRequest, into target: MTLTexture,
-                       linearize: Bool? = nil) -> Bool {
+                       linearize: Bool? = nil, headroom: Double = .infinity) -> Bool {
         guard let cb = queue.makeCommandBuffer() else {
             lastFailure = "no command buffer"
             return false
@@ -519,7 +524,8 @@ public final class CanvasPresenter {
             return false
         }
         do {
-            try draw(request, into: enc, linearize: linear, format: target.pixelFormat)
+            try draw(request, into: enc, linearize: linear, format: target.pixelFormat,
+                     headroom: headroom)
             enc.endEncoding()
         } catch {
             enc.endEncoding()
@@ -543,7 +549,7 @@ public final class CanvasPresenter {
     /// backdrop. Painter's order does the compositing: no blending, no depth buffer, the later quad
     /// simply replaces the earlier one where it lands.
     private func draw(_ request: PresentRequest, into enc: MTLRenderCommandEncoder,
-                      linearize: Bool, format: MTLPixelFormat) throws {
+                      linearize: Bool, format: MTLPixelFormat, headroom: Double) throws {
         let quads = request.quads
         guard !quads.isEmpty else { return }
         // One pipeline for every quad: the fragment does not know which texture it reads, which is the
@@ -555,12 +561,13 @@ public final class CanvasPresenter {
         let canvas = request.canvas
         for quad in quads {
             // `misc.x` says whether the bound texture is display-encoded (the 16-bit path stores
-            // linear light). 143b deleted the preview gain that used to ride in `yzw`: the drag is a
-            // real render now, so the present pass transfers the frame and nothing else.
+            // linear light). `misc.y` is 544's **live headroom**: the fragment applies it after the
+            // inverse OETF, so the frame texture itself does not depend on the display reading.
             var params = PresentParams(quad: Self.normalised(quad.rect, canvas: canvas),
                                        window: SIMD4(quad.window.u0, quad.window.v0,
                                                      quad.window.du, quad.window.dv),
-                                       misc: SIMD4(linearize ? 1 : 0, 0, 0, 0))
+                                       misc: SIMD4(linearize ? 1 : 0,
+                                                   Self.sanitisedHeadroom(headroom), 0, 0))
             enc.setFragmentTexture(quad.texture, index: 0)
             enc.setVertexBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
             enc.setFragmentBytes(&params, length: MemoryLayout<PresentParams>.stride, index: 0)
@@ -576,6 +583,13 @@ public final class CanvasPresenter {
                      Float(rect.width) / w, Float(rect.height) / h)
     }
 
+    /// 544 — the shader's sentinel for "no extra bound" is `<= 0`, so a non-finite or negative live
+    /// reading becomes 0 rather than an infinity that some Metal targets treat as a NaN `min`.
+    static func sanitisedHeadroom(_ headroom: Double) -> Float {
+        guard headroom.isFinite, headroom > 0 else { return 0 }
+        return Float(headroom)
+    }
+
     /// The CPU half of the struct both sides must agree on.
     ///
     /// `PresentParams` is handed to the GPU as raw bytes (`setVertexBytes`/`setFragmentBytes`), so the
@@ -588,8 +602,9 @@ public final class CanvasPresenter {
         var quad: SIMD4<Float>
         /// The uv window the quad reads: `xy` = origin, `zw` = size, normalised texture coordinates.
         var window: SIMD4<Float>
-        /// `x` = linearize. `yzw` are unused padding: three spare floats keep the struct at three
-        /// `float4`s (stride 48), the layout `present.metal` pins. No gain rides here any more.
+        /// `x` = linearize. `y` = the **live headroom** (544) the fragment clamps at in linear light;
+        /// `z` and `w` are spare floats that keep the struct at three `float4`s (stride 48), the layout
+        /// `present.metal` pins. `y <= 0` is the pre-544 "no extra bound" sentinel.
         var misc: SIMD4<Float>
 
         init(quad: SIMD4<Float>, window: SIMD4<Float>, misc: SIMD4<Float>) {

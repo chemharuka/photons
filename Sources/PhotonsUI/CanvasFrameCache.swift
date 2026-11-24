@@ -66,8 +66,10 @@ public final class CanvasFrameCache {
     public enum MissReason: String, CaseIterable, Sendable, Hashable {
         /// No entry names this photo at all (a first visit, or the table was just released).
         case noEntryForPhoto
-        /// The entry is the right canvas, but the display read its pixels under another
-        /// headroom/primaries. Never served: clearing the table is the honest answer.
+        /// The entry is the right canvas, but the display renders it in another primaries. **Headroom
+        /// is not a reason any more** (544): the panel's bound is applied by the present pass, so one
+        /// texture serves every headroom. Never served on a primaries move: clearing the table is the
+        /// honest answer.
         case displayChanged
         /// `decodeInputs` (white balance/detail/decoder), `editDigest` or `geometry` moved.
         case documentChanged
@@ -124,10 +126,11 @@ public final class CanvasFrameCache {
         public let cropIsActive: Bool
         /// The clipping-warning grid is drawn into the frame's pixels.
         public let highlightWarning: Bool
-        /// S4's ceiling (`DisplayOptions.headroom`).
+        /// The live display headroom when the frame was rendered.
         ///
-        /// 458 — kept for the 434 key-completeness contract, but **not part of `softIdentity`**:
-        /// `lookup` checks the entry's rendered headroom bit-for-bit instead.
+        /// 458 — kept for the 434 key-completeness contract. 544 — **not** part of `softIdentity` and
+        /// no longer compared by `lookup`: the panel's bound moved to the present pass, so two
+        /// headrooms are the same canvas.
         public let headroom: Double
         /// The rung the frame was rendered from. Not in the dispatch list, but two rungs of the same
         /// photo are two different resamplings of the canvas and must never alias.
@@ -224,20 +227,23 @@ public final class CanvasFrameCache {
             String(format: "%.17g", value.isFinite ? value : 0)
         }
 
-        /// 458 — **the soft key**: everything that names *which canvas* it is, minus the three
-        /// display/rung facts that are verified against the entry instead of spelled twice.
+        /// 458 — **the soft key**: everything that names *which canvas* it is, minus the display/rung
+        /// facts that are verified against the entry instead of spelled twice.
         ///
-        /// `headroom` and `primaries` are the live display reading at lookup time, but the stored
-        /// entry carries the values the GPU actually rendered under. Spelling either side with
-        /// `%.17g` made a 1-ulp difference two keys and every return a miss (the user's 「建好了但没
-        /// 读取上」). They are not identity here; `lookup` compares them with the entry and misses
-        /// when they differ. The rung is the same argument: the caller predicts, the entry knows.
+        /// `primaries` is the live display reading at lookup time, but the stored entry carries the
+        /// value the GPU actually rendered under; `lookup` compares them with the entry. The rung is
+        /// the same argument: the caller predicts, the entry knows.
+        ///
+        /// 544 — `headroom` is no longer a display fact at all: the panel's bound is applied when the
+        /// texture is presented, so a 1-ulp screen reading cannot make a canvas miss. The trailing
+        /// `hm=present` token retires entries written before the clamp moved (their pixels were
+        /// clamped at the old reading and mean something else).
         public var softIdentity: String {
             "\(photo)|\(decodeInputs)|\(editDigest)|\(geometry.isEmpty ? "-" : geometry)"
                 + "|\(cameraState)|\(viewport.width)x\(viewport.height)|\(mode)"
                 + "|fit=\(Self.number(fitScale))|role=\(canvasRole)"
                 + "|crop=\(cropIsActive ? 1 : 0)|warn=\(highlightWarning ? 1 : 0)"
-                + "|ceil=\(Self.number(highlightCeiling))"
+                + "|ceil=\(Self.number(highlightCeiling))|hm=present"
         }
     }
 
@@ -321,8 +327,8 @@ public final class CanvasFrameCache {
     public private(set) var evictions = 0
     /// 458 — misses by component.
     public private(set) var missReasons = MissReasons()
-    /// 458 — set by `invalidateForDisplayChange`; the next lookup attributes its miss to the display
-    /// move even though the table is already empty.
+    /// 458 — set by `invalidateForDisplayChange` (now a **primaries** move only, 544); the next
+    /// lookup attributes its miss to the display move even though the table is already empty.
     private var displayChangePending = false
     /// Wall time of the last GPU blit (main thread, including the wait).
     public private(set) var lastBlitMilliseconds: Double = 0
@@ -370,21 +376,20 @@ public final class CanvasFrameCache {
     ///
     /// 458 — matching is **soft key + hard display/rung check**. The caller passes the display facts
     /// it is about to present under; the entry must have been rendered under exactly those values
-    /// (bit-for-bit for the headroom, exact for the primaries and rung). A miss is counted, the
-    /// component that moved is named, and the entry is left alone (the next store replaces it).
+    /// (exact for the primaries and rung). 544 — **headroom is ignored**: it is a present-time bound,
+    /// not a property of the texture, so a drifting screen reading keeps the entry. A miss is counted,
+    /// the component that moved is named, and the entry is left alone (the next store replaces it).
     public func lookup(_ key: Key, headroom: Double? = nil,
                        primaries: OutputPrimaries? = nil,
                        decodeScale: Double? = nil) -> CachedCanvas? {
         currentPhoto = key.photo
-        let requestedHeadroom = headroom ?? key.headroom
         let requestedPrimaries = primaries
             ?? OutputPrimaries(rawValue: key.primaries) ?? .displayP3
         let requestedScale = decodeScale ?? key.decodeScale
 
         if let index = entries.firstIndex(where: { $0.key.softIdentity == key.softIdentity }) {
             let entry = entries[index]
-            let displayMatches = entry.value.headroom.bitPattern == requestedHeadroom.bitPattern
-                && entry.value.primaries == requestedPrimaries
+            let displayMatches = entry.value.primaries == requestedPrimaries
             let scaleMatches = entry.value.decodeScale == Float(requestedScale)
             if displayMatches && scaleMatches {
                 displayChangePending = false
@@ -482,9 +487,13 @@ public final class CanvasFrameCache {
         displayChangePending = false
     }
 
-    /// 458 — headroom or primaries moved: **clear, do not approximate**. A tolerance match between
-    /// the stored reading and the live one is exactly how a canvas rendered for one display gets
-    /// served on another; an empty table costs one development, a wrong pixel costs the user's trust.
+    /// 458 — primaries moved: **clear, do not approximate**. A tolerance match between the stored
+    /// matrix's pixels and the live display's primaries is exactly how a canvas rendered for one
+    /// display gets served on another; an empty table costs one development, a wrong pixel costs the
+    /// user's trust.
+    ///
+    /// 544 — **headroom is not a reason to call this any more.** The panel's bound is applied by the
+    /// present pass from the live reading, so one texture serves every headroom.
     public func invalidateForDisplayChange() {
         // Only a table that actually held something was invalidated; a cold start's first lookup is
         // 「no entry for this photo」, not a display move.

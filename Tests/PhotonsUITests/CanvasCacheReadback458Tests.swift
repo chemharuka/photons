@@ -11,9 +11,10 @@ import PhotonsCore
 /// 身份：写的时候用帧记下的值，读的时候用屏幕此刻的实时值，`%.17g` 下只要差 1 ulp 就是两个 key。
 ///
 /// 458 的规则：
-///   · **软 key + 硬校验** — 身份不含 headroom / primaries / rung；命中要求条目的这三个值与调用方
-///     此刻给出的值逐位相等。
-///   · **显示变化即失效** — headroom / primaries 一移动就清表，不拿旧显示下的像素凑命中。
+///   · **软 key + 硬校验** — 身份不含 headroom / primaries / rung；命中要求条目的 primaries 与 rung
+///     与调用方此刻给出的值相等。544 之后 **headroom 不再是校验项**：面板上限在 present 片元里按
+///     当下读数施加，同一张纹理服务任意 headroom。
+///   · **显示变化即失效** — primaries 一移动就清表；headroom 移动不清表（544）。
 ///   · **miss 归因** — 每次 miss 记下是照片、显示、文档、相机、画布还是 rung 变了。
 ///
 /// 所有用例都走真实路径：`LoupeController` + `frameSource` + 真实 RAW + 真实 Metal presenter。
@@ -192,7 +193,7 @@ final class CanvasCacheReadback458Tests: XCTestCase {
                        Double(cached.byteCount) / 1_048_576))
     }
 
-    // MARK: - ② display change: clear, never serve the other display's pixels
+    // MARK: - ② display change: a headroom drift keeps the table; primaries still clears
 
     func testADisplayMoveClearsTheTableInsteadOfServingAnotherDisplay() throws {
         let (a, b) = try rawFixtures()
@@ -206,9 +207,12 @@ final class CanvasCacheReadback458Tests: XCTestCase {
         let hitsBefore = cache.hits
         let presentsBefore = controller.canvasCachePresents
         let displayMissesBefore = controller.canvasCacheMissReasons[.displayChanged]
+        let countBefore = cache.count
 
         // Inject one ulp of headroom between the two settles. This is the real screen's behaviour
-        // (EDR/brightness re-reads move the number) reproduced deterministically.
+        // (EDR/brightness re-reads move the number) reproduced deterministically. 544 — the panel's
+        // bound is a present-time value now, so this must **not** clear the table and the return must
+        // still hit: the texture is the same picture at either reading.
         controller.autoRenderEnabled = false
         let bumped = controller.headroom.nextUp
         XCTAssertNotEqual(bumped, controller.headroom)
@@ -217,18 +221,17 @@ final class CanvasCacheReadback458Tests: XCTestCase {
                             maximumEDRComponent: bumped, source: .extendedRange))
         controller.autoRenderEnabled = true
 
-        // ② 新代码：显示一变就清空，不拿旧 headroom 的像素凑一个「命中」。
-        XCTAssertEqual(cache.count, 0, "a display move must leave no entry to serve")
+        // ② 新代码：headroom 漂移不再清表，也不再把同一张画布判成另一个显示。
+        XCTAssertEqual(cache.count, countBefore, "a headroom move must keep every entry")
 
         _ = try switchTo(controller, a, "display458-a")
 
-        XCTAssertEqual(cache.hits, hitsBefore, "the return after a display move must not hit")
-        XCTAssertEqual(controller.canvasCachePresents, presentsBefore,
-                       "the return after a display move must not present a cached canvas")
-        XCTAssertNotEqual(controller.firstFrameContent, .canvasCache)
-        XCTAssertGreaterThanOrEqual(
-            controller.canvasCacheMissReasons[.displayChanged], displayMissesBefore + 1,
-            "the miss must be attributed to the display, not silently counted as a first visit")
+        XCTAssertEqual(cache.hits, hitsBefore + 1, "the return after a headroom move must hit")
+        XCTAssertEqual(controller.canvasCachePresents, presentsBefore + 1,
+                       "the return after a headroom move must present the cached canvas")
+        XCTAssertEqual(controller.firstFrameContent, .canvasCache)
+        XCTAssertEqual(controller.canvasCacheMissReasons[.displayChanged], displayMissesBefore,
+                       "a headroom move is not a display miss any more")
     }
 
     // MARK: - ⑤ the capacities are still 10 / 3
@@ -249,23 +252,25 @@ final class CanvasCacheReadback458Tests: XCTestCase {
     }
 
     /// The soft key is not permission to serve any display: the entry's own values are the check.
-    /// This is the unit-level form of ②, independent of the controller's invalidation.
+    /// 544 — **headroom is not one of them** (present applies the bound); primaries and rung still are.
     func testLookupHardChecksDisplayAndRungInsteadOfTrustingTheSoftKey() throws {
         let cache = try makeEmptyCache()
         let key = dummyKey(photo: "display458-unit")
         XCTAssertTrue(cache.store(try dummyFrame(), key: key))
 
+        let hitsBefore = cache.hits
         XCTAssertNotNil(cache.lookup(key, headroom: 1, primaries: .displayP3, decodeScale: 1),
                         "same display and rung must hit")
+        XCTAssertEqual(cache.hits, hitsBefore + 1)
 
-        XCTAssertNil(cache.lookup(key, headroom: 1.0000000000000002,
-                                  primaries: .displayP3, decodeScale: 1),
-                     "one ulp of headroom must miss, not alias")
-        XCTAssertEqual(cache.missReasons[.displayChanged], 1)
+        XCTAssertNotNil(cache.lookup(key, headroom: 1.0000000000000002,
+                                     primaries: .displayP3, decodeScale: 1),
+                        "544: one ulp of headroom is the same canvas — present applies the bound")
+        XCTAssertEqual(cache.hits, hitsBefore + 2)
 
         XCTAssertNil(cache.lookup(key, headroom: 1, primaries: .sRGB, decodeScale: 1),
                      "another primaries must miss")
-        XCTAssertEqual(cache.missReasons[.displayChanged], 2)
+        XCTAssertEqual(cache.missReasons[.displayChanged], 1)
 
         XCTAssertNil(cache.lookup(key, headroom: 1, primaries: .displayP3, decodeScale: 0.5),
                      "a predicted rung the entry was not rendered from must miss")

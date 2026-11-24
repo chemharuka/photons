@@ -271,8 +271,14 @@ final class PhotoSwitchFlashTests: XCTestCase {
 
         // Leave and come straight back. B never gets a frame, so `decoded` is still A's 0.5 rung
         // when A is re-armed; that is what makes the stand-in's own rect the measurement.
+        //
+        // 544 — a headroom drift no longer invalidates the canvas cache, so the return can now be
+        // served by A's cached canvas (the intended change) and the stand-in never has a tick. The
+        // subject here is the stand-in geometry, so drop the cache to put the fixture back on the
+        // cold path it is written for.
         session.activate(assets[1].id)
         editor.rootView.showModule(for: .loupe)
+        loupe.canvasFrameCache.cleanup()
         session.activate(assets[0].id)
         editor.rootView.showModule(for: .loupe)
 
