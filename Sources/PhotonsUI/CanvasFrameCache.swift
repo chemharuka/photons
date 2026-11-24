@@ -55,6 +55,14 @@ public final class CanvasFrameCache {
     /// 491 — the document digest names only fields that reach the pixels. Off makes 「同一文档两次
     /// 构造键相等」red for a document whose *selection cursor* moved (a point-colour swatch).
     public nonisolated(unsafe) static var canonicalizesCanvasEditDigest = true
+    /// 542 — a coarser resident canvas may answer a sharper request when the ladder no longer holds
+    /// the photo (B → A evicts A's rung, so the prediction becomes 1.0). Off restores the exact-rung
+    /// rule and makes the return-to-A test red.
+    public nonisolated(unsafe) static var acceptsCoarserRung = true
+    /// 542 — the floor for that tolerance: `entryScale / requestedScale` must be at least this.
+    /// 0.5 accepts 「0.5 的缓存帧回答 1.0 的请求」; 0.25 vs 1.0 is visibly blurry and must miss so the
+    /// 533 stand-in (or the fresh frame) is used instead of pretending.
+    public nonisolated(unsafe) static var coarserRungFloor = 0.5
 
     public enum Regime: String, Sendable {
         case browsing
@@ -79,6 +87,11 @@ public final class CanvasFrameCache {
         case canvasChanged
         /// The entry was rendered from another rung than the one this job predicts.
         case decodeScaleChanged
+        /// 542 — the entry is **coarser** than the requested rung but still usable (same canvas, at
+        /// least `coarserRungFloor` of the requested scale). Counted on the **hit**, not on a miss:
+        /// 「命中一次记一次，不许静默」. The frame goes on screen immediately and the fresh render
+        /// still runs, so this also names how often the user was served the older rung first.
+        case coarserRung
     }
 
     /// One counter per `MissReason`. A struct (not a dictionary) so the diagnostics line has a
@@ -379,25 +392,50 @@ public final class CanvasFrameCache {
     /// (exact for the primaries and rung). 544 — **headroom is ignored**: it is a present-time bound,
     /// not a property of the texture, so a drifting screen reading keeps the entry. A miss is counted,
     /// the component that moved is named, and the entry is left alone (the next store replaces it).
+    ///
+    /// 542 — an **exact** rung is still preferred, but a coarser one under the same `softIdentity` is
+    /// accepted when it is at least `coarserRungFloor` of the requested scale. Returning to a photo
+    /// evicts its rung from the one-photo decode ladder, so the caller predicts the full rung even
+    /// though the screen frame it cached was the 0.5 preview: that frame is still the right picture
+    /// and is presented now, then upgraded by the full rung that follows (535's write rule). The hit
+    /// is not silent — it is recorded in `missReasons[.coarserRung]`.
     public func lookup(_ key: Key, headroom: Double? = nil,
                        primaries: OutputPrimaries? = nil,
                        decodeScale: Double? = nil) -> CachedCanvas? {
         currentPhoto = key.photo
         let requestedPrimaries = primaries
             ?? OutputPrimaries(rawValue: key.primaries) ?? .displayP3
-        let requestedScale = decodeScale ?? key.decodeScale
+        let requestedScale = Float(decodeScale ?? key.decodeScale)
 
-        if let index = entries.firstIndex(where: { $0.key.softIdentity == key.softIdentity }) {
-            let entry = entries[index]
-            let displayMatches = entry.value.primaries == requestedPrimaries
-            let scaleMatches = entry.value.decodeScale == Float(requestedScale)
-            if displayMatches && scaleMatches {
+        let matching = entries.indices.filter { entries[$0].key.softIdentity == key.softIdentity }
+        if let first = matching.first {
+            // Exact: same display facts and the rung the caller predicted.
+            if let index = matching.first(where: {
+                entries[$0].value.primaries == requestedPrimaries
+                    && entries[$0].value.decodeScale == requestedScale
+            }) {
                 displayChangePending = false
                 hits += 1
-                entries.remove(at: index)
+                let entry = entries.remove(at: index)
                 entries.append(entry)                  // most recently used is last
                 return entry.value
             }
+            // 542 — coarser but usable: the sharpest entry at or below the request, never below the
+            // floor. (One entry per soft identity today; the `max` keeps the rule honest if that
+            // ever changes.)
+            if Self.acceptsCoarserRung, requestedScale > 0,
+               let index = coarserCandidate(matching, requested: requestedScale,
+                                            primaries: requestedPrimaries) {
+                displayChangePending = false
+                hits += 1
+                missReasons.record(.coarserRung)
+                let entry = entries.remove(at: index)
+                entries.append(entry)
+                return entry.value
+            }
+            let entry = entries[first]
+            let displayMatches = entry.value.primaries == requestedPrimaries
+            let scaleMatches = entry.value.decodeScale == requestedScale
             misses += 1
             if !displayMatches { missReasons.record(.displayChanged) }
             if !scaleMatches { missReasons.record(.decodeScaleChanged) }
@@ -414,6 +452,26 @@ public final class CanvasFrameCache {
             missReasons.record(.noEntryForPhoto)
         }
         return nil
+    }
+
+    /// 542 — the best same-canvas entry that is no sharper than the request and no coarser than
+    /// `coarserRungFloor` of it. `nil` when only a blurrier (or a different-display) entry exists.
+    private func coarserCandidate(_ indices: [Int], requested: Float,
+                                  primaries: OutputPrimaries) -> Int? {
+        var best: Int?
+        for index in indices {
+            let entry = entries[index]
+            guard entry.value.primaries == primaries else { continue }
+            let scale = entry.value.decodeScale
+            guard scale <= requested,
+                  Double(scale) >= Double(requested) * Self.coarserRungFloor else { continue }
+            if let current = best {
+                if scale > entries[current].value.decodeScale { best = index }
+            } else {
+                best = index
+            }
+        }
+        return best
     }
 
     /// Which component of a same-photo key moved. The display/rung components never reach here: they
