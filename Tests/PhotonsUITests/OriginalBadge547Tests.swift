@@ -118,5 +118,19 @@ final class OriginalBadge547Tests: XCTestCase {
         XCTAssertTrue(badge.isHidden)
         XCTAssertEqual(badge.stringValue, Loc.t("修改前"))
         XCTAssertFalse(info.isHidden)
+
+        // ④ the copy lives in both tables: reading the en resource must give `Before`, never the
+        // Chinese key as a fallback (that would make the English UI quietly show 中文).
+        guard let enURL = Loc.stringsURL(for: "en"),
+              let en = Bundle(url: enURL.deletingLastPathComponent()) else {
+            return XCTFail("找不到 en.lproj/Localizable.strings")
+        }
+        XCTAssertEqual(en.localizedString(forKey: "修改前", value: nil, table: nil), "Before")
+        XCTAssertEqual(badge.stringValue, Loc.t("修改前"))
+        guard let zhURL = Loc.stringsURL(for: "zh-Hans"),
+              let zh = Bundle(url: zhURL.deletingLastPathComponent()) else {
+            return XCTFail("找不到 zh-Hans.lproj/Localizable.strings")
+        }
+        XCTAssertEqual(zh.localizedString(forKey: "修改前", value: nil, table: nil), "修改前")
     }
 }
