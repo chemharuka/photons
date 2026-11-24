@@ -2621,26 +2621,26 @@ public final class CatalogSession {
 
     /// §395 / §396 — 那唯一一条「产物带着原图编辑」历史行的 label。
     ///
-    /// 396 之后它同时**包住三项覆写**（解码器 v9.dng、两根降噪归零），因为整件事是一个 payload
+    /// 396 之后它同时**包住三项覆写**（首选解码器版本、两根降噪归零），因为整件事是一个 payload
     /// 一次 `appendDevelop`。改这个名字等于改两单的验收（395 的 ④ 与 396 的 ⑥ 都按字符串断言），
     /// 所以 396 沿用它而不是新起一条 —— 用户看到的是「产物的编辑 = 原图编辑 + 三项调整」一个步骤。
     nonisolated static let denoiseInheritLabel = Loc.t("模型降噪：继承编辑")
 
-    /// §396 B — 这个产物文件**自己**认不认 `"9.dng"`。
+    /// §554 — 这个产物文件应该自动选哪个解码器拼写。
     ///
-    /// 这是**文件能力**的问题，不是运行时行为：`EditModel.decoderVersion` 只接受该文件
-    /// `supportedDecoderVersions` 里的一项，而裸 `"9"` 不在 SL3 的列表里、赋上去会静默读回
-    /// `8`（`EditModel.swift:165-172` 的实测注释：`8`→`08193a35…`、`8.dng`→`a15055fa…`、
-    /// `9.dng`→`f4d7e53b…`）。所以入口是 `RAWDecoder.availableVersions(for:)` —— 它建一个
-    /// 临时 `CIRAWFilter` 读 `supportedDecoderVersions`，与解码路径用的是同一个来源。
+    /// 顺序是用户口径 `9 > 9.dng > 8 > 8.dng > 其他`，并且**赋值后回读**：Apple 对文件不认的
+    /// 拼写是静默忽略的（`DecoderCapabilities` 头注释），所以「写进去」不等于「生效」。
+    /// `DecoderVersionPreference` 是唯一的选择逻辑，395/396 的继承段只调用它，不再自己挑版本。
     ///
-    /// **不做「试写再读回」**：那测的是这台机器此刻的行为（`RAWDecoder.decodeDetailed` 的
-    /// read-back 才是那件事），而这里要问的是文件允不允许。
-    ///
-    /// 读不出来（不是 RAW、文件坏了、`CIRAWFilter` 为 nil）一律回答 `false` —— 调用方因此
-    /// 留 `nil`（= 跟随 Apple），既不会写入一个读回会变的值，也不会因为这一项把降噪判失败。
-    nonisolated static func supportsV9(at url: URL) -> Bool {
-        ((try? RAWDecoder.availableVersions(for: url)) ?? []).contains("9.dng")
+    /// 读不出来（不是 RAW、文件坏了、`CIRAWFilter` 为 nil）时 `selected == nil`，调用方因此
+    /// 不覆写继承来的值；这个加分项也绝不会把降噪判失败。
+    nonisolated static func preferredDecoderVersion(at url: URL) -> String? {
+        let resolution = DecoderVersionPreference.resolve(for: url)
+        // 「首选 X 被回读成 Y」/「全部改写」必须留下读数，否则线上只能看到最后写了什么。
+        for note in resolution.notes {
+            NSLog("photons: 解码器版本 %@（%@）", note, url.lastPathComponent)
+        }
+        return resolution.selected
     }
 
     /// 阻塞的那一半。**不在主线程**（由 `ranOffMain` 断言）。
@@ -2730,13 +2730,13 @@ public final class CatalogSession {
                 // 一次，仍然和上面的继承共用**同一次** `appendDevelop`（一条历史、一个 undo 步骤）。
                 payload.geometry.guideLines = sourceDocument.geometry.guideLines
 
-                // 396 B — 产物默认走 **v9.dng**（用户的取舍：v9 下 Apple 的三根 no-op 滑杆关掉，
-                // 让模型降噪的结果不被解码器二次处理）。**只有文件自己列了这个版本才写**：裸
-                // "9" 或文件不支持的版本会被静默读回 v8（`EditModel.swift:165-172` 的实测注释），
-                // 所以先问文件的能力，问不到就留 nil（= 跟随 Apple 默认），绝不硬写、也不用
-                // 「试写再读回」冒充能力判断（那是运行时行为）。
-                if Self.supportsV9(at: outcome.output) {
-                    payload.decoderVersion = "9.dng"
+                // 554 — 产物默认走首选解码器版本：`9` → `9.dng` → `8` → `8.dng` → 其他
+                // （用户的取舍：新解码器下让模型降噪的结果不被二次处理）。选择逻辑只有
+                // `DecoderVersionPreference` 一处，并且**赋值后回读**：文件不认的拼写会被
+                // Apple 静默忽略，回读不一致就换下一个候选；全部改写时回答 nil，这里保留
+                // 继承来的值（= 源图怎么解码，产物就怎么解码），绝不硬写、也不把降噪判失败。
+                if let version = Self.preferredDecoderVersion(at: outcome.output) {
+                    payload.decoderVersion = version
                 }
 
                 // 396 C — 降噪归零。v9 下 `colorNR` 是无效写（`DecoderCapabilities.swift:17`：

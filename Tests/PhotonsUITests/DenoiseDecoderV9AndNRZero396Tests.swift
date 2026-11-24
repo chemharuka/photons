@@ -15,7 +15,8 @@ import PhotonsExtensions
 /// (`session.denoiseSelection()`) against a **real** library on disk and the real catalog reads —
 /// the same harness §395 established, so the two tickets are measured by the same ruler:
 ///
-///   ② the product's `decoderVersion` in `develop_json` is exactly `"9.dng"` (raw value printed);
+///   ② the product's `decoderVersion` in `develop_json` is the §554 preference's answer — on this
+///      machine's fixture that is bare `"9"` (raw value printed);
 ///   ③ the product's `detailSettings.luminanceNR` and `.colorNR` are **0** — and, because 042's
 ///      decoder reads a stored `0` back as `nil`, the reading is taken **twice**: once from the
 ///      document object and once from the raw JSON text, so 「写进去了」 is measured on the bytes
@@ -73,8 +74,8 @@ final class DenoiseDecoderV9AndNRZero396Tests: XCTestCase {
 
     /// A source document that carries the things 396 must **not** clobber: exposure/contrast (395's
     /// ④), and the decoder + a non-zero `detailSettings` that 396 is supposed to **overwrite** — the
-    /// source is deliberately v8 with NR 60/40 so the product's `9.dng` / `0` / `0` cannot be a
-    /// coincidence of 「源图本来就是这样」.
+    /// source is deliberately v8 with NR 60/40 so the product's preferred version and `0` / `0` cannot
+    /// be a coincidence of 「源图本来就是这样」.
     private func richDocument() -> EditModel {
         var d = EditModel.neutral
         d.light.exposure = 1.5
@@ -230,14 +231,23 @@ final class DenoiseDecoderV9AndNRZero396Tests: XCTestCase {
         let product = try stored(productID)
 
         // ── ② decoderVersion ──────────────────────────────────────────────────────────────────────
+        // 554 changed the automatic choice: the product now follows
+        // `DecoderVersionPreference` (9 > 9.dng > 8 > 8.dng > …), not the old 396-only "9.dng".
+        // The fixture's list gained bare `9` on 2026-11-23 (macOS 27.3) and assigning it reads back
+        // `9`, so the expected value here is the preference's own answer, printed next to the list.
+        let offered = try RAWDecoder.availableVersions(for: Self.fixtureURL)
+        let expectedVersion = try XCTUnwrap(DecoderVersionPreference.preferred(in: offered),
+                                            "② 夹具必须至少有一个可用的解码器版本")
+        print("② 夹具 supportedDecoderVersions = \(offered) ⇒ §554 选中 \(expectedVersion)")
         print("② 产物 decoderVersion = \(String(describing: product.decoderVersion))")
-        XCTAssertEqual(product.decoderVersion, "9.dng",
-                       "② 产物必须是 9.dng（裸 \"9\" 会静默读回 8，见 EditModel 的实测注释）")
-        XCTAssertNotEqual(product.decoderVersion, "9", "② 反向门：裸 9 不是这个文件的一项")
+        XCTAssertEqual(product.decoderVersion, expectedVersion,
+                       "② 产物必须等于 §554 的首选（本机列表含裸 9，见 554 的实测）")
+        XCTAssertEqual(product.decoderVersion, "9",
+                       "② 本机夹具的首选就是裸 9；列表变化时上面的打印会说明原因")
 
         let rawDecoder = try rawLeaf(productID, group: "", key: "decoderVersion")
         print("② develop_json 里的 decoderVersion 原文 = \(String(describing: rawDecoder))")
-        XCTAssertEqual(rawDecoder as? String, "9.dng", "② 字节里也得是 9.dng")
+        XCTAssertEqual(rawDecoder as? String, expectedVersion, "② 字节里也得是选中的那个拼写")
 
         // ── ③ luminanceNR / colorNR ───────────────────────────────────────────────────────────────
         // Two readings, deliberately. The type drops a stored 0 (`v > 0` guard), so asserting only
@@ -405,16 +415,18 @@ final class DenoiseDecoderV9AndNRZero396Tests: XCTestCase {
     ///
     /// Two facts, both measured here:
     ///
-    ///   · the fixture offers `9.dng` **and not bare `9`** — which is exactly why `EditModel`'s
-    ///     comment says a bare `9` silently reads back `8`, and why ② must assert the `.dng` spelling;
+    ///   · the fixture now offers **bare `9` as well as `9.dng`** (2026-11-23, macOS 27.3). That is
+    ///     the environment change 554 records: when 396 was written bare `9` was absent and silently
+    ///     read back `8`, which is why 396 stored `9.dng`. Today `9` is a real, distinct choice and
+    ///     §554 prefers it;
     ///   · a different container answers a **different** list that has neither — so ⑤'s branch is
     ///     reachable, and the empty-list case (`["None"]` + unreadable) is not the same thing.
-    func testTheVersionListIsPerFileAndTheBareNineIsAbsent() throws {
+    func testTheVersionListIsPerFileAndTheBareNineIsNowPresent() throws {
         let fixture = try RAWDecoder.availableVersions(for: Self.fixtureURL)
         print("自检 夹具 supportedDecoderVersions = \(fixture)")
-        XCTAssertTrue(fixture.contains("9.dng"), "自检 夹具必须认 9.dng，否则 ② 无从测起")
-        XCTAssertFalse(fixture.contains("9"),
-                       "自检 本机列表里没有裸 9 —— 这正是必须写 \"9.dng\" 的原因")
+        XCTAssertTrue(fixture.contains("9.dng"), "自检 夹具必须认 9.dng")
+        XCTAssertTrue(fixture.contains("9"),
+                      "自检 本机列表（macOS 27.3）已含裸 9 —— 这是 554 选它、而不是 9.dng 的原因")
 
         let other = try makeFileWithoutV9()
         let otherVersions = try RAWDecoder.availableVersions(for: other)
