@@ -1089,7 +1089,7 @@ private struct DetailFXParamsU {
     var e: SIMD4<Float>    // gradient gate: g0, g1 (luma per 1/q texel), pad, pad
     var b: SIMD4<Int32>    // canvasW, canvasH, q (statistics block), radius in the 1/q domain
     var c: SIMD4<Int32>    // qW, qH, segment length, pad
-    var f: SIMD4<Float>    // 164: denoise luma amount, chroma amount (0…1), pad, pad
+    var f: SIMD4<Float>    // 164: denoise luma amount, chroma amount (0…1); 553: headroom (0/1 = pre-553)
     /// 181 — local detail: `maskCount, contentOriginX, contentOriginY, 0` and
     /// `contentWidth, contentHeight, 0, 0`. Mirror of `DetailFXParams.g` / `.h`.
     var g: SIMD4<Int32>
@@ -1112,7 +1112,7 @@ private struct SharpenParams {
 private struct DenoiseParamsU {
     var canvas: SIMD4<Int32> // w, h, cell, zBins
     var grid: SIMD4<Int32>   // gW, gH, axis (0 = x, 1 = y), pad
-    var n: SIMD4<Float>      // luma amount, chroma amount, pad, pad
+    var n: SIMD4<Float>      // luma amount, chroma amount, 553 headroom (0/1 = pre-553), pad
 }
 
 /// 365 — mirror of `Kernels/s1_65_denoise.metal`, byte for byte. `fit` is the **output** of
@@ -4865,7 +4865,11 @@ public final class RenderGraph {
             e: SIMD4(0.015, 0.06, 0, 0),
             b: SIMD4(Int32(w), Int32(h), Int32(q), 0),
             c: SIMD4(Int32(qW), Int32(qH), 32, 0),
-            f: SIMD4(lumaNR, chromaNR, 0, 0),
+            // 553 — `.z` is the headroom the grid's luma axis is normalised by. It is the picture's
+            // 320 ceiling, not `options.display.headroom`: the ceiling is already key material (it
+            // reaches this stage through the tone-map link, 323), while the panel's headroom is a
+            // display property that would let a cached grid cross headrooms.
+            f: SIMD4(lumaNR, chromaNR, Float(ceiling), 0),
             // The content rect, not the canvas: a mask's detail stops at the picture's edge exactly
             // where S2/S3/S3.5 stop (派单 008 C's rule).
             g: SIMD4(hasLocalDetail ? Int32(localDetail.count) : 0,
@@ -4898,7 +4902,9 @@ public final class RenderGraph {
             var dp = DenoiseParamsU(
                 canvas: SIMD4(Int32(w), Int32(h), Int32(cell), Int32(zBins)),
                 grid: SIMD4(Int32(gW), Int32(gH), 0, 0),
-                n: SIMD4(lumaNR, chromaNR, 0, 0))
+                // 553 — `n.z` is the headroom the splat's z/luma index is normalised by, the same
+                // picture ceiling the apply pass reads from `DetailFXParams.d.z`.
+                n: SIMD4(lumaNR, chromaNR, Float(ceiling), 0))
 
             nrSigma = try scratch("detailfx-nr-sigma", width: 1, height: 1, format: .rgba32Float)
             let gridA = try scratch3D("detailfx-nr-grid-a", width: gW, height: gH, depth: zBins,

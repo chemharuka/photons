@@ -238,6 +238,10 @@ kernel void s3_8_guide_coeff(texture2d<float, access::read> stats [[texture(0)]]
 /// untouched 细节 card executes exactly the pre-164 instruction stream.
 #define S3_9_CELL 8
 
+/// 553 — the linear toe of the headroom-normalised luma compander; must equal `S3_9_TOE` in
+/// `s3_9_denoise.metal`, because splat and slice have to walk the same axis bit for bit.
+#define S3_9_TOE 5.0f
+
 /// 181 — how far a local 锐化 may leave the block range it is clipped to, in **codes** (1/255 of the
 /// displayed value). The contract is ≤ 2 codes on a one-pixel edge; 1.5 is what is shipped, and the
 /// suite measures **1.49** on both fixtures. The same-radius plain unsharp draws 32.26 codes there
@@ -393,22 +397,74 @@ kernel void s3_8_guide_apply(texture2d<float, access::read> src [[texture(0)]],
     // 171 — **one** grid slice serves both controls: the grid is joint, so the pixel's own luma
     // picks the same cell for the luma mix and for a/b. A neutral document never reaches here (the
     // stage is not encoded at all), and the `> 0` guard keeps the pre-171 instruction stream intact.
+    //
+    // 553 — the slice is read in the **same headroom-normalised domain the splat wrote** (`L / H`,
+    // H = the 320 ceiling in `p.d.z`), then `× H` puts the mean back in linear light. The multiply is
+    // the inverse of the splat's divide, not a highlight "restore": no value is clamped to 1.0 on
+    // this side. `p.d.z <= 1` is the pre-553 index.
+    //
+    // 553 — **detail re-injection by a local-variance mask.** The grid is a wide low-pass (cell 8,
+    // ±2 cells of spatial blur), so `amount = 100` used to replace the picture by that low-pass and
+    // erase texture. The correction is therefore weighted by the picture's own **5×5 local variance**
+    // (normalised to the frame's noise σ): a flat patch's variance is noise², so the denoise runs at
+    // full strength; a checkerboard or a step is far above it, so the amount falls to 0 and the
+    // original pixel — texture, edge and all — is re-injected unchanged.
+    //
+    // Measured on the input, not on the grid's residual: a residual-based gate cannot tell structure
+    // from a grid that is simply *wrong* (a mis-indexed highlight looks exactly like texture), and it
+    // would have hidden the 553 index bug behind its own protection. The literal
+    // `low + (I − low)` is the identity and cannot denoise anything; this gate is the useful form of
+    // "keep the high frequencies".
     float amountNR = clamp(p.f.x, 0.0, 1.0);
     float amountCNR = clamp(p.f.y, 0.0, 1.0);
     float abar = 0.0, bbar = 0.0;
     if (amountNR > 0.0 || amountCNR > 0.0) {
-        float r = clamp((0.4 + 0.6 * amountNR) * nrSigma.read(uint2(0, 0)).x, 0.010, 0.050);
+        float sigmaN = max(nrSigma.read(uint2(0, 0)).x, 0.0);
+        float H = max(p.d.z, 1.0);
+        bool normalised = p.d.z > 1.0001;
+        float r = clamp((0.4 + 0.6 * amountNR) * sigmaN, 0.010, 0.050);
         uint3 dim = uint3(nrGrid.get_width(), nrGrid.get_height(), nrGrid.get_depth());
+        float cz;
+        if (normalised) {
+            // Mirror of `s3_9_nr_splat`: log1p compander over `[0, H]`, linear toe below H/5.
+            float toe = H / S3_9_TOE;
+            float zTop = float(dim.z - 1);
+            cz = clamp((log(1.0 + I / toe) / log(1.0 + H / toe)) * zTop, 0.0, zTop);
+        } else {
+            cz = clamp(I / r, 0.0, 39.0);
+        }
         float3 gc = float3((float(gid.x) + 0.5) / float(S3_9_CELL) - 0.5,
                            (float(gid.y) + 0.5) / float(S3_9_CELL) - 0.5,
-                           clamp(I / r, 0.0, 39.0));
+                           cz);
         float4 slice = s3_9_grid_read(nrGrid, gc, dim);
         float wsum = max(slice.w, 1e-6);
         abar = slice.y / wsum;
         bbar = slice.z / wsum;
         // luminance: add the difference from the pixel's own luma to all three channels, so the
         // chroma ratios stay put and only the luma moves.
-        if (amountNR > 0.0) { delta += amountNR * (slice.x / wsum - I); }
+        if (amountNR > 0.0) {
+            float Lbar = slice.x / wsum * H;
+            // 5×5 local variance of the input luma. 5, not 3: a 4 px checkerboard fits inside a 3×3
+            // window at some centres, where 5×5 always straddles a transition. The window clamps at
+            // the frame edge, like every other local operator in this file.
+            float sum = 0.0, sumSq = 0.0;
+            for (int dy = -2; dy <= 2; ++dy) {
+                int yy = clamp(int(gid.y) + dy, 0, h - 1);
+                for (int dx = -2; dx <= 2; ++dx) {
+                    int xx = clamp(int(gid.x) + dx, 0, w - 1);
+                    float v = s3_8_luma(max(src.read(uint2(xx, yy)).rgb, 0.0), p.luma.xyz);
+                    sum += v; sumSq += v * v;
+                }
+            }
+            float mean = sum / 25.0;
+            float variance = max(sumSq / 25.0 - mean * mean, 0.0);
+            // Noise floor: variance below (2σ)² is a flat patch (gate 1, the full denoise); above
+            // (4σ)² it is structure (gate 0, the detail is re-injected untouched). The 1e-4 floor
+            // keeps a noiseless frame (σ = 0) denoising.
+            float tau = max(2.0 * sigmaN, 1e-4);
+            float gate = 1.0 - smoothstep(tau * tau, 4.0 * tau * tau, variance);
+            delta += amountNR * gate * (Lbar - I);
+        }
     }
     // 320 — the upper bound is the picture's ceiling, not a literal 4.0: a halo may not lift a pixel
     // past the top the user set. `0` = a caller that predates the field keeps the old 4.0.
