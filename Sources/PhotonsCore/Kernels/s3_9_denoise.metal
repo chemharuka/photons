@@ -24,14 +24,31 @@ using namespace metal;
 // The apply pass (`s3_8_detail_fx.metal`) reads the grid with a **manual** eight-corner trilinear
 // interpolation: `texture3d` linear filtering is silently unavailable on some devices, where the
 // sampler degrades to nearest without an error.
+//
+// ── 553: the luma axis is **headroom-normalised** ─────────────────────────────────────────────────
+// Before 553 both the z index and the stored luma were absolute, and the stored value was
+// `clamp(L, 0, 1)`. Every pixel above display white therefore landed in the **top** z bin and was
+// written as exactly 1.0, so a 1.2 / 2.0 / 4.0 patch became three copies of 1.0 and the slice could
+// only pull the picture down. The grid now works in `L' = L / H`, where `H` is the picture's own
+// headroom (the 320 ceiling: the brightest linear value the tone map may keep, and already part of
+// the key chain that seeds this stage). The 40 bins span `[0, H]` through a **log1p compander** with
+// a linear toe (`c = H/5`): below H/5 the axis is nearly the old linear luma axis (so midtone noise
+// keeps the old bin width and the denoise keeps averaging it), above it the axis compresses
+// logarithmically so 1.2 / 2.0 / 4.0 each keep a layer of their own. Bin 0 is black and bin 39 is
+// the ceiling — nothing is folded into the top bin merely for being above white — and the slice
+// multiplies the same ratio back (`× H`), never a clamp to 1.0.
+//
+// `p.n.z <= 1` is the pre-553 index, bit for bit: it is what `DenoiseKernelProbeTests` (whose
+// params carry no headroom) and every SDR frame recorded before this ticket were computed with.
 
 #define S3_9_Z 40                 // z 轴 bin 数
 #define S3_9_Q 65535.0            // 定点标度
+#define S3_9_TOE 5.0              // 553: 线性趾部 = H / S3_9_TOE（其下近似旧的线性轴）
 
 struct DenoiseParams {
     int4 canvas;   // x = w, y = h, z = cell(格边长, 8), w = zBins(40)
     int4 grid;     // x = gW, y = gH, z = axis(0=x 1=y), w = 0
-    float4 n;      // x = amtL, y = amtC, z = unused, w = unused
+    float4 n;      // x = amtL, y = amtC, z = 画面 headroom (线性, 0/1 = pre-553), w = unused
 };
 
 // MARK: - noise estimate
@@ -118,6 +135,9 @@ kernel void s3_9_nr_splat(texture2d<float, access::read> src [[texture(0)]],
     uint tgSize = tgSize3.x * tgSize3.y * tgSize3.z;
 
     float r = clamp((0.4 + 0.6 * p.n.x) * sig.read(uint2(0, 0)).x, 0.010, 0.050);
+    // 553 — the picture's headroom (the 320 ceiling). `<= 1` is the pre-553 absolute index.
+    float H = max(p.n.z, 1.0);
+    bool normalised = p.n.z > 1.0001;
 
     // L / A / B / weight, 40 bins each.
     threadgroup atomic_uint acc[160];
@@ -136,9 +156,22 @@ kernel void s3_9_nr_splat(texture2d<float, access::read> src [[texture(0)]],
         float3 rgb = max(src.read(uint2(px, py)).rgb, 0.0);
         float L = dot(rgb, lw);
         float3 lab = oklab_raw(rgb);
-        int z = clamp(int(round(L / r)), 0, S3_9_Z - 1);
+        float Ln = L / H;                       // 553 — headroom-normalised luma, ≤ 1 in range
+        int z;
+        if (normalised) {
+            // 553 — log1p compander over `[0, H]`: a linear toe below H/5, a logarithmic shoulder
+            // above it. Rounding protects the ends: black is bin 0 and the ceiling is bin 39, and
+            // *nothing* is folded together merely because it is above white.
+            float toe = H / S3_9_TOE;
+            float f = log(1.0 + L / toe) / log(1.0 + H / toe);
+            z = clamp(int(round(f * float(S3_9_Z - 1))), 0, S3_9_Z - 1);
+        } else {
+            z = clamp(int(round(L / r)), 0, S3_9_Z - 1);
+        }
 
-        uint lv = uint(round(clamp(L, 0.0, 1.0) * S3_9_Q));
+        // The stored value is the same normalised luma the slice multiplies back by H. In the
+        // pre-553 branch H is 1, so this is the exact `clamp(L, 0, 1)` of the recorded frames.
+        uint lv = uint(round(clamp(Ln, 0.0, 1.0) * S3_9_Q));
         uint av = uint(round(clamp(lab.y + 0.5, 0.0, 1.0) * S3_9_Q));
         uint bv = uint(round(clamp(lab.z + 0.5, 0.0, 1.0) * S3_9_Q));
 
