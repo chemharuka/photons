@@ -22,8 +22,9 @@ final class ViewMenu551Tests: XCTestCase {
         AppPreferences.store.removeObject(forKey: "photons.browserMode")
         NSApp.mainMenu = MainMenu.build()
         editor = EditorWindowController(size: NSSize(width: 1200, height: 800))
-        editor.showWindow(nil)
-        editor.window?.makeKeyAndOrderFront(nil)
+        // 331 的统一入口：`alphaValue = 0` + 屏幕外，照样是 key window（合成按键要用），
+        // 但用户屏幕上不会弹出 1200×800 的窗口。这里只需要 `windowNumber` 与焦点，不需要可见。
+        TestWindows.show(editor.window, key: true)
         pump(0.05)
     }
 
