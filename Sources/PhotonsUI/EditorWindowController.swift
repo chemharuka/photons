@@ -7,7 +7,7 @@ import PhotonsCore
 ///
 /// No `NSToolbar` (§2b item 1) and no storyboard/XIB anywhere: the window, its content and its
 /// menus are built in code, which is what every surviving editor in the survey does.
-public final class EditorWindowController: NSWindowController {
+public final class EditorWindowController: NSWindowController, NSMenuItemValidation {
 
     public let session = CatalogSession()
     public private(set) var rootView: WorkspaceRootView!
@@ -41,9 +41,16 @@ public final class EditorWindowController: NSWindowController {
         // 474 — the row lives on the app's 编辑 menu, but its visibility is per-window state
         // (`session.selection`), so it is installed here rather than baked into `MainMenu.build()`.
         installBatchDenoiseMenuItem()
+        installBrowserShortcutMonitor()
     }
 
     public required init?(coder: NSCoder) { fatalError("no nibs in this app") }
+
+    deinit {
+        // A local monitor is retained by the event loop; without this the window controller (and its
+        // window) would outlive the closed editor.
+        if let monitor = browserShortcutMonitor { NSEvent.removeMonitor(monitor) }
+    }
 
     // MARK: opening
 
@@ -241,6 +248,54 @@ public final class EditorWindowController: NSWindowController {
     @objc public func showBrowserListAction(_ sender: Any?) { showBrowserAsList() }
 
     @objc public func showBrowserFilmstripAction(_ sender: Any?) { showBrowserAsFilmstrip() }
+
+    // MARK: browser chords (551 — ⌃⌘B / ⌃⌘A)
+
+    /// The two menubar chords are **not** left to the menu alone: `NSTextView` treats a Control+letter
+    /// as its own Emacs movement key (⌃B = one character back, ⌃A = start of line), so with a search
+    /// field or an inspector value focused the chord never reaches 显示 ▸ 胶片条 / 侧栏. A local
+    /// monitor is called before that dispatch, which is the same device `handleCropReturn` uses.
+    private var browserShortcutMonitor: Any?
+
+    private func installBrowserShortcutMonitor() {
+        guard browserShortcutMonitor == nil else { return }
+        browserShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.handleBrowserMenuShortcut(event) else { return event }
+            return nil
+        }
+    }
+
+    /// True when `event` is ⌃⌘B/⌃⌘A aimed at this editor window. The current mode's own chord is
+    /// consumed as a no-op — its menu row is grey (551), and the text field must not act on ⌃B/⌃A
+    /// either when the user pressed the browser command.
+    @discardableResult
+    func handleBrowserMenuShortcut(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, let window else { return false }
+        guard event.window === window || event.windowNumber == window.windowNumber else { return false }
+        guard event.modifierFlags.intersection([.command, .control, .option, .shift])
+            == [.control, .command] else { return false }
+        switch chordLetter(event) {
+        case "b":
+            if rootView.browserMode != .filmstrip { toggleFilmstrip() }
+            return true
+        case "a":
+            if rootView.browserMode != .list { showBrowserAsList() }
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// `charactersIgnoringModifiers` is the letter on a menu key equivalent, but a field editor can
+    /// see Control translated to the C0 character (⌃B = U+0002). Both spellings mean the same chord.
+    private func chordLetter(_ event: NSEvent) -> String? {
+        guard let characters = event.charactersIgnoringModifiers?.lowercased(),
+              characters.count == 1, let scalar = characters.unicodeScalars.first else { return nil }
+        if (1...26).contains(scalar.value) {
+            return String(UnicodeScalar(scalar.value + 0x60)!)
+        }
+        return characters
+    }
 
     @objc public func selectAllAction(_ sender: Any?) { selectAllAssets() }
 
@@ -691,11 +746,12 @@ public final class EditorWindowController: NSWindowController {
             item.state = session.mode == .loupe ? .on : .off
             return session.anchorID != nil
         case #selector(toggleFilmstripAction(_:)):
+            // 551 — the pair is a radio group: the current mode is ticked and cannot be chosen again.
             item.state = rootView.browserMode == .filmstrip ? .on : .off
-            return true
+            return rootView.browserMode != .filmstrip
         case #selector(showBrowserListAction(_:)):
             item.state = rootView.browserMode == .list ? .on : .off
-            return true
+            return rootView.browserMode != .list
         case #selector(selectAllAction(_:)):
             return !session.assets.isEmpty
         case #selector(copySettingsAction(_:)), #selector(chooseCopySettingsAction(_:)):
