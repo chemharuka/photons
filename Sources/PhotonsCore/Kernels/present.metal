@@ -31,7 +31,8 @@ using namespace metal;
 // The drawable format decides the transfer function of the values it stores:
 //
 //   linearize = 1  → drawable is rgba16Float + extendedLinearDisplayP3, so the stored value must be
-//                    linear light. Values above 1 are kept: that is the EDR headroom S4 preserved.
+//                    linear light. Values above 1 are kept: that is the EDR headroom, bounded here
+//                    by the **live** display reading (544 — S4 no longer clips it).
 //   linearize = 0  → drawable is bgra8Unorm + sRGB (the fallback for a layer that refuses the
 //                    16-bit format), so the value stays display-encoded and is clamped to 1.
 //
@@ -48,7 +49,8 @@ struct PresentParams {
                      // `uv = window.xy + canvasPosition · window.zw` — the window is a function of the
                      // canvas position, not of the quad's local coordinates, because the texture is
                      // canvas-sized and the window is the map that places it there.
-    float4 misc;     // x = linearize; yzw unused padding, so the struct stays three float4s (stride 48).
+    float4 misc;     // x = linearize; y = live headroom (544); zw padding, so the struct stays three
+                     // float4s (stride 48).
 };
 
 struct PresentOut {
@@ -80,10 +82,19 @@ static inline float srgb_encode_inverse(float v) {
 
 // What the drawable stores for a sampled value: linear light for the 16-bit layer, clamped display
 // encoding for the bgra8 fallback. One function, one path — there is no second fragment any more.
+//
+// 544 — the **panel's bound lives here**, not in S4. S4 now hands over the picture encoded up to the
+// 503 ceiling, so a headroom change re-presents the same texture instead of making the canvas cache
+// refuse it. In the linear branch the bound is applied after the inverse OETF (a clamp on an encoded
+// code is a clamp on a different quantity); `misc.y <= 0` means an old caller that predates 544 and
+// gets no extra bound. The bgra8 fallback stays the SDR rule: `min(v, 1)` on the encoded value.
 static inline float3 present_transfer(float3 rgb, constant PresentParams &p) {
     float3 v = max(rgb, 0.0);
     if (p.misc.x > 0.5) {
         v = float3(srgb_encode_inverse(v.x), srgb_encode_inverse(v.y), srgb_encode_inverse(v.z));
+        if (p.misc.y > 0.0) {
+            v = min(v, p.misc.y);
+        }
     } else {
         v = min(v, 1.0);
     }

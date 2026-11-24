@@ -8,10 +8,17 @@ using namespace metal;
 // `Rec2020 → sRGB` (or `Rec2020 → Display P3`), fed from `ColorPrimaries.conversion` by `RenderGraph`.
 // Encoding is the sRGB piecewise OETF, which Display P3 also uses.
 //
-// The upper bound is `headroom`, not 1. With headroom = 1 this is exactly the old
-// `clamp(v, 0.0, 1.0)` (pixel-identical, golden-checked); with headroom > 1 the >1 values produced
-// by the D2′ decode recipe survive into the texture, which is what EDR consumes in M3.5
-// (docs/architecture-decisions.md §11.8). The file-export path always passes headroom = 1.
+// 544 — **the panel's headroom is not an exit clamp any more.** This kernel writes the picture up to
+// the 503 ceiling, encoded, and the present pass (`present.metal`) applies `min(v, liveHeadroom)` in
+// linear light after its inverse OETF. The texture is therefore a property of the document, not of
+// the display that happens to be showing it: a headroom change re-presents the same pixels instead
+// of invalidating the canvas-frame cache.
+//
+// `p.a.w` is the switch: **1 = presentation exit** (no headroom clamp — the caller is going to
+// present this texture), **0 = legacy clip** (the SDR file-export path and every pre-544 caller,
+// which still needs headroom = 1 to be the old hard clamp). The value in `p.a.y` is the live display
+// reading; it is kept in the struct so both exits read the same uniform, but this exit only clamps
+// when `p.a.w == 0`.
 //
 // ── 075: the lower clamp is **after** the matrix, and that is a bug fix ─────────────────────────
 // This kernel used to clamp `max(c.rgb, 0)` *before* the matrix and then write the matrix's output
@@ -51,8 +58,9 @@ using namespace metal;
 // Position — three constraints, all of them load-bearing:
 //   · **after** the matrix, for the reason 075 gives above: the matrix mixes, so a clamp in front of
 //     it can be pushed over by the matrix's own arithmetic (measured: 4.92 in, 7.46 out);
-//   · **before** `min(v, headroom)` (the panel's ceiling, which must still win when it is lower) and
-//     before `srgb_encode` (a clamp on an encoded code is a clamp on a different quantity);
+//   · **before** `srgb_encode` (a clamp on an encoded code is a clamp on a different quantity), and
+//     since 544 in front of nothing else on the presentation exit — the panel's headroom is applied
+//     after the OETF has been undone in the present pass;
 //   · **`p.a.z == 0` means "no extra clamp"** — a caller that predates 503. A real ceiling is
 //     `2^0 = 1` at the lowest (`HighlightCeiling.evRange` starts at 0 EV), so 0 is unambiguous.
 //
@@ -61,7 +69,9 @@ using namespace metal;
 
 struct DisplayParams {
     float4x4 m;   // working primaries → linear output primaries (column-major, from ColorPrimaries)
-    float4 a;     // identityMatrix, headroom, 503 ceiling (linear; 0 = caller predates 503), pad
+    // identityMatrix, headroom (live display reading), 503 ceiling (linear; 0 = caller predates 503),
+    // presentation-exit flag (1 = do **not** clamp at headroom; the present pass will).
+    float4 a;
 };
 
 static inline float srgb_encode(float v) {
@@ -86,8 +96,13 @@ kernel void s4_display(texture2d<float, access::read> src [[texture(0)]],
     if (ceiling > 0.0) {
         v = min(v, ceiling);
     }
-    float headroom = max(p.a.y, 0.0);
-    v = min(v, headroom);
+    // 544 — the presentation exit leaves the panel's bound to `present.metal`, which has the live
+    // reading at the moment of the draw. The legacy clip stays for a caller that is writing a file
+    // (SDR export) and for every pre-544 request.
+    if (p.a.w < 0.5) {
+        float headroom = max(p.a.y, 0.0);
+        v = min(v, headroom);
+    }
     float3 enc = float3(srgb_encode(v.x), srgb_encode(v.y), srgb_encode(v.z));
     dst.write(float4(enc, 1.0), gid);
 }

@@ -186,7 +186,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
         public let displayHash: String?
         /// Canvas pixels per source pixel this frame was rendered at (1 = 1:1).
         public let zoom: Double
-        /// The S4 ceiling this frame was rendered with (`DisplayOptions.headroom`).
+        /// The live display headroom this frame was rendered under (`DisplayOptions.headroom`).
+        ///
+        /// 544 — since the panel's bound moved to the present pass, this is **not** what the pixels
+        /// are clamped at any more; it is the reading that was live when the frame was made. What the
+        /// screen actually shows is clamped at the live reading at present time
+        /// (`lastPresentedHeadroomForTesting`).
         public let headroom: Double
         /// The visible window in source pixels.
         public let window: ImageSize
@@ -535,12 +540,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// identical pixels, and re-presenting the cached copy on every scheduled request would only add
     /// draws. A photo switch always changes the key.
     private var lastCanvasCachePresentedKey: String?
-    /// 458 — the display facts the cache entries were last known to be rendered under. A move here
-    /// clears the table (`refreshDisplay` / `setDisplayHeadroom`); it is never compared with a
-    /// tolerance at lookup time.
+    /// 458/544 — the primaries the cache entries were last known to be rendered under. A primaries
+    /// move clears the table (`refreshDisplay`); headroom is not here any more (544), because the
+    /// panel's bound is applied at present time. It is never compared with a tolerance at lookup.
     private var canvasCachePrimaries: OutputPrimaries?
-    /// 458 — what the last **cache hit** actually put on the layer. The acceptance compares these
-    /// with the entry's own values, so 「命中但头空间不对」 cannot pass silently.
+    /// 458/544 — what the last present actually used. 544: `headroom` is the **live reading at the
+    /// moment of the draw** (the bound `present.metal` applied), not the value the texture was
+    /// rendered under. `primaries` is still the entry's own S4 matrix.
     public private(set) var lastPresentedHeadroomForTesting: Double?
     public private(set) var lastPresentedPrimariesForTesting: OutputPrimaries?
     /// Document digests last seen per photo, so a digest move is recognised as an edit landing even
@@ -2198,13 +2204,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
         canvasCachePrimaries = current
     }
 
-    /// 458 — the two spellings of "the display moved": a new headroom clears the window canvas cache
-    /// immediately. `lookup` also compares the values, so a missed notification still cannot serve a
-    /// frame rendered for another display — it misses and says `.displayChanged`.
+    /// 544 — **a headroom change no longer clears the window canvas cache.** The frame texture now
+    /// carries only the picture (matrix + 503 ceiling), and the panel's bound is applied by the
+    /// present pass from the live reading. Updating the reading and re-presenting the same entry is
+    /// therefore enough: `lastCanvasCachePresentedKey = nil` lets the next `scheduleRender` hit that
+    /// entry and draw it at the new headroom immediately.
+    ///
+    /// (`invalidateForDisplayChange()` is still the rule for a **primaries** move: the S4 matrix is
+    /// baked into the texture and the old pixels would be the wrong colours.)
     public func setDisplayHeadroom(_ next: DisplayHeadroom) {
         guard next != displayHeadroom else { return }
         displayHeadroom = next
-        canvasFrameCache.invalidateForDisplayChange()
         lastCanvasCachePresentedKey = nil
         applyLayerEDR()
         updateStatusChip()
@@ -8555,15 +8565,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
             // second cached present would only add a draw.
             //
             // 458 — the display facts are passed **here** from the same source the writer used
-            // (`headroom` / `currentCanvasPrimaries`). They are hard-checked against the entry, not
-            // spelled into the key: two live screen readings of the same display can differ in the
-            // last ulp, and that used to be two keys and a guaranteed miss.
+            // (`headroom` / `currentCanvasPrimaries`). 544 — headroom is no longer part of the match:
+            // the texture is the picture, and the live reading is applied by the present pass.
             if key.identity != lastCanvasCachePresentedKey,
                let cached = canvasFrameCache.lookup(key, headroom: headroom,
                                                     primaries: currentCanvasPrimaries,
                                                     decodeScale: predictedScale) {
                 lastCanvasCachePresentedKey = key.identity
-                lastPresentedHeadroomForTesting = cached.headroom
                 lastPresentedPrimariesForTesting = cached.primaries
                 canvasCachePresents += 1
                 // 5.1 (口径修正 18:1x): the cached frame takes the place of the 1920 px stand-in
@@ -9583,8 +9591,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
         lastPresentRequest = request
         let ok = presenter.present(request, in: canvasView.metalLayer,
                                    wantsEDR: wantsExtendedDynamicRange,
-                                   drawableSize: canvas, onComplete: completion)
+                                   drawableSize: canvas, headroom: headroom,
+                                   onComplete: completion)
         guard ok else { return false }
+        // 544 — the reading that was actually applied to the pixels, on every path (settled frame,
+        // frozen re-present, cache hit). This is the present-time number, not the one the texture was
+        // rendered under.
+        lastPresentedHeadroomForTesting = headroom
         recordBackdropPresent(window: window, backdropWindow: backdropWindow, drawn: backdrop,
                               placement: placement, pictureQuad: request.pictureQuad, serial: serial)
         recordPresent(PresentRecord(drawable: canvas, frameCanvas: frameCanvas,
