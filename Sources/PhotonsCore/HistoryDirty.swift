@@ -44,6 +44,9 @@ extension EditHistory {
         // decode input there is — a switch must be one committable edit (and the loupe re-develops,
         // because `decodeInputs` moves). It dirties no *stage*: a new development is not a render stage.
         if before.decoderVersion != after.decoderVersion { dirty.insert(.detail) }
+        // 555 — 自动/手选 is a decoder fact like the spelling; the loupe must re-develop when it
+        // changes (the resolution may move to another spelling).
+        if before.decoderVersionPolicy != after.decoderVersionPolicy { dirty.insert(.detail) }
         if !EditParameters.areEqual(before.effects, after.effects) { dirty.insert(.effects) }
         // 2026-10-31 (185): **显示域锐化**. Exactly the 078 B8 色差 accident again — 185 put four
         // sliders on 细节卡 and wired the S3.10 stage, key token, history labels and snapshot

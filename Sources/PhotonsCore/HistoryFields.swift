@@ -338,6 +338,13 @@ extension EditHistory {
             add("decoderVersion", .detail,
                 .text(before.decoderVersion ?? Loc.t("默认")), .text(after.decoderVersion ?? Loc.t("默认")))
         }
+        // 555 — 自动 vs 手选 is a document state of its own: switching the picker to 自动 writes no
+        // spelling, so without this row the change would be invisible in the timeline.
+        if before.decoderVersionPolicy != after.decoderVersionPolicy {
+            add("decoderVersionPolicy", .detail,
+                .text(before.decoderVersionPolicy.rawValue),
+                .text(after.decoderVersionPolicy.rawValue))
+        }
 
         // S3 — Effects.
         num("effects.vignetteAmount", .effects,
@@ -691,6 +698,7 @@ extension EditHistory {
         "detailSettings.detail": Loc.t("细节"),
         "detailSettings.moire": Loc.t("去摩尔纹"),
         "decoderVersion": Loc.t("解码版本"),
+        "decoderVersionPolicy": Loc.t("解码版本策略"),
         "effects.vignetteAmount": Loc.t("暗角"),
         "effects.vignetteMidpoint": Loc.t("暗角中点"),
         "effects.vignetteFeather": Loc.t("暗角羽化"),

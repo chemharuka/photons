@@ -20,7 +20,7 @@ public struct PhotoMetadata: Sendable {
     public var focalLength: Double?
     /// 409 — the 35 mm-equivalent focal length (`exif:FocalLenIn35mmFilm`). With `focalLength` it is
     /// the **only** input to the crop factor the automatic decoder-version rule uses
-    /// (`DecoderAutoVersion.cropFactor`); the user's rule is 「传感器尺寸通过物理焦距和等效焦距算出」.
+    /// (`DecoderVersionPreference.cropFactor`); the user's rule is 「传感器尺寸通过物理焦距和等效焦距算出」.
     public var focalLength35mm: Double?
     public var aperture: Double?
     public var shutter: String?

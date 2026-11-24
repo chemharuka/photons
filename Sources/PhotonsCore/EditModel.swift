@@ -172,6 +172,35 @@ public struct EditModel: Sendable, Equatable, Codable {
     /// `RAWDecoder` assigns the string verbatim and reads it back, so a document from another body that
     /// this file cannot honour reports the fallback (`已退回 v8`) instead of pretending.
     public var decoderVersion: String?
+
+    /// 555 — **whether `decoderVersion` is the user's hand pick or an automatic result**.
+    ///
+    /// `.auto` (the default, and every pre-555 document): the resolver chooses from the file's own
+    /// list, the photo's ISO and 设置 → 解码偏好. `.v8` / `.v9`: the user pinned a family in the
+    /// 解码模型 picker, so the setting cannot move it and a rejected spelling falls back only inside
+    /// the same family.
+    ///
+    /// The document stores the **policy**, not the resolved spelling; `resolvedDecoderVersion` is
+    /// the fact the cache key names. This is the §2 rule: document = 自动, key = 解析结果.
+    public var decoderVersionPolicy: DecoderVersionPolicy
+
+    /// 555 — **the spelling the last resolution chose**, or `nil` before the first resolution.
+    ///
+    /// Written by the decode path (Phase 2), never by a user control. Two jobs:
+    ///   · the UI's 「实际塑造了这一帧」 readout can say `自动 · 9.dng`;
+    ///   · the decode/cache key can name `9.dng` instead of `auto`, so a macOS upgrade that changes
+    ///     the answer cannot serve the old buffer.
+    ///
+    /// It is also the legacy marker: a pre-555 document has `decoderVersion` but no
+    /// `resolvedDecoderVersion`, and `DecoderVersionPreference.candidates(...)` therefore treats its
+    /// stored spelling as the hand pick it was. That is what keeps old documents' pixels unchanged.
+    ///
+    /// **Phase 2 rule:** do **not** stamp a resolved spelling onto such a document. The legacy pin is
+    /// recognisable precisely because `decoderVersion != nil && resolvedDecoderVersion == nil`; writing
+    /// the resolved result there would turn the next load into a table lookup and move the pixels. A new
+    /// automatic document has `decoderVersion == nil`, and that is the only shape that stores a result
+    /// here. A hand-picked `.v8` / `.v9` document already has the truth in `decoderVersion`.
+    public var resolvedDecoderVersion: String?
     public var effects: EffectsGroup
     /// 185 — **自研锐化** (S3.10): 数量 / 半径 / 细节 / 蒙版, in the display-referred domain.
     ///
@@ -262,6 +291,8 @@ public struct EditModel: Sendable, Equatable, Codable {
                 detail: DetailGroup = .identity,
                 detailSettings: DetailSettings = .identity,
                 decoderVersion: String? = nil,
+                decoderVersionPolicy: DecoderVersionPolicy = .auto,
+                resolvedDecoderVersion: String? = nil,
                 effects: EffectsGroup = .identity,
                 sharpen: SharpenGroup = .identity,
                 optics: OpticsGroup = .identity,
@@ -282,6 +313,8 @@ public struct EditModel: Sendable, Equatable, Codable {
         self.detail = detail
         self.detailSettings = detailSettings
         self.decoderVersion = decoderVersion
+        self.decoderVersionPolicy = decoderVersionPolicy
+        self.resolvedDecoderVersion = resolvedDecoderVersion
         self.effects = effects
         self.sharpen = sharpen
         self.optics = optics
@@ -510,6 +543,11 @@ public struct EditModel: Sendable, Equatable, Codable {
         v.detail = c.val("detail", v.detail)
         v.detailSettings = c.val("detailSettings", v.detailSettings)
         v.decoderVersion = c.val("decoderVersion", v.decoderVersion)
+        // 555: absent policy = `.auto`, absent resolved = nil. This is the whole legacy migration:
+        // a pre-555 document keeps its `decoderVersion` verbatim, and the resolver reads the missing
+        // resolved spelling as "this was a hand pick" (see `decoderVersionPolicy`).
+        v.decoderVersionPolicy = c.val("decoderVersionPolicy", v.decoderVersionPolicy)
+        v.resolvedDecoderVersion = c.val("resolvedDecoderVersion", v.resolvedDecoderVersion)
         v.effects = c.val("effects", v.effects)
         // 185: an absent key reads as the neutral group — four defaults, `hasSharpen == false`, no
         // S3.10 link (schema 9's additive rule, read for the last time). A pre-185 document therefore
@@ -665,6 +703,21 @@ public struct EditModel: Sendable, Equatable, Codable {
         try encodeGroup(detail, "detail", into: &c, extras: extras)
         try encodeGroup(detailSettings, "detailSettings", into: &c, extras: extras)
         try c.encodeIfPresent(decoderVersion, forKey: AnyCodingKey("decoderVersion"))
+        // 555: written **only when the policy is not 自动 or a resolved spelling exists**, so a
+        // pre-555 document keeps its `develop_json` byte for byte — including one with a hand-picked
+        // `decoderVersion`, whose legacy meaning is "pin that spelling, no policy key". That is the
+        // §7.3 gate, and it is why `ThumbRecipe.recipeDigest` does not turn over for the whole
+        // library on the first save. `resolved` is written as `null` when the policy is pinned and
+        // nothing was resolved, so both keys appear together (`c.val` reads null as nil); the two
+        // names are also in `ForwardCompatKnownKeys.topLevel` by hand.
+        if decoderVersionPolicy != .auto || resolvedDecoderVersion != nil {
+            try c.encode(decoderVersionPolicy, forKey: AnyCodingKey("decoderVersionPolicy"))
+            if let resolvedDecoderVersion {
+                try c.encode(resolvedDecoderVersion, forKey: AnyCodingKey("resolvedDecoderVersion"))
+            } else {
+                try c.encodeNil(forKey: AnyCodingKey("resolvedDecoderVersion"))
+            }
+        }
         try encodeGroup(effects, "effects", into: &c, extras: extras)
         // 185: written **only when non-neutral** (the `colorGrading`/`healSpots` rule), so every
         // document from before S3.10 re-encodes byte for byte and an absent key reads as the identity.

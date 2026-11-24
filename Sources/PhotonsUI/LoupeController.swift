@@ -8984,11 +8984,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
     static func develop(url: URL, scale: Float, inputs: DecodeInputs) throws -> DecodeRung {
         let decoder = try RAWDecoder()
         let t0 = CFAbsoluteTimeGetCurrent()
-        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
-                                                                              exposureEV: 0,
-                                                                              scale: scale,
-                                                                              whiteBalance: inputs.whiteBalance,
-                                                                              detail: inputs.detail))
+        let developed = try decoder.decodeDetailed(url, options: DecodeOptions(
+            decoderVersion: inputs.decoderVersion,
+            decoderVersionPolicy: inputs.decoderVersionPolicy,
+            decoderStoredVersion: inputs.decoderStoredVersion,
+            decoderResolvedVersion: inputs.decoderResolvedVersion,
+            exposureEV: 0,
+            scale: scale,
+            whiteBalance: inputs.whiteBalance,
+            detail: inputs.detail))
         return DecodeRung(scale: scale, image: developed.image,
                           capabilities: developed.capabilities,
                           milliseconds: (CFAbsoluteTimeGetCurrent() - t0) * 1000,

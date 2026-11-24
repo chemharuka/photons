@@ -125,10 +125,14 @@ func cmdExportBatch(_ a: Args) throws {
         // v9, and shipped the untouched NR/detail amounts while the screen showed the adjusted ones.
         let inputs = edit.decodeInputs
         let exportWhiteBalance = inputs.whiteBalance
-        let decoded = try decoder.decode(url, options: DecodeOptions(decoderVersion: inputs.decoderVersion,
-                                                                    scale: decodeScale,
-                                                                    whiteBalance: exportWhiteBalance,
-                                                                    detail: inputs.detail))
+        let decoded = try decoder.decode(url, options: DecodeOptions(
+            decoderVersion: inputs.decoderVersion,
+            decoderVersionPolicy: inputs.decoderVersionPolicy,
+            decoderStoredVersion: inputs.decoderStoredVersion,
+            decoderResolvedVersion: inputs.decoderResolvedVersion,
+            scale: decodeScale,
+            whiteBalance: exportWhiteBalance,
+            detail: inputs.detail))
 
         let identity = "export|\(item.id)|v\(decoded.decoderVersion)"
             + String(format: "|s%.4f", decodeScale)

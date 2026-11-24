@@ -230,7 +230,13 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
             case .calibration: out.calibration = edit.calibration
-            case .detail: out.detail = edit.detail
+            case .detail:
+                out.detail = edit.detail
+                // 555 — the 解码模型 policy rides with 开发. A 细节 preset that carried a pinned
+                // spelling but not its policy would silently become 「自动」 on the next build.
+                out.decoderVersion = edit.decoderVersion
+                out.decoderVersionPolicy = edit.decoderVersionPolicy
+                out.resolvedDecoderVersion = nil
             case .effects:
                 out.effects = edit.effects
                 // 185: 自研锐化 is stored in its own group but belongs to the 细节 card, whose storage
@@ -268,7 +274,12 @@ public struct Preset: Sendable, Equatable, Codable {
             case .color: out.color = edit.color
             case .colorGrading: out.colorGrading = edit.colorGrading
             case .calibration: out.calibration = edit.calibration
-            case .detail: out.detail = edit.detail
+            case .detail:
+                out.detail = edit.detail
+                // 555 — policy + spelling travel together, and the resolved fact is per photo.
+                out.decoderVersion = edit.decoderVersion
+                out.decoderVersionPolicy = edit.decoderVersionPolicy
+                out.resolvedDecoderVersion = nil
             case .effects:
                 out.effects = edit.effects
                 out.sharpen = edit.sharpen

@@ -909,6 +909,13 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
     /// `true` = the source was 自动 and a paste writes `nil` back; `false` = `decoderVersion` holds
     /// the model; `nil` = a legacy payload, which keeps the destination's decoder.
     public var decoderVersionAuto: Bool?
+    /// 555 — the source document's 解码模型 policy (自动 / 手选 v8 / 手选 v9). `nil` = a payload
+    /// written before the policy existed; its meaning is the pre-555 one (`decoderVersionAuto`).
+    ///
+    /// Carried because the picker's new 自动 row is a *document state*, not a spelling: a paste of
+    /// 「解码器版本」 must be able to put the destination back on 自动 (and clear its resolved
+    /// spelling) instead of pinning the source's resolved `9.dng` forever.
+    public var decoderVersionPolicy: DecoderVersionPolicy?
 
     public init() {
         self.schemaVersion = EditSnapshot.currentSchemaVersion
@@ -1012,6 +1019,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // copied state of its own: `decoderVersionAuto == true` means "paste this photo back to 自动".
         s.decoderVersion = edit.decoderVersion
         s.decoderVersionAuto = edit.decoderVersion == nil
+        s.decoderVersionPolicy = edit.decoderVersionPolicy
 
         // 156: 校正 — the two lateral-CA ratios, both carried (0 included). The document stores α,
         // not the panel's −100…+100 position.
@@ -1155,6 +1163,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if edit.detail.lensCorrections { detail.lensCorrections = true }
         s.detail = detail.isEmpty ? nil : detail
         if let version = edit.decoderVersion { s.decoderVersion = version }
+        // 555 — the policy is carried even when it is `.auto`: the fragment must know whether the
+        // version above is a pin or a resolved fact.
+        s.decoderVersionPolicy = edit.decoderVersionPolicy
 
         var optics = OpticsPatch()
         if differs(edit.optics.caRed, 0) { optics.caRed = edit.optics.caRed }
@@ -1466,6 +1477,7 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         if sections.contains(.detail), on(.decoderVersion) {
             out.decoderVersion = decoderVersion
             out.decoderVersionAuto = decoderVersionAuto
+            out.decoderVersionPolicy = decoderVersionPolicy
         }
 
         // 179: 校准 is one card and seven numbers, so checking it copies all seven — there is no
@@ -1648,8 +1660,21 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // 319/442 — the decoder state. Written last of the document-shaping fields because it is the
         // one that changes *which buffer* every other leaf is read through. An explicit 「自动」 is a
         // written value too: it clears a destination's pinned model.
-        if decoderVersionAuto == true { out.decoderVersion = nil }
-        else if let v = decoderVersion { out.decoderVersion = v }
+        if decoderVersionAuto == true {
+            out.decoderVersion = nil
+            out.resolvedDecoderVersion = nil
+        } else if let v = decoderVersion {
+            out.decoderVersion = v
+            // 555 — the resolved fact belonged to the **source** photo/file; the destination must
+            // resolve for itself (or use the explicit pin above).
+            out.resolvedDecoderVersion = nil
+        }
+        if let policy = decoderVersionPolicy {
+            out.decoderVersionPolicy = policy
+        } else if decoderVersionAuto == true {
+            // A pre-policy payload that says 「自动」 still means 自动 on the new field.
+            out.decoderVersionPolicy = .auto
+        }
 
         if let p = optics {
             if let v = p.caRed { out.optics.caRed = v }
@@ -1729,6 +1754,9 @@ public struct EditSnapshot: Sendable, Equatable, Codable {
         // 442: absent in every pre-442 payload; its absence keeps the old "don't touch the decoder"
         // meaning. No schema bump — the key is additive and optional.
         self.decoderVersionAuto = c.val("decoderVersionAuto", Bool?.none)
+        // 555 — absent in every pre-555 payload; its absence keeps the old `decoderVersionAuto`
+        // meaning. Additive and optional, so no clipboard schema bump.
+        self.decoderVersionPolicy = c.val("decoderVersionPolicy", DecoderVersionPolicy?.none)
 
     }
 
