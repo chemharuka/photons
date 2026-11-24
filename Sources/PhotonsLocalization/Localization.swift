@@ -12,8 +12,9 @@ import Foundation
 /// - `Loc.t(_:_:)` —— 表里的 `{0}` `{1}` 占位，按位置代入 `String`。用于 `\(expr)` 插值。
 /// - `Loc.f(_:_:)` —— 表里带 `%.2f` 之类的 printf 说明符，走 `String(format:)`，参数是 `CVarArg`。
 ///
-/// 语言在**进程内冻结**：`language` 第一次读时定下来，菜单、工具窗口、后台任务因此不会中途换语言。
-/// 改语言写入 `UserDefaults`（`photons.language`）并重启生效 —— 与 PR1 的口径一致。
+/// 语言在**进程内冻结**：界面文字只看 `appliedLanguage`，它第一次读时定下来；
+/// 菜单、工具窗口、后台任务因此不会中途换语言。改语言只写偏好（`photons.language`），
+/// 重启后新的进程才会用新语言 —— 与 PR1 的口径一致。
 public enum Loc {
     /// 语言变更（写入偏好后）——供设置窗口刷新自己的说明文字。
     public static let languageDidChange = Notification.Name("photons.languageDidChange")
@@ -21,12 +22,67 @@ public enum Loc {
     public static let defaultLanguage = "zh-Hans"
     public static let supportedLanguages = ["zh-Hans", "en"]
 
-    /// `PHOTONS_LANGUAGE`（测试/命令行）优先，其次偏好，最后默认中文。
+    /// 当前偏好解析出的语言（`PHOTONS_LANGUAGE` 优先，其次偏好，最后默认中文）。
+    ///
+    /// 注意：这是**偏好**，不是界面正在使用的语言。偏好一写这里就变，但 `Loc.t` / `Loc.f`
+    /// 只认 `appliedLanguage`；判断「选的和生效的是否一致」也要用 `appliedLanguage`。
     public static var language: String {
-        let raw = ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"]
+        resolve(environment: ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"])
+    }
+
+    /// 用户上次选的语言（只读 `photons.language`，不含 `PHOTONS_LANGUAGE` 覆盖）。
+    /// 设置窗口的选中项用它：用户看到的应当是自己上次的选择，而不是测试/命令行的临时覆盖。
+    public static var preferenceLanguage: String {
+        resolve(environment: nil)
+    }
+
+    /// 本进程真正生效的界面语言：第一次读时定下来，之后不再随偏好变化。
+    ///
+    /// `PHOTONS_LANGUAGE`（测试/命令行）优先，其次偏好，最后默认中文；与 `language` 的解析
+    /// 顺序相同，但结果**冻结**。所有取表的地方（`t` / `f`）只用它 —— 这就是「重启后生效」。
+    public static var appliedLanguage: String {
+        FrozenLanguage.shared.value
+    }
+
+    private static func resolve(environment: String?) -> String {
+        let raw = environment
             ?? AppPreferences.store.string(forKey: keyLanguage)
             ?? defaultLanguage
         return supportedLanguages.contains(raw) ? raw : defaultLanguage
+    }
+
+    /// 进程内的生效语言。用锁而不是 `static let` 是为了让测试能在同一进程里模拟
+    /// 「以 en 偏好启动」—— 生产代码没有任何写入点，第一次读之后就固定。
+    private final class FrozenLanguage: @unchecked Sendable {
+        static let shared = FrozenLanguage()
+
+        private let lock = NSLock()
+        private var frozen: String?
+        private var frozenEnvironment: String?
+
+        var value: String {
+            lock.lock(); defer { lock.unlock() }
+            let environment = ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"]
+            // 生产里环境变量启动后不会变；测试会在同一进程里改 `PHOTONS_LANGUAGE`
+            // （`LocalizationTableTests` 的端到端用例），那只对测试进程重新定一次。
+            if frozen == nil || (AppPreferences.isRunningTests && environment != frozenEnvironment) {
+                frozen = Loc.resolve(environment: environment)
+                frozenEnvironment = environment
+            }
+            return frozen ?? Loc.defaultLanguage
+        }
+
+        /// 只给测试：钉住生效语言；传 `nil` 表示下次读时重新按启动语义解析。
+        func override(_ code: String?) {
+            lock.lock(); defer { lock.unlock() }
+            frozen = code
+            frozenEnvironment = ProcessInfo.processInfo.environment["PHOTONS_LANGUAGE"]
+        }
+    }
+
+    /// 只给测试：模拟一次「以某个生效语言启动」；生产代码不调用。
+    static func setAppliedLanguageForTesting(_ code: String?) {
+        FrozenLanguage.shared.override(code)
     }
 
     public static let keyLanguage = "photons.language"
@@ -48,8 +104,8 @@ public enum Loc {
     /// 每种语言的 `.lproj` 包，按语言缓存（`Bundle(path:)` 不必重复打开）。
     /// 缺表时回落到 `Bundle.module` 本身 —— 于是返回 key 即中文原文，不会返回空串。
     ///
-    /// 用字典而**不是**一个 `static let`：语言在进程内实际上不变（改了要重启），
-    /// 但测试要在同一进程里验「语言切换真的换表」，一次性缓存会让那条用例变成假红。
+    /// 用字典而**不是**一个 `static let`：界面语言在进程内冻结（`appliedLanguage`），
+    /// 但测试要在同一进程里模拟不同启动语言，按语言缓存才能让两种表都被读到。
     private static let bundles = BundleCache()
     private final class BundleCache: @unchecked Sendable {
         private var cache: [String: Bundle] = [:]
@@ -82,7 +138,7 @@ public enum Loc {
     }
 
     private static func raw(_ key: String) -> String {
-        bundles.bundle(for: language).localizedString(forKey: key, value: key, table: nil)
+        bundles.bundle(for: appliedLanguage).localizedString(forKey: key, value: key, table: nil)
     }
 
     // MARK: - 文案
