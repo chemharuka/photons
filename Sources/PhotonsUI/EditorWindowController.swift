@@ -53,6 +53,9 @@ public final class EditorWindowController: NSWindowController {
         window?.title = "Photons — \(url.deletingPathExtension().lastPathComponent)"
         window?.representedURL = url
         rootView.needsLayout = true
+        // 539 — `Catalog.open` succeeded and the anchor is known: warm its first v9 development
+        // while the grid is up. Background, one photo, no frame is rendered or presented.
+        rootView.loupeController.prewarmV9ForAnchor()
     }
 
     public func openLibraryPanel() {

@@ -319,6 +319,55 @@ public struct DetailAxes: Sendable, Equatable {
     }
 }
 
+/// 539 — the **one** slot through which a neural-stage (v9) development may run.
+///
+/// The crash class 506-C documented lives in a process-wide Apple table (`Espresso` / `ANEServicesThread`),
+/// and its amplifier was several ML decodes feeding it at once. The loupe's own decode queue is serial,
+/// so the shipped path already runs one ML development at a time; this gate makes that a property of the
+/// decoder rather than of one caller, and gives the prewarm acceptance a number to read:
+/// `mlInFlightPeak` must stay **1** even when a prewarm and the user's next photo overlap.
+///
+/// It counts and serialises only the neural stage; classic (v6–v8) decodes never enter it, which keeps
+/// the grid's `avoidNeuralStage` policy untouched. The lock is held across the actual filter/render
+/// work, so a second ML decode waits instead of racing the program table — this is a ceiling, never a
+/// raised concurrency.
+public enum NeuralStageSlot {
+    private static let lock = NSLock()
+    private static var inFlight = 0
+    private static var peak = 0
+
+    /// ML developments running right now (0 or 1 in the shipped path).
+    public static var inFlightCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return inFlight
+    }
+
+    /// The high-water mark since the last reset — the `mlInFlightPeak` reading of 539.
+    public static var peakInFlight: Int {
+        lock.lock(); defer { lock.unlock() }
+        return peak
+    }
+
+    /// The acceptance's spelling of `peakInFlight`.
+    public static var mlInFlightPeak: Int { peakInFlight }
+
+    /// Tests only: start a fresh high-water mark. Never called by the app.
+    public static func resetPeak() {
+        lock.lock(); defer { lock.unlock() }
+        peak = inFlight
+    }
+
+    static func enter() {
+        lock.lock(); defer { lock.unlock() }
+        inFlight += 1
+        peak = max(peak, inFlight)
+    }
+
+    static func exit() {
+        lock.lock(); inFlight = max(0, inFlight - 1); lock.unlock()
+    }
+}
+
 public enum DecodeError: LocalizedError {
     case unsupportedFile(URL)
     case noMetalDevice
@@ -1058,6 +1107,14 @@ public final class RAWDecoder {
             detailApplied = try Self.applyDetail(options.detail, to: filter, baseline: detailBaseline,
                                                  axes: axes)
         }
+
+        // 539 — a neural-stage (v9) development takes the process-wide ML slot before the filter
+        // produces pixels and holds it through the GPU wait. Classic decodes skip both calls, so
+        // the grid's `avoidNeuralStage` path is byte-for-byte what it was. The `defer` is outside
+        // every branch below, including the throwing ones: a failed v9 decode must release the slot.
+        let usesNeuralStage = DecoderCapabilities.usesNeuralStage(capabilities.effectiveVersion)
+        if usesNeuralStage { NeuralStageSlot.enter() }
+        defer { if usesNeuralStage { NeuralStageSlot.exit() } }
 
         guard let output = filter.outputImage else { throw DecodeError.renderFailed }
         ph.prepare = (CACurrentMediaTime() - cursor) * 1000
