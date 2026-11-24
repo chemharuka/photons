@@ -23,7 +23,59 @@ import Foundation
 ///
 /// The user's manual 解码模型 picker is **not** touched by this type: it stores a hand-picked item
 /// verbatim. This rule is only for the automatic choice a denoise product inherits.
+///
+/// 555 extends the same file with the **document-level** rule: a document says whether it is
+/// automatic (`.auto`) or pinned to a family (`.v8` / `.v9`), and the resolver turns that — plus the
+/// photo's ISO and the user's 解码偏好 — into one spelling. There is deliberately **one** automatic
+/// entry point here; `DecoderAutoVersion` (409) is the older, second one and is scheduled to be
+/// folded into this type in Phase 2 (see `local/REPORT.md`).
+public enum DecoderVersionPolicy: String, Codable, CaseIterable, Sendable {
+    /// 自动 — the document stores the policy, not the spelling. The resolved spelling lives in
+    /// `EditModel.resolvedDecoderVersion` and is what the cache key must name.
+    case auto
+    /// 手选 v8 family — pin `8` / `8.dng`, never fall through to v9.
+    case v8
+    /// 手选 v9 family — pin `9` / `9.dng`.
+    case v9
+
+    /// The family a hand-picked policy pins; `nil` for `.auto`.
+    public var pinnedFamily: Int? {
+        switch self {
+        case .auto: return nil
+        case .v8: return 8
+        case .v9: return 9
+        }
+    }
+}
+
 public enum DecoderVersionPreference {
+
+    /// 555 — the user's 解码偏好 in 设置 (not the document's own picker).
+    ///
+    /// Three values, default `.auto`. The table is `local/TASK.md` §3.2:
+    ///
+    /// | preference | high ISO | everything else |
+    /// |---|---|---|
+    /// | `.auto` | `9 > 9.dng > 8 > 8.dng > 其他` | `8 > 8.dng > 其他` |
+    /// | `.preferV9` | `9 > 9.dng > 8 > 8.dng > 其他` | `9 > 9.dng > 8 > 8.dng > 其他` |
+    /// | `.preferV8` | `8 > 8.dng > 其他` | `8 > 8.dng > 其他` |
+    ///
+    /// This is only the **setting**; a document's hand pick (`.v8` / `.v9`) ignores it. The
+    /// `UserDefaults` key and the settings row arrive in Phase 3.
+    public enum Preference: String, Codable, CaseIterable, Sendable {
+        case auto
+        case preferV9
+        case preferV8
+    }
+
+    /// 555 — the full-frame ISO at or above which `.auto` / `.preferV9` may choose v9.
+    ///
+    /// `800` matches both the ticket's 「iso ≥ 800」 and 409's full-frame anchor. The resolver also
+    /// accepts a crop factor, so the effective test is `ISO · crop² ≥ 800` (m4/3 ISO 200, APS-C
+    /// ≈ 342) — the same normalisation 409 shipped, kept here so the two rules can converge without
+    /// changing the meaning of 「高 ISO」. **This is the one constant to tune**; changing it must bump
+    /// `DecodeRecipe.current` in the same change (Phase 2).
+    public static let highISOThreshold: Double = 800
 
     /// The owner's explicit order, before the deterministic fallback for everything else.
     public static let fixedOrder = ["9", "9.dng", "8", "8.dng"]
@@ -63,12 +115,7 @@ public enum DecoderVersionPreference {
     /// `CIRAWDecoderVersionNone` is not a version (513): a JPEG answers `["None"]`, and returning it
     /// would make the caller store a spelling no RAW filter accepts.
     public static func candidates(in available: [String]) -> [String] {
-        var seen = Set<String>()
-        let usable = available.filter {
-            !$0.isEmpty
-                && $0 != CIRAWDecoderVersion.none.rawValue
-                && seen.insert($0).inserted
-        }
+        let usable = usableSpellings(in: available)
 
         var ordered: [String] = []
         for spelling in fixedOrder where usable.contains(spelling) {
@@ -78,6 +125,100 @@ public enum DecoderVersionPreference {
             .filter { !fixedOrder.contains($0) }
             .sorted(by: fallbackComesBefore))
         return ordered
+    }
+
+    // MARK: - 555 · policy + ISO + 解码偏好 → one candidate list
+
+    /// `ISO · crop² ≥ 800` — the ticket's 「iso ≥ 阈值」 with 409's format normalisation.
+    ///
+    /// A missing ISO is **not** high ISO (we cannot prove the frame is noisy). An unreadable crop is
+    /// treated as full frame (`1`), exactly as 409 did.
+    public static func isHighISO(iso: Int?, cropFactor: Double = 1) -> Bool {
+        guard let iso else { return false }
+        let sensorCrop = cropFactor.isFinite && cropFactor > 0 ? cropFactor : 1
+        return Double(iso) * sensorCrop * sensorCrop >= highISOThreshold
+    }
+
+    /// The pure answer of §555: **every** candidate the read-back loop should try, in order.
+    ///
+    /// The three inputs are deliberately separate:
+    ///   · `policy` is the document's own 解码模型 choice;
+    ///   · `preference` is the 设置 preference, which only `.auto` documents read;
+    ///   · `iso` / `cropFactor` are facts about the file.
+    ///
+    /// `stored` is `EditModel.decoderVersion` and `resolved` is
+    /// `EditModel.resolvedDecoderVersion`. The pair is what keeps pre-555 documents byte-for-byte
+    /// stable: a legacy document has a `stored` spelling but **no** `resolved` result, so it is
+    /// treated as the hand pick it always was. A new automatic document has `resolved` (or neither),
+    /// so it follows the table. An explicit `.v8` / `.v9` document is pinned to that family, with
+    /// the same family's next spelling as the read-back fallback — never the other family.
+    public static func candidates(policy: DecoderVersionPolicy,
+                                  preference: Preference = .auto,
+                                  iso: Int?,
+                                  cropFactor: Double = 1,
+                                  stored: String?,
+                                  resolved: String? = nil,
+                                  in available: [String]) -> [String] {
+        let usable = usableSpellings(in: available)
+
+        switch policy {
+        case .v8:
+            return pinnedThenFamily(pinned: stored, family: 8, in: usable)
+        case .v9:
+            return pinnedThenFamily(pinned: stored, family: 9, in: usable)
+        case .auto:
+            // A pre-555 document has an explicit spelling but no policy key and no resolved result.
+            // That spelling was the user's hand pick; the table must not move its pixels.
+            if resolved == nil, let stored {
+                if let family = rank(stored).major {
+                    return pinnedThenFamily(pinned: stored, family: family, in: usable)
+                }
+                return [stored]
+            }
+            let allowV9 = preference == .preferV9
+                || (preference == .auto && isHighISO(iso: iso, cropFactor: cropFactor))
+            return allowV9 ? candidates(in: usable) : nonV9Order(in: usable)
+        }
+    }
+
+    /// Apply the §555 table and **verify every assignment by reading it back**.
+    ///
+    /// Same read-back discipline as the 554 overload: a spelling the filter silently rewrites is
+    /// skipped, and the skip is recorded. `nil` means "ask for nothing" (Apple's default).
+    public static func resolve(policy: DecoderVersionPolicy,
+                               preference: Preference = .auto,
+                               iso: Int?,
+                               cropFactor: Double = 1,
+                               stored: String?,
+                               resolved: String? = nil,
+                               in available: [String],
+                               readback: (String) -> String?) -> Resolution {
+        let ordered = candidates(policy: policy, preference: preference, iso: iso,
+                                 cropFactor: cropFactor, stored: stored, resolved: resolved,
+                                 in: available)
+        return apply(ordered, available: available,
+                     emptyNote: "没有符合策略的候选，跟随默认", readback: readback)
+    }
+
+    /// The live form of the §555 resolver: one filter, its own version list, assign → read back.
+    public static func resolve(policy: DecoderVersionPolicy,
+                               preference: Preference = .auto,
+                               iso: Int?,
+                               cropFactor: Double = 1,
+                               stored: String?,
+                               resolved: String? = nil,
+                               for url: URL) -> Resolution {
+        guard let filter = CIRAWFilter(imageURL: url) else {
+            return Resolution(available: [], selected: nil, readBacks: [],
+                              notes: ["读不出解码器版本，跟随默认"])
+        }
+        let available = filter.supportedDecoderVersions.map { $0.rawValue }
+        return resolve(policy: policy, preference: preference, iso: iso,
+                       cropFactor: cropFactor, stored: stored, resolved: resolved,
+                       in: available) { candidate in
+            filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
+            return filter.decoderVersion.rawValue
+        }
     }
 
     /// The pure rule: the owner's four spellings first, then the deterministic fallback.
@@ -94,10 +235,34 @@ public enum DecoderVersionPreference {
     /// spelling. The real overload below passes the live `CIRAWFilter`'s answer.
     public static func resolve(in available: [String],
                                readback: (String) -> String?) -> Resolution {
-        let ordered = candidates(in: available)
+        apply(candidates(in: available), available: available,
+              emptyNote: "文件没有可用的解码器版本，跟随默认", readback: readback)
+    }
+
+    /// The live form used by the denoise product: one filter, the file's own list, assign → read back.
+    public static func resolve(for url: URL) -> Resolution {
+        guard let filter = CIRAWFilter(imageURL: url) else {
+            return Resolution(available: [], selected: nil, readBacks: [],
+                              notes: ["读不出解码器版本，跟随默认"])
+        }
+        let available = filter.supportedDecoderVersions.map { $0.rawValue }
+        return resolve(in: available) { candidate in
+            filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
+            return filter.decoderVersion.rawValue
+        }
+    }
+
+    // MARK: - shared read-back loop
+
+    /// Assign each candidate in order, stop at the first one the filter reports back unchanged.
+    ///
+    /// The loop is here, once, so the 554 denoise rule and the 555 document rule cannot drift in how
+    /// they treat a silent rewrite. `emptyNote` keeps the two callers' pre-existing wording.
+    private static func apply(_ ordered: [String], available: [String], emptyNote: String,
+                              readback: (String) -> String?) -> Resolution {
         guard !ordered.isEmpty else {
             return Resolution(available: available, selected: nil, readBacks: [],
-                              notes: ["文件没有可用的解码器版本，跟随默认"])
+                              notes: [emptyNote])
         }
 
         var readBacks: [ReadBack] = []
@@ -115,17 +280,62 @@ public enum DecoderVersionPreference {
         return Resolution(available: available, selected: nil, readBacks: readBacks, notes: notes)
     }
 
-    /// The live form used by the denoise product: one filter, the file's own list, assign → read back.
-    public static func resolve(for url: URL) -> Resolution {
-        guard let filter = CIRAWFilter(imageURL: url) else {
-            return Resolution(available: [], selected: nil, readBacks: [],
-                              notes: ["读不出解码器版本，跟随默认"])
+    // MARK: - candidate helpers
+
+    /// The file's own list with the non-versions removed and duplicates collapsed.
+    private static func usableSpellings(in available: [String]) -> [String] {
+        var seen = Set<String>()
+        return available.filter {
+            !$0.isEmpty
+                && $0 != CIRAWDecoderVersion.none.rawValue
+                && seen.insert($0).inserted
         }
-        let available = filter.supportedDecoderVersions.map { $0.rawValue }
-        return resolve(in: available) { candidate in
-            filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
-            return filter.decoderVersion.rawValue
+    }
+
+    /// `8 > 8.dng > other non-v9 spellings`, the no-v9 half of the 555 table.
+    ///
+    /// v9 is excluded rather than merely deprioritised: 「优先 v8 … 不自动选 v9」 means a file whose
+    /// only versions are v9 gets `nil` (ask for nothing), not a hidden upgrade.
+    private static func nonV9Order(in usable: [String]) -> [String] {
+        var ordered: [String] = []
+        for spelling in ["8", "8.dng"] where usable.contains(spelling) {
+            ordered.append(spelling)
         }
+        ordered.append(contentsOf: usable
+            .filter { rank($0).major != 9 && !ordered.contains($0) }
+            .sorted(by: fallbackComesBefore))
+        return ordered
+    }
+
+    /// `pinned` first (when it belongs to `family`), then that family's own spellings.
+    ///
+    /// The family's next spelling is the only fallback for a hand pick: a rejected `8` becomes
+    /// `8.dng`, never `9`. A non-numeric `pinned` has no family and is tried alone.
+    private static func pinnedThenFamily(pinned: String?, family: Int,
+                                         in usable: [String]) -> [String] {
+        var ordered: [String] = []
+        if let pinned, rank(pinned).major == family {
+            ordered.append(pinned)
+        }
+        for spelling in familyOrder(family: family, in: usable) where !ordered.contains(spelling) {
+            ordered.append(spelling)
+        }
+        return ordered
+    }
+
+    /// `family > family.dng > other spellings of the same major version`, then nothing else.
+    ///
+    /// The bare spelling comes before `.dng` for every family (554's measured preference), and the
+    /// remaining spellings use the same deterministic fallback as the general rule.
+    private static func familyOrder(family: Int, in usable: [String]) -> [String] {
+        var ordered: [String] = []
+        for spelling in ["\(family)", "\(family).dng"] where usable.contains(spelling) {
+            ordered.append(spelling)
+        }
+        ordered.append(contentsOf: usable
+            .filter { rank($0).major == family && !ordered.contains($0) }
+            .sorted(by: fallbackComesBefore))
+        return ordered
     }
 
     // MARK: - deterministic fallback

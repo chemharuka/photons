@@ -166,6 +166,11 @@ public struct RenderInputs: Sendable, Equatable {
         // The decoder model (v8/v9) is the same kind of fact: it picks *which* decoder produced the
         // buffer, and the buffer already carries the answer. A render-side question must not move.
         e.decoderVersion = nil
+        // 555 — the policy and its resolved spelling are decode facts too. Clearing them here keeps
+        // "did the render change?" blind to them, exactly like `decoderVersion`; the decode key is
+        // where they will enter in Phase 2.
+        e.decoderVersionPolicy = .auto
+        e.resolvedDecoderVersion = nil
         self.edit = e
     }
 
