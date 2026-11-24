@@ -955,11 +955,8 @@ public final class ExportSheetModel {
     func finish(with report: BatchExportReport) {
         // 454 P3 — close the row before resetting the run's own flags. A cancelled run must not read
         // as finished just because the engine returned a report; its count stays where it stopped.
-        // 488 — the panel's square describes 「正在处理的那张」, so it goes back to the placeholder
-        // with the run. (`finish` below then keeps the terminal row for its counts.)
-        if let taskID = backgroundTaskID, let store = backgroundTasks {
-            store.clearCurrent(id: taskID)
-        }
+        // 549 — keep 「正在处理的那张」 on the terminal row, exactly like 527's denoise batch: the
+        // panel's square stays on the last exported photo (or the one that was running at cancel).
         if let taskID = backgroundTaskID, let store = backgroundTasks {
             let state: BackgroundTask.State = taskCancelled
                 ? .cancelled
