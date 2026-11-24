@@ -221,11 +221,11 @@ public enum MainMenu {
         view.addItem(withTitle: Loc.t("网格"), action: #selector(EditorWindowController.showGridAction(_:)), keyEquivalent: "1")
         view.addItem(withTitle: Loc.t("单图"), action: #selector(EditorWindowController.showLoupeAction(_:)), keyEquivalent: "2")
         view.addItem(.separator())
-        let strip = view.addItem(withTitle: Loc.t("胶片条（第二浏览器）"),
+        let strip = view.addItem(withTitle: Loc.t("胶片条"),
                                  action: #selector(EditorWindowController.toggleFilmstripAction(_:)),
                                  keyEquivalent: "b")
         strip.keyEquivalentModifierMask = [.control, .command]
-        let list = view.addItem(withTitle: Loc.t("浏览列表"),
+        let list = view.addItem(withTitle: Loc.t("侧栏"),
                                 action: #selector(EditorWindowController.showBrowserListAction(_:)),
                                 keyEquivalent: "a")
         list.keyEquivalentModifierMask = [.control, .command]
