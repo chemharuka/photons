@@ -63,7 +63,7 @@ public enum Schema {
         return m
     }
 
-    static func migrate(_ queue: DatabaseQueue) throws {
+    static func migrate(_ queue: any DatabaseWriter) throws {
         try migrator.migrate(queue)
     }
 
@@ -72,7 +72,7 @@ public enum Schema {
     /// Tests use this to fabricate a library of an older version and then watch `Catalog.open`
     /// migrate it (the snapshot-before-migration path is only reachable from a real older file).
     /// Nothing in the product calls it with a target below `Schema.version`.
-    static func migrate(_ queue: DatabaseQueue, upTo version: Int) throws {
+    static func migrate(_ queue: any DatabaseWriter, upTo version: Int) throws {
         let target = steps.prefix(max(0, min(version, steps.count)))
         guard let last = target.last else { return }
         try migrator.migrate(queue, upTo: last.name)
