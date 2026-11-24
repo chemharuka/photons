@@ -1632,6 +1632,46 @@ public final class CropToolController {
         return true
     }
 
+    /// **545 — the drawing copy follows a discrete remap.**
+    ///
+    /// 489's `remapDraft` / `flip` / `rotateQuarter` rewrite the draft's `guideLines` (they go through
+    /// `GeometryGroup.remapped(for:)`, which turns the endpoints with the picture), but the overlay
+    /// draws from the controller's **own** `guideLines` (`LoupeController.syncGuideLines` →
+    /// `guideLineSegments`). That copy was only ever seeded by `reloadGuideLines()`, whose four doors
+    /// (进裁切 / 重开开关 / 换图 / re-seed) are not a rotate or a mirror — so after one press the frame
+    /// turned and the lines stayed on the old pixels: the user's 「引导线没有跟着旋转」. The endpoints
+    /// are the same value the draft was just built from, so this is a copy, not a second remap.
+    ///
+    /// The fit's answer is **dropped** with it: `guideLineSolution` describes the pre-remap keystone,
+    /// and `applyPendingGuideLineSolution()` would otherwise write that stale solution back on the
+    /// next ↵ (the numbers it compares against have just been remapped).
+    ///
+    /// **545 reverse gate** — `guideLinesFollowRemap == false` restores the pre-545 shape (the draft
+    /// moves, the drawn set does not); `GeometryOrder545Tests` sets it and watches all four entries go
+    /// red.
+    @discardableResult
+    func adoptRemappedGuideLines(_ geometry: GeometryGroup) -> Bool {
+        guard Self.guideLinesFollowRemap else { return false }
+        guard !isDrawingGuideLine, !isDraggingGuideLine else { return false }
+        let restored = Self.guideLines(from: geometry.guideLines)
+        guard !restored.isEmpty || !guideLines.isEmpty else { return false }
+        guideLines = restored
+        guideLineSolution = nil
+        guideLineFailure = nil
+        guideLineMeasuredPairwise = nil
+        guideLineRotationFailure = nil
+        guideLineOffendingIndex = nil
+        guideLinePairInsufficient = false
+        rejectedGuideLine = nil
+        onGuideLineChange?()
+        return true
+    }
+
+    /// **545 reverse gate** — `true` ships. Only the acceptance turns it off, to show that this one
+    /// copy is what makes 「旋转/镜像后引导线跟着走」 green. Same convention as 361's
+    /// `guideLinesSurviveDisarm` / 354's `omitsPerspective`.
+    nonisolated(unsafe) static var guideLinesFollowRemap = true
+
     /// **「清除引导线」** — 354 §2.5's explicit door: every line goes, the picture stays where the last
     /// fit put it (nothing is un-solved), the tool stays armed. Distinct from 双击线身, which deletes
     /// *one* line and re-solves on the rest, and from Esc, which also drops the tool.
@@ -2336,6 +2376,7 @@ public final class CropToolController {
             .remapped(for: horizontal ? .mirrorH : .mirrorV)
         session.applyEdit { model in model.geometry = remapped }
         draft = Draft(geometry: remapped)
+        adoptRemappedGuideLines(remapped)
         let after = session.edit.geometry
         // A flip is discrete (072 §F): never fold it into the drag before it.
         session.commitEdit(label: horizontal ? Loc.t("水平翻转") : Loc.t("垂直翻转"), coalesce: false)
@@ -2366,6 +2407,7 @@ public final class CropToolController {
         session.applyEdit { model in model.geometry = remapped }
         guard session.edit.geometry != before else { return false }
         draft = Draft(geometry: remapped)
+        adoptRemappedGuideLines(remapped)
         session.commitEdit(label: clockwise ? Loc.t("顺时针旋转 90°") : Loc.t("逆时针旋转 90°"), coalesce: false)
         return true
     }
@@ -2687,7 +2729,9 @@ public final class CropToolController {
     /// pure function, so a later 应用 cannot write the un-turned rect back.
     func remapDraft(for operation: GeometryGroup.QuarterTurnOperation, from document: GeometryGroup) {
         guard isActive else { return }
-        draft = Draft(geometry: draft.geometry(flipsOf: document).remapped(for: operation))
+        let remapped = draft.geometry(flipsOf: document).remapped(for: operation)
+        draft = Draft(geometry: remapped)
+        adoptRemappedGuideLines(remapped)
     }
 
     /// The document's quarter turn — what the card's badge prints.

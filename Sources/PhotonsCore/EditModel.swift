@@ -1404,8 +1404,14 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
     //                        V   (x,y,w,h) → (x, 1−y−h, w, h);
     //   · straightenDegrees   unchanged (a rotation commutes with the angle; a mirror is a reflection
     //                        in the same picture space, so it keeps the stored dial angle);
-    //   · perspectiveV/H      a rotation swaps them and negates both; H negates the horizontal one,
-    //                        V the vertical one;
+    //   · perspectiveV/H      a quarter turn **swaps them, and negates only the vertical result**:
+    //                        CW `v' = −h, h' = +v`; CCW `v' = +h, h' = −v`. The swap is deliberately
+    //                        not symmetric in sign — `PerspectiveMap` puts the `−` on the vertical
+    //                        knob (`verticalStrength`) and not on the horizontal one, so
+    //                        "swap and negate both" mirrored the convergence instead of turning it
+    //                        (545: the four corners then disagreed with the turned picture by 5.9e−2
+    //                        at `v = 60`, pinned by `GeometryOrder545Tests`). H negates the
+    //                        horizontal one, V the vertical one;
     //   · perspectiveShear    negated by a rotation and by either mirror;
     //   · perspectiveAspect   reciprocal on a rotation, unchanged on a mirror;
     //   · guideLines          endpoints transformed by the same point map; the axis (which end is the
@@ -1455,8 +1461,14 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         case .rotateCW:
             g.quarterTurns = GeometryGroup.normalizedQuarterTurns(q + 1)
             g.crop = GeometryGroup.rotatedCrop(crop, clockwise: true)
+            // 545 — the keystone is a map of the *content*, so a quarter turn conjugates it by the
+            // turn. The two knobs are not symmetric: `PerspectiveMap` anchors the vertical one with
+            // a `−` and the horizontal one with a `+` (`verticalStrength` / `horizontalStrength`),
+            // which makes the exact action `v' = −h, h' = +v`. Negating both (what 489 spelled)
+            // mirrored the convergence instead of turning it — the picture looked like the keystone
+            // had been flipped, not rotated.
             g.perspectiveVertical = -perspectiveHorizontal
-            g.perspectiveHorizontal = -perspectiveVertical
+            g.perspectiveHorizontal = perspectiveVertical
             g.perspectiveShear = -perspectiveShear
             if perspectiveAspect.isFinite, perspectiveAspect != 0 {
                 g.perspectiveAspect = 1 / perspectiveAspect
@@ -1464,7 +1476,8 @@ public struct GeometryGroup: Sendable, Equatable, Codable {
         case .rotateCCW:
             g.quarterTurns = GeometryGroup.normalizedQuarterTurns(q + 3)
             g.crop = GeometryGroup.rotatedCrop(crop, clockwise: false)
-            g.perspectiveVertical = -perspectiveHorizontal
+            // 545 — the inverse of the CW rule (see there): `v' = +h, h' = −v`.
+            g.perspectiveVertical = perspectiveHorizontal
             g.perspectiveHorizontal = -perspectiveVertical
             g.perspectiveShear = -perspectiveShear
             if perspectiveAspect.isFinite, perspectiveAspect != 0 {
