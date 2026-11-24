@@ -1,7 +1,6 @@
 /* Photons — key 是中文原文；本文件由 scripts/localization/extract_zh.py 维护。 */
 
 " · {0} 条警告" = " · {0} warnings";
-" · 共 %.2f s" = " · Total %.2f s";
 " · 切变 %+.1f" = " · Shear %+.1f";
 " · 另一方向请再画两条" = " · Draw two more lines in the other direction";
 " · 已到量程边界（近似）" = " · At range limit (approximate)";
@@ -153,6 +152,7 @@
 "修复 模式" = "Healing mode";
 "修复 顺序" = "Healing order";
 "修复顺序" = "Healing order";
+"修改前" = "Before";
 "偏移" = "Offset";
 "停用" = "Disable";
 "停用蒙版" = "Disable mask";
@@ -345,7 +345,7 @@
 "导出 {0} 张…" = "Export {0} Photos…";
 "导出 {0} 张照片" = "Export {0} Photos";
 "导出…" = "Export…";
-"导出中… 已渲染 %d/%d · %.1f s" = "Exporting… Rendered %d/%d · %.1f s";
+"导出中… 已渲染 %d/%d" = "Exporting… Rendered %d/%d";
 "导出到哪里" = "Choose export destination";
 "导出设置记忆已损坏，已恢复默认设置" = "Saved export settings were damaged; defaults have been restored";
 "导向滤波强度（0 = 关）：用 S1 的亮度引导边界，半径 = max(W,H)/30 钳到 3…65" = "Guided-filter strength (0 = off): S1 luminance guides the boundary, with radius max(W,H)/30 clamped to 3…65.";

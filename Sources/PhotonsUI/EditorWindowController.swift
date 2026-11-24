@@ -719,7 +719,10 @@ public final class EditorWindowController: NSWindowController, NSMenuItemValidat
             // would bring back, so an item that is on does not read like a command to turn it on.
             item.state = rootView.loupeController.showOriginal ? .on : .off
             item.title = rootView.loupeController.showOriginal ? Loc.t("显示原图（已开启）") : Loc.t("显示原图")
+            // 547 — 变换模式 removes the row: the frame owns the canvas, and `\` is gated by the same
+            // condition in `LoupeController.toggleShowOriginal`.
             return session.mode == .loupe && session.anchorID != nil
+                && !rootView.loupeController.isTransformModeActive
         case #selector(toggleCompareAction(_:)):
             item.state = rootView.loupeController.compareSplit == nil ? .off : .on
             if let split = rootView.loupeController.compareSplit {
