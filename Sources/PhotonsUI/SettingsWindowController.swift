@@ -7,7 +7,7 @@ import SwiftUI
 /// `SettingsPage` 里加一个 case —— 与 PR1 的 `SettingsWindowController` 同形，但不依赖
 /// `StudioTheme` / `ApplicationPreferences`：main 上还没有那两样。
 ///
-/// 语言**重启后生效**（`Loc.language` 在进程内冻结，见 `Localization.swift` 的说明）：
+/// 语言**重启后生效**（`Loc.appliedLanguage` 在进程内冻结，见 `Localization.swift` 的说明）：
 /// 菜单、工具窗口、后台任务因此不会在一次运行中途换语言。外观没有这个约束
 /// （`NSApp.appearance` 会对已有窗口立即生效），选中即应用。
 @MainActor
@@ -56,8 +56,9 @@ public final class SettingsWindowController: NSWindowController {
 }
 
 public struct SettingsView: View {
-    /// 当前选择。写进 `UserDefaults`（`photons.language`），重启后被 `Loc` 读走。
-    @State private var language: String = Loc.language
+    /// 用户的选择（初始值 = 上次写下的偏好，不是本进程生效语言）。写进
+    /// `UserDefaults`（`photons.language`），重启后被 `Loc` 读走。
+    @State private var language: String = Loc.preferenceLanguage
     /// 473 — 外观：跟随系统 / 浅色 / 深色。选中即 `NSApp.appearance`，不需要重启。
     @State private var appearance: AppearancePreference = .current
     /// 473 — 画布衬底。显式选过就永久遵守；没选过时显示当前的随外观默认。
@@ -67,10 +68,10 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(Loc.t("通用"))
+            Text(Self.titleText)
                 .font(.system(size: 20, weight: .semibold))
                 .padding(.bottom, 2)
-            Text(Loc.t("界面语言在下次启动时生效。"))
+            Text(Self.subtitleText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 18)
@@ -81,8 +82,8 @@ public struct SettingsView: View {
                 canvasRow
             }
 
-            if language != Loc.language {
-                Text(Loc.t("已选 {0}，重启后生效。", Loc.localizedName(of: language)))
+            if let notice = Self.pendingNotice(for: language) {
+                Text(notice)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.top, 10)
@@ -94,7 +95,7 @@ public struct SettingsView: View {
             HStack {
                 Spacer()
                 Button(Loc.t("立即重启")) { relaunch() }
-                    .disabled(language == Loc.language)
+                    .disabled(!Self.isRelaunchEnabled(for: language))
                     .accessibilityIdentifier("settings.language.relaunch")
             }
         }
@@ -114,6 +115,23 @@ public struct SettingsView: View {
                 canvasBackdrop = CanvasBackdrop.current
             }
         }
+    }
+
+    // MARK: language state
+
+    /// 页面标题与说明：只用**生效语言**（`Loc.appliedLanguage`），所以写偏好不会当场换字。
+    static var titleText: String { Loc.t("通用") }
+    static var subtitleText: String { Loc.t("界面语言在下次启动时生效。") }
+
+    /// 提示与「立即重启」的统一判据：选择 != 本进程生效语言。
+    /// 切回原语言时两者相等，提示消失、按钮置灰。
+    static func pendingNotice(for selected: String) -> String? {
+        guard selected != Loc.appliedLanguage else { return nil }
+        return Loc.t("已选 {0}，重启后生效。", Loc.localizedName(of: selected))
+    }
+
+    static func isRelaunchEnabled(for selected: String) -> Bool {
+        selected != Loc.appliedLanguage
     }
 
     // MARK: rows
