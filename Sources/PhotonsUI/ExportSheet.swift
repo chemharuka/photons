@@ -189,11 +189,10 @@ public struct ExportRow: Identifiable, Sendable {
     public var detail: String = Loc.t("等待")
     public var fileURL: URL?
     public var pixelSize: ImageSize?
-    public var seconds: Double = 0
     public var warnings: [String] = []
 
     public init(id: String, name: String, state: State = .pending, detail: String = Loc.t("等待"),
-                fileURL: URL? = nil, pixelSize: ImageSize? = nil, seconds: Double = 0,
+                fileURL: URL? = nil, pixelSize: ImageSize? = nil,
                 warnings: [String] = []) {
         self.id = id
         self.name = name
@@ -201,7 +200,6 @@ public struct ExportRow: Identifiable, Sendable {
         self.detail = detail
         self.fileURL = fileURL
         self.pixelSize = pixelSize
-        self.seconds = seconds
         self.warnings = warnings
     }
 
@@ -321,6 +319,9 @@ public final class ExportSheetModel {
     public private(set) var rows: [ExportRow] = []
     public private(set) var report: BatchExportReport?
     public private(set) var errorText: String?
+    /// 557 — the sheet no longer measures time: the summary and the rows dropped the `x.x s` readout.
+    /// These two stay as inert zeros only because `ExportSheetSizingTests` still asserts the reset path
+    /// clears them; nothing reads a clock into them any more.
     public private(set) var startedAt: CFAbsoluteTime = 0
     public private(set) var finishedAt: CFAbsoluteTime = 0
 
@@ -775,23 +776,18 @@ public final class ExportSheetModel {
     public var cancelledCount: Int { rows.filter { $0.state == .cancelled }.count }
     public var writtenURLs: [URL] { rows.compactMap { $0.state == .done ? $0.fileURL : nil } }
 
-    public var elapsed: Double {
-        let end = finishedAt == 0 ? CFAbsoluteTimeGetCurrent() : finishedAt
-        return startedAt == 0 ? 0 : end - startedAt
-    }
-
     public var summaryLine: String {
         switch phase {
         case .idle:
             return Loc.t("将导出 {0} 张 → {1}", String(describing: (selectionCount)), String(describing: (preset.summary)))
         case .running:
-            return String(format: Loc.t("导出中… 已渲染 %d/%d · %.1f s"), rendered, total, elapsed)
+            return String(format: Loc.t("导出中… 已渲染 %d/%d"), rendered, total)
         case .finished:
             var parts = [String(format: Loc.t("完成：%d 个文件"), writtenCount)]
             if skippedCount > 0 { parts.append(Loc.t("跳过 {0}", String(describing: (skippedCount)))) }
             if cancelledCount > 0 { parts.append(Loc.t("取消 {0}", String(describing: (cancelledCount)))) }
             if failedCount > 0 { parts.append(Loc.t("失败 {0}", String(describing: (failedCount)))) }
-            return parts.joined(separator: "，") + String(format: Loc.t(" · 共 %.2f s"), elapsed)
+            return parts.joined(separator: "，")
         }
     }
 
@@ -870,8 +866,6 @@ public final class ExportSheetModel {
         selectionCount = items.count
         rows = items.map { ExportRow(id: $0.id, name: $0.name) }
         phase = .running
-        startedAt = CFAbsoluteTimeGetCurrent()
-        finishedAt = 0
         let token = CancellationToken()
         cancellation = token
         taskCancelled = false
@@ -969,21 +963,18 @@ public final class ExportSheetModel {
         taskThumbKeys = [:]
 
         self.report = report
-        finishedAt = CFAbsoluteTimeGetCurrent()
         cancellation = nil
         rendered = report.outcomes.filter { !$0.cancelled }.count
         rows = report.outcomes.map { outcome in
             var row = ExportRow(id: outcome.id, name: outcome.sourceName)
             row.fileURL = outcome.fileURL
             row.pixelSize = outcome.pixelSize
-            row.seconds = outcome.seconds
             row.warnings = outcome.warnings
             if outcome.isSuccess {
                 row.state = .done
                 row.detail = [
                     outcome.pixelSize.map { "\($0.width)×\($0.height)" } ?? "—",
                     byteText(outcome.fileBytes),
-                    String(format: "%.2f s", outcome.seconds),
                 ].joined(separator: " · ")
                 if !outcome.warnings.isEmpty {
                     row.detail += Loc.t(" · {0} 条警告", String(describing: (outcome.warnings.count)))
