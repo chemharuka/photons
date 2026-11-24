@@ -70,9 +70,14 @@ public struct LibraryLayout: Sendable {
 }
 
 /// The catalog: one SQLite file inside a package, GRDB on top, WAL on.
+///
+/// 538 — reads and writes no longer share one connection. `dbQueue` is a `DatabasePool`: writes
+/// still go through its single serial writer, while `read` borrows a read-only reader connection
+/// (GRDB marks pool readers `readonly`) from a pool, so a slow import or a long save cannot queue
+/// history reads behind it. WAL was already on, which is what makes the readers concurrent.
 public final class Catalog {
     public let layout: LibraryLayout
-    public let dbQueue: DatabaseQueue
+    public let dbQueue: DatabasePool
 
     /// Develop blobs that failed to decode — and were quarantined — since this handle opened.
     ///
@@ -90,7 +95,7 @@ public final class Catalog {
 
     public var presetDecodeFailures: Int { presetFailureCounter.value }
 
-    private init(layout: LibraryLayout, dbQueue: DatabaseQueue) {
+    private init(layout: LibraryLayout, dbQueue: DatabasePool) {
         self.layout = layout
         self.dbQueue = dbQueue
     }
@@ -118,7 +123,7 @@ public final class Catalog {
             throw CatalogError.packageExists(packageURL)
         }
         try layout.ensureDirectories()
-        let queue = try DatabaseQueue(path: layout.databaseURL.path, configuration: configuration())
+        let queue = try DatabasePool(path: layout.databaseURL.path, configuration: configuration())
         try Schema.migrate(queue)
         try stampSchemaVersion(queue)
         let catalog = Catalog(layout: layout, dbQueue: queue)
@@ -136,7 +141,7 @@ public final class Catalog {
         guard FileManager.default.fileExists(atPath: layout.databaseURL.path) else {
             throw CatalogError.packageNotFound(packageURL)
         }
-        let queue = try DatabaseQueue(path: layout.databaseURL.path, configuration: configuration())
+        let queue = try DatabasePool(path: layout.databaseURL.path, configuration: configuration())
 
         let applied = try queue.read { db in try Int.fetchOne(db, sql: "PRAGMA user_version") ?? 0 }
         if applied > Schema.version {
@@ -153,7 +158,7 @@ public final class Catalog {
 
     /// GRDB tracks applied migrations in its own table; we also keep `PRAGMA user_version` honest so
     /// `sqlite3 library.db 'PRAGMA user_version'` (and our forward guard) means what it says.
-    private static func stampSchemaVersion(_ queue: DatabaseQueue) throws {
+    private static func stampSchemaVersion(_ queue: DatabaseWriter) throws {
         let version = Schema.version
         try queue.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA user_version = \(version)")
@@ -161,7 +166,12 @@ public final class Catalog {
     }
 
     /// Copy `library.db` aside before migrating, keeping the two most recent backups.
-    private static func snapshot(layout: LibraryLayout, queue: DatabaseQueue, fromVersion: Int) throws {
+    private static func snapshot(layout: LibraryLayout, queue: DatabasePool, fromVersion: Int) throws {
+        // 538 — pool readers keep their SQLite connections open between reads. Closing them first
+        // is what lets the checkpoint below truncate the WAL and the copy be a self-contained file:
+        // an idle reader is not holding a read transaction, but a connection that is still open can
+        // make the checkpoint report busy and can keep the -wal/-shm files alive.
+        queue.releaseMemory()
         // Fold the WAL back into the main file so the copy is self-contained.
         // Must run outside a transaction: a checkpoint inside one fails with SQLITE_LOCKED.
         try queue.writeWithoutTransaction { db in
