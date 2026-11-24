@@ -262,9 +262,11 @@ public extension EditModel {
                      // in `decoderVersion`; a pre-555 document has only the latter and keeps its key
                      // byte for byte. The policy and the two stored fields ride along for the decode
                      // resolver but are deliberately absent from `key`.
-                     decoderVersion: decoderVersionPolicy == .auto
-                        ? (resolvedDecoderVersion ?? decoderVersion)
-                        : (decoderVersion ?? resolvedDecoderVersion),
+                     // A stored spelling is always the user's hand pick — a pre-555 document (no
+                     // resolved result) or a document that picked after a result was recorded. A new
+                     // 自动 document stores **no** spelling, so its key names the resolved result.
+                     // This order is what keeps 「手选拼写在任何设置下都不变」.
+                     decoderVersion: decoderVersion ?? resolvedDecoderVersion,
                      decoderVersionPolicy: decoderVersionPolicy,
                      decoderStoredVersion: decoderVersion,
                      decoderResolvedVersion: resolvedDecoderVersion,

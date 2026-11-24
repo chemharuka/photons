@@ -80,6 +80,25 @@ public struct DevelopSaveResult: Sendable, Equatable {
     public var changed: Bool
 }
 
+/// 555 — what `recordResolvedDecoderVersion` did. `changed == false` is the idempotent case (the
+/// decode resolved to the spelling already on disk, or the photo has no develop row to stamp).
+public struct DevelopResolutionRecord: Sendable, Equatable {
+    public var assetId: String
+    public var developVersion: Int
+    public var developJSON: String
+    public var changed: Bool
+    public var historySeq: Int
+
+    public init(assetId: String, developVersion: Int, developJSON: String,
+                changed: Bool, historySeq: Int) {
+        self.assetId = assetId
+        self.developVersion = developVersion
+        self.developJSON = developJSON
+        self.changed = changed
+        self.historySeq = historySeq
+    }
+}
+
 /// One piece of quarantined evidence, as stored.
 public struct QuarantinedDevelop: Sendable, Equatable {
     public var id: Int64
@@ -582,6 +601,68 @@ extension Catalog {
                                      historySeq: cursorSeq, historyTipSeq: tipSeq,
                                      historyRows: rowCount, changed: changed)
         }
+    }
+
+    /// 555 Phase 3 — record the **resolved** decoder spelling on a document that already exists.
+    ///
+    /// The record is a decode fact, not an edit: it adds no `asset_history` row, does not move
+    /// `edit_time`, and is a no-op when the spelling is already stored. It updates the blob at the
+    /// current cursor as well, so the next `saveDevelop` cannot disagree with the stack
+    /// (`historyInconsistent`).
+    ///
+    /// An untouched photo — no history rows and a document semantically equal to `.neutral` — is
+    /// **not** written to. Recording a decode fact must not create the first develop row for a photo
+    /// nobody edited.
+    ///
+    /// Returns `nil` in that untouched case; otherwise the write's outcome (with `changed == false`
+    /// when the same spelling was already there).
+    @discardableResult
+    public func recordResolvedDecoderVersion(_ spelling: String?,
+                                             forAsset id: String) throws -> DevelopResolutionRecord? {
+        let row = try dbQueue.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT develop_json, develop_version, history_end FROM assets WHERE id = ?
+                """, arguments: [id])
+        }
+        guard let row else { return nil }
+        let oldBlob: String = row["develop_json"]
+        let oldVersion: Int = row["develop_version"]
+        let historyEnd: Int = row["history_end"]
+        guard case .decoded(let stored) = Self.decodeDevelop(oldBlob) else { return nil }
+        let untouched = historyEnd == 0
+            && EditHistory.isSemanticallyIdentical(stored, .neutral)
+        guard !untouched else { return nil }
+        // Only automatic documents carry a resolved fact; a legacy spelling or a hand pick already
+        // says what it wants, and stamping it would change how the resolver reads the document.
+        guard stored.decoderVersionPolicy == .auto, stored.decoderVersion == nil else { return nil }
+        guard stored.resolvedDecoderVersion != spelling else {
+            return DevelopResolutionRecord(assetId: id, developVersion: oldVersion,
+                                           developJSON: oldBlob, changed: false,
+                                           historySeq: historyEnd)
+        }
+
+        var next = stored
+        next.resolvedDecoderVersion = spelling
+        let blob = try Self.encode(next)
+        guard blob != oldBlob else {
+            return DevelopResolutionRecord(assetId: id, developVersion: oldVersion,
+                                           developJSON: oldBlob, changed: false,
+                                           historySeq: historyEnd)
+        }
+        let newVersion = oldVersion + 1
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                UPDATE assets SET develop_json = ?, develop_version = ? WHERE id = ?
+                """, arguments: [blob, newVersion, id])
+            if historyEnd > 0 {
+                try db.execute(sql: """
+                    UPDATE asset_history SET develop_json = ?
+                    WHERE asset_id = ? AND seq = ?
+                    """, arguments: [blob, id, historyEnd])
+            }
+        }
+        return DevelopResolutionRecord(assetId: id, developVersion: newVersion,
+                                       developJSON: blob, changed: true, historySeq: historyEnd)
     }
 
     /// Convenience: append `edit` to the stored stack and save it, in one call.

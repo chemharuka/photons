@@ -970,3 +970,8 @@
 "（无窗口）" = " (no window)";
 "（还没有预设）" = "(No presets yet)";
 "，透视超出 ±{0}" = "; perspective exceeds ±{0}";
+"解码" = "Decode";
+"解码偏好" = "Decoder preference";
+"优先 v9" = "Prefer v9";
+"优先 v8" = "Prefer v8";
+"解码版本 9 使用机器学习降噪算法，处理时长慢 5–10 倍" = "Decoder version 9 uses a machine-learning denoiser and takes 5–10× longer.";

@@ -267,6 +267,19 @@ public struct EditHistory: Sendable, Equatable, Codable {
 
     public var canRedo: Bool { cursor + 1 < snapshots.count }
 
+    /// 555 Phase 3 — stamp the resolved decoder spelling onto the **current** snapshot.
+    ///
+    /// This is a decode fact, not an edit: no row is added, the cursor and every label stay put, and
+    /// the snapshot's other fields are untouched. It exists so the stored blob and the history's
+    /// current state cannot disagree after `Catalog.recordResolvedDecoderVersion` writes the blob
+    /// (a later `saveDevelop` compares the two exactly and would otherwise throw
+    /// `historyInconsistent`).
+    public mutating func setResolvedDecoderVersion(_ spelling: String?) {
+        guard snapshots.indices.contains(cursor), snapshots[cursor].edit.decoderVersionPolicy == .auto,
+              snapshots[cursor].edit.decoderVersion == nil else { return }
+        snapshots[cursor].edit.resolvedDecoderVersion = spelling
+    }
+
     public func snapshot(at index: Int) -> Snapshot? {
         snapshots.indices.contains(index) ? snapshots[index] : nil
     }

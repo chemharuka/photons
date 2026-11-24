@@ -1,5 +1,6 @@
 import CoreImage
 import Foundation
+import PhotonsLocalization
 
 /// §554 — **which decoder spelling a denoise product should ask for**.
 ///
@@ -46,6 +47,18 @@ public enum DecoderVersionPolicy: String, Codable, CaseIterable, Sendable {
         case .v9: return 9
         }
     }
+
+    /// The policy that pins one spelling's family, or `nil` for a spelling the three-way policy
+    /// cannot name (`7`, `7.dng`, …). Such a spelling is stored as the legacy hand pick
+    /// (`policy = .auto`, `decoderVersion = spelling`, no resolved result) and keeps its pixels.
+    public static func pinning(_ spelling: String) -> DecoderVersionPolicy? {
+        let base = spelling.hasSuffix(".dng") ? String(spelling.dropLast(4)) : spelling
+        switch Int(base) {
+        case 8: return .v8
+        case 9: return .v9
+        default: return nil
+        }
+    }
 }
 
 public enum DecoderVersionPreference {
@@ -60,12 +73,92 @@ public enum DecoderVersionPreference {
     /// | `.preferV9` | `9 > 9.dng > 8 > 8.dng > 其他` | `9 > 9.dng > 8 > 8.dng > 其他` |
     /// | `.preferV8` | `8 > 8.dng > 其他` | `8 > 8.dng > 其他` |
     ///
-    /// This is only the **setting**; a document's hand pick (`.v8` / `.v9`) ignores it. The
-    /// `UserDefaults` key and the settings row arrive in Phase 3.
+    /// This is only the **setting**; a document's hand pick (`.v8` / `.v9`) ignores it. It is
+    /// persisted under `settingDefaultsKey` and edited in 设置 → 解码偏好 (Phase 3).
     public enum Preference: String, Codable, CaseIterable, Sendable {
         case auto
         case preferV9
         case preferV8
+
+        /// 555 Phase 3 — the settings row's label, in the interface language.
+        public var title: String {
+            switch self {
+            case .auto: return Loc.t("自动")
+            case .preferV9: return Loc.t("优先 v9")
+            case .preferV8: return Loc.t("优先 v8")
+            }
+        }
+    }
+
+    /// 555 Phase 3 — the one `UserDefaults` key for 设置 → 解码偏好.
+    ///
+    /// Always through `AppPreferences.store`: the test process and `--ui-smoke` get their own
+    /// isolated domains (466), so switching this in a test cannot rewrite the user's preference.
+    public static let settingDefaultsKey = "photons.decoderVersionPreference"
+
+    /// Posted after the setting moves, so an open document can re-resolve and re-render.
+    public static let settingDidChangeNotification =
+        Notification.Name("PhotonsDecoderVersionPreferenceDidChange")
+
+    /// The stored 解码偏好. Unknown values (a downgrade, a hand-edited plist) read as 自动.
+    public static var setting: Preference {
+        guard let raw = AppPreferences.store.string(forKey: settingDefaultsKey),
+              let stored = Preference(rawValue: raw) else { return .auto }
+        return stored
+    }
+
+    /// Write the setting and tell the open document. This is the **only** writer; the settings view
+    /// must not touch `UserDefaults` itself.
+    public static func setSetting(_ preference: Preference) {
+        guard setting != preference else { return }
+        AppPreferences.store.set(preference.rawValue, forKey: settingDefaultsKey)
+        NotificationCenter.default.post(name: settingDidChangeNotification, object: nil)
+    }
+
+    /// What a file offers, plus the EXIF facts the rule needs — one `CIRAWFilter`, no pixels.
+    public struct DocumentFacts: Sendable, Equatable {
+        public let available: [String]
+        public let iso: Int?
+        public let cropFactor: Double
+        /// What the filter reports with nothing assigned (`8` on every body measured here). Used as
+        /// the key's spelling when every candidate is rewritten, so the key never falls back to the
+        /// literal `auto`.
+        public let defaultVersion: String?
+
+        public init(available: [String], iso: Int?, cropFactor: Double,
+                    defaultVersion: String?) {
+            self.available = available
+            self.iso = iso
+            self.cropFactor = cropFactor
+            self.defaultVersion = defaultVersion
+        }
+    }
+
+    /// The resolved spelling plus the facts that produced it — what the open path injects into a
+    /// document and what the diagnostics print.
+    public struct DocumentResolution: Sendable, Equatable {
+        public let resolution: Resolution
+        public let facts: DocumentFacts
+
+        public init(resolution: Resolution, facts: DocumentFacts) {
+            self.resolution = resolution
+            self.facts = facts
+        }
+
+        /// The spelling the cache key must name: the candidate the read-back accepted, or the
+        /// filter's own default when none survived. **Never** `auto`.
+        public var spelling: String? { resolution.selected ?? facts.defaultVersion }
+    }
+
+    /// Read the file's facts with one filter. Cheap compared with a decode (no pixels), and cached
+    /// by the session so a photo switch does not pay it twice.
+    public static func facts(for url: URL) -> DocumentFacts? {
+        guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+        let exif = RAWDecoder.exifFacts(from: filter)
+        let crop = cropFactor(orFullFrame: exif.focalLength, exif.focalLength35mm)
+        return DocumentFacts(available: filter.supportedDecoderVersions.map { $0.rawValue },
+                             iso: exif.iso, cropFactor: crop,
+                             defaultVersion: filter.decoderVersion.rawValue)
     }
 
     /// 555 — the full-frame ISO at or above which `.auto` / `.preferV9` may choose v9.
@@ -208,9 +301,10 @@ public enum DecoderVersionPreference {
         case .v9:
             return pinnedThenFamily(pinned: stored, family: 9, in: usable)
         case .auto:
-            // A pre-555 document has an explicit spelling but no policy key and no resolved result.
-            // That spelling was the user's hand pick; the table must not move its pixels.
-            if resolved == nil, let stored {
+            // A stored spelling is always the user's hand pick: a pre-555 document has one and no
+            // resolved result, and a Phase 2 document could carry both. The table must not move its
+            // pixels; a new 自动 document stores no spelling at all.
+            if let stored {
                 if let family = rank(stored).major {
                     return pinnedThenFamily(pinned: stored, family: family, in: usable)
                 }
