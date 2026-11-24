@@ -44,6 +44,26 @@ public struct DevelopState: Sendable, Equatable {
     }
 }
 
+/// 537 — the cheapest stack a **write** can be based on: the persisted cursor's row plus a window of
+/// the newest rows, without decoding the entire history.
+///
+/// `isComplete` says whether the window already reaches the oldest stored row. When it is `false`,
+/// a caller that needs an arbitrary row (the history panel, a jump, a migration) must ask for the
+/// whole stack with `editHistory(forAsset:)`; a commit or a one-step undo does not.
+public struct EditHistoryWindow: Sendable {
+    public let history: EditHistory
+    /// True when no stored row is older than the first row in `history`.
+    public let isComplete: Bool
+    /// Rows in `asset_history` for the asset, whether or not they were decoded into the window.
+    public let totalRows: Int
+
+    public init(history: EditHistory, isComplete: Bool, totalRows: Int) {
+        self.history = history
+        self.isComplete = isComplete
+        self.totalRows = totalRows
+    }
+}
+
 /// What a save actually did — the CLI prints it, tests assert on it.
 public struct DevelopSaveResult: Sendable, Equatable {
     public var assetId: String
@@ -161,11 +181,56 @@ extension Catalog {
         case failed(String)
     }
 
+    /// 537 — the snapshot cache behind `editHistoryWindow`. A history row is immutable once written
+    /// (only the *tip* can be rewritten by a merged drag, and then its JSON changes), so a decoded
+    /// `Snapshot` and its field diff can be keyed by the row's own JSON. Re-reading a sliding window
+    /// then decodes only the row that entered it instead of all 64 — the first visit pays the window
+    /// decode once, every later switch to the same photo is sub-millisecond. Keyed by database path
+    /// too, so two libraries (and every test's UUID package) cannot collide. Bounded FIFO, because a
+    /// catalog may be browsed for hours.
+    private final class HistorySnapshotCache: @unchecked Sendable {
+        struct Entry {
+            let json: String
+            let label: String
+            let createdAt: String
+            /// The predecessor JSON the stored `changes` were diffed against; nil when the row was
+            /// the first of a window (no predecessor in hand).
+            let predecessorJSON: String?
+            let snapshot: EditHistory.Snapshot
+        }
+
+        private let lock = NSLock()
+        private var entries: [String: Entry] = [:]
+        private var fifo: [String] = []
+        private let capacity = 4_096
+
+        func entry(_ key: String) -> Entry? {
+            lock.lock(); defer { lock.unlock() }
+            return entries[key]
+        }
+
+        func store(_ key: String, _ entry: Entry) {
+            lock.lock(); defer { lock.unlock() }
+            if entries.updateValue(entry, forKey: key) == nil {
+                fifo.append(key)
+                if fifo.count > capacity {
+                    entries.removeValue(forKey: fifo.removeFirst())
+                }
+            }
+        }
+    }
+
+    /// 537 — one decoder for a whole batch. Creating a `JSONDecoder` per row was measurable noise
+    /// on a 64-row window; a decoder is used serially inside one read, so sharing it is safe.
     static func decodeDevelop(_ json: String) -> DevelopDecode {
+        decodeDevelop(json, using: JSONDecoder())
+    }
+
+    static func decodeDevelop(_ json: String, using decoder: JSONDecoder) -> DevelopDecode {
         let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("empty blob") }
         do {
-            return .decoded(try JSONDecoder().decode(EditModel.self, from: Data(trimmed.utf8)))
+            return .decoded(try decoder.decode(EditModel.self, from: Data(trimmed.utf8)))
         } catch {
             return .failed("\(error)")
         }
@@ -224,24 +289,84 @@ extension Catalog {
                 FROM asset_history WHERE asset_id = ? ORDER BY seq
                 """, arguments: [id])
         }
-        var out: [EditHistory.Snapshot] = []
-        out.reserveCapacity(rows.count)
+        return try decodeHistoryRows(rows, assetId: id)
+    }
+
+    /// 537 — the rows from `fromSeq` to the tip, in one query. The decode/quarantine rules are the
+    /// same as `historyRows(forAsset:)`; only the SQL window differs.
+    private func historyRows(forAsset id: String, fromSeq: Int) throws -> [EditHistory.Snapshot] {
+        let rows = try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT seq, label, develop_json, created_at
+                FROM asset_history WHERE asset_id = ? AND seq >= ? ORDER BY seq
+                """, arguments: [id, fromSeq])
+        }
+        return try decodeHistoryRows(rows, assetId: id)
+    }
+
+    private static let historySnapshotCache = HistorySnapshotCache()
+
+    private func decodeHistoryRows(_ rows: [Row], assetId id: String,
+                                   useCache: Bool = true) throws -> [EditHistory.Snapshot] {
+        struct Decoded {
+            var json: String
+            var label: String
+            var createdAt: String
+            var snapshot: EditHistory.Snapshot
+        }
+        var decoded: [Decoded] = []
+        decoded.reserveCapacity(rows.count)
+        let decoder = JSONDecoder()
+        let libraryPath = layout.databaseURL.path
         for row in rows {
             let seq: Int = row["seq"]
             let json: String = row["develop_json"]
-            let label: String? = row["label"]
+            let label: String = row["label"] ?? ""
             let createdAt: String = row["created_at"]
-            switch Self.decodeDevelop(json) {
+            let key = "\(libraryPath)|\(id)|\(seq)"
+            if useCache, let cached = Self.historySnapshotCache.entry(key),
+               cached.json == json, cached.label == label, cached.createdAt == createdAt {
+                var snapshot = cached.snapshot
+                // `changes` are a diff against the *stored* predecessor. When this row opens a
+                // window there is no predecessor in hand, and `EditHistory(rows:)` treats the first
+                // row as the floor; forcing it empty keeps a re-used row from carrying a stale diff
+                // into that slot. If the predecessor JSON changed (a merged tip), the diff is stale
+                // too. The fill loop below recomputes every empty diff.
+                if decoded.last?.json != cached.predecessorJSON { snapshot.changes = [] }
+                decoded.append(Decoded(json: json, label: label, createdAt: createdAt, snapshot: snapshot))
+                continue
+            }
+            switch Self.decodeDevelop(json, using: decoder) {
             case .decoded(let edit):
-                out.append(EditHistory.Snapshot(seq: seq, label: label ?? "", edit: edit,
-                                                createdAt: ISO8601.date(from: createdAt) ?? .distantPast))
+                decoded.append(Decoded(json: json, label: label, createdAt: createdAt,
+                                       snapshot: EditHistory.Snapshot(
+                                        seq: seq, label: label, edit: edit,
+                                        createdAt: ISO8601.date(from: createdAt) ?? .distantPast)))
             case .failed(let reason):
                 try quarantine(assetId: id, developJSON: json, developVersion: 0,
                                reason: "history seq \(seq): \(reason)")
                 developFailureCounter.increment()
             }
         }
-        return out
+
+        // Fill the field diffs exactly as `EditHistory.init(rows:)` would, then cache them. A row
+        // whose predecessor JSON no longer matches has its diff recomputed; the rows are immutable
+        // in practice, so a repeat of the same window computes none of them.
+        for i in decoded.indices.dropFirst() where decoded[i].snapshot.changes.isEmpty {
+            decoded[i].snapshot.changes = EditHistory.changedFields(between: decoded[i - 1].snapshot.edit,
+                                                                    and: decoded[i].snapshot.edit)
+        }
+        if !decoded.isEmpty { decoded[0].snapshot.changes = [] }
+        if useCache {
+            for i in decoded.indices {
+                Self.historySnapshotCache.store("\(libraryPath)|\(id)|\(decoded[i].snapshot.seq)",
+                    HistorySnapshotCache.Entry(
+                        json: decoded[i].json, label: decoded[i].label, createdAt: decoded[i].createdAt,
+                        predecessorJSON: i > 0 ? decoded[i - 1].json : nil,
+                        snapshot: decoded[i].snapshot))
+            }
+        }
+        return decoded.map(\.snapshot)
     }
 
     /// The whole stack with its persisted cursor — what a document open wants, instead of
@@ -251,6 +376,66 @@ extension Catalog {
         let rows = try historyRows(forAsset: id)
         let cursor = rows.contains { $0.seq == state.historyEnd } ? state.historyEnd : nil
         return EditHistory(rows: rows, cursorSeq: cursor)
+    }
+
+    /// 537 — the pre-537 read, straight past the snapshot cache. It exists so the ticket's
+    /// before/after table can be measured on one build; production always uses
+    /// `editHistory(forAsset:)`.
+    public func editHistoryUncached(forAsset id: String) throws -> EditHistory {
+        let state = try developState(forAsset: id)
+        let rows = try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT seq, label, develop_json, created_at
+                FROM asset_history WHERE asset_id = ? ORDER BY seq
+                """, arguments: [id])
+        }
+        let decoded = try decodeHistoryRows(rows, assetId: id, useCache: false)
+        let cursor = decoded.contains { $0.seq == state.historyEnd } ? state.historyEnd : nil
+        return EditHistory(rows: decoded, cursorSeq: cursor)
+    }
+
+    /// 537 — the stack a **write** needs, without decoding every snapshot.
+    ///
+    /// A commit appends at the cursor; undo/redo move it by one; `saveDevelop` only manages rows
+    /// inside the window its stack covers (it keeps everything older). So a contiguous window that
+    /// ends at the tip and starts at `tip - limit + 1` is enough for both — rows below it are never
+    /// touched. The persisted cursor and its predecessor are pulled in as well, so a one-step undo
+    /// works even when a jump left the cursor behind a redo branch longer than `limit`.
+    ///
+    /// Why the full stack is **not** needed for correctness: `EditHistory(rows:)` trims to
+    /// `maxDepth` (200) anyway, and `saveDevelop` deletes only rows `>=` the window's first seq. A
+    /// window that starts later than the oldest row therefore cannot truncate the stored stack.
+    /// Callers that need an arbitrary row (history panel, jump, migration) use
+    /// `editHistory(forAsset:)` instead.
+    public func editHistoryWindow(forAsset id: String, limit: Int) throws -> EditHistoryWindow {
+        // Only the cursor, not the live document: the caller already has the document in memory,
+        // and decoding it here would add a document-sized read to the write path.
+        let historyEnd = try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT history_end FROM assets WHERE id = ?",
+                             arguments: [id]) ?? 0
+        }
+        let bounds = try dbQueue.read { db -> (min: Int?, max: Int?, count: Int) in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT MIN(seq) AS lo, MAX(seq) AS hi, COUNT(*) AS n
+                FROM asset_history WHERE asset_id = ?
+                """, arguments: [id])
+            return (row?["lo"], row?["hi"], row?["n"] ?? 0)
+        }
+        guard let oldest = bounds.min, let tip = bounds.max else {
+            return EditHistoryWindow(history: EditHistory(rows: [], cursorSeq: nil),
+                                     isComplete: true, totalRows: 0)
+        }
+        // `limit >= 2` keeps the cursor row and the row a single undo lands on.
+        var start = max(oldest, tip - max(2, limit) + 1)
+        if historyEnd > 0 {
+            // A cursor left behind the newest rows (a jump, then a switch) brings its predecessor
+            // with it; the redo branch to the tip stays contiguous, so a save cannot delete a hole.
+            start = min(start, max(oldest, historyEnd - 1))
+        }
+        let rows = try historyRows(forAsset: id, fromSeq: start)
+        let cursor = rows.contains { $0.seq == historyEnd } ? historyEnd : nil
+        return EditHistoryWindow(history: EditHistory(rows: rows, cursorSeq: cursor),
+                                 isComplete: start == oldest, totalRows: bounds.count)
     }
 
     // MARK: quarantine

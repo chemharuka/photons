@@ -473,6 +473,39 @@ public final class CatalogSession {
     /// turns it on to measure the baseline on the same machine; production is `false`.
     public var loadsEditHistorySynchronouslyForTesting = false
 
+    /// 537 — how many newest rows the background history read decodes. A write needs the cursor
+    /// row, the row one undo lands on, and the tip (a redo branch must survive an undo's save);
+    /// a panel-sized working set on top of that means a quick run of ⌘Z after a switch does not
+    /// have to fall back to the whole stack. 64 also keeps the decoded window inside the ticket's
+    /// 5 ms p95 budget (the 393-row stack in the demo library is ~1.3 KB of JSON per row).
+    /// The full stack is read lazily when the history panel opens or an operation targets an
+    /// older row (`loadFullEditHistoryIfNeeded()`).
+    public static let pendingEditHistoryWindow = 64
+
+    /// 537 — the wait in front of a history write was unbounded; 530 measured the read at p95
+    /// 883 ms, so a commit right after a switch could freeze the main thread for that long. This
+    /// is a **hang guard**, not a performance target: the window read above normally returns in a
+    /// few milliseconds, so this limit should not be reached in production. Tests may shorten it.
+    public static let defaultPendingEditHistoryWaitLimit: TimeInterval = 1.2
+
+    /// 537 — test-injectable copy of the limit above. One place defines the default.
+    public var pendingEditHistoryWaitLimit = CatalogSession.defaultPendingEditHistoryWaitLimit
+
+    /// 537 — readback for the benchmark: how long the last `flushPendingEditHistory()` blocked, and
+    /// how many times the 1.2 s cap was actually hit (the ticket asks for 0 on the normal path).
+    public private(set) var lastPendingEditHistoryWaitMilliseconds: Double = 0
+    public private(set) var pendingEditHistoryWaitCount = 0
+    public private(set) var pendingEditHistoryWaitTimeouts = 0
+
+    /// 537 — false while `history` holds only the newest window (or is still the one-row floor).
+    /// `historyRows` and the operations that can target an arbitrary row load the full stack first.
+    public private(set) var historyWindowIsComplete = true
+
+    /// True once a window (complete or not) has actually replaced the one-row floor. Kept apart
+    /// from `historyWindowIsComplete` so a failed load's floor is never merged into a later full
+    /// read as if it were stored history.
+    private var historyWindowLoaded = false
+
     /// A switch whose document read has finished but whose history read is still on a background
     /// queue. Anything that *writes* history calls `flushPendingEditHistory()` first: the user's
     /// undo stack must be the stored one before a snapshot is appended, never a one-row baseline
@@ -480,16 +513,16 @@ public final class CatalogSession {
     private final class EditHistoryLoadBox: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
         private let lock = NSLock()
-        private var stored: EditHistory?
+        private var stored: EditHistoryWindow?
 
-        func finish(_ stack: EditHistory?) {
+        func finish(_ window: EditHistoryWindow?) {
             lock.lock()
-            stored = stack
+            stored = window
             lock.unlock()
             semaphore.signal()
         }
 
-        var result: EditHistory? {
+        var result: EditHistoryWindow? {
             lock.lock(); defer { lock.unlock() }
             return stored
         }
@@ -503,6 +536,9 @@ public final class CatalogSession {
 
     private var pendingEditHistory: PendingEditHistoryLoad?
     private var editHistoryLoadToken = 0
+    /// 537 — a background read that threw. With no stack and no window, a write must be refused
+    /// rather than based on the one-row floor.
+    private var editHistoryLoadFailed = false
 
     /// A deferred (reverse-gate) switch: everything is read, nothing is written until the frame.
     private struct DeferredEditLoad {
@@ -3439,7 +3475,7 @@ public final class CatalogSession {
     ///   是**一个动作**，不许折进它前面那次拖动里（详见 `EditHistory.commit`）。
     @discardableResult
     public func commitEdit(label: String = "", coalesce: Bool = true) -> Bool {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
         let committed = history.commit(MaskViewState.documentOnly(edit), label: label,
                                        coalesce: coalesce) != nil
         if committed { persist() }
@@ -3458,7 +3494,10 @@ public final class CatalogSession {
         // the undo and commit `base → edit`, resurrecting the state ⌘Z had just stepped away from.
         // Closing first is a no-op when nothing is open, so the door is the same either way.
         endToolSession()
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
+        // A minimal window may stop at the oldest row it decoded; an undo that reaches that floor
+        // asks for the full stack once, then walks it.
+        if !history.canUndo, !historyWindowIsComplete { _ = loadFullEditHistoryIfNeeded() }
         guard let model = history.undo() else { return false }
         restore(model)
         persist()
@@ -3474,7 +3513,10 @@ public final class CatalogSession {
     /// truncates it — which is the user's 「如果继续操作了，恢复点后面的操作就没了」.
     @discardableResult
     public func jumpToHistory(seq: Int) -> Bool {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
+        if history.index(of: seq) == nil, !historyWindowIsComplete {
+            _ = loadFullEditHistoryIfNeeded()
+        }
         guard let index = history.index(of: seq), index != history.cursor else { return false }
         guard let model = history.jump(to: seq) else { return false }
         restore(model)
@@ -3512,12 +3554,19 @@ public final class CatalogSession {
     }
 
     /// Rows for the panel: seq, label, the field-level summary, the time, and the two flags.
-    public var historyRows: [HistoryRow] { history.rows }
+    ///
+    /// 537 — opening the timeline is the moment the whole stack is wanted, so it is the moment the
+    /// full read happens (once; the flag flips to true). The selection path only decoded the newest
+    /// window.
+    public var historyRows: [HistoryRow] {
+        if !historyWindowIsComplete { _ = loadFullEditHistoryIfNeeded() }
+        return history.rows
+    }
 
     /// Begin a tool session (077): from here to `endToolSession` the history records **nothing**, so
     /// a crop/rotate gesture is one row however many handle positions it went through.
     public func beginToolSession(_ tool: String, label: String? = nil) {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return }
         history.beginSession(tool, label: label)
     }
 
@@ -3532,7 +3581,7 @@ public final class CatalogSession {
     /// gives back — independent of it.
     public func beginToolGesture(tool: String, label: String) {
         endToolSession()                        // no-op when nothing is open
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return }
         history.beginSession(tool, label: label)
     }
 
@@ -3553,7 +3602,7 @@ public final class CatalogSession {
     /// 应用: close the session with exactly one snapshot (`base → edit`), or none if nothing moved.
     @discardableResult
     public func endToolSession(label: String? = nil) -> Bool {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
         let committed = history.endSession(MaskViewState.documentOnly(edit), label: label) != nil
         if committed { persist() }
         return committed
@@ -3565,7 +3614,7 @@ public final class CatalogSession {
     /// the document), but a control that *does* write inside a session (裁切 bar's flips) must not
     /// survive a cancel with no history row to undo it. One render, no snapshot.
     public func cancelToolSession() {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return }
         let base = history.activeSession?.base
         history.cancelSession()
         guard let base, !EditHistory.isSemanticallyIdentical(edit, base) else { return }
@@ -3598,7 +3647,7 @@ public final class CatalogSession {
     @discardableResult
     public func redo() -> Bool {
         endToolSession()            // 356 — same rule as `undo()`: a command closes the gesture's session
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
         guard let model = history.redo() else { return false }
         restore(model)
         persist()
@@ -3626,7 +3675,7 @@ public final class CatalogSession {
     /// checks a save against. A no-op commit therefore cannot throw "the blob disagrees with the
     /// cursor" just because a double moved by less than `EditHistory.dirtyTolerance`.
     private func persist() {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return }
         guard let catalog, let id = loadedEditAssetID ?? anchorAsset?.id else { return }
         var stack = history
         if stack.isEmpty {
@@ -3704,6 +3753,9 @@ public final class CatalogSession {
         guard let a = anchorAsset else {
             pendingEditHistory = nil
             pendingDeferredEditLoad = nil
+            editHistoryLoadFailed = false
+            historyWindowIsComplete = true
+            historyWindowLoaded = false
             edit = .neutral
             history = EditHistory(baseline: .neutral)
             loadedEditAssetID = nil
@@ -3721,6 +3773,8 @@ public final class CatalogSession {
         // names another asset, so it could only be dropped later anyway.
         pendingEditHistory = nil
         editHistoryLoadToken &+= 1
+        editHistoryLoadFailed = false
+        historyWindowLoaded = false
         let selectionAt = selectionChangedAt == 0 ? CFAbsoluteTimeGetCurrent() : selectionChangedAt
         var timeline = EditLoadTimeline(assetID: a.id, selectionAt: selectionAt,
                                         developBeganAt: 0, developEndedAt: 0,
@@ -3773,6 +3827,13 @@ public final class CatalogSession {
     private func applyEditLoad(_ load: DeferredEditLoad) {
         var timeline = load.timeline
         edit = load.model
+        // A synchronous read that threw must not be mistaken for "the stack is empty": the floor
+        // would be saved over the stored one. It stays incomplete and writes are refused until a
+        // later full read succeeds.
+        let synchronousFailure = load.installsHistoryNow && load.stack == nil && catalog != nil
+        historyWindowIsComplete = load.installsHistoryNow && !synchronousFailure
+        historyWindowLoaded = load.installsHistoryNow && !synchronousFailure
+        editHistoryLoadFailed = synchronousFailure
         if load.installsHistoryNow, let stack = load.stack, !stack.isEmpty {
             history = stack
         } else {
@@ -3804,13 +3865,20 @@ public final class CatalogSession {
         let token = editHistoryLoadToken
         let box = EditHistoryLoadBox()
         pendingEditHistory = PendingEditHistoryLoad(assetID: assetID, token: token, box: box)
+        historyWindowIsComplete = false
+        historyWindowLoaded = false
+        editHistoryLoadFailed = false
         let delay = editHistoryLoadDelayForTesting
+        let limit = Self.pendingEditHistoryWindow
         DispatchQueue.global(qos: .userInitiated).async {
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             let started = CFAbsoluteTimeGetCurrent()
-            let stack = try? catalog.editHistory(forAsset: assetID)
+            // 537 — the write-sized window, not the whole stack: the old `editHistory(forAsset:)`
+            // decoded all 393 rows (~270 ms p50 / 883 ms p95) to hand a commit a stack it would only
+            // append to. See `Catalog.editHistoryWindow`.
+            let window = try? catalog.editHistoryWindow(forAsset: assetID, limit: limit)
             let milliseconds = (CFAbsoluteTimeGetCurrent() - started) * 1000
-            box.finish(stack)
+            box.finish(window)
             Task { @MainActor [weak self] in
                 self?.installPendingHistory(token: token, milliseconds: milliseconds)
             }
@@ -3822,26 +3890,123 @@ public final class CatalogSession {
         pendingEditHistory = nil
         lastEditHistoryLoadMilliseconds = milliseconds
         guard loadedEditAssetID == pending.assetID else { return }
-        if let stack = pending.box.result, !stack.isEmpty { history = stack }
+        if let window = pending.box.result {
+            editHistoryLoadFailed = false
+            historyWindowIsComplete = window.isComplete
+            historyWindowLoaded = true
+            clearEditHistoryLoadingError()
+            if !window.history.isEmpty { history = window.history }
+        } else {
+            editHistoryLoadFailed = true
+            historyWindowLoaded = false
+            lastPersistError = Self.editHistoryLoadingMessage
+        }
         if var timeline = lastEditLoadTimeline, timeline.assetID == pending.assetID {
             timeline.historyEndedAt = CFAbsoluteTimeGetCurrent()
             lastEditLoadTimeline = timeline
         }
     }
 
+    /// The message a refused write reports. One string, so the UI/tests can assert on it.
+    static let editHistoryLoadingMessage = "历史仍在加载，请稍后重试"
+
+    /// Clear the loading notice once the read has actually landed, without touching a genuine save
+    /// failure that happened in the meantime.
+    private func clearEditHistoryLoadingError() {
+        if lastPersistError == Self.editHistoryLoadingMessage { lastPersistError = nil }
+    }
+
     /// A write that appends to / moves the undo stack must see the stored one first. Waiting here is
-    /// free in practice (the read has landed long before a user's first edit); it exists so a very
-    /// fast 「选图→拖滑块」 cannot commit onto a one-row baseline and truncate `asset_history`.
-    private func flushPendingEditHistory() {
-        guard let pending = pendingEditHistory else { return }
-        pending.box.semaphore.wait()
+    /// cheap in practice (537 loads only the newest window; the full 393-row read used to cost
+    /// 270 ms p50 / 883 ms p95) and it exists so a very fast 「选图→拖滑块」 cannot commit onto a
+    /// one-row baseline and truncate `asset_history`.
+    ///
+    /// 537 — the wait is now **bounded** (`pendingEditHistoryWaitLimit`, 1.2 s). On a timeout the
+    /// pending read is deliberately left in flight, the write is refused, and `lastPersistError`
+    /// explains why. Proceeding with the one-row floor would silently truncate the stored stack,
+    /// which is exactly the failure 530's flush was added to prevent.
+    ///
+    /// - Returns: `false` when the caller must **not** write. Call sites either ignore the readback
+    ///   (a session only needs it eventually) or guard on it before touching `history`.
+    @discardableResult
+    private func flushPendingEditHistory() -> Bool {
+        guard let pending = pendingEditHistory else {
+            if !historyWindowIsComplete && editHistoryLoadFailed {
+                lastPersistError = Self.editHistoryLoadingMessage
+                return false
+            }
+            return true
+        }
+        pendingEditHistoryWaitCount += 1
+        let started = CFAbsoluteTimeGetCurrent()
+        let waited = pending.box.semaphore.wait(timeout: .now() + pendingEditHistoryWaitLimit)
+        lastPendingEditHistoryWaitMilliseconds = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        if waited == .timedOut {
+            pendingEditHistoryWaitTimeouts += 1
+            // Keep `pendingEditHistory`: the background read is still on its way and may still
+            // install. A later commit/undo retries against it.
+            lastPersistError = Self.editHistoryLoadingMessage
+            return false
+        }
         pendingEditHistory = nil
-        guard loadedEditAssetID == pending.assetID else { return }
-        if let stack = pending.box.result, !stack.isEmpty { history = stack }
+        guard loadedEditAssetID == pending.assetID else { return true }
+        guard let window = pending.box.result else {
+            editHistoryLoadFailed = true
+            historyWindowLoaded = false
+            lastPersistError = Self.editHistoryLoadingMessage
+            return false
+        }
+        editHistoryLoadFailed = false
+        historyWindowIsComplete = window.isComplete
+        historyWindowLoaded = true
+        clearEditHistoryLoadingError()
+        if !window.history.isEmpty { history = window.history }
         if var timeline = lastEditLoadTimeline, timeline.assetID == pending.assetID {
             timeline.historyEndedAt = CFAbsoluteTimeGetCurrent()
             lastEditLoadTimeline = timeline
         }
+        return true
+    }
+
+    /// 537 — materialise the whole stack when an operation can target a row outside the newest
+    /// window: the history panel (it lists every row), a jump, a delete/revert, or a schema
+    /// migration (it must rewrite every snapshot, not just the newest 64).
+    ///
+    /// Merges by seq, preferring in-memory rows: a commit whose write failed lives only in memory,
+    /// and replacing the stack with the database copy would drop it. An open tool session owns its
+    /// base/cursor inside `history`, so this is a no-op while one is active (the panel is not
+    /// reachable mid-gesture; a later command flushes normally).
+    @discardableResult
+    private func loadFullEditHistoryIfNeeded() -> Bool {
+        guard !historyWindowIsComplete else { return true }
+        guard !history.isSessionActive else { return false }
+        guard let catalog, let id = loadedEditAssetID else { return false }
+        // Cancel any window still in flight: installing it after the full read would shrink the
+        // stack again.
+        let hadWindow = historyWindowLoaded
+        pendingEditHistory = nil
+        editHistoryLoadToken &+= 1
+        guard let full = try? catalog.editHistory(forAsset: id) else {
+            editHistoryLoadFailed = true
+            lastPersistError = Self.editHistoryLoadingMessage
+            return false
+        }
+        guard loadedEditAssetID == id else { return false }
+        var bySeq: [Int: EditHistory.Snapshot] = [:]
+        for snap in full.snapshots { bySeq[snap.seq] = snap }
+        if hadWindow {
+            // Rows read before the window was replaced are at least as fresh as the database's.
+            for snap in history.snapshots { bySeq[snap.seq] = snap }
+        }
+        let merged = EditHistory(rows: bySeq.values.sorted { $0.seq < $1.seq },
+                                 cursorSeq: hadWindow ? (history.currentSeq ?? full.currentSeq)
+                                                      : full.currentSeq)
+        history = merged
+        historyWindowIsComplete = true
+        historyWindowLoaded = true
+        editHistoryLoadFailed = false
+        clearEditHistoryLoadingError()
+        return true
     }
 
     /// 249 — convert a legacy (`canvasV1`) heal document to S1 source coordinates once the **exact**
@@ -3852,7 +4017,9 @@ public final class CatalogSession {
     /// Returns `true` when anything moved.
     @discardableResult
     public func migrateHealSpots(sourceSize: ImageSize) -> Bool {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
+        // A migration rewrites every snapshot, so the newest window is not enough.
+        guard loadFullEditHistoryIfNeeded() else { return false }
         var next = edit
         guard next.migrateHealSpots(sourceSize: sourceSize) else { return false }
         edit = next
@@ -3870,7 +4037,8 @@ public final class CatalogSession {
     /// the point). A keystone-free document returns `false` and its bytes do not move.
     @discardableResult
     public func migrateCropToCanvasSpace(sourceSize: ImageSize) -> Bool {
-        flushPendingEditHistory()
+        guard flushPendingEditHistory() else { return false }
+        guard loadFullEditHistoryIfNeeded() else { return false }
         var next = edit
         guard next.migrateCropToCanvasSpace(sourceSize: sourceSize) else { return false }
         edit = next
