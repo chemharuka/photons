@@ -1641,6 +1641,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public private(set) var lastTimings: FrameTimings?
     public private(set) var lastPresentError: String?
 
+    /// 546 — the picture quads of the two renders a **compare** frame is made of, in the composite's
+    /// canvas pixels (original first: left / top of the line). `nil` until a compare frame runs, and
+    /// never set by a plain frame. It is the only observable evidence for 「对比的原图侧也带几何」:
+    /// the two sides are separate renders, so their corners have to be compared as numbers.
+    public private(set) var lastCompareQuadsForTesting: (original: [CGPoint], edited: [CGPoint])?
+    /// 546 — the two canvases the compare frame's renders were made for. Same size is the other half
+    /// of 「四角坐标逐点相等」: equal corners on two differently sized canvases would still be a lie.
+    public private(set) var lastCompareCanvasesForTesting: (original: ImageSize, edited: ImageSize)?
+    /// 546 — the picture quad of the one render this frame is of (the decode under `\`). Recorded so
+    /// 「显示原图」's geometry can be pinned as *unchanged* while the compare side changed.
+    public private(set) var lastFrameQuadForTesting: [CGPoint]?
+
     // MARK: 235 — what the editor showed before the first frame
 
     /// The one enum the cold-start acceptance reads. It is deliberately about **what the eye saw**,
@@ -9222,7 +9234,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // keys are the document's, so a compare frame hits S1…S3 exactly where the plain frame did and
         // leaving 对比 asks for nothing new.
         func renderOne(_ source: RenderSource, _ s: Shot, _ editForRender: EditModel,
-                       measure: Bool) throws -> (result: RenderResult, ms: Double) {
+                       measure: Bool, clearsParameters: Bool = false)
+            throws -> (result: RenderResult, ms: Double) {
             let t = CFAbsoluteTimeGetCurrent()
             // 一次请求 = 一个值：字段和 `RenderOptions` 一一对应，映射只在 `LoupeFrameRequest` 里有一份。
             // 132 §9 / 234: 适应 in **both** workspaces is a deliberate 90 % of the viewport fit.
@@ -9256,6 +9269,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                 canvasRole: canvasRole)
             var options = request.renderOptions()
             options.useCache = useCache
+            // 546 — 对比的原图侧 is the **same document with its parameters cleared**, not the decode:
+            // the crop / straighten / turn / keystone are geometry, and a comparison against the whole
+            // decode is a comparison of two differently placed pictures (`composite` rejects different
+            // canvases, so the shipped spelling could only ever scale one side into the other).
+            options.originalRendersAsParametersCleared = clearsParameters
             options.collectHistogram = measure
             options.histogramSampleLongEdge = (measure || wantsPointerSample)
                 ? Histogram.frameSampleLongEdge : 0
@@ -9305,11 +9323,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
             guard let e = editedShotResult, let editedTexture = e.result.output else {
                 throw RenderError.executeFailed("loupe produced no texture")
             }
-            let o = try renderOne(.decoded, originalShot, model.disregardingGeometry, measure: false)
+            // 546 — the original side is *the same camera and the same geometry* as the edit, with
+            // only the parameters zeroed (`originalRendersAsParametersCleared`). Passing `editedShot`
+            // rather than a shot of the geometry-stripped document is what makes the two canvases and
+            // the two picture quads equal — 「原图要包含透视校正，否则比较无意义」.
+            let o = try renderOne(.decoded, editedShot, model, measure: false,
+                                  clearsParameters: true)
             guard let originalTexture = o.result.output else {
                 graph.recycle(output: editedTexture)
-                throw RenderError.executeFailed("loupe produced no decode texture")
+                throw RenderError.executeFailed("loupe produced no original texture")
             }
+            lastCompareQuadsForTesting = (o.result.photoQuad ?? [], e.result.photoQuad ?? [])
+            lastCompareCanvasesForTesting = (o.result.canvas, e.result.canvas)
             // The two frames are recycled the moment the composite has read them: the composite is
             // what the canvas presents, and it came from the same pool.
             let composed: MTLTexture
@@ -9366,6 +9391,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return drawing.histogramSample
         }()
         let shotForFrame = mode == .original ? originalShot : editedShot
+        // 546 — the frame's own picture quad, from the render that produced it (`\` keeps its decode
+        // geometry here; a compare frame records both sides above).
+        lastFrameQuadForTesting = drawing.photoQuad
         return FrameResult(texture: texture, owner: .graph(graph),
                            photo: baseIdentity, sourceSize: graph.sourceSize,
                            canvas: drawing.canvas, content: drawing.content,

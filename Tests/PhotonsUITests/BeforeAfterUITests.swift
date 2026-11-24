@@ -150,7 +150,10 @@ final class BeforeAfterUITests: XCTestCase {
         let doc = editedDocument()
 
         let edited = try frame(loupe, url, doc)
-        let original = try frame(loupe, url, doc, mode: .original)
+        // 546 — 对比's original side is the document with its **parameters cleared and its geometry
+        // kept**, not `\`'s whole decode. The two spellings are different pictures on this document
+        // (it has a crop and a 6° turn), so the reference frame has to be the cleared one.
+        let original = try frame(loupe, url, doc.disregardingParameters)
 
         loupe.setCompare(true)
         let split = try XCTUnwrap(loupe.compareSplit)

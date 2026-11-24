@@ -192,13 +192,17 @@ public struct RenderOptions: Sendable {
     /// resident buffer, which is why showing the original costs a pass and never a decode.
     public var source: RenderSource
 
-    /// **Tests only.** Make `.decoded` render the **parameters-cleared** document through the whole
-    /// pipeline instead — the spelling 「参数清零后的渲染」 that `\` must not be.
+    /// **前后对比 (546).** Make `.decoded` render the **parameters-cleared** document through the whole
+    /// pipeline instead of the decode — the spelling 「参数清零后的渲染」 that `\` must not be.
     ///
-    /// It exists so the acceptance's first assertion can be shown to be load-bearing rather than
-    /// claimed: `BeforeAfterTests.testTheRefutationTurnsTheFirstAssertionRed` renders both spellings
-    /// and prints that the decode and this one are the *same bytes* when the flag is on, i.e. the
-    /// assertion "the two differ" fails.
+    /// The compare frame sets it, because the original side has to keep the document's **geometry**
+    /// (crop, straighten, flip, turn, keystone) for the split line to compare anything: a decode and a
+    /// cropped picture are two differently framed pictures, and two canvases of one size can still be
+    /// two different rectangles of the world. `\` leaves it false and is still the whole decode.
+    ///
+    /// It is also what `BeforeAfterTests.testTheRefutationTurnsTheFirstAssertionRed` uses to show the
+    /// two spellings really are different: with the flag on, `.decoded` renders the cleared document,
+    /// so the assertion 「`\` differs from the parameters-cleared render」 is false.
     public var originalRendersAsParametersCleared: Bool
 
     /// **Tests only.** Compute S3.4's grey **once per channel** (`L` of `(r,r,r)`, of `(g,g,g)`, of
@@ -2435,17 +2439,20 @@ public final class RenderGraph {
     /// the readback, the histogram plumbing) is the same machinery, and the only difference is which
     /// document reaches the plan and which stages the plan visits. `.decoded` resolves the document to
     /// `disregardingGeometry` — so S0 crops nothing, turns nothing and flips nothing — and visits
-    /// `[.geometry, .display]`, i.e. the decode, display-encoded.
+    /// `[.geometry, .display]`, i.e. the decode, display-encoded. With
+    /// `originalRendersAsParametersCleared` it resolves to `disregardingParameters` instead and runs
+    /// the whole pipeline: geometry kept, every tone/colour parameter zeroed (546's compare side).
     ///
     /// Nothing here can write to `edit`: the resolution is a copy.
     public func render(_ edit: EditModel, options: RenderOptions = RenderOptions()) throws -> RenderResult {
         let document: EditModel
         switch (options.source, options.originalRendersAsParametersCleared) {
         case (.decoded, false):
-            // The shipped spelling: the decode, i.e. the document with no geometry at all.
+            // 「显示原图」(`\`): the decode, i.e. the document with no geometry at all.
             document = edit.disregardingGeometry
         case (.decoded, true):
-            // The refutation's spelling: 「参数清零后的渲染」 — geometry kept, every parameter zeroed.
+            // 546's compare side, and the refutation's spelling: 「参数清零后的渲染」 —
+            // geometry kept, every parameter zeroed.
             document = edit.disregardingParameters
         case (.edited, _):
             document = edit
@@ -2469,9 +2476,8 @@ public final class RenderGraph {
         //     (p05 151 → 89 ms: without it every stage pays a 483 MB `makeTexture`); at 4.10 Mpx it
         //     is not, because a 32.8 MB allocation is cheaper than the barrier that reusing the
         //     texture forces between two passes (p50 8–13 ms vs 6.2 ms cold, p05 equal).
-        // 080: the decode path. `true` for the shipped spelling; the test hook
-        // (`originalRendersAsParametersCleared`) turns it off and renders the whole pipeline of the
-        // parameters-cleared document instead, which is the refutation.
+        // 080 / 546: the decode path (`\`). `true` for `.decoded` unless the compare side asks for
+        // the parameters-cleared document, which runs the whole pipeline and keeps its geometry.
         let decodeOnly = options.source == .decoded && !options.originalRendersAsParametersCleared
         let plan = plan(edit, options)
         // 256 — a stopped probe may need a mask atlas of its own 1×1 canvas, but it must not evict
@@ -3189,7 +3195,9 @@ public final class RenderGraph {
     /// Two display-encoded frames, one canvas, split at a draggable line.
     ///
     /// - Parameters:
-    ///   - original: the decode (`RenderSource.decoded`) — left / top of the line.
+    ///   - original: the original side — the document with its parameters cleared and its geometry
+    ///     kept (546; `\`'s whole decode is a different frame and never reaches here) — left / top of
+    ///     the line.
     ///   - edited: the document (`RenderSource.edited`) — right / bottom.
     ///   - split: where the line is and which way it runs. Its `dividerPixel(canvas:)` is what the
     ///     kernel receives, so a pixel's owner is the same answer here and in
