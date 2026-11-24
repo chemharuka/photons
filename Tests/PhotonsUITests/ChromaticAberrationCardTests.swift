@@ -15,7 +15,7 @@ import PhotonsCore
 /// names — and no user could reach any of it. This file is about the missing half:
 ///
 ///   1. **两根行**: 色差 R / 色差 B, in the 细节 card of 调整, in slider units (−100…+100), `.linear`
-///      (red `#FF375F`), typeable, with a double-click reset on each name — and the card's title takes
+///      (541: 黄), typeable, with a double-click reset on each name — and the card's title takes
 ///      both back in **one** snapshot, like every other card.
 ///   2. **画出来了**: two rows inside the detail card, in table order, not overlapping, at the three
 ///      card content widths 244 / 274 / 308 pt (panel 300 / 330 / 364) — `LayoutContractTests` pins the
@@ -51,10 +51,10 @@ final class ChromaticAberrationCardTests: XCTestCase {
             XCTAssertEqual(row.range, OpticsGroup.sliderRange, "\(row.title)：滑杆的行程是 −100…+100")
             XCTAssertEqual(row.range, -100 ... 100)
             XCTAssertEqual(row.format, "%.0f", "\(row.title)：整数读数")
-            XCTAssertEqual(row.shape, .linear, "\(row.title)：线性域 → 红 #FF375F（071 的第三类）")
-            XCTAssertEqual(row.shape.accent, SliderShape.linearAccent, "\(row.title)：强调色就是那一个红")
+            XCTAssertEqual(row.shape, .linear, "\(row.title)：线性域 → 黄（071 的第三类）")
+            XCTAssertEqual(row.shape.accent, SliderShape.linearAccent, "\(row.title)：强调色就是那一个黄")
             XCTAssertNotEqual(row.shape.accent, SliderShape.knob.accent, "渲染参数是蓝，色差不是")
-            XCTAssertNotEqual(row.shape.accent, SliderShape.bar.accent, "解码参数是黄，色差不是")
+            XCTAssertNotEqual(row.shape.accent, SliderShape.bar.accent, "解码参数是红，色差不是")
             XCTAssertTrue(row.editable, "047：每一行都能键入")
             XCTAssertEqual(row.decimals, 0)
             XCTAssertEqual(row.defaultValue, 0, "默认 = 文档的 0（`OpticsGroup()`，不是字面量）")

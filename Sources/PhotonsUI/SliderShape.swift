@@ -24,13 +24,15 @@ import SwiftUI
 /// 强调色，默认蓝）。用户原话：「都改成 SwiftUI，只不过强调色不同，这样用来区分。默认的强调色应该是
 /// 蓝色，然后与 RAW 解码有关的改为橙色。」
 ///
-/// **071（用户 2026-10-27 重新定案，覆盖 060 的配色）**：颜色现在表达的是参数**在哪个域**，共三类：
+/// **071（用户 2026-10-27 重新定案，覆盖 060 的配色）**：颜色现在表达的是参数**在哪个域**，共三类。
+///
+/// **541（用户 2026-11-24 定案，把 071 的红/黄互换）**：
 ///
 /// | 类别 | 颜色 | 行 |
 /// |---|---|---|
 /// | 默认（解 RAW 之后的渲染：Light / Color / 曲线面板） | **蓝 = 系统强调色**（不设 tint） | 与 060 相同 |
-/// | raw / 解码参数（写 `CIRAWFilter`，会重新 develop） | **黄**（060 是橙 → 改） | 降噪 / 色彩降噪 / 细节 / 锐化 / 色温 / 色调 |
-/// | **线性域**（直接加在 scene-linear 缓冲上的算术） | **`#FF375F`** | 黑电平（071）、色差 R·B（078） |
+/// | raw / 解码参数（写 `CIRAWFilter`，会重新 develop） | **红 `#FF375F`**（071 是黄 → 541 换成红） | 降噪 / 色彩降噪 / 细节 / 锐化 / 色温 / 色调 |
+/// | **线性域**（直接加在 scene-linear 缓冲上的算术） | **黄**（071 是红 → 541 换成黄） | 黑电平（071）、色差 R·B（078）、校准（179） |
 ///
 /// 三类都还是**同一个** `Slider`、同一个 `sliderRow`，`accent` 是唯一的差别，而且是**唯一**的颜色
 /// 来源（`HistogramCard` 的橙色刻度是「显示 headroom」的语义标记，不是滑杆 tint，不在这里）。
@@ -42,11 +44,11 @@ import SwiftUI
 /// 强调色是**唯一**的差异。label、数值框、双击复位、`onEditingChanged`（按下 true / 抬起 false）
 /// 都由 `InspectorView.sliderRow` 提供，三类共用同一段代码。
 public enum SliderShape: String, CaseIterable, Sendable, Equatable {
-    /// 解码参数：**黄色**强调色。没有刻度。
+    /// 解码参数：**红色**强调色（541）。没有刻度。
     case bar
     /// 渲染参数：不设 tint，跟随系统强调色（默认蓝）。没有刻度。
     case knob
-    /// 071：**线性域**参数，直接改 scene-linear 缓冲的算术。`#FF375F`（红）。没有刻度。
+    /// 071 / 541：**线性域**参数，直接改 scene-linear 缓冲的算术。**黄**。没有刻度。
     case linear
 
     /// 这条滑杆的强调色 —— 面板里**唯一**的一份颜色定义。
@@ -61,16 +63,17 @@ public enum SliderShape: String, CaseIterable, Sendable, Equatable {
         }
     }
 
-    /// raw / 解码参数 = **黄**（071 改的；060 是橙）。
+    /// raw / 解码参数 = **`#FF375F`**（541 的红黄互换：raw 处理回到红）。
     ///
-    /// 用系统 `Color.yellow` 而不是写死一个 RGB：它就是「黄」，在深/浅色主题与提高对比度下都由系统
-    /// 处理。实测的取色像素见 `SliderStyleTests`（报告里给了数字）。
-    public static let rawAccent = Color.yellow
+    /// sRGB 逐通道写死：这个颜色是用户给的品牌色，不该随系统主题漂移。实测取色见
+    /// `SliderStyleTests`（报告里给了数字）。
+    public static let rawAccent = Color(.sRGB, red: 1.0, green: 55.0 / 255, blue: 95.0 / 255,
+                                        opacity: 1)
 
-    /// 线性域 = **`#FF375F`**（用户指定的红）。sRGB 逐通道写死：这个颜色是用户给的品牌色，
-    /// 不该随系统主题漂移。
-    public static let linearAccent = Color(.sRGB, red: 1.0, green: 55.0 / 255, blue: 95.0 / 255,
-                                          opacity: 1)
+    /// 线性域 = **黄**（541 的红黄互换：线性域处理改成黄）。
+    ///
+    /// 用系统的黄色而不是写死一个 RGB：它就是「黄」，在深/浅色主题与提高对比度下都由系统处理。
+    public static let linearAccent = Color.yellow
 }
 
 // MARK: - 数值映射

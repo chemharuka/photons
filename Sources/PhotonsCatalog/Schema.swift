@@ -14,6 +14,7 @@ import GRDB
 /// | v6 | `assets.stack_id` + `assets.stack_rank` — photo stacks (§378) |
 /// | v7 | backfill `assets.width/height` to display pixels for rows with orientation 5…8 (§436) |
 /// | v8 | `assets.stack_kind` — `plain` / `denoise` (487) |
+/// | v9 | `asset_histograms` — durable per-asset histogram bins (534) |
 ///
 /// **Naming deviation, deliberate:** the task that introduced v3 calls the stack table
 /// `edit_history(asset_id, seq, label, develop_json, created_at)`. v1 already created exactly that
@@ -23,7 +24,7 @@ import GRDB
 /// write timestamp and a place to park blobs that will not decode.
 public enum Schema {
     /// Bump on every additive migration; `PRAGMA user_version` follows it.
-    public static let version = 8
+    public static let version = 9
     /// Version of the identity-hash recipe. Bump when `content_hash` changes meaning.
     public static let uniqueHashVersion = 1
 
@@ -51,6 +52,7 @@ public enum Schema {
         Step(name: "v6") { db in try addStackColumnsIfAbsent(db) },
         Step(name: "v7") { db in try uprightPixelDimensions(db) },
         Step(name: "v8") { db in try addStackKindColumnIfAbsent(db) },
+        Step(name: "v9") { db in try db.execute(sql: v9) },
     ]
 
     static var migrator: DatabaseMigrator {
@@ -420,5 +422,37 @@ public enum Schema {
     );
     CREATE UNIQUE INDEX idx_presets_name ON presets(name COLLATE NOCASE);
     CREATE UNIQUE INDEX idx_presets_default ON presets(is_default) WHERE is_default = 1;
+    """
+
+    // MARK: - v9
+
+    /// `asset_histograms` — a photo's measured bins, durable with the library (534).
+    ///
+    /// The key is `(asset_id, pixel_digest, scale, ceiling)`: the picture, the document fields that
+    /// reach a pixel (`CanvasFrameCache.pixelCanonicalEdit`), the rung the bins were measured from,
+    /// and the render ceiling the bins were measured under (320 — the clamp moves the bins). The
+    /// value is a small binary plist plus the eight bin segments; see `CatalogHistogramStore` for
+    /// the bytes and the miss rules.
+    ///
+    /// **No foreign key on `asset_id`, deliberately.** This is a cache of a rendering fact, not a
+    /// relationship: a test or an import preview may name a picture the catalog has no row for, and
+    /// deleting an asset only makes its rows unreachable (an asset id is required to read them). A
+    /// stale row is not a correctness problem, so the table does not make deletion fail.
+    ///
+    /// **Replayable**: `IF NOT EXISTS`, so a library whose `user_version` stamp was lost re-runs the
+    /// step as a no-op. An older library gets an empty table and measures as before — no migration.
+    private static let v9 = """
+    CREATE TABLE IF NOT EXISTS asset_histograms(
+      asset_id        TEXT NOT NULL,
+      pixel_digest    TEXT NOT NULL,
+      scale           REAL NOT NULL,
+      ceiling         REAL NOT NULL,
+      storage_version INTEGER NOT NULL,
+      bins            BLOB NOT NULL,
+      updated_at      TEXT NOT NULL,
+      PRIMARY KEY(asset_id, pixel_digest, scale, ceiling)
+    );
+    CREATE INDEX IF NOT EXISTS idx_asset_histograms_asset
+        ON asset_histograms(asset_id, scale);
     """
 }
