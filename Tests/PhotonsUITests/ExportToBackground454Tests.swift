@@ -179,10 +179,11 @@ final class ExportToBackground454Tests: XCTestCase {
         XCTAssertEqual(observed, [1, 2, 3], "并发 2、回调乱序，计数只能是自增")
         let task = try onlyTask(in: store)
         XCTAssertEqual(BackgroundTaskStore.countText(for: task), "3/3")
-        // 488 — a batch clears 「正在处理的那张」 when it ends, so the panel's square stops showing
-        // the last photo. (The counts stay on the terminal row.)
-        XCTAssertNil(task.currentAssetID)
-        XCTAssertNil(task.currentThumbKey)
+        // 549 — a batch keeps 「正在处理的那张」 when it ends, so the panel's square stays on the
+        // photo whose render callback arrived last (`b`, not the request-order last `c`). The counts
+        // stay on the terminal row.
+        XCTAssertEqual(task.currentAssetID, "b")
+        XCTAssertEqual(task.currentThumbKey, "thumb-b")
         XCTAssertEqual(BackgroundTaskStore.progressFraction(for: task), 1, accuracy: 0.0001)
     }
 
