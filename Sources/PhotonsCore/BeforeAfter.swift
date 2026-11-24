@@ -38,7 +38,10 @@ public enum RenderSource: String, Sendable, Codable, CaseIterable {
 
 /// Which side of the 分屏 line a pixel belongs to.
 public enum CompareSide: String, Sendable, Codable, CaseIterable {
-    /// The decode (`RenderSource.decoded`) — the left / top half.
+    /// The original side: the same document with its **parameters cleared** and its geometry kept
+    /// (`RenderOptions.originalRendersAsParametersCleared`), so crop / straighten / turn / keystone
+    /// line up with the edited side. Only 「显示原图」(`\`) shows the whole decode — a comparison
+    /// against that is a comparison of two differently framed pictures (546).
     case original
     /// The document (`RenderSource.edited`) — the right / bottom half.
     case edited
