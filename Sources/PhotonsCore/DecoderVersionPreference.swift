@@ -27,8 +27,8 @@ import Foundation
 /// 555 extends the same file with the **document-level** rule: a document says whether it is
 /// automatic (`.auto`) or pinned to a family (`.v8` / `.v9`), and the resolver turns that — plus the
 /// photo's ISO and the user's 解码偏好 — into one spelling. There is deliberately **one** automatic
-/// entry point here; `DecoderAutoVersion` (409) is the older, second one and is scheduled to be
-/// folded into this type in Phase 2 (see `local/REPORT.md`).
+/// entry point here. 409's `DecoderAutoVersion` has been folded in (Phase 2): its crop/threshold
+/// helpers live here and its `requestedVersion` / `availableV9` are deleted.
 public enum DecoderVersionPolicy: String, Codable, CaseIterable, Sendable {
     /// 自动 — the document stores the policy, not the spelling. The resolved spelling lives in
     /// `EditModel.resolvedDecoderVersion` and is what the cache key must name.
@@ -76,6 +76,13 @@ public enum DecoderVersionPreference {
     /// changing the meaning of 「高 ISO」. **This is the one constant to tune**; changing it must bump
     /// `DecodeRecipe.current` in the same change (Phase 2).
     public static let highISOThreshold: Double = 800
+
+    /// 409's names, kept here now that its rule has been folded into this type.
+    public static let fullFrameBaseISO: Double = highISOThreshold
+    /// The crop range the `FocalLenIn35mmFilm / FocalLength` ratio is trusted in.
+    public static let cropRange: ClosedRange<Double> = 0.5...4.0
+    /// The crop an unreadable file is decoded at — full frame, per the owner's rule.
+    public static let assumedCropFactor: Double = 1
 
     /// The owner's explicit order, before the deterministic fallback for everything else.
     public static let fixedOrder = ["9", "9.dng", "8", "8.dng"]
@@ -128,6 +135,40 @@ public enum DecoderVersionPreference {
     }
 
     // MARK: - 555 · policy + ISO + 解码偏好 → one candidate list
+
+    /// 409 — 画幅比，从 EXIF 的两个焦距算出。`nil` ⇒ 调用方按全画幅处理（用户口径：
+    /// 「如果算不出画幅就默认全画幅」）。
+    ///
+    /// Both values must exist and be positive; a ratio outside `cropRange` is treated as untrustworthy
+    /// EXIF rather than as a sensor (`25 / 200 = 8.0` is not a format we know).
+    public static func cropFactor(focalLength: Double?, focalLength35mm: Double?) -> Double? {
+        guard let f = focalLength, let f35 = focalLength35mm, f > 0, f35 > 0 else { return nil }
+        let k = f35 / f
+        guard cropRange.contains(k) else { return nil }
+        return k
+    }
+
+    /// The crop a file is actually decoded at: the measured one, else full frame.
+    public static func cropFactor(orFullFrame focalLength: Double?,
+                                  _ focalLength35mm: Double?) -> Double {
+        cropFactor(focalLength: focalLength, focalLength35mm: focalLength35mm) ?? assumedCropFactor
+    }
+
+    /// `thresholdISO(crop) = 800 / crop²` — the actual-ISO value at which the equivalent ISO reaches
+    /// the full-frame 800 reference (full frame 800, m4/3 200, APS-C ≈ 342).
+    ///
+    /// A non-positive or non-finite crop is a broken input, not a format: it answers the full-frame
+    /// threshold instead of dividing by zero.
+    public static func thresholdISO(crop sensorCrop: Double) -> Double {
+        guard sensorCrop.isFinite, sensorCrop > 0 else { return highISOThreshold }
+        return highISOThreshold / (sensorCrop * sensorCrop)
+    }
+
+    /// 409's boundary, unified with §555: `ISO · crop² ≥ 800` (the ticket changed 409's strict `>` to
+    /// `≥`, so ISO exactly 800 now upgrades).
+    public static func shouldUpgrade(iso: Int?, crop: Double = assumedCropFactor) -> Bool {
+        isHighISO(iso: iso, cropFactor: crop)
+    }
 
     /// `ISO · crop² ≥ 800` — the ticket's 「iso ≥ 阈值」 with 409's format normalisation.
     ///

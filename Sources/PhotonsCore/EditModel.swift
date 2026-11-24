@@ -703,12 +703,14 @@ public struct EditModel: Sendable, Equatable, Codable {
         try encodeGroup(detail, "detail", into: &c, extras: extras)
         try encodeGroup(detailSettings, "detailSettings", into: &c, extras: extras)
         try c.encodeIfPresent(decoderVersion, forKey: AnyCodingKey("decoderVersion"))
-        // 555: written only when the decoder model has been touched, so a neutral document keeps
-        // every pre-change byte (and every cached thumbnail's `develop_json` digest). The gate is
-        // deliberately true for a legacy `decoderVersion`: that is what puts both keys into the
-        // forward-compat probe's key set without a second hand-maintained list. `resolved` is written
-        // as `null` when absent so the *key* exists on the probe too; `c.val` reads null as nil.
-        if decoderVersion != nil || decoderVersionPolicy != .auto || resolvedDecoderVersion != nil {
+        // 555: written **only when the policy is not 自动 or a resolved spelling exists**, so a
+        // pre-555 document keeps its `develop_json` byte for byte — including one with a hand-picked
+        // `decoderVersion`, whose legacy meaning is "pin that spelling, no policy key". That is the
+        // §7.3 gate, and it is why `ThumbRecipe.recipeDigest` does not turn over for the whole
+        // library on the first save. `resolved` is written as `null` when the policy is pinned and
+        // nothing was resolved, so both keys appear together (`c.val` reads null as nil); the two
+        // names are also in `ForwardCompatKnownKeys.topLevel` by hand.
+        if decoderVersionPolicy != .auto || resolvedDecoderVersion != nil {
             try c.encode(decoderVersionPolicy, forKey: AnyCodingKey("decoderVersionPolicy"))
             if let resolvedDecoderVersion {
                 try c.encode(resolvedDecoderVersion, forKey: AnyCodingKey("resolvedDecoderVersion"))

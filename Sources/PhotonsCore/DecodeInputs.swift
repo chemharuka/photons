@@ -40,9 +40,24 @@ public struct DecodeInputs: Sendable, Hashable {
     /// The drag does **not** come through here: while the hand is moving, the loupe renders the resident
     /// buffer through S1 with an `WhiteBalanceEstimate` gain and no development at all.
     public var whiteBalance: WhiteBalance
-    /// Decoder version requested from the system pipeline; `nil` = whatever Apple defaults to.
+    /// 555 — the **resolved spelling** this development names, or `nil` before the first resolution.
     /// Part of the key because a v9 request that silently became v8 is a different buffer.
+    ///
+    /// This is not the document's policy: `decoderVersionPolicy` below says whether the document is
+    /// 自动 or pinned, while this field is the **fact** the key names. §2 of the ticket: document =
+    /// 自动, key = 解析结果. A legacy document has no policy key and no resolved result, so this is
+    /// still its stored spelling and its key is byte-identical to pre-555.
     public var decoderVersion: String?
+    /// 555 — the document's own choice (自动 / 手选 v8 / 手选 v9). Not part of the key: two documents
+    /// that differ only here but resolve to the same spelling are the same buffer.
+    public var decoderVersionPolicy: DecoderVersionPolicy
+    /// 555 — the document's stored hand pick (`EditModel.decoderVersion`), for the resolver. `nil`
+    /// for a new automatic document; non-`nil` with no resolved spelling is the pre-555 hand pick.
+    public var decoderStoredVersion: String?
+    /// 555 — the document's last resolved spelling (`EditModel.resolvedDecoderVersion`). It is what
+    /// tells the resolver "this is a new automatic document that has already answered once", as
+    /// opposed to the legacy hand pick above.
+    public var decoderResolvedVersion: String?
     /// Decode scale (1.0 = full). A rung is a scale, so this belongs to the development.
     public var scale: Double
     /// The fixed decode recipe (`DecodeRecipe.current`). Bumped when the settings change.
@@ -65,12 +80,18 @@ public struct DecodeInputs: Sendable, Hashable {
 
     public init(whiteBalance: WhiteBalance = .asShot,
                 decoderVersion: String? = nil,
+                decoderVersionPolicy: DecoderVersionPolicy = .auto,
+                decoderStoredVersion: String? = nil,
+                decoderResolvedVersion: String? = nil,
                 scale: Double = 1,
                 recipe: String = DecodeRecipe.current,
                 detail: DetailSettings = .identity,
                 lens: String? = nil) {
         self.whiteBalance = whiteBalance
         self.decoderVersion = decoderVersion
+        self.decoderVersionPolicy = decoderVersionPolicy
+        self.decoderStoredVersion = decoderStoredVersion
+        self.decoderResolvedVersion = decoderResolvedVersion
         self.scale = scale
         self.recipe = recipe
         self.detail = detail
@@ -101,12 +122,11 @@ public struct DecodeInputs: Sendable, Hashable {
     /// `dt=…`), which is exactly the workaround the user reported. `key` had `ver=` all along; the
     /// identity did not.
     ///
-    /// 409: the **automatic** rule (`DecoderAutoVersion`) does **not** enter this component. The key
-    /// spells a document that asked for nothing as `ver=auto`, exactly as before, because the rule is a
-    /// deterministic function of one file (ISO, crop, the file's offered spellings, and an explicit
-    /// request that is by definition `nil` here): the same file always resolves to the same version, so
-    /// `ver=auto` can never name two different buffers. The rule's **generation** — the thing that does
-    /// have to invalidate old buffers when a constant moves — is carried by `DecodeRecipe.current`.
+    /// 555: this names the **resolved spelling**, never the policy. A document that has not resolved
+    /// yet (a brand-new 自动 document) still spells `auto` — that is the pre-555 literal and keeps its
+    /// first key byte-identical — but the moment a resolution exists the key names the fact, so a
+    /// macOS upgrade that changes the answer cannot serve the old buffer. The rule's **generation** is
+    /// still carried by `DecodeRecipe.current`; the spelling is now carried here as well.
     public var versionComponent: String? { decoderVersion.map { "ver=\($0)" } }
 
     /// What `key` spells for the version: `9.dng`, or `auto` when the document asks for nothing.
@@ -237,7 +257,17 @@ public extension EditModel {
         // `nil` pair still spells `.asShot`, and `.asShot` appends **nothing** to any key — the as-shot
         // identity gate is the same string it was before 194.
         DecodeInputs(whiteBalance: WhiteBalance(temperature: light.temperature, tint: light.tint),
-                     decoderVersion: decoderVersion,
+                     // §555 — **the key names the resolved spelling, not `auto`.** A new automatic
+                     // document stores its last answer in `resolvedDecoderVersion`; a hand pick lives
+                     // in `decoderVersion`; a pre-555 document has only the latter and keeps its key
+                     // byte for byte. The policy and the two stored fields ride along for the decode
+                     // resolver but are deliberately absent from `key`.
+                     decoderVersion: decoderVersionPolicy == .auto
+                        ? (resolvedDecoderVersion ?? decoderVersion)
+                        : (decoderVersion ?? resolvedDecoderVersion),
+                     decoderVersionPolicy: decoderVersionPolicy,
+                     decoderStoredVersion: decoderVersion,
+                     decoderResolvedVersion: resolvedDecoderVersion,
                      scale: 1,
                      recipe: DecodeRecipe.current,
                      detail: detailSettings)

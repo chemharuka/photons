@@ -270,6 +270,11 @@ public final class CanvasFrameCache {
         guard canonicalizesCanvasEditDigest else { return edit }
         var out = edit
         out.forwardCompatVersion = nil
+        // 555 — the **policy** is not a pixel fact, but `resolvedDecoderVersion` is: it names the
+        // spelling that produced this buffer. Neutralise only the policy, exactly as the ticket asks;
+        // two documents that resolve to the same spelling then share a canvas digest, while a macOS
+        // upgrade that resolves differently still misses (the buffer really is different).
+        out.decoderVersionPolicy = .auto
         if var point = out.color.point {
             point.active = nil
             out.color.point = point

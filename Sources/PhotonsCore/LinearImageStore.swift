@@ -15,20 +15,23 @@ import CryptoKit
 /// buffers must not be reused; the profile's own `lens=panasonic:…` also enters the key.
 ///
 /// `v4-auto409` = 409: a document that asks for no decoder version (`nil`) is no longer fixed at
-/// Apple's default — `DecoderAutoVersion` reads the file's EXIF ISO and crop factor and asks for v9
-/// when the **equivalent** ISO (`ISO · crop²`) exceeds the full-frame 800 reference, provided the file
-/// whitelists `9.dng` / `9`. The crop is `FocalLenIn35mmFilm / FocalLength`; unreadable EXIF means
-/// full frame. Consequence: every `decoderVersion == nil` document is re-decoded once (the token
-/// moved), and exactly the ones above their format's threshold change pixels. Documents with an
-/// explicit version, and every document at or below the threshold, decode to the same pixels as
-/// before.
+/// Apple's default — `DecoderAutoVersion` read the file's EXIF ISO and crop factor and asked for v9
+/// when the **equivalent** ISO (`ISO · crop²`) exceeded the full-frame 800 reference.
 ///
-/// Changing **any** constant of `DecoderAutoVersion` (the base ISO, the crop range, the v9 spellings,
-/// the threshold itself) must bump this token in the same change: the automatic rule does not appear
-/// in the decode key (`ver=auto` only), so this token is the one thing that separates buffers decoded
-/// by the old rule from the ones the new rule asks for.
+/// `v5-policy555` = 555: 409's rule is folded into `DecoderVersionPreference` and the document keeps
+/// a policy (自动 / 手选 v8 / 手选 v9). Four behaviour changes ride with this token:
+///   · high ISO now prefers **bare `9`** before `9.dng` (554 measured this machine accepts bare 9,
+///     and its pixels differ from `9.dng`);
+///   · the boundary is `≥` (ISO exactly 800 now upgrades; 409 used strict `>`);
+///   · 设置 → 优先 v8 can suppress the high-ISO upgrade (impossible in 409);
+///   · a resolved spelling is named in the decode key instead of `ver=auto`, so a macOS upgrade that
+///     changes the answer cannot serve the old buffer.
+/// The crop normalisation (`ISO · crop² ≥ 800`) is 409's, kept unchanged.
+///
+/// Changing **any** constant of `DecoderVersionPreference` (the base ISO, the crop range, the
+/// spellings, the threshold, or the table) must bump this token in the same change.
 public enum DecodeRecipe {
-    public static let current = "v4-auto409"
+    public static let current = "v5-policy555"
 }
 
 /// Identity of a decode result: everything that can change the pixels.

@@ -815,7 +815,16 @@ private extension EditHistory {
             if let v = optionalNumber(change.from) { doc.detailSettings.moire = v }
 
         case "decoderVersion":
-            if let v = text(change.from) { doc.decoderVersion = v == Loc.t("默认") ? nil : v }
+            if let v = text(change.from) {
+                doc.decoderVersion = v == Loc.t("默认") ? nil : v
+                doc.resolvedDecoderVersion = nil
+            }
+
+        case "decoderVersionPolicy":
+            if let v = text(change.from), let policy = DecoderVersionPolicy(rawValue: v) {
+                doc.decoderVersionPolicy = policy
+                doc.resolvedDecoderVersion = nil
+            }
 
         case "effects.vignetteAmount":
             if let v = number(change.from) { doc.effects.vignetteAmount = v }

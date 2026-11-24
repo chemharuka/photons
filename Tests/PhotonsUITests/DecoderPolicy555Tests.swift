@@ -1,5 +1,6 @@
 import XCTest
 import PhotonsCore
+@testable import PhotonsUI
 
 /// §555 Phase 1 — **the document policy, the 解码偏好 table, and the one resolver**.
 ///
@@ -239,6 +240,43 @@ final class DecoderPolicy555Tests: XCTestCase {
         XCTAssertFalse(text.contains("resolvedDecoderVersion"), text)
     }
 
+    /// §7.3 — a pre-555 document is **byte for byte** unchanged by a load → save round trip, even
+    /// though it has a hand-picked `decoderVersion`. The new keys appear only when the policy is
+    /// not 自动 or a resolved spelling exists.
+    func testAPrePolicyDocumentReEncodesByteForByte() throws {
+        let json = #"{"schemaVersion":13,"decoderVersion":"8.dng"}"#
+        let old = try JSONDecoder().decode(EditModel.self, from: Data(json.utf8))
+        XCTAssertEqual(old.decoderVersionPolicy, .auto)
+
+        let text = String(decoding: try JSONEncoder().encode(old), as: UTF8.self)
+        XCTAssertFalse(text.contains("decoderVersionPolicy"), text)
+        XCTAssertFalse(text.contains("resolvedDecoderVersion"), text)
+        // The visible document fields (not the JSON key order) are identical to the input.
+        let back = try JSONDecoder().decode(EditModel.self, from: Data(text.utf8))
+        XCTAssertEqual(back.decoderVersion, "8.dng")
+        XCTAssertEqual(back.decoderVersionPolicy, .auto)
+        XCTAssertNil(back.resolvedDecoderVersion)
+
+        // Reproducible byte evidence for the report: the encoder output for a pre-555 document is a
+        // fixed point under decode → encode, and it carries neither new key.
+        let first = try JSONEncoder().encode(old)
+        let second = try JSONEncoder().encode(
+            try JSONDecoder().decode(EditModel.self, from: first))
+        func canonical(_ data: Data) throws -> String {
+            let object = try JSONSerialization.jsonObject(with: data)
+            let sorted = try JSONSerialization.data(withJSONObject: object,
+                                                     options: [.sortedKeys, .withoutEscapingSlashes])
+            return String(decoding: sorted, as: UTF8.self)
+        }
+        print("555 legacy bytes: \(first.count) B → \(second.count) B"
+              + " · canonical identical \(try canonical(first) == canonical(second))"
+              + " · policy key \(String(decoding: first, as: UTF8.self).contains("decoderVersionPolicy"))"
+              + " · resolved key \(String(decoding: first, as: UTF8.self).contains("resolvedDecoderVersion"))")
+        XCTAssertEqual(try canonical(first), try canonical(second),
+                       "decode → encode must be a fixed point (canonical key order; "
+                       + "`JSONEncoder` itself does not promise object key order)")
+    }
+
     // MARK: - 5. key stability / correctness
 
     /// Two documents that differ only in policy but resolve to the same spelling must produce the
@@ -268,5 +306,80 @@ final class DecoderPolicy555Tests: XCTestCase {
         // 反向门 — the key must name the spelling, never the literal `auto`.
         XCTAssertTrue(autoKey.contains("ver=9.dng"), autoKey)
         XCTAssertFalse(autoKey.contains("ver=auto"), autoKey)
+    }
+
+    /// §7.4 — a document's own `decodeInputs` names the resolved spelling, not `auto`, and its key
+    /// is the same as a document that reached the same spelling another way.
+    func testADocumentDecodeKeyNamesTheResolvedSpelling() {
+        var auto = EditModel.neutral
+        auto.resolvedDecoderVersion = "9.dng"
+
+        var pinned = EditModel.neutral
+        pinned.decoderVersionPolicy = .v9
+        pinned.decoderVersion = "9.dng"
+
+        XCTAssertEqual(auto.decodeInputs.decoderVersion, "9.dng")
+        XCTAssertEqual(pinned.decodeInputs.decoderVersion, "9.dng")
+        XCTAssertEqual(auto.decodeInputs.key, pinned.decodeInputs.key,
+                       "same resolved spelling ⇒ same buffer key")
+        XCTAssertFalse(auto.decodeInputs.key.contains("ver=auto"), auto.decodeInputs.key)
+
+        var eight = auto
+        eight.resolvedDecoderVersion = "8"
+        XCTAssertNotEqual(auto.decodeInputs.key, eight.decodeInputs.key,
+                          "8 and 9.dng are different pictures")
+    }
+
+    /// §7.4 — only the policy is stripped from the pixel digest; the resolved spelling stays because
+    /// it is the pixel fact.
+    func testPixelCanonicalEditStripsPolicyAndKeepsResolved() {
+        var edit = EditModel.neutral
+        edit.resolvedDecoderVersion = "9.dng"
+        edit.forwardCompatVersion = 14
+
+        let canonical = CanvasFrameCache.pixelCanonicalEdit(edit)
+        XCTAssertEqual(canonical.decoderVersionPolicy, .auto)
+        XCTAssertEqual(canonical.resolvedDecoderVersion, "9.dng")
+        XCTAssertNil(canonical.forwardCompatVersion)
+    }
+
+    /// §7.6 — the clipboard carries the policy with the decoder leaf, and a paste clears the
+    /// destination's resolved fact (it belonged to the source photo).
+    func testTheClipboardCarriesThePolicyAndClearsTheDestinationsResolvedFact() {
+        var source = EditModel.neutral
+        source.decoderVersionPolicy = .v9
+        source.decoderVersion = "9.dng"
+        source.resolvedDecoderVersion = "9.dng"
+
+        let snapshot = EditSnapshot.capture(source)
+        XCTAssertEqual(snapshot.decoderVersionPolicy, .v9)
+
+        var target = EditModel.neutral
+        target.resolvedDecoderVersion = "8"
+        let pasted = snapshot.applied(to: target)
+        XCTAssertEqual(pasted.decoderVersionPolicy, .v9)
+        XCTAssertEqual(pasted.decoderVersion, "9.dng")
+        XCTAssertNil(pasted.resolvedDecoderVersion, "the destination must resolve for itself")
+
+        // A narrowed copy (解码器版本 only) carries the policy too.
+        let onlyVersion = snapshot.filtered(to: [.detail], children: [.decoderVersion])
+        XCTAssertEqual(onlyVersion.decoderVersionPolicy, .v9)
+        XCTAssertNil(onlyVersion.detail)
+    }
+
+    /// §7.6 — a preset's fragment carries the policy; applying it writes it.
+    func testAPresetCarriesThePolicy() {
+        var source = EditModel.neutral
+        source.decoderVersionPolicy = .v8
+        source.decoderVersion = "8.dng"
+
+        let preset = Preset(name: "p", from: source, groups: [.detail])
+        XCTAssertEqual(preset.edit.decoderVersionPolicy, .v8)
+        XCTAssertEqual(preset.edit.decoderVersion, "8.dng")
+
+        var target = EditModel.neutral
+        target.decoderVersionPolicy = .v9
+        let applied = preset.apply(to: target)
+        XCTAssertEqual(applied.decoderVersionPolicy, .v8)
     }
 }

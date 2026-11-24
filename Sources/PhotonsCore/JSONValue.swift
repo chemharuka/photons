@@ -99,6 +99,12 @@ enum ForwardCompatKnownKeys {
     static let topLevel: Set<String> = {
         var keys: Set<String> = []
         for tree in trees { keys.formUnion(tree.objectKeys) }
+        // 555 — the two conditional document keys. The probe above happens to write them (it has a
+        // hand pick), but they are named here explicitly so a future probe that is fully neutral
+        // cannot make a saved `decoderVersionPolicy` / `resolvedDecoderVersion` look like a future
+        // key and re-emit it beside its own value.
+        keys.insert("decoderVersionPolicy")
+        keys.insert("resolvedDecoderVersion")
         return keys
     }()
 

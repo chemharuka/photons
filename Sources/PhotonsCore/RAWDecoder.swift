@@ -105,6 +105,18 @@ public struct DecodeOptions: Sendable {
     /// value, so `RAWDecoder` reads the version back and reports the effective one
     /// (`DecoderCapabilities`, docs/architecture-decisions.md §11.1 / D2′).
     public var decoderVersion: String?
+    /// 555 — the document's 解码模型 policy. `.auto` follows the 解码偏好 table; `.v8` / `.v9` pin a
+    /// family. Only used when `decoderVersion` is not a deliberate CLI pin (callers that pass a bare
+    /// spelling leave this `.auto`, and the resolver then treats that spelling as the hand pick).
+    public var decoderVersionPolicy: DecoderVersionPolicy
+    /// 555 — the document's stored hand pick, for `DecoderVersionPreference.resolve`. `nil` with
+    /// `decoderResolvedVersion == nil` is the automatic case.
+    public var decoderStoredVersion: String?
+    /// 555 — the document's last resolved spelling. Non-`nil` marks a new automatic document (as
+    /// opposed to a pre-555 hand pick, which has a stored spelling but no resolved one).
+    public var decoderResolvedVersion: String?
+    /// 555 — 设置 → 解码偏好. Phase 2 ships the default; the settings row arrives in Phase 3.
+    public var decoderVersionPreference: DecoderVersionPreference.Preference
     public var exposureEV: Float
     public var scale: Float
     public var draft: Bool
@@ -142,6 +154,10 @@ public struct DecodeOptions: Sendable {
     public var avoidNeuralStage: Bool
 
     public init(decoderVersion: String? = nil,
+                decoderVersionPolicy: DecoderVersionPolicy = .auto,
+                decoderStoredVersion: String? = nil,
+                decoderResolvedVersion: String? = nil,
+                decoderVersionPreference: DecoderVersionPreference.Preference = .auto,
                 exposureEV: Float = 0,
                 scale: Float = 1,
                 draft: Bool = false,
@@ -150,6 +166,10 @@ public struct DecodeOptions: Sendable {
                 detail: DetailSettings = .identity,
                 avoidNeuralStage: Bool = false) {
         self.decoderVersion = decoderVersion
+        self.decoderVersionPolicy = decoderVersionPolicy
+        self.decoderStoredVersion = decoderStoredVersion
+        self.decoderResolvedVersion = decoderResolvedVersion
+        self.decoderVersionPreference = decoderVersionPreference
         self.exposureEV = exposureEV
         self.scale = scale
         self.draft = draft
@@ -411,8 +431,9 @@ public struct RAWProbe: Sendable {
     /// (`FocalLenIn35mmFilm / FocalLength`). `nil` when the file does not carry one.
     public let focalLength: Double?
     public let focalLength35mm: Double?
-    /// 409 — the crop factor this file is decoded at, or `nil` when the EXIF cannot answer (the caller
-    /// then treats it as full frame, per the user's rule). `DecoderAutoVersion.cropFactor`.
+    /// 409/555 — the crop factor this file is decoded at, or `nil` when the EXIF cannot answer (the
+    /// caller then treats it as full frame, per the user's rule).
+    /// `DecoderVersionPreference.cropFactor`.
     public let cropFactor: Double?
     /// 409 — what the automatic rule would ask this file for, i.e. what a document with
     /// `decoderVersion == nil` gets **today**. `nil` = Apple's default (the pre-409 decode).
@@ -602,7 +623,7 @@ public final class RAWDecoder {
 
     public static func versionString(_ v: CIRAWDecoderVersion) -> String { v.rawValue }
 
-    /// 409 — the three EXIF facts the automatic version rule reads, taken from a **live filter's own**
+    /// 409/555 — the three EXIF facts the automatic version rule reads, taken from a **live filter's own**
     /// `properties` (measured on this machine: `L1030433.dng` reports `FocalLength = 50`,
     /// `FocalLenIn35mmFilm = 50`, `ISOSpeedRatings = [100]` right here, so the rule needs neither a
     /// second `CIRAWFilter` nor an ImageIO scan on the decode path).
@@ -657,8 +678,8 @@ public final class RAWDecoder {
         let tiff = (props[kCGImagePropertyTIFFDictionary as String] as? [String: Any])
             ?? (props["{TIFF}"] as? [String: Any])
         let facts = Self.exifFacts(from: props)
-        let crop = DecoderAutoVersion.cropFactor(focalLength: facts.focalLength,
-                                                 focalLength35mm: facts.focalLength35mm)
+        let crop = DecoderVersionPreference.cropFactor(focalLength: facts.focalLength,
+                                                       focalLength35mm: facts.focalLength35mm)
 
         return RAWProbe(supportedVersions: versions,
                         defaultVersion: Self.versionString(filter.decoderVersion),
@@ -670,10 +691,12 @@ public final class RAWDecoder {
                         focalLength: facts.focalLength,
                         focalLength35mm: facts.focalLength35mm,
                         cropFactor: crop,
-                        autoVersion: DecoderAutoVersion.requestedVersion(
-                            explicit: nil, iso: facts.iso,
-                            focalLength: facts.focalLength, focalLength35mm: facts.focalLength35mm,
-                            offered: versions),
+                        // §555 — the probe reports the file's **automatic** answer under the default
+                        // 解码偏好 (自动). It is computed by the one resolver, not by a second rule.
+                        autoVersion: DecoderVersionPreference.candidates(
+                            policy: .auto, preference: .auto, iso: facts.iso,
+                            cropFactor: crop ?? 1, stored: nil, resolved: nil,
+                            in: versions).first,
                         lensCorrectionSupported: Self.probeLensCorrection(filter),
                         lensCorrectionEnabled: filter.isLensCorrectionEnabled,
                         asShotTemperature: Self.saneTemperature(filter.neutralTemperature),
@@ -968,37 +991,54 @@ public final class RAWDecoder {
         let offered = filter.supportedDecoderVersions.map { Self.versionString($0) }
         let filterDefault = Self.versionString(filter.decoderVersion)
 
-        // ── 409: the automatic version, from THIS filter's own facts ─────────────────────────
+        // ── 555: the one automatic version resolver, from THIS filter's own facts ─────────────
         // The rule needs three things: ISO, the crop factor and the file's version list. All three
         // are already in hand here — `offered` above, and `filter.properties` (the same EXIF
-        // dictionary `probe` reads) — so the automatic choice costs **no second filter** and no
-        // ImageIO scan. That is the timing constraint the brief names: v9 冷启 4.86 s.
+        // dictionary `probe` reads) — so the choice costs **no second filter** and no ImageIO scan.
+        // That is the timing constraint the brief names: v9 冷启 4.86 s.
         //
-        // Only a document that asks for nothing is eligible; an explicit `decoderVersion` is the
-        // user's choice and is never second-guessed (`DecoderAutoVersion.requestedVersion`).
-        // A measurement decode keeps today's recipe: its whole point is a fixed, comparable decode,
-        // and a version that follows the EXIF would make the black-level numbers depend on the
-        // threshold.
-        // 425: the rule's answer for a document that asks for nothing, computed **once** and
-        // unconditionally — `measurement` and an explicit `options.decoderVersion` decide what this
-        // decode *requests*, never what the picker must show on an untouched document. This is the
-        // same call `probe` makes, so `capabilities.autoVersion` and `RAWProbe.autoVersion` cannot
-        // drift apart.
+        // 409's `requestedVersion` / `availableV9` are gone: this is the repository's only
+        // automatic-version entry point, and `probe` calls the same table.
+        //
+        // 425: the rule's answer for a document that asks for nothing is computed once and
+        // unconditionally — `measurement` and an explicit document request decide what this decode
+        // *requests*, never what the picker must show on an untouched document.
         let exif = Self.exifFacts(from: filter)
-        let autoVersion = DecoderAutoVersion.requestedVersion(
-            explicit: nil,
-            iso: exif.iso,
-            focalLength: exif.focalLength,
-            focalLength35mm: exif.focalLength35mm,
-            offered: offered)
+        let sensorCrop = DecoderVersionPreference.cropFactor(
+            orFullFrame: exif.focalLength, exif.focalLength35mm)
+        let autoVersion = DecoderVersionPreference.candidates(
+            policy: .auto, preference: options.decoderVersionPreference,
+            iso: exif.iso, cropFactor: sensorCrop, stored: nil, resolved: nil,
+            in: offered).first
+
+        // A bare `DecodeOptions(decoderVersion:)` is a caller's **exact** request (photonsctl
+        // `--version`, the detail probe, a test): it must be assigned verbatim and report the D2′
+        // fallback, exactly as before 555. A document's request travels with its policy/stored/
+        // resolved fields and goes through the resolver.
+        let isExactRequest = options.decoderStoredVersion == nil
+            && options.decoderResolvedVersion == nil
+            && options.decoderVersion != nil
+        var resolution = DecoderVersionPreference.Resolution(
+            available: offered, selected: options.decoderVersion, readBacks: [], notes: [])
         var resolvedRequest = options.decoderVersion
-        if !measurement, options.decoderVersion == nil {
-            resolvedRequest = autoVersion
+        if !measurement, !isExactRequest {
+            resolution = DecoderVersionPreference.resolve(
+                policy: options.decoderVersionPolicy,
+                preference: options.decoderVersionPreference,
+                iso: exif.iso, cropFactor: sensorCrop,
+                stored: options.decoderStoredVersion,
+                resolved: options.decoderResolvedVersion,
+                in: offered) { candidate in
+                    guard DecoderCapabilities.knownVersions.contains(candidate) else { return nil }
+                    filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
+                    return Self.versionString(filter.decoderVersion)
+                }
+            resolvedRequest = resolution.selected
         }
 
         // ── 506-C: 缩略图这条路从不进 ML 阶段 ────────────────────────────────────────────────
         // `options.avoidNeuralStage` 是一个**策略**，不是一次请求：它把版本钉到「这个文件自己
-        // offer 的最宽非 ML 拼写」（实测每台机身都是 v8），因为自动规则（409）会把高 ISO 的
+        // offer 的最宽非 ML 拼写」（实测每台机身都是 v8），因为自动规则（409/555）会把高 ISO 的
         // 文件升到 v9，而 v9 是 ANE。缩略图池是唯一把这条路径开到 8–9 路并发的地方，三份崩溃
         // 报告（11-18 / 11-21 / 11-22）都死在那张进程级 E5RT 程序表上（见
         // docs/tasks/506-raw-decode-ane-concurrency.md）。文件只 offer v9 时保持原请求 —— 换
@@ -1010,18 +1050,20 @@ public final class RAWDecoder {
         // ── 前置 ① D2′: v8 default + read-back assert ────────────────────────────────────────
         // Assign, then read back. A body that does not whitelist the request keeps the old value
         // (measurably: v9 on an SL3 stays v8), so the read-back — not the assignment — is the
-        // truth. On a mismatch we pin the D2′ default and report `effectiveVersion`.
+        // truth. The resolver has already assigned its candidates; this branch covers the exact
+        // caller request and the measurement decode, and verifies the resolver's answer too.
         var effective = filterDefault
         if let wanted = resolvedRequest {
             guard DecoderCapabilities.knownVersions.contains(wanted) else {
                 throw DecodeError.unsupportedVersion(requested: wanted, available: offered)
             }
-            // The document holds one item of this file's own `supportedDecoderVersions`, assigned
-            // verbatim. A value this file does not offer (a document written on another body, or a bare
-            // `9` where only `9.dng` exists) is **not** rewritten into something that works: it is
-            // assigned, it reads back as whatever the filter kept, and both the inspector and
-            // `DecoderCapabilities.downgraded` report that fallback.
-            filter.decoderVersion = CIRAWDecoderVersion(rawValue: wanted)
+            if isExactRequest || measurement || options.avoidNeuralStage
+                || filter.decoderVersion.rawValue != wanted {
+                // The exact-request / measurement / thumbnail pin path keeps the pre-555 rule: assign
+                // verbatim, read back, and pin the D2′ default on a refusal. A resolver answer was
+                // already read back while it was chosen; re-assigning it is a no-op.
+                filter.decoderVersion = CIRAWDecoderVersion(rawValue: wanted)
+            }
             effective = Self.versionString(filter.decoderVersion)
             if effective != wanted {
                 // Downgrade explicitly, then re-read: reporting the *requested* version here is
@@ -1030,6 +1072,12 @@ public final class RAWDecoder {
                     rawValue: DecoderCapabilities.preferredDefault(offered: offered, filterDefault: filterDefault))
                 effective = Self.versionString(filter.decoderVersion)
             }
+        } else if !measurement, !resolution.readBacks.isEmpty {
+            // Every candidate was silently rewritten: the old contract is the D2′ default, not
+            // whatever the last rejected assignment left behind.
+            filter.decoderVersion = CIRAWDecoderVersion(
+                rawValue: DecoderCapabilities.preferredDefault(offered: offered, filterDefault: filterDefault))
+            effective = Self.versionString(filter.decoderVersion)
         }
 
         // ── 前置 ② explicit linear ──────────────────────────────────────────────────────────

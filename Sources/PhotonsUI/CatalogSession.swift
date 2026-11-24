@@ -5236,6 +5236,9 @@ public final class CatalogSession {
         let inputs = document.decodeInputs
         let decoded = try RAWDecoder().decode(url, options: DecodeOptions(
             decoderVersion: inputs.decoderVersion,
+            decoderVersionPolicy: inputs.decoderVersionPolicy,
+            decoderStoredVersion: inputs.decoderStoredVersion,
+            decoderResolvedVersion: inputs.decoderResolvedVersion,
             scale: decodeScale,
             whiteBalance: inputs.whiteBalance,
             detail: inputs.detail))

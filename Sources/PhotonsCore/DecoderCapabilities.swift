@@ -32,9 +32,9 @@ public struct DecoderCapabilities: Sendable, Equatable {
     /// screen.
     public let supportedVersions: [String]
 
-    /// 425 — **what a document that asks for nothing would get today**: the answer of the 409 rule
-    /// (`DecoderAutoVersion.requestedVersion(explicit: nil, …)`) for this file, byte for byte the same
-    /// value `RAWProbe.autoVersion` reports. `nil` = the rule does not upgrade (Apple's default, v8).
+    /// 425 — **what a document that asks for nothing would get today**: the 555 resolver's first
+    /// candidate for this file under the default 解码偏好 (自动), the same value `RAWProbe.autoVersion`
+    /// reports. `nil` = the file offers no usable spelling.
     ///
     /// It is **not** `requestedVersion`: that one is the final request of *this* decode, and it differs
     /// whenever the document named a version explicitly or the decode is a measurement. This field is a
