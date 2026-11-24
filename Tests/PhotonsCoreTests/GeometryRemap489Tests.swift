@@ -34,7 +34,10 @@ final class GeometryRemap489Tests: XCTestCase {
         XCTAssertEqual(g.rotationDegrees, 3.5, accuracy: 1e-15)
         XCTAssertEqual(g.aspectLock, .square, "a 1:1 lock survives a quarter turn")
         XCTAssertEqual(g.perspectiveVertical, 30, accuracy: 1e-15)
-        XCTAssertEqual(g.perspectiveHorizontal, -40, accuracy: 1e-15)
+        // 545 — one quarter turn swaps the two knobs and negates **only** the vertical result:
+        // `h' = +v`. The `−h` this assertion used to carry was the mirror bug `GeometryOrder545Tests`
+        // measures on the four corners (5.9e−2 at `v = 60`), not a convention.
+        XCTAssertEqual(g.perspectiveHorizontal, 40, accuracy: 1e-15)
         XCTAssertEqual(g.perspectiveShear, -0.2, accuracy: 1e-15)
         XCTAssertEqual(g.perspectiveAspect, 2.0 / 3.0, accuracy: 1e-15)
         XCTAssertEqual(g.cropSpace, .canvas)
@@ -49,7 +52,7 @@ final class GeometryRemap489Tests: XCTestCase {
         let g = base().remapped(for: .rotateCCW)
         XCTAssertEqual(g.quarterTurns, 0)
         XCTAssertEqual(g.crop, NormalizedRect(x: 0.2, y: 0.4, width: 0.3, height: 0.5))
-        XCTAssertEqual(g.perspectiveVertical, 30, accuracy: 1e-15)
+        XCTAssertEqual(g.perspectiveVertical, -30, accuracy: 1e-15)
         XCTAssertEqual(g.perspectiveHorizontal, -40, accuracy: 1e-15)
         XCTAssertEqual(g.perspectiveShear, -0.2, accuracy: 1e-15)
         XCTAssertEqual(g.perspectiveAspect, 2.0 / 3.0, accuracy: 1e-15)

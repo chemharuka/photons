@@ -420,7 +420,9 @@ private final class BackgroundTaskRowView: NSTableCellView {
         thumbnail.layer?.masksToBounds = true
         addSubview(thumbnail)
 
-        thumbnailImageView.imageScaling = .scaleProportionallyUpOrDown
+        // 549 — the square is a 1:1 centre crop, not a letterboxed contain. The bitmap is cropped
+        // below; this scaling then fills the square with those pixels.
+        thumbnailImageView.imageScaling = .scaleAxesIndependently
         thumbnailImageView.imageAlignment = .alignCenter
         thumbnailImageView.wantsLayer = true
         thumbnailImageView.layer?.cornerRadius = 3
@@ -509,15 +511,28 @@ private final class BackgroundTaskRowView: NSTableCellView {
     private func showThumbnail(_ image: CGImage?, key: String?) {
         displayedThumbnailKey = image == nil ? nil : key
         if let image {
+            // 549 — a non-square photo is cropped from its centre (side = min(w, h)), so the 28 pt
+            // square is covered edge to edge instead of showing letterbox bars.
+            let square = Self.centerSquare(image)
             // 488 — the square shows the processed photo, not the placeholder tint.
             thumbnail.layer?.backgroundColor = NSColor.clear.cgColor
-            thumbnailImageView.image = NSImage(cgImage: image,
-                                               size: NSSize(width: image.width,
-                                                            height: image.height))
+            thumbnailImageView.image = NSImage(cgImage: square,
+                                               size: NSSize(width: square.width,
+                                                            height: square.height))
         } else {
             thumbnail.layer?.backgroundColor = Self.placeholderColor.cgColor
             thumbnailImageView.image = nil
         }
+    }
+
+    /// 549 — the largest centred square of the source bitmap. A source that is already square is
+    /// handed back untouched (no needless re-encode / copy).
+    private static func centerSquare(_ image: CGImage) -> CGImage {
+        let side = min(image.width, image.height)
+        guard side > 0, image.width != image.height else { return image }
+        let crop = CGRect(x: (image.width - side) / 2, y: (image.height - side) / 2,
+                          width: side, height: side)
+        return image.cropping(to: crop) ?? image
     }
 
     override func layout() {
