@@ -63,6 +63,9 @@ public struct SettingsView: View {
     @State private var appearance: AppearancePreference = .current
     /// 473 — 画布衬底。显式选过就永久遵守；没选过时显示当前的随外观默认。
     @State private var canvasBackdrop: CanvasBackdrop = .current
+    /// 555 — 解码偏好（自动 / 优先 v9 / 优先 v8）。写 `AppPreferences.store`，切换即重解当前文档。
+    @State private var decoderPreference: DecoderVersionPreference.Preference =
+        DecoderVersionPreference.setting
 
     public init() {}
 
@@ -80,6 +83,7 @@ public struct SettingsView: View {
                 languageRow
                 appearanceRow
                 canvasRow
+                decoderSection
             }
 
             if let notice = Self.pendingNotice(for: language) {
@@ -104,6 +108,7 @@ public struct SettingsView: View {
         .onAppear {
             appearance = .current
             canvasBackdrop = .current
+            decoderPreference = DecoderVersionPreference.setting
         }
         .onChange(of: language) { _, new in
             Loc.setLanguage(new)
@@ -114,6 +119,9 @@ public struct SettingsView: View {
             if AppPreferences.store.string(forKey: CanvasBackdrop.defaultsKey) == nil {
                 canvasBackdrop = CanvasBackdrop.current
             }
+        }
+        .onChange(of: decoderPreference) { _, new in
+            DecoderVersionPreference.setSetting(new)
         }
     }
 
@@ -207,6 +215,36 @@ public struct SettingsView: View {
         }
     }
 
+    /// 555 — 「解码」分区, after 画布: one three-way 解码偏好 row and the ML-cost note underneath.
+    ///
+    /// The note is a real `NSTextField` (not a SwiftUI `Text`) so a UI test can read the control's
+    /// own font size and secondary colour, and so the smaller/secondary style is one AppKit fact
+    /// instead of a source string.
+    private var decoderSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(Loc.t("解码"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("settings.decoder.title")
+            HStack(spacing: 12) {
+                Text(Loc.t("解码偏好"))
+                    .frame(width: 64, alignment: .leading)
+                Picker("", selection: $decoderPreference) {
+                    ForEach(DecoderVersionPreference.Preference.allCases, id: \.self) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+                .accessibilityIdentifier("settings.decoderPreference")
+            }
+            SettingsSecondaryNote(text: Loc.t("解码版本 9 使用机器学习降噪算法，处理时长慢 5–10 倍"),
+                                  identifier: "settings.decoderPreference.note")
+                .frame(maxWidth: 380, alignment: .leading)
+        }
+    }
+
     private func appearanceLabel(_ preference: AppearancePreference) -> String {
         switch preference {
         case .system: return "跟随系统"
@@ -234,5 +272,34 @@ public struct SettingsView: View {
                                            configuration: config) { _, _ in
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
+    }
+}
+
+/// 555 — the settings window's one small secondary note line.
+///
+/// It is an `NSTextField` on purpose: 「小字/次要色」 is then a control fact (point size 11 and
+/// `secondaryLabelColor`, dynamic with the appearance) that the acceptance test reads back from the
+/// hosted view tree, not a claim about a SwiftUI modifier in the source.
+struct SettingsSecondaryNote: NSViewRepresentable {
+    let text: String
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 2
+        field.setAccessibilityIdentifier(identifier)
+        field.identifier = NSUserInterfaceItemIdentifier(identifier)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        if field.stringValue != text { field.stringValue = text }
+        field.font = .systemFont(ofSize: 11)
+        field.textColor = .secondaryLabelColor
+        field.setAccessibilityIdentifier(identifier)
+        field.identifier = NSUserInterfaceItemIdentifier(identifier)
     }
 }

@@ -8989,6 +8989,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
             decoderVersionPolicy: inputs.decoderVersionPolicy,
             decoderStoredVersion: inputs.decoderStoredVersion,
             decoderResolvedVersion: inputs.decoderResolvedVersion,
+            decoderVersionPreference: DecoderVersionPreference.setting,
             exposureEV: 0,
             scale: scale,
             whiteBalance: inputs.whiteBalance,

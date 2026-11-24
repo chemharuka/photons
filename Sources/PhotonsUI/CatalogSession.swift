@@ -851,6 +851,23 @@ public final class CatalogSession {
     /// attributing one picture's as-shot pair to the next one.
     private var capabilitiesAssetID: String?
 
+    // MARK: 555 Phase 3 — the document's resolved decoder spelling
+
+    /// The one `CIRAWFilter` reading of the **open** file: versions, ISO, crop. Reused when the
+    /// 解码偏好 changes, so switching the setting does not pay for a second probe.
+    public private(set) var decoderFacts: DecoderVersionPreference.DocumentFacts?
+    private var decoderFactsAssetID: String?
+
+    /// The last live resolution (diagnostics / `--ui-smoke`); `nil` for a hand-picked or legacy
+    /// document, which does not read the table.
+    public private(set) var lastDecoderResolution: DecoderVersionPreference.DocumentResolution?
+
+    /// Successful `Catalog.recordResolvedDecoderVersion` writes. Stays at 1 when the same decode is
+    /// answered three times, which is the idempotence reading the acceptance asks for.
+    public private(set) var decoderResolutionWrites = 0
+
+    private nonisolated(unsafe) var decoderSettingObserver: NSObjectProtocol?
+
     /// 540 — the **loaded photo's** as-shot white balance, available as soon as `edit` is assigned.
     ///
     /// It is the stored catalog row on a switch (`Catalog.storedAsShotWhiteBalance`), and the first
@@ -898,6 +915,20 @@ public final class CatalogSession {
         // Restored before the first `open()`, so a session's very first query already lands in the
         // order the user chose last time — there is no "restore after the first paint" flicker.
         sortOrder = PhotoSortPreferences.recall(from: sortPreferenceStore)
+        // 555 Phase 3 — a change in 设置 → 解码偏好 re-resolves the open 自动 document and bumps
+        // `editRevision`, which is the loupe's one "render this document again" signal. The observer
+        // is main-queue because `CatalogSession` is `@MainActor`.
+        decoderSettingObserver = NotificationCenter.default.addObserver(
+            forName: DecoderVersionPreference.settingDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.decoderPreferenceDidChange() }
+            }
+    }
+
+    deinit {
+        if let decoderSettingObserver {
+            NotificationCenter.default.removeObserver(decoderSettingObserver)
+        }
     }
 
     // MARK: lifecycle
@@ -3849,7 +3880,12 @@ public final class CatalogSession {
     /// reverse-gate door can defer exactly this step until a frame lands.
     private func applyEditLoad(_ load: DeferredEditLoad) {
         var timeline = load.timeline
-        edit = load.model
+        // 555 Phase 3 — resolve before the first identity chain is built. The document is still
+        // 自动 (no hand pick), so the spelling comes from the file's own list + ISO + 解码偏好, and
+        // the key names that fact from the very first frame (`ver=8`, never `ver=auto`).
+        var model = load.model
+        resolveDecoderVersionAtOpen(asset: load.asset, model: &model)
+        edit = model
         // A synchronous read that threw must not be mistaken for "the stack is empty": the floor
         // would be saved over the stored one. It stays incomplete and writes are refused until a
         // later full read succeeds.
@@ -3862,9 +3898,13 @@ public final class CatalogSession {
         } else {
             // A usable floor immediately; the stored stack replaces it when the background read
             // lands (or `flushPendingEditHistory()` pulls it forward before a write).
-            history = EditHistory(baseline: load.model)
+            history = EditHistory(baseline: model)
         }
         loadedEditAssetID = load.asset.id
+        // A decode fact is not an edit: stamp the current snapshot so a later save cannot disagree
+        // with the blob, then persist only when the photo already has a develop row.
+        history.setResolvedDecoderVersion(model.resolvedDecoderVersion)
+        persistResolvedDecoderVersion(model.resolvedDecoderVersion)
         // 540 — the as-shot pair is read with the document, not with the first frame. One indexed
         // settings row, synchronous, so the two white-balance rows are ready at the same moment as
         // every other slider (530). A miss stays `nil`: the first frame fills it in below.
@@ -4077,6 +4117,114 @@ public final class CatalogSession {
         return true
     }
 
+    // MARK: 555 Phase 3 — resolving the document's decoder spelling
+
+    /// 555 Phase 3 — the **pure** half: apply the 解码偏好 table to a document and install the answer.
+    ///
+    /// `available` / `iso` / `cropFactor` are the file's facts (from a probe, from the last frame's
+    /// capabilities, or from a test). An 自动 document with no hand pick gets `resolvedDecoderVersion`
+    /// set *before* the next identity chain is built; a legacy document (`decoderVersion` set, no
+    /// resolved) and a hand pick (`.v8` / `.v9`) are left exactly as they are.
+    ///
+    /// Returns the spelling now in force — for a hand-picked document, its own spelling.
+    @discardableResult
+    public func adoptDecoderResolution(available: [String], iso: Int?,
+                                       cropFactor: Double = 1,
+                                       effectiveDefault: String? = nil,
+                                       preference: DecoderVersionPreference.Preference = DecoderVersionPreference.setting)
+        -> String? {
+        guard edit.decoderVersionPolicy == .auto, edit.decoderVersion == nil else {
+            return edit.decodeInputs.decoderVersion
+        }
+        let resolution = DecoderVersionPreference.resolve(
+            policy: .auto, preference: preference, iso: iso, cropFactor: cropFactor,
+            stored: nil, resolved: edit.resolvedDecoderVersion, in: available) { $0 }
+        let spelling = resolution.selected ?? effectiveDefault
+        installResolvedDecoderVersion(spelling)
+        return spelling
+    }
+
+    /// Install the resolved spelling as a **decode fact**: no snapshot, no `edit_time`, no history
+    /// row. The document's identity chain moves (`editRevision`), which is what re-renders the frame
+    /// with the new `ver=`; the stored blob is only stamped when the photo already has a develop row.
+    private func installResolvedDecoderVersion(_ spelling: String?) {
+        guard edit.decoderVersionPolicy == .auto, edit.decoderVersion == nil else { return }
+        if edit.resolvedDecoderVersion != spelling {
+            edit.resolvedDecoderVersion = spelling
+            editRevision &+= 1
+            lastEditChangedAt = CFAbsoluteTimeGetCurrent()
+            history.setResolvedDecoderVersion(spelling)
+            notifyEditObservers(assetID: editedAssetID)
+        }
+        persistResolvedDecoderVersion(spelling)
+    }
+
+    private func persistResolvedDecoderVersion(_ spelling: String?) {
+        guard let catalog, let id = loadedEditAssetID else { return }
+        guard let record = try? catalog.recordResolvedDecoderVersion(spelling, forAsset: id) else {
+            return
+        }
+        guard record.changed else { return }
+        decoderResolutionWrites += 1
+        if let index = assets.firstIndex(where: { $0.id == id }) {
+            assets[index].developJson = record.developJSON
+            assets[index].developVersion = record.developVersion
+            assets[index].historyEnd = record.historySeq
+        }
+    }
+
+    /// Called at document load, while the file's `available` list is at hand. Only a new 自动
+    /// document (policy `.auto`, no stored spelling) is resolved: that is the shape Phase 2 left
+    /// spelling the key `auto`.
+    private func resolveDecoderVersionAtOpen(asset: Asset, model: inout EditModel) {
+        decoderFacts = nil
+        decoderFactsAssetID = asset.id
+        lastDecoderResolution = nil
+        guard model.decoderVersionPolicy == .auto, model.decoderVersion == nil else { return }
+        guard let url = fileURL(for: asset),
+              FileManager.default.isReadableFile(atPath: url.path),
+              let facts = DecoderVersionPreference.facts(for: url) else { return }
+        decoderFacts = facts
+        let live = resolution(from: facts, resolved: model.resolvedDecoderVersion)
+        lastDecoderResolution = live
+        if let spelling = live.spelling {
+            model.resolvedDecoderVersion = spelling
+        }
+    }
+
+    /// The pure table over one file's facts. No candidate is assigned here: the open path must not
+    /// pay v9's ML cold start a second time before the development that will actually use it. The
+    /// decode path still assigns and reads back; `recordCapabilities` stamps the **effective**
+    /// spelling afterwards, so a silent rewrite moves the key instead of leaving a prediction.
+    private func resolution(from facts: DecoderVersionPreference.DocumentFacts,
+                            resolved: String?) -> DecoderVersionPreference.DocumentResolution {
+        let resolution = DecoderVersionPreference.resolve(
+            policy: .auto, preference: DecoderVersionPreference.setting,
+            iso: facts.iso, cropFactor: facts.cropFactor,
+            stored: nil, resolved: resolved, in: facts.available) { $0 }
+        return DecoderVersionPreference.DocumentResolution(resolution: resolution, facts: facts)
+    }
+
+    /// 设置 → 解码偏好 moved. Re-resolve the open 自动 document so the next `ver=` is the new
+    /// answer; the `editRevision` bump is what makes the loupe draw it.
+    private func decoderPreferenceDidChange() {
+        guard edit.decoderVersionPolicy == .auto, edit.decoderVersion == nil else { return }
+        if let facts = decoderFacts, decoderFactsAssetID == anchorAsset?.id {
+            let live = resolution(from: facts, resolved: edit.resolvedDecoderVersion)
+            lastDecoderResolution = live
+            installResolvedDecoderVersion(live.spelling)
+            return
+        }
+        guard let asset = anchorAsset, let url = fileURL(for: asset),
+              FileManager.default.isReadableFile(atPath: url.path),
+              let fresh = DecoderVersionPreference.facts(for: url) else { return }
+        decoderFacts = fresh
+        decoderFactsAssetID = asset.id
+        let live = resolution(from: fresh, resolved: edit.resolvedDecoderVersion)
+        lastDecoderResolution = live
+        installResolvedDecoderVersion(live.spelling)
+    }
+
     public func recordCapabilities(_ c: DecoderCapabilities) {
         // Equality-guarded: every presented frame reports the same facts, and an unconditional write
         // would re-render the SwiftUI inspector once per slider frame for no information. The photo
@@ -4085,6 +4233,22 @@ public final class CatalogSession {
         guard capabilities != c || capabilitiesAssetID != loadedEditAssetID else { return }
         capabilities = c
         capabilitiesAssetID = loadedEditAssetID
+
+        // 555 Phase 3 — the frame's read-back is the strongest fact there is: whatever the resolver
+        // predicted, these pixels were shaped by `effectiveVersion`. Stamping it makes a silent
+        // downgrade move the key instead of leaving it naming a spelling no buffer had.
+        if edit.decoderVersionPolicy == .auto, edit.decoderVersion == nil,
+           !c.effectiveVersion.isEmpty,
+           DecoderCapabilities.knownVersions.contains(c.effectiveVersion) {
+            if var facts = decoderFacts, decoderFactsAssetID == loadedEditAssetID {
+                facts = DecoderVersionPreference.DocumentFacts(
+                    available: c.supportedVersions.isEmpty ? facts.available : c.supportedVersions,
+                    iso: facts.iso, cropFactor: facts.cropFactor,
+                    defaultVersion: facts.defaultVersion)
+                decoderFacts = facts
+            }
+            installResolvedDecoderVersion(c.effectiveVersion)
+        }
 
         // 540 — persist the file's own pair on the first development and correct an old row. The
         // first frame is the truth; a stored value that disagrees is rewritten exactly once and
@@ -5239,6 +5403,7 @@ public final class CatalogSession {
             decoderVersionPolicy: inputs.decoderVersionPolicy,
             decoderStoredVersion: inputs.decoderStoredVersion,
             decoderResolvedVersion: inputs.decoderResolvedVersion,
+            decoderVersionPreference: DecoderVersionPreference.setting,
             scale: decodeScale,
             whiteBalance: inputs.whiteBalance,
             detail: inputs.detail))

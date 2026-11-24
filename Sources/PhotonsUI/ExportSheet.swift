@@ -80,6 +80,7 @@ public enum UIExportRenderer {
             decoderVersionPolicy: inputs.decoderVersionPolicy,
             decoderStoredVersion: inputs.decoderStoredVersion,
             decoderResolvedVersion: inputs.decoderResolvedVersion,
+            decoderVersionPreference: DecoderVersionPreference.setting,
             scale: decodeScale,
             whiteBalance: exportWhiteBalance,
             detail: inputs.detail))

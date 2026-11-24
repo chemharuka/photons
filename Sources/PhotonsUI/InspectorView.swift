@@ -1218,13 +1218,15 @@ public struct InspectorView: View {
     private var detailCard: some View {
         let baseline = detailBaselineValue
         let caps = session.capabilities
-        let chosen = chosenDecoderSpelling(offered: caps?.supportedVersions ?? [],
-                                           auto: caps?.autoVersion)
+        let offered = caps?.supportedVersions ?? []
+        let choice = chosenDecoderChoice(offered: offered, auto: caps?.autoVersion)
+        let chosen = choice.spelling ?? chosenDecoderSpelling(offered: offered,
+                                                             auto: caps?.autoVersion)
         let axes = Self.detailAxes(capabilities: caps,
                                    requested: chosen,
                                    document: session.edit.decoderVersion)
         return card(Section.detail.title, reset: { resetGroup(.detail) }) {
-            decoderModelRow(chosen: chosen, offered: caps?.supportedVersions ?? [],
+            decoderModelRow(choice: choice, offered: offered,
                             auto: caps?.autoVersion,
                             effective: caps?.effectiveVersion)
             divider
@@ -1405,7 +1407,7 @@ public struct InspectorView: View {
     /// The line underneath is the **read-back**, never the request: `session.capabilities.effectiveVersion`
     /// is what the filter reported *after* the assignment, so a version this file cannot honour says
     /// `已退回 v8` instead of the panel claiming something that did not run.
-    private func decoderModelRow(chosen: String, offered: [String], auto: String?,
+    private func decoderModelRow(choice: DecoderModelChoice, offered: [String], auto: String?,
                                  effective: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: SliderRowStyle.standard.headSpacing) {
@@ -1414,13 +1416,23 @@ public struct InspectorView: View {
                                   weight: SliderRowStyle.standard.labelWeight))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
-                Picker(Loc.t("解码模型"), selection: Binding(get: { chosen },
-                                                     set: { spelling in
-                                                         resets.decoderVersion(spelling, offered: offered,
-                                                                               auto: auto)
+                Picker(Loc.t("解码模型"), selection: Binding(get: { choice },
+                                                     set: { picked in
+                                                         switch picked {
+                                                         case .auto:
+                                                             _ = resets.decoderPolicy(
+                                                                 .auto, offered: offered, auto: auto)
+                                                         case .spelling(let spelling):
+                                                             let policy = DecoderVersionPolicy
+                                                                 .pinning(spelling) ?? .auto
+                                                             _ = resets.decoderPolicy(
+                                                                 policy, spelling: spelling,
+                                                                 offered: offered, auto: auto)
+                                                         }
                                                      })) {
-                    ForEach(Self.decoderChoices(chosen: chosen, offered: offered), id: \.self) { spelling in
-                        Text(Self.decoderVersionLabel(spelling)).tag(spelling)
+                    ForEach(Self.decoderModelChoices(chosen: choice, offered: offered),
+                            id: \.self) { item in
+                        Text(item.label).tag(item)
                     }
                 }
                 .labelsHidden()
@@ -1429,8 +1441,20 @@ public struct InspectorView: View {
                 .frame(width: 96, alignment: .trailing)
                 .accessibilityIdentifier("inspector.detail.decoderModel")
             }
-            if let note = Self.decoderModelNote(requested: session.edit.decoderVersion,
-                                                effective: effective) {
+            if case .auto = choice {
+                let note = Self.decoderModelAutoNote(
+                    resolved: session.edit.resolvedDecoderVersion ?? auto,
+                    effective: effective)
+                Text(note)
+                    .font(.system(size: 9))
+                    .foregroundStyle(Self.decoderModelAutoWasDowngraded(
+                        resolved: session.edit.resolvedDecoderVersion ?? auto,
+                        effective: effective)
+                                     ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("inspector.detail.decoderModel.effective")
+            } else if let note = Self.decoderModelNote(requested: session.edit.decoderVersion,
+                                                       effective: effective) {
                 Text(note)
                     .font(.system(size: 9))
                     .foregroundStyle(Self.decoderModelWasDowngraded(requested: session.edit.decoderVersion,
@@ -1710,8 +1734,72 @@ public struct InspectorView: View {
     ///
     /// `offered` is empty until the first development lands (the list arrives with
     /// `DecoderCapabilities.supportedVersions`), in which case `8` is shown and the note stays silent.
+    /// 555 Phase 3 — the 「解码模型」 Picker's items: **自动** first, then the file's own spellings.
+    ///
+    /// `.auto` is a *policy*, not a spelling: choosing it stores 自动 + the resolved result, and the
+    /// sub-line says what that resolved to. A spelling pins its family (`.v8` / `.v9`); a spelling
+    /// the three-way policy cannot name (`7.dng`) is stored as the legacy pin, exactly as before.
+    public enum DecoderModelChoice: Hashable, Sendable {
+        case auto
+        case spelling(String)
+
+        public var label: String {
+            switch self {
+            case .auto: return Loc.t("自动")
+            case .spelling(let spelling): return InspectorView.decoderVersionLabel(spelling)
+            }
+        }
+
+        public var spelling: String? {
+            if case .spelling(let spelling) = self { return spelling }
+            return nil
+        }
+    }
+
+    /// The document's item: 自动 exactly when the policy is 自动 **and** no spelling is pinned.
+    /// A pre-555 document has a stored spelling and no resolved result — it was a hand pick, so the
+    /// picker shows that spelling, not 自动.
+    public static func decoderModelChoice(policy: DecoderVersionPolicy, stored: String?,
+                                          offered: [String], auto: String?) -> DecoderModelChoice {
+        if policy == .auto, stored == nil { return .auto }
+        return .spelling(stored ?? auto ?? defaultDecoderSpelling(offered: offered))
+    }
+
+    /// 自动 first, then the file's list in the file's order (the chosen spelling is guaranteed
+    /// present, so a document from another body still shows what it asks for).
+    public static func decoderModelChoices(chosen: DecoderModelChoice,
+                                           offered: [String]) -> [DecoderModelChoice] {
+        var list: [DecoderModelChoice] = [.auto]
+        let spelling = chosen.spelling ?? defaultDecoderSpelling(offered: offered)
+        for item in decoderChoices(chosen: spelling, offered: offered)
+        where !list.contains(.spelling(item)) {
+            list.append(.spelling(item))
+        }
+        return list
+    }
+
+    private func chosenDecoderChoice(offered: [String], auto: String?) -> DecoderModelChoice {
+        Self.decoderModelChoice(policy: session.edit.decoderVersionPolicy,
+                                stored: session.edit.decoderVersion,
+                                offered: offered, auto: auto)
+    }
+
     private func chosenDecoderSpelling(offered: [String], auto: String?) -> String {
         Self.chosenDecoderSpelling(stored: session.edit.decoderVersion, offered: offered, auto: auto)
+    }
+
+    /// The sub-line for 自动: 「自动 · 9.dng」. The effective spelling wins once a frame has landed —
+    /// the pixels are the truth — and `resolved` is the fallback before the first frame.
+    public static func decoderModelAutoNote(resolved: String?, effective: String?) -> String {
+        let spelling = effective ?? resolved
+        guard let spelling, !spelling.isEmpty else { return Loc.t("自动") }
+        return "\(Loc.t("自动")) · \(spelling)"
+    }
+
+    /// A silent rewrite of an automatic request is still a downgrade worth colouring orange.
+    public static func decoderModelAutoWasDowngraded(resolved: String?, effective: String?) -> Bool {
+        guard let resolved, let effective else { return false }
+        return resolved != effective
     }
 
     /// **Which item is on screen**, as one pure function: the document's own spelling, else the 409
@@ -3632,13 +3720,18 @@ public struct PanelResets {
     /// mint empty snapshots (and cannot silently reset four sliders either).
     @discardableResult
     public func decoderVersion(_ spelling: String, offered: [String], auto: String? = nil) -> Bool {
-        // 425: 「回到自动」= picking the automatic spelling itself. `nil` then means "let the 409 rule
-        // decide at decode time", which is exactly what the picker's own `auto` branch displays.
+        // 425: 「回到自动」= picking the automatic spelling itself. `nil` then means "let the rule
+        // decide at decode time", which is exactly what the picker's own 自动 branch displays.
         let autoSpelling = auto ?? InspectorView.defaultDecoderSpelling(offered: offered)
         let stored: String? = (spelling == autoSpelling) ? nil : spelling
         guard stored != session.edit.decoderVersion else { return false }
         session.applyEdit {
             $0.decoderVersion = stored
+            // An explicit spelling is a hand pick: clear the automatic result it no longer describes
+            // (and `7.dng` pins as the legacy hand pick by having no resolved result). Picking the
+            // **automatic** spelling keeps the resolved fact the open already installed, so the key
+            // stays `ver=<spelling>` and the frame is not developed twice.
+            if stored != nil { $0.resolvedDecoderVersion = nil }
             // The same edit, not a second one: 版本 + 四轴 = 一条历史 (see the type's own note above).
             $0.detailSettings = .identity
         }
@@ -3647,6 +3740,46 @@ public struct PanelResets {
         // A command, not a slider tick: the user is already looking at the result and will not move
         // the pointer to make the low-resolution whole picture follow. Arm its rebuild now; the next
         // landed frame (the new development) is what actually renders it.
+        if committed { loupe?.refreshLowResFullFrameForDecodeInputs() }
+        return committed
+    }
+
+    /// 555 Phase 3 — the Picker's **自动** item and the pinned families in one command.
+    ///
+    /// - `.auto` with `spelling == nil`: the document stores 自动 + the resolved spelling the
+    ///   capabilities already know (`auto`). The next frame re-resolves with the current 解码偏好.
+    /// - `.auto` with a spelling: a version the three-way policy cannot name (`7`, `7.dng`); it is
+    ///   stored as the legacy pin — present, no resolved result — and keeps its pixels.
+    /// - `.v8` / `.v9`: the spelling is pinned; the 设置 cannot move it and a rejected spelling falls
+    ///   back only inside that family.
+    ///
+    /// One pick = one history entry, and the four decoder amounts go back to the body's baseline in
+    /// the same entry (the 425 rule, unchanged).
+    @discardableResult
+    public func decoderPolicy(_ policy: DecoderVersionPolicy, spelling: String? = nil,
+                              offered: [String], auto: String? = nil) -> Bool {
+        var next = session.edit
+        switch policy {
+        case .auto:
+            if let spelling {
+                next.decoderVersionPolicy = .auto
+                next.decoderVersion = spelling
+                next.resolvedDecoderVersion = nil
+            } else {
+                next.decoderVersionPolicy = .auto
+                next.decoderVersion = nil
+                next.resolvedDecoderVersion = auto
+            }
+        case .v8, .v9:
+            guard let spelling else { return false }
+            next.decoderVersionPolicy = policy
+            next.decoderVersion = spelling
+            next.resolvedDecoderVersion = nil
+        }
+        next.detailSettings = .identity
+        guard !EditHistory.isSemanticallyIdentical(session.edit, next) else { return false }
+        session.applyEdit { $0 = next }
+        let committed = session.commitEdit(label: Loc.t("解码模型"), coalesce: false)
         if committed { loupe?.refreshLowResFullFrameForDecodeInputs() }
         return committed
     }

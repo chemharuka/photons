@@ -1,5 +1,11 @@
 import XCTest
+import AppKit
+import SwiftUI
+import GRDB
+import PhotonsCatalog
 import PhotonsCore
+import PhotonsLocalization
+@testable import PhotonsCatalog
 @testable import PhotonsUI
 
 /// §555 Phase 1 — **the document policy, the 解码偏好 table, and the one resolver**.
@@ -12,6 +18,7 @@ import PhotonsCore
 ///   · if `.v8` were allowed to fall through to v9, `testTheV8PolicyNeverFallsThroughToNine` goes red;
 ///   · if the cache key were spelled `auto` instead of the resolved spelling,
 ///     `testTheKeyNamesTheResolvedSpellingNotAuto` goes red.
+@MainActor
 final class DecoderPolicy555Tests: XCTestCase {
 
     private let all = ["9", "9.dng", "8", "8.dng"]
@@ -125,9 +132,11 @@ final class DecoderPolicy555Tests: XCTestCase {
         XCTAssertEqual(selected(.auto, .preferV8, iso: 400, stored: "8.dng", resolved: nil,
                                 in: all), "8.dng")
 
-        // Once a resolved result exists, the same document follows the table (it is a new auto doc).
+        // Phase 3 — a stored spelling wins even when a resolved fact was recorded earlier: it is the
+        // user's hand pick, and 「手选拼写在任何设置下都不变」. A genuinely automatic document stores
+        // no spelling at all.
         XCTAssertEqual(selected(.auto, .preferV8, iso: 400, stored: "9.dng", resolved: "9.dng",
-                                in: all), "8")
+                                in: all), "9.dng")
     }
 
     // MARK: - 2. threshold
@@ -381,5 +390,345 @@ final class DecoderPolicy555Tests: XCTestCase {
         target.decoderVersionPolicy = .v9
         let applied = preset.apply(to: target)
         XCTAssertEqual(applied.decoderVersionPolicy, .v8)
+    }
+
+    // MARK: - 6. Phase 3 · the key never spells `auto`
+
+    /// Acceptance ① — a brand-new 自动 document adopts the resolved spelling **before** the first
+    /// identity chain is built, and every key says `ver=<spelling>`.
+    func testANewAutomaticDocumentNamesTheResolvedSpellingInItsIdentity() {
+        let session = CatalogSession()
+        let spelling = session.adoptDecoderResolution(
+            available: all, iso: 800, cropFactor: 1, effectiveDefault: "8",
+            preference: .auto)
+
+        XCTAssertEqual(spelling, "9", "自动 + iso 800 选 9")
+        XCTAssertEqual(session.edit.decoderVersionPolicy, .auto)
+        XCTAssertNil(session.edit.decoderVersion, "自动 does not store a hand pick")
+        XCTAssertEqual(session.edit.resolvedDecoderVersion, "9")
+
+        let inputs = session.edit.decodeInputs
+        XCTAssertEqual(inputs.decoderVersion, "9", "the key names the resolved spelling")
+        XCTAssertTrue(inputs.key.contains("ver=9"), inputs.key)
+        XCTAssertFalse(inputs.key.contains("ver=auto"),
+                       "反向门：退回 decoderVersion（nil）会让这里变回 ver=auto")
+
+        // The three settings rows at the same ISO / list.
+        XCTAssertEqual(session.adoptDecoderResolution(available: all, iso: 3200,
+                                                      effectiveDefault: "8", preference: .preferV8),
+                       "8", "优先 v8 + iso 3200 仍选 8")
+        XCTAssertEqual(session.adoptDecoderResolution(available: all, iso: 400,
+                                                      effectiveDefault: "8", preference: .preferV9),
+                       "9", "优先 v9 + iso 400 选 9")
+        XCTAssertEqual(session.adoptDecoderResolution(available: all, iso: 400,
+                                                      effectiveDefault: "8", preference: .auto),
+                       "8", "自动 + iso 400 选 8")
+        XCTAssertFalse(session.edit.decodeInputs.key.contains("ver=auto"),
+                       session.edit.decodeInputs.key)
+    }
+
+    /// Acceptance ② — three decodes with the same answer write the document **once**, add no history
+    /// row, and leave the live document semantically equal to the history's current state.
+    func testResolvedSpellingIsPersistedOnceAndNeverDirtiesTheDocument() throws {
+        let library = try makeLibrary(doc: editedAutoDocument(), historyRow: true)
+        defer { library.cleanUp() }
+        let session = library.session
+
+        let writesAfterOpen = session.decoderResolutionWrites
+        XCTAssertEqual(writesAfterOpen, 1, "the open resolved once and stamped the develop row")
+        // The real fixture is ISO 3200 and offers bare 9: the first identity chain already names
+        // that spelling, never `auto`.
+        XCTAssertEqual(session.edit.resolvedDecoderVersion, "9")
+        XCTAssertTrue(session.edit.decodeInputs.key.contains("ver=9"),
+                      session.edit.decodeInputs.key)
+        XCTAssertFalse(session.edit.decodeInputs.key.contains("ver=auto"),
+                       "反向门：把 (a) 退回 decoderVersion（nil）会让这里变回 auto")
+        let historyBefore = session.history.count
+
+        for _ in 0..<3 {
+            session.adoptDecoderResolution(available: all, iso: 3200,
+                                           effectiveDefault: "8", preference: .auto)
+        }
+        XCTAssertEqual(session.decoderResolutionWrites, writesAfterOpen,
+                       "重复解码结果相同 ⇒ 不重复写")
+        XCTAssertEqual(session.history.count, historyBefore, "记解码事实不产生撤销步")
+        let current = try XCTUnwrap(session.history.current)
+        XCTAssertEqual(current, session.edit, "document and current snapshot must agree exactly")
+        XCTAssertTrue(EditHistory.dirtyGroups(from: current, to: session.edit).isEmpty,
+                      "isDirty must not be set by a decode fact")
+
+        let stored = try library.catalog.develop(forAsset: library.asset.id)
+        XCTAssertEqual(stored.resolvedDecoderVersion, session.edit.resolvedDecoderVersion)
+        XCTAssertEqual(stored.decoderVersionPolicy, .auto)
+        let raw = try library.catalog.dbQueue.read { db in
+            try String.fetchOne(db,
+                                sql: "SELECT develop_json FROM asset_history WHERE asset_id = ?",
+                                arguments: [library.asset.id])
+        }
+        XCTAssertEqual(raw, try Catalog.encode(session.edit),
+                       "the history's current row carries the same fact as the assets blob")
+        print("555 ③ open writes=\(writesAfterOpen) · 3 decodes writes=\(session.decoderResolutionWrites)"
+              + " · history=\(session.history.count) · resolved=\(String(describing: stored.resolvedDecoderVersion))")
+    }
+
+    /// Acceptance ③ — a changed available list (a simulated macOS upgrade) moves the recorded
+    /// spelling and therefore the key; the cache cannot keep serving the old pixels.
+    func testAChangedAvailableListUpdatesTheRecordAndMovesTheKey() throws {
+        let library = try makeLibrary(doc: editedAutoDocument(), historyRow: true)
+        defer { library.cleanUp() }
+        let session = library.session
+
+        XCTAssertEqual(session.adoptDecoderResolution(
+            available: ["9", "9.dng", "8", "8.dng"], iso: 800,
+            effectiveDefault: "8", preference: .auto), "9")
+        let nineKey = session.edit.decodeInputs.key
+        XCTAssertTrue(nineKey.contains("ver=9"), nineKey)
+
+        XCTAssertEqual(session.adoptDecoderResolution(
+            available: ["8", "8.dng"], iso: 800,
+            effectiveDefault: "8", preference: .auto), "8")
+        let eightKey = session.edit.decodeInputs.key
+        XCTAssertTrue(eightKey.contains("ver=8"), eightKey)
+        XCTAssertNotEqual(nineKey, eightKey, "a different spelling is a different buffer → cache miss")
+
+        let stored = try library.catalog.develop(forAsset: library.asset.id)
+        XCTAssertEqual(stored.resolvedDecoderVersion, "8", "the record follows the new list")
+        print("555 ④ upgrade simulation · \(nineKey) → \(eightKey) · stored="
+              + "\(String(describing: stored.resolvedDecoderVersion))")
+    }
+
+    /// Acceptance ④ — decoding an **unedited** photo records nothing and creates no develop row.
+    func testAnUneditedPhotoGetsNoDevelopRowFromTheDecodeFact() throws {
+        let library = try makeLibrary(doc: .neutral, historyRow: false)
+        defer { library.cleanUp() }
+        let session = library.session
+
+        XCTAssertFalse(session.edit.resolvedDecoderVersion?.isEmpty ?? true,
+                       "the in-memory document still knows the spelling for its key")
+        XCTAssertEqual(session.decoderResolutionWrites, 0)
+        let raw = try library.catalog.dbQueue.read { db in
+            try String.fetchOne(db, sql: "SELECT develop_json FROM assets WHERE id = ?",
+                                arguments: [library.asset.id])
+        }
+        XCTAssertEqual(raw, try Catalog.encode(.neutral),
+                       "未编辑照片的 develop_json 不许被写")
+        XCTAssertFalse(raw?.contains("resolvedDecoderVersion") ?? true)
+        let rows = try library.catalog.dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM asset_history WHERE asset_id = ?",
+                             arguments: [library.asset.id])
+        } ?? -1
+        XCTAssertEqual(rows, 0, "未编辑照片不建 develop 行")
+    }
+
+    // MARK: - 7. Phase 3 · UI
+
+    /// Acceptance ⑤a — the 解码模型 Picker's first item is 自动.
+    func testTheDecoderPickerStartsWithAutomatic() {
+        let choices = InspectorView.decoderModelChoices(chosen: .auto, offered: ["8", "8.dng", "9.dng"])
+        XCTAssertEqual(choices.first, .auto)
+        XCTAssertEqual(choices.first?.label, Loc.t("自动"))
+        XCTAssertEqual(Array(choices.dropFirst()), [.spelling("8"), .spelling("8.dng"),
+                                                    .spelling("9.dng")])
+        XCTAssertEqual(InspectorView.decoderModelChoice(policy: .auto, stored: nil,
+                                                        offered: [], auto: nil), .auto)
+        XCTAssertEqual(InspectorView.decoderModelChoice(policy: .auto, stored: "8.dng",
+                                                        offered: [], auto: nil),
+                       .spelling("8.dng"), "a legacy spelling is shown as the hand pick it was")
+        XCTAssertEqual(InspectorView.decoderModelAutoNote(resolved: "9.dng", effective: nil),
+                       "\(Loc.t("自动")) · 9.dng")
+
+        // The shipped control, not only the list: a hosted menu Picker's first item is 自动.
+        let session = CatalogSession()
+        session.recordCapabilities(DecoderCapabilities(
+            requestedVersion: nil, effectiveVersion: "8", defaultVersion: "8",
+            supportedVersions: ["8", "8.dng", "9.dng"]))
+        let host = NSHostingView(rootView: InspectorView(session: session))
+        host.frame = NSRect(x: 0, y: 0, width: 300, height: 900)
+        let window = NSWindow(contentRect: host.frame,
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        pump(host)
+        let popup = allSubviews(of: host).compactMap { $0 as? NSPopUpButton }
+            .first { $0.itemTitles.contains(Loc.t("自动")) }
+        if let popup {
+            XCTAssertEqual(popup.itemTitles.first, Loc.t("自动"), popup.itemTitles.joined(separator: "/"))
+            print("555 picker · hosted items = \(popup.itemTitles)")
+        } else {
+            print("555 picker · no NSPopUpButton in the hosted tree; list assertion above stands")
+        }
+    }
+
+    /// Acceptance ⑤b — 设置 → 解码偏好: three segments, persisted, and the note is a real small
+    /// secondary-colour `NSTextField`.
+    func testTheSettingsDecoderPreferencePersistsAndTheNoteIsSmallAndSecondary() throws {
+        let saved = AppPreferences.store.object(forKey: DecoderVersionPreference.settingDefaultsKey)
+        AppPreferences.store.removeObject(forKey: DecoderVersionPreference.settingDefaultsKey)
+        defer {
+            if let saved {
+                AppPreferences.store.set(saved, forKey: DecoderVersionPreference.settingDefaultsKey)
+            } else {
+                AppPreferences.store.removeObject(forKey: DecoderVersionPreference.settingDefaultsKey)
+            }
+        }
+
+        let host = NSHostingView(rootView: SettingsView())
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: 440)
+        let window = NSWindow(contentRect: host.frame,
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        pump(host)
+
+        let labels = [Loc.t("自动"), Loc.t("优先 v9"), Loc.t("优先 v8")]
+        let picker = try XCTUnwrap(segmentedControl(in: host, labels: labels),
+                                   "找不到解码偏好分段控件；现有：\(segmentedLabels(in: host))")
+        XCTAssertEqual(picker.segmentCount, 3)
+
+        select(1, in: picker)
+        pump(host)
+        XCTAssertEqual(DecoderVersionPreference.setting, .preferV9)
+        XCTAssertEqual(AppPreferences.store.string(forKey: DecoderVersionPreference.settingDefaultsKey),
+                       "preferV9")
+
+        // 「重启后保持」: a fresh view reads the stored value back.
+        let restarted = NSHostingView(rootView: SettingsView())
+        restarted.frame = host.frame
+        let window2 = NSWindow(contentRect: restarted.frame,
+                               styleMask: [.borderless], backing: .buffered, defer: false)
+        window2.contentView = restarted
+        defer {
+            window2.orderOut(nil)
+            window2.contentView = nil
+        }
+        pump(restarted)
+        let again = try XCTUnwrap(segmentedControl(in: restarted, labels: labels))
+        XCTAssertEqual(again.selectedSegment, 1, "重启后仍是 优先 v9")
+
+        select(2, in: picker)
+        pump(host)
+        XCTAssertEqual(DecoderVersionPreference.setting, .preferV8)
+
+        let note = try XCTUnwrap(allSubviews(of: host).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "settings.decoderPreference.note" },
+            "找不到小字提示")
+        XCTAssertTrue(note.stringValue.contains("5–10"), note.stringValue)
+        let size = try XCTUnwrap(note.font?.pointSize)
+        XCTAssertLessThanOrEqual(size, 11, "小字：实际控件字号 \(size)")
+        XCTAssertTrue(note.textColor?.isEqual(NSColor.secondaryLabelColor) ?? false,
+                      "次要色：实际控件颜色 \(String(describing: note.textColor))")
+        print("555 ⑤ · settings 3 segments · stored=\(DecoderVersionPreference.setting.rawValue)"
+              + " · note font=\(size) color=secondary")
+    }
+
+    // MARK: - Phase 3 helpers
+
+    private struct Library {
+        let catalog: Catalog
+        let session: CatalogSession
+        let asset: Asset
+        let workDir: URL
+        func cleanUp() { try? FileManager.default.removeItem(at: workDir) }
+    }
+
+    private static var fixtureURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Tests/Fixtures/small-rggb.dng")
+    }
+
+    private final class MemoryStore: FilterPersistence.Store, PhotoSortPreferences.Store {
+        var filters: [String: String] = [:]
+        var sort: [String: String] = [:]
+        func storedFilterJSON(forKey key: String) -> String? { filters[key] }
+        func storeFilterJSON(_ json: String, forKey key: String) { filters[key] = json }
+        func removeFilterJSON(forKey key: String) { filters.removeValue(forKey: key) }
+        func sortOrderRaw(forKey key: String) -> String? { sort[key] }
+        func storeSortOrderRaw(_ raw: String?, forKey key: String) { sort[key] = raw }
+    }
+
+    private func editedAutoDocument() -> EditModel {
+        var doc = EditModel.neutral
+        doc.light.exposure = 1.25
+        doc.decoderVersionPolicy = .auto
+        doc.decoderVersion = nil
+        doc.resolvedDecoderVersion = nil
+        return doc
+    }
+
+    private func makeLibrary(doc: EditModel, historyRow: Bool) throws -> Library {
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photons-555-phase3-\(UUID().uuidString)", isDirectory: true)
+        let src = workDir.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let package = workDir.appendingPathComponent("L.\(LibraryLayout.packageExtension)",
+                                                     isDirectory: true)
+        let catalog = try Catalog.create(at: package)
+        let root = try catalog.ensureRoot(for: src, mode: .reference)
+        let name = "IMG_0000.dng"
+        try FileManager.default.copyItem(at: Self.fixtureURL,
+                                         to: src.appendingPathComponent(name))
+        let blob = try Catalog.encode(doc)
+        let asset = Asset(sourceRootId: root.id, relPath: name, filename: name,
+                          ext: "dng", kind: .raw, size: 1, mtime: 0,
+                          contentHash: UUID().uuidString, width: 1024, height: 1024,
+                          cameraModel: "LEICA SL3", cameraKey: "leica|sl3",
+                          developJson: blob, developVersion: 1,
+                          historyEnd: historyRow ? 1 : 0)
+        try catalog.dbQueue.write { db in
+            try asset.insert(db)
+            if historyRow {
+                try AssetHistory(assetId: asset.id, seq: 1, developJson: blob,
+                                 label: "import", createdAt: ISO8601.now()).insert(db)
+            }
+        }
+        let store = MemoryStore()
+        let session = CatalogSession(filterStore: store, sortPreferenceStore: store,
+                                     remembersRecentLibrary: false)
+        try session.open(package)
+        session.setSortOrder(.newestFirst)
+        session.selectOnly(asset.id)
+        return Library(catalog: catalog, session: session, asset: asset, workDir: workDir)
+    }
+
+    // MARK: - UI helpers
+
+    private func pump(_ host: NSView) {
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    }
+
+    private func select(_ index: Int, in control: NSSegmentedControl) {
+        control.selectedSegment = index
+        _ = control.sendAction(control.action, to: control.target)
+    }
+
+    private func segmentedControl(in root: NSView, labels: [String]) -> NSSegmentedControl? {
+        allSubviews(of: root).compactMap { $0 as? NSSegmentedControl }.first { control in
+            (0..<control.segmentCount).compactMap { control.label(forSegment: $0) } == labels
+        }
+    }
+
+    private func segmentedLabels(in root: NSView) -> [String] {
+        allSubviews(of: root).compactMap { $0 as? NSSegmentedControl }.map { control in
+            (0..<control.segmentCount).map { control.label(forSegment: $0) ?? "?" }
+                .joined(separator: "/")
+        }
+    }
+
+    private func allSubviews(of root: NSView) -> [NSView] {
+        var out: [NSView] = [root]
+        for child in root.subviews { out += allSubviews(of: child) }
+        return out
     }
 }
