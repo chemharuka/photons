@@ -14,7 +14,7 @@ import PhotonsCore
 ///  2. **一个控件**：`sliderRow` 里只有**一处** `Slider(value: …, in: …, onEditingChanged:)`；
 ///     没有 `BubbleSlider` / `BarSlider` / `NSSlider` 的引用（055 的自绘气泡与换 cell 方案已删除）。
 ///  3. **颜色真的不同**（060 验收 2 / 071 验收 7）：用 `ImageRenderer` 离屏渲染三条真实的滑杆行，
-///     采「已选部分」的像素 —— `.bar` 黄、`.knob` 系统强调色（默认蓝）、`.linear` `#FF375F`。
+///     采「已选部分」的像素 —— `.bar` 红 `#FF375F`、`.knob` 系统强调色（默认蓝）、`.linear` 黄。
 ///     源码里写没写 `.tint` 不算证据；像素才算。
 ///  4. **无刻度 / 行高 16 / 一次拖动一条历史**：前两条按源码与 `fittingSize` 钉，第三条按
 ///     「一次拖动 = 一串 `applyEdit` + 一次 `commitEdit`」在 `CatalogSession` 上跑一遍。
@@ -37,7 +37,7 @@ final class SliderStyleTests: XCTestCase {
         let detail = InspectorView.detailContent.rows
         XCTAssertEqual(detail.map(\.title), ["降噪", "色彩降噪", "细节", "锐化"])
         XCTAssertEqual(detail.map(\.shape), [.bar, .bar, .bar, .bar],
-                       "046: 会触发重新 develop 的四根滑杆必须是「解 RAW 参数」（橙色）")
+                       "046: 会触发重新 develop 的四根滑杆必须是「解 RAW 参数」（541: 红）")
         XCTAssertEqual(detail.map(\.axis), DetailAxis.panelOrder,
                        "the four rows are the four decode axes, in panel order")
 
@@ -49,11 +49,11 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertEqual(InspectorView.colorRows.map(\.shape), Array(repeating: .knob, count: 2),
                        "Color 的两行也是渲染参数 → 默认强调色")
         XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.shape), [.bar, .bar],
-                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 黄")
+                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 红")
 
-        // 071: 线性域一行 —— 黑电平。它是面板里唯一 `.linear`（红）的行。
+        // 071: 线性域一行 —— 黑电平。它是面板里唯一 `.linear`（541: 黄）的行。
         XCTAssertEqual(InspectorView.blackLevelRows.map(\.shape), [.linear],
-                       "黑电平是线性域参数 → 红 #FF375F")
+                       "黑电平是线性域参数 → 黄")
 
         // 两张表是不相交的两类参数：没有一行同时出现在两边。
         XCTAssertTrue(Set(detail.map(\.title)).isDisjoint(with: Set(light.map(\.title))),
@@ -67,10 +67,10 @@ final class SliderStyleTests: XCTestCase {
     }
 
     /// 白平衡的两行不走 `sliderRow`（它们有草稿值 + 自己的提交时机），所以单独钉：
-    /// 060 之后它们也用**同一个** `shapeSlider`，类别是 `.bar` → 黄（解 RAW 参数，071 改的配色）。
-    func testWhiteBalanceRowsUseTheSameSliderTintedYellow() throws {
+    /// 060 之后它们也用**同一个** `shapeSlider`，类别是 `.bar` → 红（541 的红黄互换）。
+    func testWhiteBalanceRowsUseTheSameSliderTintedRed() throws {
         XCTAssertEqual(InspectorView.whiteBalanceRows.map(\.shape), [.bar, .bar],
-                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 黄")
+                       "色温/色调 写 CIRAWFilter（= 重新解码）→ 解 RAW 参数 → 红")
 
         let body = try Self.body(of: "private func whiteBalanceRow",
                                  upTo: "private var dropperRow",
@@ -140,7 +140,7 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertEqual(Self.occurrences(of: "Slider(value: ", in: forwarder), 0,
                        "卡片这一侧不许再有一份自己的 Slider")
 
-        // 颜色那句话本身：`.bar` 黄、`.linear` 红 #FF375F、`.knob` 不设 tint —— 三类，一处定义。
+        // 颜色那句话本身：`.bar` 红 #FF375F、`.linear` 黄、`.knob` 不设 tint —— 三类，一处定义。
         let slider = try Self.body(of: "static func shapeSlider", upTo: "/// One slider's readout",
                                    in: Self.inspectorSource)
         XCTAssertTrue(slider.contains(".tint(shape.accent)"),
@@ -150,16 +150,18 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertTrue(slider.contains(".controlSize(controlSize)"),
                       "all shapes keep the row's own control size (.mini)")
 
-        // 配色表本身（唯一定义）：黄 = raw/解码，红 = 线性域，knob = 跟随系统。
+        // 配色表本身（唯一定义）：红 = raw/解码，黄 = 线性域，knob = 跟随系统（541 把 071 的红/黄互换）。
         let palette = try String(contentsOf: Self.sliderShapeSource, encoding: .utf8)
         XCTAssertTrue(palette.contains("case .bar: return SliderShape.rawAccent"))
         XCTAssertTrue(palette.contains("case .linear: return SliderShape.linearAccent"))
         XCTAssertTrue(palette.contains("case .knob: return nil"),
                       "渲染参数必须跟随系统强调色（.tint(nil)），不许写死一个蓝")
-        XCTAssertTrue(palette.contains("public static let rawAccent = Color.yellow"),
-                      "071: raw/解码参数从橙改成黄")
+        XCTAssertTrue(palette.contains("public static let rawAccent = Color(.sRGB"),
+                      "541: raw/解码参数是红（#FF375F）")
         XCTAssertTrue(palette.contains("red: 1.0, green: 55.0 / 255, blue: 95.0 / 255"),
-                      "071: 线性域就是用户指定的 #FF375F（255, 55, 95）")
+                      "541: raw/解码参数就是用户指定的 #FF375F（255, 55, 95）")
+        XCTAssertTrue(palette.contains("public static let linearAccent = Color.yellow"),
+                      "541: 线性域是黄")
         XCTAssertEqual(Self.occurrences(of: "= Color.orange", in: palette), 0,
                        "071 覆盖了 060 的橙：配色表里不许再有橙色赋值（注释里的历史说明可以留）")
 
@@ -212,22 +214,41 @@ final class SliderStyleTests: XCTestCase {
               + " · NSSlider → \(nsSliderFiles.sorted())")
     }
 
-    // MARK: - 3. 颜色实测（060 验收 2 / 071 验收 7：核心）
+    // MARK: - 3. 颜色实测（060 验收 2 / 071 验收 7 / 541 验收 1：核心）
 
-    /// **这是 060/071 的验收本身**：三条真实的滑杆行离屏渲染成位图，采「已选部分」的像素。
+    /// 541 验收 1：三类强调色的**实际取值** —— `.bar` 红、`.linear` 黄、`.knob` 跟随系统。
     ///
-    ///  · `.bar`（raw/解码）→ **黄**：R ≥ 200、G ≥ 150、B ≤ 40，且 R > G > B；
+    /// 上面那条按源码字符串钉；这条按值钉：把两个常量换回红/黄互换前的旧值，这里必红。
+    func testTheThreeAccentValuesAreRedYellowAndSystem() throws {
+        XCTAssertEqual(SliderShape.bar.accent, SliderShape.rawAccent, ".bar 用 rawAccent")
+        XCTAssertEqual(SliderShape.linear.accent, SliderShape.linearAccent, ".linear 用 linearAccent")
+        XCTAssertNil(SliderShape.knob.accent,
+                     "541 选 (a)：渲染参数继续跟随系统强调色（默认蓝），不写死 Color.blue")
+
+        // `.bar` = #FF375F（255, 55, 95），sRGB 逐通道写死。
+        let red = try XCTUnwrap(Self.rgb(SliderShape.rawAccent), "rawAccent 转不成 sRGB")
+        XCTAssertEqual(red.r, 255, "raw/解码参数的 R，实测 \(red)")
+        XCTAssertEqual(red.g, 55, "raw/解码参数的 G，实测 \(red)")
+        XCTAssertEqual(red.b, 95, "raw/解码参数的 B，实测 \(red)")
+
+        // `.linear` = 系统黄（语义色，深浅主题由系统处理）。
+        XCTAssertEqual(SliderShape.linearAccent, Color.yellow, "线性域参数是黄")
+    }
+
+    /// **这是 060/071/541 的验收本身**：三条真实的滑杆行离屏渲染成位图，采「已选部分」的像素。
+    ///
+    ///  · `.bar`（raw/解码）→ **`#FF375F`**：逐通道 ≤ 2/255；
     ///  · `.knob`（默认）→ 系统强调色：与 `NSColor.controlAccentColor` 同色（逐通道 ≤ 24）；
-    ///  · `.linear`（071，线性域）→ **`#FF375F`**：逐通道 ≤ 2/255。
+    ///  · `.linear`（071/541，线性域）→ **黄**：R ≥ 200、G ≥ 150、B ≤ 40，且 R > G > B。
     ///
     /// 采样像素是**预乘**的（`CGContext` 的 premultipliedLast，滑杆的已选部分带一点点透明）：
-    /// 实测 `.bar` 落在 (249, 199, 0)，而 tint 是 (255, 204, 0) —— α ≈ 249/255。所以断言前先
-    /// 反预乘，否则 `#FF375F` 会被读成 (249, 54, 93) 而「差 6」不是滑杆的问题。原始字节与反预乘后的
-    /// 值都打进日志，报告里给的是这两组数字。
+    /// 实测 `.linear` 的 (255, 204, 0) 落在 (249, 199, 0)，`#FF375F` 落在 (249, 54, 93) —— α ≈ 249/255。
+    /// 所以断言前先归一到满量程，否则 `#FF375F` 会被读成 (249, 54, 93) 而「差 6」不是滑杆的问题。
+    /// 原始字节与归一后的值都打进日志，报告里给的是这两组数字。
     ///
     /// 没有窗口/图形上下文导致 `ImageRenderer` 交不出 `CGImage` 时 `XCTSkip`，但**源码断言在此之前**
     /// 已经跑完 —— 跳过的只是像素那一半。
-    func testTheThreeShapesRenderYellowTheSystemAccentAndFF375F() throws {
+    func testTheThreeShapesRenderRedTheSystemAccentAndYellow() throws {
         // 源码那一半：先钉住，跳过渲染也不会放掉它。
         let slider = try Self.body(of: "static func shapeSlider", upTo: "/// One slider's readout",
                                    in: Self.inspectorSource)
@@ -248,18 +269,18 @@ final class SliderStyleTests: XCTestCase {
         print("SLIDER colour · bar \(bar.raw) → \(bar) · knob \(knob.raw) → \(knob)"
               + " · linear \(linear.raw) → \(linear) · system accent \(accent)")
 
-        // `.bar` 是黄：R > G > B，且黄的两个分量都高、蓝几乎没有。
-        XCTAssertGreaterThan(bar.r, bar.g, "raw/解码参数的已选部分必须是黄（R > G）")
-        XCTAssertGreaterThan(bar.g, bar.b, "raw/解码参数的已选部分必须是黄（G > B）")
-        XCTAssertGreaterThanOrEqual(bar.r, 200, "黄的 R 必须是满的，实测 \(bar.r)")
-        XCTAssertGreaterThanOrEqual(bar.g, 150, "黄的 G 必须高（橙的 G 只有 137），实测 \(bar.g)")
-        XCTAssertLessThanOrEqual(bar.b, 40, "黄不许有蓝，实测 \(bar.b)")
-        XCTAssertGreaterThanOrEqual(bar.r - bar.b, 150, "黄色的 R − B 实测 \(bar.r) − \(bar.b)")
+        // `.bar` 就是用户给的 #FF375F（255, 55, 95），逐通道 ≤ 2/255。
+        XCTAssertLessThanOrEqual(abs(bar.r - 255), 2, "raw/解码参数的 R 必须是 255，实测 \(bar.r)")
+        XCTAssertLessThanOrEqual(abs(bar.g - 55), 2, "raw/解码参数的 G 必须是 55，实测 \(bar.g)")
+        XCTAssertLessThanOrEqual(abs(bar.b - 95), 2, "raw/解码参数的 B 必须是 95，实测 \(bar.b)")
 
-        // `.linear` 就是用户给的 #FF375F（255, 55, 95），逐通道 ≤ 2/255。
-        XCTAssertLessThanOrEqual(abs(linear.r - 255), 2, "线性域的 R 必须是 255，实测 \(linear.r)")
-        XCTAssertLessThanOrEqual(abs(linear.g - 55), 2, "线性域的 G 必须是 55，实测 \(linear.g)")
-        XCTAssertLessThanOrEqual(abs(linear.b - 95), 2, "线性域的 B 必须是 95，实测 \(linear.b)")
+        // `.linear` 是黄：R > G > B，且黄的两个分量都高、蓝几乎没有。
+        XCTAssertGreaterThan(linear.r, linear.g, "线性域的已选部分必须是黄（R > G）")
+        XCTAssertGreaterThan(linear.g, linear.b, "线性域的已选部分必须是黄（G > B）")
+        XCTAssertGreaterThanOrEqual(linear.r, 200, "黄的 R 必须是满的，实测 \(linear.r)")
+        XCTAssertGreaterThanOrEqual(linear.g, 150, "黄的 G 必须高（橙的 G 只有 137），实测 \(linear.g)")
+        XCTAssertLessThanOrEqual(linear.b, 40, "黄不许有蓝，实测 \(linear.b)")
+        XCTAssertGreaterThanOrEqual(linear.r - linear.b, 150, "黄色的 R − B 实测 \(linear.r) − \(linear.b)")
 
         // `.knob` 跟随系统强调色 —— 不是我们写死的某个颜色。
         XCTAssertLessThanOrEqual(abs(knob.r - accent.r), 24, "渲染参数用系统强调色（R）")
@@ -275,16 +296,16 @@ final class SliderStyleTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(knob.b, knob.r, "默认蓝主题下，渲染参数的已选部分是蓝的")
 
         // 三色必须**看得出来**彼此不同（逐通道差 ≥ 30，且三通道差之和 ≥ 100）。
-        let pairs: [(String, RGB, RGB)] = [("黄 vs 蓝", bar, knob), ("红 vs 蓝", linear, knob),
-                                           ("黄 vs 红", bar, linear)]
+        let pairs: [(String, RGB, RGB)] = [("红 vs 蓝", bar, knob), ("黄 vs 蓝", linear, knob),
+                                           ("红 vs 黄", bar, linear)]
         for (name, a, b) in pairs {
             let total = abs(a.r - b.r) + abs(a.g - b.g) + abs(a.b - b.b)
             XCTAssertGreaterThanOrEqual(total, 100,
                                         "\(name) 的三通道差之和必须远大于渲染误差（实测 \(total)/765）")
         }
-        print("SLIDER colour distance · yellow↔blue \(abs(bar.r - knob.r) + abs(bar.g - knob.g) + abs(bar.b - knob.b))"
-              + " · red↔blue \(abs(linear.r - knob.r) + abs(linear.g - knob.g) + abs(linear.b - knob.b))"
-              + " · yellow↔red \(abs(bar.r - linear.r) + abs(bar.g - linear.g) + abs(bar.b - linear.b))")
+        print("SLIDER colour distance · red↔blue \(abs(bar.r - knob.r) + abs(bar.g - knob.g) + abs(bar.b - knob.b))"
+              + " · yellow↔blue \(abs(linear.r - knob.r) + abs(linear.g - knob.g) + abs(linear.b - knob.b))"
+              + " · red↔yellow \(abs(bar.r - linear.r) + abs(bar.g - linear.g) + abs(bar.b - linear.b))")
     }
 
     // MARK: - 4. 无刻度（060 验收 3）
@@ -423,7 +444,7 @@ final class SliderStyleTests: XCTestCase {
         print(String(format: "SLIDER row heights · bar %.1f · knob %.1f · linear %.1f (target %.1f)",
                      bar, knob, linear, SliderValueMap.rowHeight))
         XCTAssertEqual(bar, knob, accuracy: 0.01, "三类强调色的行高必须相同（同一段代码只差 tint）")
-        XCTAssertEqual(linear, knob, accuracy: 0.01, "071 的红行也不许比其它行高/矮")
+        XCTAssertEqual(linear, knob, accuracy: 0.01, "541: 黄行也不许比其它行高/矮")
         XCTAssertEqual(bar, SliderValueMap.rowHeight, accuracy: 0.5)
         XCTAssertEqual(knob, SliderValueMap.rowHeight, accuracy: 0.5)
         XCTAssertEqual(linear, SliderValueMap.rowHeight, accuracy: 0.5)
@@ -474,6 +495,14 @@ final class SliderStyleTests: XCTestCase {
         return RGB(r: Int((color.redComponent * 255).rounded()),
                    g: Int((color.greenComponent * 255).rounded()),
                    b: Int((color.blueComponent * 255).rounded()))
+    }
+
+    /// 一个 SwiftUI `Color` 的 sRGB 8-bit 值 —— 用来按**实际取值**钉配色（541 验收 1）。
+    private static func rgb(_ color: Color) -> RGB? {
+        guard let srgb = NSColor(color).usingColorSpace(.sRGB) else { return nil }
+        return RGB(r: Int((srgb.redComponent * 255).rounded()),
+                   g: Int((srgb.greenComponent * 255).rounded()),
+                   b: Int((srgb.blueComponent * 255).rounded()))
     }
 
     /// 离屏渲染一条滑杆行，返回「已选部分」里出现最多的那个颜色（**归一到满量程**，见下）。
