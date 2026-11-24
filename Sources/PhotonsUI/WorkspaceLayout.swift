@@ -182,6 +182,10 @@ public enum WorkspaceLayout {
 
     public static let dividerThickness: CGFloat = 1
 
+    /// 547 — the gap between the canvas readout's `显示器信息` line and the `修改前` line beneath it.
+    /// One number, because the badge is a second row of the same chip rather than its own card.
+    public static let statusChipLineSpacing: CGFloat = 2
+
     // MARK: resolve
 
     public static func clampBrowserWidth(_ w: CGFloat) -> CGFloat {

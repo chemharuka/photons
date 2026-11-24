@@ -789,12 +789,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// what the menu row offers. Returns the new state so a caller can assert it.
     @discardableResult
     public func toggleShowOriginal() -> Bool {
-        compare.toggleShowOriginal()
+        // 547 — 变换模式 owns the canvas' geometry; showing the decode there would put a picture the
+        // frame cannot be drawn on under the crop overlay. The guard is the behaviour, not a hint.
+        guard !isTransformModeActive else { return false }
+        return compare.toggleShowOriginal()
     }
 
+    /// 547 — refused while 变换 is up, including for callers that name the state directly (`set` is
+    /// the door behind the menu, the key and the tests, so the guard lives here as well as in the
+    /// toggle). Turning it *off* is always allowed.
     @discardableResult
     public func setShowOriginal(_ on: Bool) -> Bool {
-        compare.setShowOriginal(on)
+        guard !(on && isTransformModeActive) else { return false }
+        return compare.setShowOriginal(on)
     }
 
     /// Y — before/after. Off → on splits the canvas at the current fraction (50 % the first time).
@@ -836,6 +843,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     /// The count lives in `compare` (P5a); this method only moves the generation.
     private func frameModeDidChange() {
+        // 547 — the readout's `修改前` row follows `showOriginal` (the mode change is the only writer,
+        // and it also runs before the view is on screen for a test that drives the state directly).
+        statusChip.showsOriginal = showOriginal
+        layoutStatusChip()
         generation += 1
         guard autoRenderEnabled else { return }
         requestViewportRender()
@@ -1853,6 +1864,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // is asked for (a straighten moves the picture).
         cropTool.onDraftChange = { [weak self] in
             guard let self else { return }
+            // 547 — every door into 变换 (the workspace, the menu, a direct `cropTool.begin`) publishes
+            // the open draft here, so this is where the decode view can never stay on beside it.
+            if self.cropTool.isActive, self.compare.showOriginal {
+                _ = self.compare.setShowOriginal(false)
+            }
             // 088: a draft change moves the **frame**, not the picture. Rendering follows the
             // document (a released 转动 writes it), so this must not request a frame per tick.
             self.refreshCropTool()
@@ -4624,6 +4640,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public var isCropToolActive: Bool { cropTool.isActive }
     /// 123 — the acceptance's name for the same view state.
     public var isCropping: Bool { cropTool.isActive }
+    /// 547 — 「变换模式」 is exactly the crop tool's open draft (the workspace enters it on seeing the
+    /// card and leaves it through `endToolSession`/finish). One name for the gate and the menu row.
+    public var isTransformModeActive: Bool { cropTool.isActive }
 
     /// What a press at `point` belongs to — **one** decision, in one place.
     ///
@@ -4707,6 +4726,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return false
         }
         guard cropTool.begin() else { return false }
+        // 547 — 变换 and 「显示原图」 cannot both own the canvas: entering the frame leaves the decode
+        // view *first*, so every later gate (`\`, the menu) sees a consistent state.
+        if compare.showOriginal { _ = compare.setShowOriginal(false) }
         // 169: the bookkeeping starts on the photo the frame was opened on. Without this, the first
         // document write (the first straighten release) looked like a photo switch and detached.
         lastHandledAnchorID = session.anchorID
@@ -11242,11 +11264,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
 
     // MARK: status strip
 
+    /// 547 — the acceptance reads the two real labels (their frames and their styles), not a copy.
+    var statusChipForTesting: LoupeStatusChip { statusChip }
+
     private func updateStatusChip(projection: LoupeFraming? = nil) {
         // 333 ④ — one projection for the chip **and** the pill: `statusText → zoomLabel → camera` and
         // `syncZoomSlider → currentZoomStop → camera` used to build it twice more per camera change.
         let projection = projection ?? framing()
         statusChip.text = statusText(projection: projection)
+        statusChip.showsOriginal = showOriginal
         statusChip.tooltip = displayHeadroom.detailText
         layoutStatusChip()
         syncZoomSlider(projection: projection)
