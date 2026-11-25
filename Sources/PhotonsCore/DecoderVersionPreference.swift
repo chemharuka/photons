@@ -124,13 +124,17 @@ public enum DecoderVersionPreference {
         /// the key's spelling when every candidate is rewritten, so the key never falls back to the
         /// literal `auto`.
         public let defaultVersion: String?
+        /// 559 — whether the file name carries the denoise marker. Recorded here so the open path
+        /// keeps the fact alongside the rest of the file's facts.
+        public let denoisedProduct: Bool
 
         public init(available: [String], iso: Int?, cropFactor: Double,
-                    defaultVersion: String?) {
+                    defaultVersion: String?, denoisedProduct: Bool = false) {
             self.available = available
             self.iso = iso
             self.cropFactor = cropFactor
             self.defaultVersion = defaultVersion
+            self.denoisedProduct = denoisedProduct
         }
     }
 
@@ -158,8 +162,24 @@ public enum DecoderVersionPreference {
         let crop = cropFactor(orFullFrame: exif.focalLength, exif.focalLength35mm)
         return DocumentFacts(available: filter.supportedDecoderVersions.map { $0.rawValue },
                              iso: exif.iso, cropFactor: crop,
-                             defaultVersion: filter.decoderVersion.rawValue)
+                             defaultVersion: filter.decoderVersion.rawValue,
+                             denoisedProduct: isDenoisedProduct(name: url.lastPathComponent))
     }
+
+    /// 559 — the denoise marker **is the file name**. `<原名>-denoised.dng` and its
+    /// `-denoised-2.dng` / `-denoised-3.dng` siblings are the shipped naming
+    /// (`AnselDenoiseJob.swift`), so today's products are recognised without touching any writer.
+    ///
+    /// Known boundaries, accepted by the ticket: renaming a product and dropping `denoise` returns it
+    /// to today's behaviour, and a DNG denoised by another tool is not recognised. The user's rule is
+    /// about their own marked source files, so both are out of scope rather than bugs.
+    public static func isDenoisedProduct(name: String) -> Bool {
+        let base = (name as NSString).lastPathComponent
+        return !base.isEmpty && base.lowercased().contains("denoise")
+    }
+
+    /// 559 — the one note appended when an already-denoised source skips v9.
+    static let denoisedSkipNote = "文件名带 denoise：已降噪源跳过 v9（除非手动覆盖）"
 
     /// 555 — the full-frame ISO at or above which `.auto` / `.preferV9` may choose v9.
     ///
@@ -214,7 +234,7 @@ public enum DecoderVersionPreference {
     ///
     /// `CIRAWDecoderVersionNone` is not a version (513): a JPEG answers `["None"]`, and returning it
     /// would make the caller store a spelling no RAW filter accepts.
-    public static func candidates(in available: [String]) -> [String] {
+    public static func candidates(in available: [String], denoised: Bool = false) -> [String] {
         let usable = usableSpellings(in: available)
 
         var ordered: [String] = []
@@ -224,7 +244,7 @@ public enum DecoderVersionPreference {
         ordered.append(contentsOf: usable
             .filter { !fixedOrder.contains($0) }
             .sorted(by: fallbackComesBefore))
-        return ordered
+        return skippingV9(ordered, usable: usable, denoised: denoised)
     }
 
     // MARK: - 555 · policy + ISO + 解码偏好 → one candidate list
@@ -292,28 +312,37 @@ public enum DecoderVersionPreference {
                                   cropFactor: Double = 1,
                                   stored: String?,
                                   resolved: String? = nil,
+                                  denoised: Bool = false,
                                   in available: [String]) -> [String] {
         let usable = usableSpellings(in: available)
 
+        let ordered: [String]
         switch policy {
         case .v8:
-            return pinnedThenFamily(pinned: stored, family: 8, in: usable)
+            ordered = pinnedThenFamily(pinned: stored, family: 8, in: usable)
         case .v9:
-            return pinnedThenFamily(pinned: stored, family: 9, in: usable)
+            ordered = pinnedThenFamily(pinned: stored, family: 9, in: usable)
         case .auto:
             // A stored spelling is always the user's hand pick: a pre-555 document has one and no
             // resolved result, and a Phase 2 document could carry both. The table must not move its
             // pixels; a new 自动 document stores no spelling at all.
             if let stored {
                 if let family = rank(stored).major {
-                    return pinnedThenFamily(pinned: stored, family: family, in: usable)
+                    ordered = pinnedThenFamily(pinned: stored, family: family, in: usable)
+                } else {
+                    ordered = [stored]
                 }
-                return [stored]
+            } else {
+                let allowV9 = preference == .preferV9
+                    || (preference == .auto && isHighISO(iso: iso, cropFactor: cropFactor))
+                ordered = allowV9 ? candidates(in: usable) : nonV9Order(in: usable)
             }
-            let allowV9 = preference == .preferV9
-                || (preference == .auto && isHighISO(iso: iso, cropFactor: cropFactor))
-            return allowV9 ? candidates(in: usable) : nonV9Order(in: usable)
         }
+
+        // 559 — the denoise filter runs **after** the policy, so a `.v9` document and an old
+        // hand-picked `stored == "9"` are pulled back to the classic family as well: 「无论是自动
+        // 还是 v9」. With no classic spelling left, ask for nothing (Apple's default).
+        return skippingV9(ordered, usable: usable, denoised: denoised)
     }
 
     /// Apply the §555 table and **verify every assignment by reading it back**.
@@ -326,13 +355,15 @@ public enum DecoderVersionPreference {
                                cropFactor: Double = 1,
                                stored: String?,
                                resolved: String? = nil,
+                               denoised: Bool = false,
                                in available: [String],
                                readback: (String) -> String?) -> Resolution {
         let ordered = candidates(policy: policy, preference: preference, iso: iso,
                                  cropFactor: cropFactor, stored: stored, resolved: resolved,
-                                 in: available)
-        return apply(ordered, available: available,
-                     emptyNote: "没有符合策略的候选，跟随默认", readback: readback)
+                                 denoised: denoised, in: available)
+        let resolution = apply(ordered, available: available,
+                               emptyNote: "没有符合策略的候选，跟随默认", readback: readback)
+        return annotated(resolution, denoised: denoised)
     }
 
     /// The live form of the §555 resolver: one filter, its own version list, assign → read back.
@@ -342,6 +373,7 @@ public enum DecoderVersionPreference {
                                cropFactor: Double = 1,
                                stored: String?,
                                resolved: String? = nil,
+                               denoised: Bool = false,
                                for url: URL) -> Resolution {
         guard let filter = CIRAWFilter(imageURL: url) else {
             return Resolution(available: [], selected: nil, readBacks: [],
@@ -350,7 +382,7 @@ public enum DecoderVersionPreference {
         let available = filter.supportedDecoderVersions.map { $0.rawValue }
         return resolve(policy: policy, preference: preference, iso: iso,
                        cropFactor: cropFactor, stored: stored, resolved: resolved,
-                       in: available) { candidate in
+                       denoised: denoised, in: available) { candidate in
             filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
             return filter.decoderVersion.rawValue
         }
@@ -368,10 +400,13 @@ public enum DecoderVersionPreference {
     ///
     /// `readback` is a closure so the fallback branch is testable without a RAW that refuses a
     /// spelling. The real overload below passes the live `CIRAWFilter`'s answer.
-    public static func resolve(in available: [String],
+    public static func resolve(in available: [String], denoised: Bool = false,
                                readback: (String) -> String?) -> Resolution {
-        apply(candidates(in: available), available: available,
-              emptyNote: "文件没有可用的解码器版本，跟随默认", readback: readback)
+        let resolution = apply(candidates(in: available, denoised: denoised),
+                               available: available,
+                               emptyNote: "文件没有可用的解码器版本，跟随默认",
+                               readback: readback)
+        return annotated(resolution, denoised: denoised)
     }
 
     /// The live form used by the denoise product: one filter, the file's own list, assign → read back.
@@ -381,10 +416,20 @@ public enum DecoderVersionPreference {
                               notes: ["读不出解码器版本，跟随默认"])
         }
         let available = filter.supportedDecoderVersions.map { $0.rawValue }
-        return resolve(in: available) { candidate in
+        return resolve(in: available,
+                       denoised: isDenoisedProduct(name: url.lastPathComponent)) { candidate in
             filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)
             return filter.decoderVersion.rawValue
         }
+    }
+
+    /// 559 — one reading on every denoised-source resolution, so a log can attribute the v8 choice
+    /// to the file-name rule instead of guessing.
+    private static func annotated(_ resolution: Resolution, denoised: Bool) -> Resolution {
+        guard denoised else { return resolution }
+        return Resolution(available: resolution.available, selected: resolution.selected,
+                          readBacks: resolution.readBacks,
+                          notes: resolution.notes + [denoisedSkipNote])
     }
 
     // MARK: - shared read-back loop
@@ -440,6 +485,16 @@ public enum DecoderVersionPreference {
             .filter { rank($0).major != 9 && !ordered.contains($0) }
             .sorted(by: fallbackComesBefore))
         return ordered
+    }
+
+    /// 559 — drop every v9 spelling from an already-ordered list. If the policy was pinned to v9
+    /// (a `.v9` document or a legacy `stored == "9"`), the list becomes empty; the classic order is
+    /// then the fallback the ticket asks for. A file offering only v9 stays empty = Apple's default.
+    private static func skippingV9(_ ordered: [String], usable: [String],
+                                   denoised: Bool) -> [String] {
+        guard denoised else { return ordered }
+        let classic = ordered.filter { rank($0).major != 9 }
+        return classic.isEmpty ? nonV9Order(in: usable) : classic
     }
 
     /// `pinned` first (when it belongs to `family`), then that family's own spellings.

@@ -251,13 +251,25 @@ final class DecoderVersionPreference554Tests: XCTestCase {
         let productID = try runDenoiseAndWait()
 
         let available = try RAWDecoder.availableVersions(for: Self.fixtureURL)
-        let expected = try XCTUnwrap(DecoderVersionPreference.preferred(in: available))
         let product = try catalog.develop(forAsset: productID)
+        let productURL = try catalog.fileURL(for: try XCTUnwrap(catalog.asset(id: productID)))
 
-        print("554 端到端 夹具列表 = \(available) ⇒ 期望 \(expected) "
+        print("554 端到端 夹具列表 = \(available) "
               + "· 产物 decoderVersion = \(String(describing: product.decoderVersion))")
-        XCTAssertEqual(product.decoderVersion, expected,
-                       "真降噪产物的 decoderVersion 必须等于 §554 选中的拼写")
+        // 559 — the product's name carries `denoise`, so the marker pulls it back to the classic
+        // family even though the fixture still offers bare `9`.
+        XCTAssertEqual(product.decoderVersion, "8",
+                       "559 之后降噪产物（文件名带 denoise）按经典解码")
+
+        // 559 — §554's order itself is intact: the **same bytes** under a name without the marker
+        // still prefer bare `9`. Without this, the assertion above would silently delete §554.
+        let plain = workDir.appendingPathComponent("probe-plain.dng")
+        try FileManager.default.copyItem(at: productURL, to: plain)
+        let plainResolution = DecoderVersionPreference.resolve(for: plain)
+        print("554 无标记拷贝的回读选中 = \(String(describing: plainResolution.selected))")
+        XCTAssertEqual(plainResolution.selected, "9",
+                       "559 只影响带 denoise 的文件名；无标记文件仍按 §554 选裸 9")
+
         XCTAssertEqual(product.light.exposure, 1.25, accuracy: 1e-12,
                        "395/396 的继承不能被 554 带坏")
         XCTAssertNil(session.lastDenoiseInheritError)

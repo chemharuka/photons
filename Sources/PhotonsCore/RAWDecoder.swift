@@ -442,6 +442,9 @@ public struct RAWProbe: Sendable {
     /// offered and the EXIF decides whether it is wanted. `photonsctl info` prints it, and it is what
     /// makes 「这台机器上没有高 ISO 文件」 checkable instead of merely believed.
     public let autoVersion: String?
+    /// 559 — the file name carries the denoise marker, so the automatic answer never uses v9.
+    /// `photonsctl info` prints it beside `autoVersion`.
+    public let denoisedProduct: Bool
     /// §11.3: lens correction is a **per-file** fact, never a per-camera one — the EOS R5 + Sigma
     /// 50/1.4 CR3 body reports the switch as unavailable while RW2/RAF from the same era honour it.
     /// So this is `isLensCorrectionSupported` *and* a successful toggle-and-read-back on this very
@@ -680,6 +683,7 @@ public final class RAWDecoder {
         let facts = Self.exifFacts(from: props)
         let crop = DecoderVersionPreference.cropFactor(focalLength: facts.focalLength,
                                                        focalLength35mm: facts.focalLength35mm)
+        let denoised = DecoderVersionPreference.isDenoisedProduct(name: url.lastPathComponent)
 
         return RAWProbe(supportedVersions: versions,
                         defaultVersion: Self.versionString(filter.decoderVersion),
@@ -693,10 +697,12 @@ public final class RAWDecoder {
                         cropFactor: crop,
                         // §555 — the probe reports the file's **automatic** answer under the default
                         // 解码偏好 (自动). It is computed by the one resolver, not by a second rule.
+                        // 559 — a denoised product skips v9 even here.
                         autoVersion: DecoderVersionPreference.candidates(
                             policy: .auto, preference: .auto, iso: facts.iso,
                             cropFactor: crop ?? 1, stored: nil, resolved: nil,
-                            in: versions).first,
+                            denoised: denoised, in: versions).first,
+                        denoisedProduct: denoised,
                         lensCorrectionSupported: Self.probeLensCorrection(filter),
                         lensCorrectionEnabled: filter.isLensCorrectionEnabled,
                         asShotTemperature: Self.saneTemperature(filter.neutralTemperature),
@@ -1006,10 +1012,14 @@ public final class RAWDecoder {
         let exif = Self.exifFacts(from: filter)
         let sensorCrop = DecoderVersionPreference.cropFactor(
             orFullFrame: exif.focalLength, exif.focalLength35mm)
+        // 559 — the denoise marker lives in the file name, and this is the only decode entry point
+        // that sees the URL. Passing it here is what pulls a denoised product's automatic decode
+        // back to the classic family; an explicit `decoderVersion` still bypasses the resolver below.
+        let denoised = DecoderVersionPreference.isDenoisedProduct(name: url.lastPathComponent)
         let autoVersion = DecoderVersionPreference.candidates(
             policy: .auto, preference: options.decoderVersionPreference,
             iso: exif.iso, cropFactor: sensorCrop, stored: nil, resolved: nil,
-            in: offered).first
+            denoised: denoised, in: offered).first
 
         // A bare `DecodeOptions(decoderVersion:)` is a caller's **exact** request (photonsctl
         // `--version`, the detail probe, a test): it must be assigned verbatim and report the D2′
@@ -1028,6 +1038,7 @@ public final class RAWDecoder {
                 iso: exif.iso, cropFactor: sensorCrop,
                 stored: options.decoderStoredVersion,
                 resolved: options.decoderResolvedVersion,
+                denoised: denoised,
                 in: offered) { candidate in
                     guard DecoderCapabilities.knownVersions.contains(candidate) else { return nil }
                     filter.decoderVersion = CIRAWDecoderVersion(rawValue: candidate)

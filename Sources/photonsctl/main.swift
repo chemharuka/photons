@@ -103,6 +103,7 @@ func cmdInfo(_ a: Args) {
     // gets today (the same value `DecoderCapabilities.autoVersion` carries to the 解码模型 picker).
     // `RAWProbe.autoVersion`'s own comment promised `photonsctl info` printed it; it did not.
     note("autoVersion     \(probe.autoVersion ?? "nil (no upgrade)")")
+    note("denoisedProduct \(probe.denoisedProduct ? "yes" : "no")")
     note("versions        \(probe.supportedVersions.joined(separator: ", "))")
     // 派单 006 A: the file's own white balance — what the inspector shows while the document is
     // as shot, instead of the nominal 6500 K the panel used to print.
