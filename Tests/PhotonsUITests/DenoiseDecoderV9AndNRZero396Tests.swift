@@ -15,8 +15,8 @@ import PhotonsExtensions
 /// (`session.denoiseSelection()`) against a **real** library on disk and the real catalog reads —
 /// the same harness §395 established, so the two tickets are measured by the same ruler:
 ///
-///   ② the product's `decoderVersion` in `develop_json` is the §554 preference's answer — on this
-///      machine's fixture that is bare `"9"` (raw value printed);
+///   ② the product's `decoderVersion` in `develop_json` is the classic `"8"` after §559: the
+///      product's name carries `denoise`, so the marker pulls it back from §554's bare `"9"`;
 ///   ③ the product's `detailSettings.luminanceNR` and `.colorNR` are **0** — and, because 042's
 ///      decoder reads a stored `0` back as `nil`, the reading is taken **twice**: once from the
 ///      document object and once from the raw JSON text, so 「写进去了」 is measured on the bytes
@@ -231,23 +231,33 @@ final class DenoiseDecoderV9AndNRZero396Tests: XCTestCase {
         let product = try stored(productID)
 
         // ── ② decoderVersion ──────────────────────────────────────────────────────────────────────
-        // 554 changed the automatic choice: the product now follows
-        // `DecoderVersionPreference` (9 > 9.dng > 8 > 8.dng > …), not the old 396-only "9.dng".
-        // The fixture's list gained bare `9` on 2026-11-23 (macOS 27.3) and assigning it reads back
-        // `9`, so the expected value here is the preference's own answer, printed next to the list.
+        // 559 — a denoised product is decoded by the classic family regardless of §554's order:
+        // the file name is the marker, so even though the fixture offers bare `9`, the product is
+        // expected to be `"8"`. The plain-name copy below proves §554's order is still intact.
         let offered = try RAWDecoder.availableVersions(for: Self.fixtureURL)
         let expectedVersion = try XCTUnwrap(DecoderVersionPreference.preferred(in: offered),
                                             "② 夹具必须至少有一个可用的解码器版本")
         print("② 夹具 supportedDecoderVersions = \(offered) ⇒ §554 选中 \(expectedVersion)")
         print("② 产物 decoderVersion = \(String(describing: product.decoderVersion))")
-        XCTAssertEqual(product.decoderVersion, expectedVersion,
-                       "② 产物必须等于 §554 的首选（本机列表含裸 9，见 554 的实测）")
-        XCTAssertEqual(product.decoderVersion, "9",
-                       "② 本机夹具的首选就是裸 9；列表变化时上面的打印会说明原因")
+        // 559 — the product's name carries `denoise`, so the name rule pulls it back to the classic
+        // family (8), overriding §554's 「裸 9 优先」 for products only.
+        XCTAssertEqual(product.decoderVersion, "8",
+                       "559 之后降噪产物（文件名带 denoise）按经典解码")
+        XCTAssertEqual(product.decoderVersion, "8",
+                       "② 产物按经典解码；列表变化时上面的打印会说明原因")
 
         let rawDecoder = try rawLeaf(productID, group: "", key: "decoderVersion")
         print("② develop_json 里的 decoderVersion 原文 = \(String(describing: rawDecoder))")
-        XCTAssertEqual(rawDecoder as? String, expectedVersion, "② 字节里也得是选中的那个拼写")
+        XCTAssertEqual(rawDecoder as? String, "8", "② 字节里也得是经典拼写")
+
+        // 559 — §554's order is unchanged for a file name without the marker: same bytes, plain name.
+        let productURL = try catalog.fileURL(for: try XCTUnwrap(catalog.asset(id: productID)))
+        let plain = workDir.appendingPathComponent("probe-plain.dng")
+        try FileManager.default.copyItem(at: productURL, to: plain)
+        let plainResolution = DecoderVersionPreference.resolve(for: plain)
+        print("② 无标记拷贝的回读选中 = \(String(describing: plainResolution.selected))")
+        XCTAssertEqual(plainResolution.selected, "9",
+                       "② 559 只影响带 denoise 的文件名；无标记文件仍按 §554 选裸 9")
 
         // ── ③ luminanceNR / colorNR ───────────────────────────────────────────────────────────────
         // Two readings, deliberately. The type drops a stored 0 (`v > 0` guard), so asserting only
