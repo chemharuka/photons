@@ -4130,15 +4130,19 @@ public final class CatalogSession {
     @discardableResult
     public func adoptDecoderResolution(available: [String], iso: Int?,
                                        cropFactor: Double = 1,
+                                       denoised: Bool = false,
                                        effectiveDefault: String? = nil,
                                        preference: DecoderVersionPreference.Preference = DecoderVersionPreference.setting)
         -> String? {
         guard edit.decoderVersionPolicy == .auto, edit.decoderVersion == nil else {
             return edit.decodeInputs.decoderVersion
         }
+        // 559 的标记事实由调用方随文件事实一起传入（`facts.denoisedProduct`）；不能从 `available`
+        // 自己猜 —— 同一个列表既可能来自降噪产物，也可能来自原始文件。
         let resolution = DecoderVersionPreference.resolve(
             policy: .auto, preference: preference, iso: iso, cropFactor: cropFactor,
-            stored: nil, resolved: edit.resolvedDecoderVersion, in: available) { $0 }
+            stored: nil, resolved: edit.resolvedDecoderVersion, denoised: denoised,
+            in: available) { $0 }
         let spelling = resolution.selected ?? effectiveDefault
         installResolvedDecoderVersion(spelling)
         return spelling
@@ -4198,10 +4202,13 @@ public final class CatalogSession {
     /// spelling afterwards, so a silent rewrite moves the key instead of leaving a prediction.
     private func resolution(from facts: DecoderVersionPreference.DocumentFacts,
                             resolved: String?) -> DecoderVersionPreference.DocumentResolution {
+        // 559 的标记事实随 `facts` 一起来（`facts.denoisedProduct`，文件名判定）；不能从 `available`
+        // 自己猜。少了这一项，打开路径会把降噪产物预测成 `9`，而解码端实际按文件名走 `8`。
         let resolution = DecoderVersionPreference.resolve(
             policy: .auto, preference: DecoderVersionPreference.setting,
             iso: facts.iso, cropFactor: facts.cropFactor,
-            stored: nil, resolved: resolved, in: facts.available) { $0 }
+            stored: nil, resolved: resolved, denoised: facts.denoisedProduct,
+            in: facts.available) { $0 }
         return DecoderVersionPreference.DocumentResolution(resolution: resolution, facts: facts)
     }
 
