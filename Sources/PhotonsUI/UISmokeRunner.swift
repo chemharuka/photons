@@ -3717,9 +3717,6 @@ public final class UISmokeRunner {
                            second.usedCachedDecode ? "hit" : "miss"))
             }
         }
-        let denoise = windowController.session.denoiseStats
-        log("denoise cache           hits=\(denoise.cacheHits) computes=\(denoise.computes) "
-            + "failed=\(denoise.computesFailed) bytesWritten=\(denoise.bytesWritten)")
         return finish()
     }
 
