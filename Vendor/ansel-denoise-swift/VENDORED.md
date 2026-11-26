@@ -1,7 +1,7 @@
 # ansel-denoise-swift — vendored
 
 Source copy of https://github.com/chemharuka/ansel-denoise-swift at commit
-`7919bb8` ("feat(host): the client asks for the measured curve by default").
+`4042425` ("feat(blend): 564 — 相干门控保留暗部细频带（self-normalised grain floor）").
 
 This tool is **GPL-3.0**, so unlike the MIT denoiser next door it is *not* linked
 into Photons. It is built to its own executable and driven over a pipe
@@ -30,4 +30,4 @@ rsync -a --delete --exclude .build --exclude .git --exclude .DS_Store \
 
 then update the commit hash above and commit the diff.
 
-Last synced: 2026-11-23 (`7919bb8`).
+Last synced: 2026-11-26 (`4042425`).
