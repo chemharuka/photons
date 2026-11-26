@@ -288,6 +288,7 @@
 "命名" = "Naming";
 "品红" = "Magenta";
 "回到这一步（不新增历史）" = "Return to this step (without adding history)";
+"回到默认五槽" = "Reset to the default five slots";
 "图像尺寸" = "Image Size";
 "在 Finder 中显示" = "Show in Finder";
 "在照片旁生成 {0}，并与原图组成堆叠（降噪结果置顶）" = "Create {0} beside the photo and stack it with the original (denoised result on top)";
@@ -584,6 +585,7 @@
 "浏览列表" = "Browser List";
 "混合" = "Blend";
 "混合{0}" = "Blend {0}";
+"清掉所有筛选值，并把筛选条恢复成默认五个维度" = "Clear every filter value and restore the bar to its default five dimensions";
 "清晰度" = "Clarity";
 "清除全部" = "Clear all";
 "清除引导线" = "Clear guides";

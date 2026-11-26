@@ -197,10 +197,14 @@ public struct CatalogFilter: Equatable, Sendable {
         return next
     }
 
-    /// 「全部不选」 — every slot goes away, so the next five clicks number 1…5 again.
+    /// 「回到默认五槽」 — every value goes and the bar returns to the five factory dimensions, empty
+    /// and in `defaultDimensions` order. Not `slots = []`: an empty bar is a *shape* the user can end
+    /// up stuck in (569), while "no filter" already has one spelling — the default bar with no values.
+    /// This also matches `FilterPersistence`'s "all empty ⇒ forget the archive" rule: after this click
+    /// the stored blob is gone and the next launch opens on these same five slots.
     public func clearingSlots() -> CatalogFilter {
         var next = self
-        next.slots = []
+        next.slots = Self.defaultSlots
         return next
     }
 
