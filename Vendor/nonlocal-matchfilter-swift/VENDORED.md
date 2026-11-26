@@ -1,7 +1,7 @@
 # nonlocal-matchfilter-swift - vendored
 
 Source copy of https://github.com/chemharuka/nonlocal-matchfilter-swift at commit
-`37efdb4` ("taper: hold the blend back at the floor, where signal and noise are one").
+`751fa44` ("blend: 564 — coherence-gated fine-band blend keeps shadow detail").
 
 Photons builds it as a **local SwiftPM package** (`Package.swift` ->
 `.package(path: "Vendor/nonlocal-matchfilter-swift")`) so a checkout needs no

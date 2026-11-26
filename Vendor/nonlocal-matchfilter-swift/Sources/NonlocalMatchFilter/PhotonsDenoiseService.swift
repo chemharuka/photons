@@ -51,6 +51,14 @@ public struct NLMFDenoiseOptions: Sendable, Equatable {
     public var shadowTaper: Double = 0
     public var shadowLow: Double = 0.002
     public var shadowHigh: Double = 0.02
+    /// Coherence gate on the residual's finest band (`DetailGate`), as `wMax`.
+    /// 0 turns it off and restores the historical blend exactly.
+    public var detailGate: Double = 0.85
+    public var detailKneeLow: Double = 1.05
+    public var detailKneeHigh: Double = 1.25
+    public var detailSigma: Double = 1.5
+    /// Coherence box **half-width** in plane pixels; the window is 2·box+1.
+    public var detailBox: Int = 16
     /// Border to discard from each tile, in plane pixels (8 mosaic pixels).
     ///
     /// The network's tile edges are seams — it conditioned its answer on a
@@ -92,6 +100,8 @@ public struct NLMFDenoiseReport: Sendable, Equatable {
     public let shadowStrength: Double
     /// Green-plane σ at 5 % brightness behind that choice.
     public let sigma: Double
+    /// Mean `DetailGate` weight; 0 when the gate is off.
+    public let detailMeanWeight: Double
     public let seconds: Double
     public let inferenceSeconds: Double
     public let outputBytes: Int
@@ -157,6 +167,11 @@ public struct NLMFDenoiseService: Sendable {
             shadowTaper: options.shadowTaper,
             shadowLow: options.shadowLow,
             shadowHigh: options.shadowHigh,
+            detailGate: options.detailGate,
+            detailKneeLow: options.detailKneeLow,
+            detailKneeHigh: options.detailKneeHigh,
+            detailSigma: options.detailSigma,
+            detailBox: options.detailBox,
             crop: options.crop,
             estimateNoise: options.measureNoise,
             checkerboardNoise: options.checkerboardNoise)
@@ -173,6 +188,7 @@ public struct NLMFDenoiseService: Sendable {
                 highlightStrength: report.strengthHighlight,
                 shadowStrength: report.strengthShadow,
                 sigma: report.sigma,
+                detailMeanWeight: report.detailMeanWeight,
                 seconds: report.seconds,
                 inferenceSeconds: report.inferenceSeconds,
                 outputBytes: report.outputBytes)

@@ -5,6 +5,8 @@
 //
 //  usage: nlmf-denoise <model.mlpackage> <in.dng> --out <out.dng>
 //                      [--a r,g,b,g2] [--b r,g,b,g2] [--strength S] [--crop N]
+//                      [--detail-gate 0.85] [--detail-knee 1.05,1.25]
+//                      [--detail-sigma 1.5] [--detail-box 16]
 //                      [--dual-raw] [--json]
 //
 
@@ -19,7 +21,9 @@ func die(_ msg: String) -> Never {
 let args = Array(CommandLine.arguments.dropFirst())
 guard args.count >= 2 else {
     die("usage: nlmf-denoise <model.mlpackage> <in.dng> --out <out.dng> "
-        + "[--a r,g,b,g2] [--b r,g,b,g2] [--strength S] [--crop N] [--dual-raw] [--json]")
+        + "[--a r,g,b,g2] [--b r,g,b,g2] [--strength S] [--crop N] "
+        + "[--detail-gate W] [--detail-knee lo,hi] [--detail-sigma PX] "
+        + "[--detail-box PX] [--dual-raw] [--json]")
 }
 
 func flag(_ name: String) -> String? {
@@ -71,6 +75,16 @@ let shadowTaper = flag("--shadow-taper").flatMap(Double.init) ?? 0
 let sknee = flag("--shadow-knee").map(parseDoubles) ?? []
 let shadowLow = sknee.count == 2 ? sknee[0] : 0.002
 let shadowHigh = sknee.count == 2 ? sknee[1] : 0.02
+// `--detail-gate w` caps how much of the residual's finest band the network may
+// remove. 0 is the rollback switch and reproduces the old blend bit for bit.
+let detailGate = flag("--detail-gate").flatMap(Double.init) ?? 0.85
+let dknee = flag("--detail-knee").map(parseDoubles) ?? []
+let detailKneeLow = dknee.count == 2 ? dknee[0] : 1.05
+let detailKneeHigh = dknee.count == 2 ? dknee[1] : 1.25
+// Gaussian sigma in plane pixels; 1.5 plane px = 3 mosaic px.
+let detailSigma = flag("--detail-sigma").flatMap(Double.init) ?? 1.5
+// Coherence box half-width in plane pixels; the window is 2·box+1.
+let detailBox = flag("--detail-box").flatMap(Int.init) ?? 16
 let crop = flag("--crop").flatMap(Int.init) ?? 0
 // `--measure-noise` estimates the sensor's Poisson-Gaussian curve from this
 // frame and ignores --a/--b. Without it, or with explicit values, the CLI
@@ -90,7 +104,11 @@ let request = DenoiseRequest(
     mlpackage: mlpackage,
     a: a, b: b, strength: strength, strengthTaper: strengthTaper,
     taperLow: taperLow, taperHigh: taperHigh,
-    shadowTaper: shadowTaper, shadowLow: shadowLow, shadowHigh: shadowHigh, crop: crop,
+    shadowTaper: shadowTaper, shadowLow: shadowLow, shadowHigh: shadowHigh,
+    detailGate: detailGate, detailKneeLow: detailKneeLow,
+    detailKneeHigh: detailKneeHigh, detailSigma: detailSigma,
+    detailBox: detailBox,
+    crop: crop,
     estimateNoise: measureNoise, checkerboardNoise: checkerboardNoise,
     dualRaw: dualRaw)
 
@@ -114,6 +132,11 @@ do {
             "seconds": report.seconds,
             "outputBytes": report.outputBytes,
             "strengthTaper": request.strengthTaper,
+            "detailGate": request.detailGate,
+            "detailKnee": [request.detailKneeLow, request.detailKneeHigh],
+            "detailSigma": request.detailSigma,
+            "detailBox": request.detailBox,
+            "detailMeanWeight": report.detailMeanWeight,
             "writerTiles": report.writerTiles,
             "hasAlternate": report.hasAlternate,
         ]
@@ -130,6 +153,12 @@ do {
                      report.strength, report.sigma, report.strengthHighlight,
                      report.readSeconds, report.inferenceSeconds,
                      report.writeSeconds, report.seconds))
+        if request.detailGate > 0 {
+            print(String(format: "  detail gate %.2f (knee %.2f–%.2f, σf %.2f px, box ±%d px), mean weight %.3f",
+                         request.detailGate, request.detailKneeLow,
+                         request.detailKneeHigh, request.detailSigma,
+                         request.detailBox, report.detailMeanWeight))
+        }
         print("  \(report.tiles) tiles (\(report.tilesX)×\(report.tilesY)), "
               + "\(report.outputBytes / 1_000_000) MB")
     }

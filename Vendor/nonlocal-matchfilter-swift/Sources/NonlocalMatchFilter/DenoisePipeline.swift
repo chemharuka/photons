@@ -80,6 +80,21 @@ public struct DenoiseRequest {
     public var shadowTaper: Double
     public var shadowLow: Double
     public var shadowHigh: Double
+    /// Coherence gate on the residual's finest band — see `DetailGate`.
+    ///
+    /// `detailGate` is `wMax`: the maximum fraction of the fine band the network
+    /// is allowed to remove. `0` disables it and reproduces the historical blend
+    /// exactly. `detailKneeLow/High` are the smoothstep knees on the coherence
+    /// envelope normalised by the frame's own per-brightness grain floor (the
+    /// white wall sits at about 1.0), `detailSigma` is the Gaussian sigma in
+    /// **plane** pixels, and `detailBox` is the coherence box **half-width** in
+    /// plane pixels (window = 2·box+1). The default is
+    /// 0.85 / 1.05–1.25 / 1.5 px / 16 px, measured on L1040080.
+    public var detailGate: Double
+    public var detailKneeLow: Double
+    public var detailKneeHigh: Double
+    public var detailSigma: Double
+    public var detailBox: Int
     /// Unreliable border to discard from each tile, in **plane** pixels.
     ///
     /// The network's edge pixels disagree with a differently-anchored grid
@@ -107,6 +122,9 @@ public struct DenoiseRequest {
                 strengthTaper: Double = 0,
                 taperLow: Double = 0.18, taperHigh: Double = 0.60,
                 shadowTaper: Double = 0, shadowLow: Double = 0.002, shadowHigh: Double = 0.02,
+                detailGate: Double = 0.85,
+                detailKneeLow: Double = 1.05, detailKneeHigh: Double = 1.25,
+                detailSigma: Double = 1.5, detailBox: Int = 16,
                 crop: Int = 0, estimateNoise: Bool = false,
                 checkerboardNoise: Bool = false, dualRaw: Bool = false) {
         self.input = input
@@ -121,6 +139,11 @@ public struct DenoiseRequest {
         self.shadowTaper = shadowTaper
         self.shadowLow = shadowLow
         self.shadowHigh = shadowHigh
+        self.detailGate = detailGate
+        self.detailKneeLow = detailKneeLow
+        self.detailKneeHigh = detailKneeHigh
+        self.detailSigma = detailSigma
+        self.detailBox = detailBox
         self.crop = crop
         self.estimateNoise = estimateNoise
         self.checkerboardNoise = checkerboardNoise
@@ -152,6 +175,8 @@ public struct DenoiseReport: Sendable {
     public let strengthShadow: Double
     /// Green-plane σ at 5 % brightness that the strength was derived from.
     public let sigma: Double
+    /// Mean `DetailGate` weight over the frame; 0 when the gate is off.
+    public let detailMeanWeight: Double
     public let writerTiles: Int
     /// True when the output carries both the original (IFD0) and the denoised
     /// (SubIFD) mosaic.
@@ -414,41 +439,100 @@ public enum DenoisePipeline {
         // sample back toward the *input* mosaic (`i + s·(d − i)`). The blend has
         // to read the input, not the destination buffer, or a partial strength
         // drags the frame toward black.
-        var out = [Float](repeating: 0, count: width * height)
+        var out = [Float](repeating: 0, count: n)
         out.withUnsafeMutableBufferPointer { outPtr in
             mosaic.withUnsafeBufferPointer { mosaicPtr in
-                let sBase = Float(strength)
-                // Per-pixel reduction of the blend weight towards the highlights
-                // and towards the floor; `0` on both reproduces the frame-wide
-                // `strength` exactly.
-                let taperQ = Float(max(0, request.strengthTaper))
-                let k0 = Float(request.taperLow), k1 = Float(max(request.taperHigh, request.taperLow + 1e-6))
-                let shadowQ = Float(max(0, request.shadowTaper))
-                let s0 = Float(request.shadowLow), s1 = Float(max(request.shadowHigh, request.shadowLow + 1e-6))
-                @inline(__always) func smoothstep(_ x: Float, _ a: Float, _ b: Float) -> Float {
-                    var t = (x - a) / (b - a)
-                    t = t < 0 ? 0 : (t > 1 ? 1 : t)
-                    return t * t * (3 - 2 * t)
-                }
                 for i in 0..<n {
                     let w = wsum[i]
                     // No tile reached this pixel (only possible when `crop` pushes
                     // the kept windows apart): keep the source sample.
                     var d = w > 0 ? acc[i] / w : mosaicPtr[i]
                     if d < 0 { d = 0 } else if d > 1 { d = 1 }
-                    let inputValue = mosaicPtr[i]
-                    var s = sBase
-                    if taperQ > 0 || shadowQ > 0 {
-                        var factor: Float = 1
-                        // Highlights: 1 → (1 − q) as x rises.
-                        if taperQ > 0 { factor *= 1 - taperQ * smoothstep(inputValue, k0, k1) }
-                        // Floor: (1 − q) → 1 as x rises; exactly 1 at or above `s1`,
-                        // so nothing above the knee can move.
-                        if shadowQ > 0 { factor *= 1 - shadowQ * (1 - smoothstep(inputValue, s0, s1)) }
-                        s = sBase * factor
-                    }
-                    outPtr[i] = s == 1 ? d : inputValue + s * (d - inputValue)
+                    outPtr[i] = d
                 }
+            }
+        }
+
+        // Per-pixel blend weight: the frame-wide `strength`, optionally reduced
+        // towards the highlights and towards the floor. The closure is shared by
+        // both the gated and the historical path so they cannot drift.
+        let sBase = Float(strength)
+        let taperQ = Float(max(0, request.strengthTaper))
+        let k0 = Float(request.taperLow)
+        let k1 = Float(max(request.taperHigh, request.taperLow + 1e-6))
+        let shadowQ = Float(max(0, request.shadowTaper))
+        let s0 = Float(request.shadowLow)
+        let s1 = Float(max(request.shadowHigh, request.shadowLow + 1e-6))
+        @inline(__always) func smoothstep(_ x: Float, _ a: Float, _ b: Float) -> Float {
+            var t = (x - a) / (b - a)
+            t = t < 0 ? 0 : (t > 1 ? 1 : t)
+            return t * t * (3 - 2 * t)
+        }
+        let strengthAt: (Float) -> Float = { inputValue in
+            var s = sBase
+            if taperQ > 0 || shadowQ > 0 {
+                var factor: Float = 1
+                if taperQ > 0 { factor *= 1 - taperQ * smoothstep(inputValue, k0, k1) }
+                if shadowQ > 0 { factor *= 1 - shadowQ * (1 - smoothstep(inputValue, s0, s1)) }
+                s = sBase * factor
+            }
+            return s
+        }
+
+        // The gate runs on one CFA plane at a time. Filtering the interleaved
+        // mosaic would mix colours into its own 2-px pattern, which reads as
+        // perfectly coherent and opens the gate everywhere; a plane also matches
+        // the packAndSigma split the network conditions on. The coherence floor
+        // is computed per plane and per brightness, so it does not need sigma.
+        let parameters = DetailGate.Parameters(gate: request.detailGate,
+                                               kneeLow: request.detailKneeLow,
+                                               kneeHigh: request.detailKneeHigh,
+                                               sigma: request.detailSigma,
+                                               box: request.detailBox)
+        var detailMeanWeight = 0.0
+        if parameters.isActive {
+            var sumWeight = 0.0
+            for p in 0..<4 {
+                let (dy, dx) = layout.offsets[p]
+                let pw = (width - dx + 1) / 2
+                let ph = (height - dy + 1) / 2
+                guard pw > 0, ph > 0 else { continue }
+                var planeInput = [Float](repeating: 0, count: pw * ph)
+                var planeResult = [Float](repeating: 0, count: pw * ph)
+                for y in 0..<ph {
+                    let srcRow = (2 * y + dy) * width + dx
+                    let dstRow = y * pw
+                    for x in 0..<pw {
+                        let src = srcRow + 2 * x
+                        planeInput[dstRow + x] = mosaic[src]
+                        planeResult[dstRow + x] = out[src]
+                    }
+                }
+                let mean = DetailGate.blend(
+                    input: planeInput, denoised: &planeResult,
+                    width: pw, height: ph,
+                    strength: strengthAt,
+                    parameters: parameters)
+                for y in 0..<ph {
+                    let dstRow = (2 * y + dy) * width + dx
+                    let srcRow = y * pw
+                    for x in 0..<pw {
+                        out[dstRow + 2 * x] = planeResult[srcRow + x]
+                    }
+                }
+                sumWeight += mean * Double(pw * ph)
+            }
+            detailMeanWeight = n > 0 ? sumWeight / Double(n) : 0
+            progress?(String(format: "  detail gate %.2f, mean weight %.3f",
+                             request.detailGate, detailMeanWeight))
+        } else {
+            // The rollback path is the historical loop, not an algebraic
+            // rearrangement of the gate.
+            for i in 0..<n {
+                let iValue = mosaic[i]
+                let d = out[i]
+                let s = strengthAt(iValue)
+                out[i] = s == 1 ? d : iValue + s * (d - iValue)
             }
         }
         mosaic = []
@@ -496,6 +580,7 @@ public enum DenoisePipeline {
             strengthHighlight: strengthHighlight,
             strengthShadow: strengthShadow,
             sigma: sigma,
+            detailMeanWeight: detailMeanWeight,
             writerTiles: written.tileCount,
             hasAlternate: written.hasAlternate,
             alternateBytes: written.alternateByteCount)
