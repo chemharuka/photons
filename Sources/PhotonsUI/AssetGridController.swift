@@ -2014,6 +2014,26 @@ public final class StackMenuTarget: NSObject {
         guard let id = sender.representedObject as? String else { return }
         session?.setStackTop(assetID: id)
     }
+
+    /// 566 — 「删除降噪文件」: confirm once, then recycle every product and remove its row. The
+    /// original member is never touched; the existing SQLite trigger dissolves the pair when only
+    /// one member is left.
+    @objc func deleteDenoisePressed(_ sender: NSMenuItem) {
+        guard let session, let topIDs = sender.representedObject as? [String], !topIDs.isEmpty else {
+            return
+        }
+        let products = StackMenuBuilder.denoiseProducts(session: session, topIDs: topIDs)
+        guard !products.isEmpty else { return }
+        let files = products.reduce(into: 0) { count, asset in
+            guard let url = session.fileURL(for: asset),
+                  FileManager.default.fileExists(atPath: url.path) else { return }
+            count += 1
+        }
+        guard MissingFilesPanels.confirmDeleteDenoise(count: products.count, files: files,
+                                                       in: NSApp.keyWindow) else { return }
+        let outcome = session.deleteDenoiseProducts(inStackTopIDs: topIDs)
+        MissingFilesPanels.reportRemovalFailures(outcome, in: NSApp.keyWindow)
+    }
 }
 
 /// The builder. `menu` returns the 「堆叠」 submenu for the current selection, or nil when there is
@@ -2032,6 +2052,25 @@ public enum StackMenuBuilder {
     public static let makeTitle = Loc.t("堆叠所选照片")
     public static let ungroupTitle = Loc.t("取消堆叠")
     public static let setTopTitle = Loc.t("设为置顶")
+    /// 566 — a denoise pair's menu has its own title and one extra verb; the plain grammar is untouched.
+    public static let denoiseTitle = Loc.t("降噪")
+    public static let deleteDenoiseTitle = Loc.t("删除降噪文件")
+
+    /// The products behind the given tops, by the one recognition rule in `Stacks.swift`. Read-only:
+    /// used both to decide whether the delete row is worth showing and to count the confirmation.
+    static func denoiseProducts(session: CatalogSession, topIDs: [String]) -> [Asset] {
+        var seen = Set<String>()
+        var products: [Asset] = []
+        for topID in topIDs {
+            guard let summary = session.stacksByTopID[topID], summary.kind == .denoise else { continue }
+            let members = session.stackMembers(topID: topID)
+            guard let filename = StackKind.denoiseProductFilename(members.map(\.filename)),
+                  let product = members.first(where: { $0.filename == filename }),
+                  seen.insert(product.id).inserted else { continue }
+            products.append(product)
+        }
+        return products
+    }
 
     public static func menu(session: CatalogSession?, target: StackMenuTarget,
                             selectedIDs: [String]) -> NSMenu? {
@@ -2042,7 +2081,30 @@ public enum StackMenuBuilder {
         let canUngroup = !stacks.isEmpty
         guard canMake || canUngroup else { return nil }
 
-        let menu = NSMenu(title: title)
+        // 566 — only when *every* stack the selection touches is a denoise pair. A mixed selection
+        // falls back to the plain grammar, because "which product would this delete" has no answer.
+        let isDenoiseMenu = !stacks.isEmpty && stacks.allSatisfy { $0.kind == .denoise }
+        let menu = NSMenu(title: isDenoiseMenu ? denoiseTitle : title)
+
+        if isDenoiseMenu {
+            let ungroup = NSMenuItem(title: ungroupTitle,
+                                     action: #selector(StackMenuTarget.ungroupPressed(_:)),
+                                     keyEquivalent: "")
+            ungroup.target = target
+            menu.addItem(ungroup)
+
+            let topIDs = stacks.map(\.topID)
+            if !denoiseProducts(session: session, topIDs: topIDs).isEmpty {
+                menu.addItem(.separator())
+                let delete = NSMenuItem(title: deleteDenoiseTitle,
+                                        action: #selector(StackMenuTarget.deleteDenoisePressed(_:)),
+                                        keyEquivalent: "")
+                delete.target = target
+                delete.representedObject = topIDs
+                menu.addItem(delete)
+            }
+            return menu
+        }
 
         if canMake {
             let make = NSMenuItem(title: makeTitle,
@@ -2090,7 +2152,12 @@ public enum StackMenuBuilder {
     /// the menu is about, not "whatever is selected now".
     public static func attach(to menu: NSMenu, session: CatalogSession?, target: StackMenuTarget,
                               selectedIDs: [String]) {
-        for (index, item) in menu.items.enumerated().reversed() where item.title == title {
+        // 566 — both titles are cleared, and only the holder shape (no action, has a submenu) counts.
+        // Clearing just one title would leave a ghost holder whenever the same menu alternates
+        // between a plain stack and a denoise pair.
+        for (index, item) in menu.items.enumerated().reversed()
+        where (item.title == title || item.title == denoiseTitle)
+            && item.action == nil && item.submenu != nil {
             // Drop the title row and the separator `attach` put right after it.
             if index + 1 < menu.items.count, menu.items[index + 1].isSeparatorItem {
                 menu.removeItem(at: index + 1)
@@ -2100,8 +2167,11 @@ public enum StackMenuBuilder {
         guard let stackMenu = StackMenuBuilder.menu(session: session, target: target,
                                                    selectedIDs: selectedIDs)
         else { return }
-        let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let holder = NSMenuItem(title: stackMenu.title, action: nil, keyEquivalent: "")
         holder.submenu = stackMenu
+        // Assigning a submenu makes AppKit write `submenuAction:` into `action`; clear it so the row
+        // keeps the "no verb, only a submenu" shape the removal above (and 378's contract) relies on.
+        holder.action = nil
         menu.insertItem(holder, at: 0)
         menu.insertItem(.separator(), at: 1)
     }

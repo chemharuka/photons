@@ -902,6 +902,9 @@
 "阴影" = "Shadows";
 "阴影色调" = "Shadow tint";
 "降噪" = "Denoise";
+"删除降噪文件" = "Delete Denoise File";
+"删除降噪文件？" = "Delete the denoise file?";
+"将把 {0} 个条目移出照片库，并把其中 {1} 个降噪文件移到废纸篓（可在废纸篓中还原），原图保留。" = "Remove {0} item(s) from the library and move {1} denoise file(s) to the Trash (recoverable in the Finder). The original photo is kept.";
 "降噪 {0} 张（{1}）" = "Denoising {0} photos ({1})";
 "降噪 {0} 张（{1}）…" = "Denoising {0} photos ({1})…";
 "降噪 {0}…" = "Denoising {0}…";
