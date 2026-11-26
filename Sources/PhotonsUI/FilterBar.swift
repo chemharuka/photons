@@ -121,14 +121,18 @@ struct FilterChecklistRow {
     /// What the bar reads back when the row is clicked: a `FilterDimension` raw value, a canonical
     /// value string, or "" for the action/note rows.
     let tag: String
+    /// 569: hover text when the title alone cannot say what a click will do. `nil` keeps the old
+    /// behaviour of using the title as the tooltip.
+    let toolTip: String?
 
     init(title: String, checked: Bool = false, enabled: Bool = true,
-         kind: Kind = .toggle, tag: String = "") {
+         kind: Kind = .toggle, tag: String = "", toolTip: String? = nil) {
         self.title = title
         self.checked = checked
         self.enabled = enabled
         self.kind = kind
         self.tag = tag
+        self.toolTip = toolTip
     }
 }
 
@@ -179,7 +183,7 @@ final class FilterChecklistRowButton: NSButton {
         didSet {
             title = row.title
             isEnabled = row.enabled
-            toolTip = row.title
+            toolTip = row.toolTip ?? row.title
             needsDisplay = true
         }
     }
@@ -410,11 +414,12 @@ final class FilterChecklistController: NSViewController {
 ///   widens with text, so nothing can be truncated. `toolTip` and the accessibility label say
 ///   「选择筛选维度」 either way.
 /// * clicking it opens an `NSPopover` (`behavior = .transient`) holding a 15-row tick list, slot
-///   numbers as prefixes, 「全部不选」 last. **Choosing a row keeps the popover open** — a dimension
+///   numbers as prefixes, 「回到默认五槽」 last. **Choosing a row keeps the popover open** — a dimension
 ///   is ticked (appended in click order, at most five) or unticked (later slots close the gap), and
 ///   only a click outside dismisses it. `NSMenu` cannot be made to behave this way; that is why this
 ///   is a popover and not a menu.
-/// * 「全部不选」 empties every slot and **stays open**, so the next five clicks number 1…5 again.
+/// * 「回到默认五槽」 clears every value and restores the factory five dimensions (569), **staying
+///   open**. It no longer leaves an empty bar that the next five clicks have to rebuild.
 ///   When five are ticked the remaining ten rows are **disabled** (greyed), while a ticked row can
 ///   still be unticked.
 /// * each slot's right-hand control is a button opening the same kind of checklist for that slot's
@@ -645,7 +650,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
 
     // MARK: the two checklists, as snapshots
 
-    /// The 15 dimensions (slot number as prefix, tick when active) + 「全部不选」.
+    /// The 15 dimensions (slot number as prefix, tick when active) + 「回到默认五槽」.
     func dimensionChecklistRows() -> [FilterChecklistRow] {
         let full = filter.slots.count >= CatalogFilter.slotCapacity
         var rows = FilterDimension.allCases.map { dimension -> FilterChecklistRow in
@@ -657,9 +662,10 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
                                       kind: .toggle,
                                       tag: dimension.rawValue)
         }
-        rows.append(FilterChecklistRow(title: Loc.t("全部不选"),
+        rows.append(FilterChecklistRow(title: Loc.t("回到默认五槽"),
                                        enabled: !filter.slots.isEmpty,
-                                       kind: .action))
+                                       kind: .action,
+                                       toolTip: Loc.t("清掉所有筛选值，并把筛选条恢复成默认五个维度")))
         return rows
     }
 
@@ -719,7 +725,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         if dimensionPopover.isShown { dimensionPopover.performClose(nil) }
     }
 
-    /// A dimension row: tick/untick a slot, or 「全部不选」. **Never closes the popover** — that is the
+    /// A dimension row: tick/untick a slot, or 「回到默认五槽」. **Never closes the popover** — that is the
     /// whole point of 036, and it is what `.transient` + a live reload buys us.
     private func handleDimensionRow(_ row: FilterChecklistRow) {
         guard !isSyncing, row.enabled else { return }
@@ -939,7 +945,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
     // MARK: dimension checklist seams
 
     /// The dimension checklist as it would draw: `(title, checked, enabled)`, 15 dimensions then
-    /// 「全部不选」. (Named `…MenuRows` because 026's tests read it; there is no `NSMenu` any more.)
+    /// 「回到默认五槽」. (Named `…MenuRows` because 026's tests read it; there is no `NSMenu` any more.)
     public var dimensionMenuRows: [(title: String, checked: Bool, enabled: Bool)] {
         dimensionChecklistRows().map { ($0.title, $0.checked, $0.enabled) }
     }
@@ -968,7 +974,7 @@ public final class FilterBarView: NSView, NSPopoverDelegate {
         handleDimensionRow(rows[index])
     }
 
-    /// 「全部不选」 — the checklist's last row, and the seam the UI tests use for it.
+    /// 「回到默认五槽」 — the checklist's last row, and the seam the UI tests use for it.
     public func clearSlotDimensions() {
         guard !filter.slots.isEmpty else { return }
         onChange?(filter.clearingSlots())
