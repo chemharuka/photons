@@ -53,9 +53,9 @@ public struct NLMFDenoiseOptions: Sendable, Equatable {
     public var shadowHigh: Double = 0.02
     /// Coherence gate on the residual's finest band (`DetailGate`), as `wMax`.
     /// 0 turns it off and restores the historical blend exactly.
-    public var detailGate: Double = 0.85
-    public var detailKneeLow: Double = 1.05
-    public var detailKneeHigh: Double = 1.25
+    public var detailGate: Double = 0.35
+    public var detailKneeLow: Double = 1.00
+    public var detailKneeHigh: Double = 1.40
     public var detailSigma: Double = 1.5
     /// Coherence box **half-width** in plane pixels; the window is 2·box+1.
     public var detailBox: Int = 16

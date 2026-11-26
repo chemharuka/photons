@@ -89,12 +89,17 @@ public struct DenoiseRequest {
     /// white wall sits at about 1.0), `detailSigma` is the Gaussian sigma in
     /// **plane** pixels, and `detailBox` is the coherence box **half-width** in
     /// plane pixels (window = 2·box+1). The default is
-    /// 0.85 / 1.05–1.25 / 1.5 px / 16 px, measured on L1040080.
+    /// 0.35 / 1.00–1.40 / 1.5 px / 16 px, measured on L1040080: a mild gate that
+    /// lifts the fine band without becoming a visible patch.
     public var detailGate: Double
     public var detailKneeLow: Double
     public var detailKneeHigh: Double
     public var detailSigma: Double
     public var detailBox: Int
+    /// `--dump-gate <prefix>`: write the per-pixel gate weight as
+    /// `<prefix>.f32` (mosaic size, row-major) plus a `width height` sidecar.
+    /// `nil` disables the dump.
+    public var detailGateDump: URL?
     /// Unreliable border to discard from each tile, in **plane** pixels.
     ///
     /// The network's edge pixels disagree with a differently-anchored grid
@@ -122,9 +127,10 @@ public struct DenoiseRequest {
                 strengthTaper: Double = 0,
                 taperLow: Double = 0.18, taperHigh: Double = 0.60,
                 shadowTaper: Double = 0, shadowLow: Double = 0.002, shadowHigh: Double = 0.02,
-                detailGate: Double = 0.85,
-                detailKneeLow: Double = 1.05, detailKneeHigh: Double = 1.25,
+                detailGate: Double = 0.35,
+                detailKneeLow: Double = 1.00, detailKneeHigh: Double = 1.40,
                 detailSigma: Double = 1.5, detailBox: Int = 16,
+                detailGateDump: URL? = nil,
                 crop: Int = 0, estimateNoise: Bool = false,
                 checkerboardNoise: Bool = false, dualRaw: Bool = false) {
         self.input = input
@@ -144,6 +150,7 @@ public struct DenoiseRequest {
         self.detailKneeHigh = detailKneeHigh
         self.detailSigma = detailSigma
         self.detailBox = detailBox
+        self.detailGateDump = detailGateDump
         self.crop = crop
         self.estimateNoise = estimateNoise
         self.checkerboardNoise = checkerboardNoise
@@ -491,7 +498,12 @@ public enum DenoisePipeline {
                                                box: request.detailBox)
         var detailMeanWeight = 0.0
         if parameters.isActive {
+            let gateStart = Date()
             var sumWeight = 0.0
+            // Only allocate the mosaic-sized weight field when it will be
+            // written; it is 240 MB at 60 MP.
+            let dumping = request.detailGateDump != nil
+            var gateField = dumping ? [Float](repeating: 0, count: n) : []
             for p in 0..<4 {
                 let (dy, dx) = layout.offsets[p]
                 let pw = (width - dx + 1) / 2
@@ -508,11 +520,28 @@ public enum DenoisePipeline {
                         planeResult[dstRow + x] = out[src]
                     }
                 }
-                let mean = DetailGate.blend(
-                    input: planeInput, denoised: &planeResult,
-                    width: pw, height: ph,
-                    strength: strengthAt,
-                    parameters: parameters)
+                let mean: Double
+                if dumping {
+                    let recorded = DetailGate.blendRecordingWeights(
+                        input: planeInput, denoised: &planeResult,
+                        width: pw, height: ph,
+                        strength: strengthAt,
+                        parameters: parameters)
+                    mean = recorded.meanWeight
+                    for y in 0..<ph {
+                        let dstRow = (2 * y + dy) * width + dx
+                        let srcRow = y * pw
+                        for x in 0..<pw {
+                            gateField[dstRow + 2 * x] = recorded.weights[srcRow + x]
+                        }
+                    }
+                } else {
+                    mean = DetailGate.blend(
+                        input: planeInput, denoised: &planeResult,
+                        width: pw, height: ph,
+                        strength: strengthAt,
+                        parameters: parameters)
+                }
                 for y in 0..<ph {
                     let dstRow = (2 * y + dy) * width + dx
                     let srcRow = y * pw
@@ -523,8 +552,17 @@ public enum DenoisePipeline {
                 sumWeight += mean * Double(pw * ph)
             }
             detailMeanWeight = n > 0 ? sumWeight / Double(n) : 0
-            progress?(String(format: "  detail gate %.2f, mean weight %.3f",
-                             request.detailGate, detailMeanWeight))
+            let gateSeconds = Date().timeIntervalSince(gateStart)
+            if let dump = request.detailGateDump {
+                do {
+                    try DetailGate.writeDump(gateField, width: width,
+                                             height: height, toPrefix: dump)
+                } catch {
+                    throw PipelineError.write("\(error)")
+                }
+            }
+            progress?(String(format: "  detail gate %.2f, mean weight %.3f, %.1f s",
+                             request.detailGate, detailMeanWeight, gateSeconds))
         } else {
             // The rollback path is the historical loop, not an algebraic
             // rearrangement of the gate.
@@ -533,6 +571,15 @@ public enum DenoisePipeline {
                 let d = out[i]
                 let s = strengthAt(iValue)
                 out[i] = s == 1 ? d : iValue + s * (d - iValue)
+            }
+            if let dump = request.detailGateDump {
+                do {
+                    try DetailGate.writeDump(
+                        [Float](repeating: 0, count: n),
+                        width: width, height: height, toPrefix: dump)
+                } catch {
+                    throw PipelineError.write("\(error)")
+                }
             }
         }
         mosaic = []
