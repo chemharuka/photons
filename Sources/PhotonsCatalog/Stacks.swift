@@ -46,16 +46,24 @@ public enum StackKind: String, Sendable, Equatable, CaseIterable {
     /// A third member, a different extension, or a suffix that is not exactly `-denoised`
     /// (`L-denoised-2.dng`) is `plain` — the rule does not guess from a prefix.
     public static func forMemberFilenames(_ filenames: [String]) -> StackKind {
-        guard filenames.count == 2 else { return .plain }
+        denoiseProductFilename(filenames) != nil ? .denoise : .plain
+    }
+
+    /// 566 — the product file of a denoise pair, or nil when the shape is not one.
+    ///
+    /// Exactly two members, the same extension, and one stem is the other stem plus `-denoised`.
+    /// Returns the filename whose stem carries the suffix. This is the *same* rule
+    /// `forMemberFilenames` asks; the menu and the deletion path call it to name the product itself,
+    /// not just to classify the pair.
+    public static func denoiseProductFilename(_ filenames: [String]) -> String? {
+        guard filenames.count == 2 else { return nil }
         let a = split(filenames[0])
         let b = split(filenames[1])
         guard !a.ext.isEmpty, !b.ext.isEmpty,
-              a.ext.caseInsensitiveCompare(b.ext) == .orderedSame else { return .plain }
-        let aIsProduct = a.stem == b.stem + "-denoised"
-        let bIsProduct = b.stem == a.stem + "-denoised"
-        // Exactly one direction can hold for two different stems; `!=` makes that explicit instead
-        // of relying on "they cannot both be true".
-        return aIsProduct != bIsProduct ? .denoise : .plain
+              a.ext.caseInsensitiveCompare(b.ext) == .orderedSame else { return nil }
+        if a.stem == b.stem + "-denoised" { return filenames[0] }
+        if b.stem == a.stem + "-denoised" { return filenames[1] }
+        return nil
     }
 
     private static func split(_ filename: String) -> (stem: String, ext: String) {

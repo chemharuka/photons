@@ -4886,6 +4886,55 @@ public final class CatalogSession {
                               keptIDs: keptIDs, failures: failures)
     }
 
+    /// 566 — delete the **denoise product** of each denoise stack, keeping the original.
+    ///
+    /// The product is resolved from the stack's full membership (`stackMembers(topID:)`), never from
+    /// `assets`: the projection hides the non-top member, so a product that is not 置顶 would silently
+    /// escape a search over the visible rows. Files are recycled first, then all surviving rows go in
+    /// one `deleteAssets` call — the SQLite trigger dissolves a pair that lost a member.
+    @discardableResult
+    public func deleteDenoiseProducts(inStackTopIDs topIDs: [String],
+                                      recycle: (URL) throws -> Void = CatalogSession.trashItem)
+        -> RemovalOutcome {
+        guard catalog != nil, !topIDs.isEmpty else { return RemovalOutcome() }
+        // Read-only resolution first: the product comes from the stack's **full** membership, not from
+        // `assets` (which only holds 置顶). A hidden product would otherwise be neither recycled nor
+        // deleted.
+        var products: [Asset] = []
+        var seen = Set<String>()
+        for topID in topIDs {
+            guard let summary = stacksByTopID[topID], summary.kind == .denoise else { continue }
+            let members = stackMembers(topID: topID)
+            guard let filename = StackKind.denoiseProductFilename(members.map(\.filename)),
+                  let product = members.first(where: { $0.filename == filename }),
+                  seen.insert(product.id).inserted else { continue }
+            products.append(product)
+        }
+        var toDelete: [String] = []
+        var filesTrashed = 0
+        var keptIDs: [String] = []
+        var failures: [String] = []
+        for asset in products {
+            if let url = fileURL(for: asset), FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    try recycle(url)
+                    filesTrashed += 1
+                } catch {
+                    keptIDs.append(asset.id)
+                    failures.append("\(asset.filename)：\(error.localizedDescription)")
+                    continue
+                }
+            }
+            toDelete.append(asset.id)
+        }
+        let report = deleteAssets(toDelete)
+        if !toDelete.isEmpty, report == nil {
+            failures.append(Loc.t("移出条目失败：{0}", String(describing: (lastAvailabilityError ?? Loc.t("未知错误")))))
+        }
+        return RemovalOutcome(removed: report, filesTrashed: filesTrashed,
+                              keptIDs: keptIDs, failures: failures)
+    }
+
     /// One 「查找丢失的文件…」 run: search `folder` by file name, then relink every hit whose content
     /// hash matches. Entries that are not found keep their flag — nothing is guessed.
     ///
