@@ -38,6 +38,53 @@ import PhotonsCore
 ///     continuous rows read as integers rounded **away** from zero (`ceil` up, `floor` down — never
 ///     smaller than the truth) and store what was typed. `ToneRow.rounding` / `.decimals` / `.quantum`
 ///     are those three answers.
+
+/// 568 — the preset menu's state, as a value the view observes and a test can drive.
+///
+/// Before 568 the selection was *only* derived: a pair that happened to sit on a preset's mired
+/// quantum showed that preset even after the user typed/dragged the number themselves, and picking
+/// 「自定义」 was a no-op because it had no state to select. `lastPresetID` is now that state:
+/// `customID` means "the user's own number", any other id is the preset they picked, and `nil` is
+/// "nothing picked yet" (derive as before). A tiny `@Observable` reference type rather than `@State`
+/// inside the struct for the same reason `InspectorWorkspaceState` is one: tests drive the very
+/// object the panel uses.
+@MainActor
+@Observable
+public final class WhiteBalancePresetMenuState {
+
+    /// The item the user picked last, or `nil` before any choice. View state, never a document fact:
+    /// it only says which entry wins when two carry the same numbers (`闪光灯 == 日光`), plus 568's
+    /// explicit 「自定义」.
+    var lastPresetID: String?
+
+    public init(lastPresetID: String? = nil) {
+        self.lastPresetID = lastPresetID
+    }
+
+    /// The picker's tag for the live document.
+    ///
+    /// 568: as shot stays a fact of the file (it beats everything, including an explicit custom), then
+    /// an explicit 「自定义」 wins over any numeric match, and only otherwise is the name derived from
+    /// the pair as before.
+    func selection(for wb: WhiteBalance) -> String {
+        if wb.isAsShot { return WhiteBalancePresets.asShot.id }
+        if lastPresetID == WhiteBalanceCommands.customID { return WhiteBalanceCommands.customID }
+        return WhiteBalancePresets.match(wb, preferred: lastPresetID)?.id
+            ?? WhiteBalanceCommands.customID
+    }
+
+    /// A menu item was picked (`customID` included).
+    func choose(_ id: String) {
+        lastPresetID = id
+    }
+
+    /// A slider, a typed number or the eyedropper wrote a value: the number is the user's, not a
+    /// preset's — even when it lands on a preset's mired quantum.
+    func markManualEdit() {
+        lastPresetID = WhiteBalanceCommands.customID
+    }
+}
+
 public struct InspectorView: View {
 
     /// The cards, in display order (派单 009 A).
@@ -263,9 +310,10 @@ public struct InspectorView: View {
     @State private var metadataReader = InspectorMetadataReader()
     @State private var photoMetadata: AssetMetadata?
 
-    /// The preset the user picked last. View state on purpose: it only breaks ties between presets
-    /// with identical numbers (`闪光灯 == 日光`), and a tie is not a fact about the document.
-    @State private var lastPresetID: String?
+    /// The preset the user picked last (568: including the explicit 「自定义」). View state on
+    /// purpose: a tie between presets with identical numbers (`闪光灯 == 日光`) and "the user typed
+    /// this number" are not facts about the document.
+    @State private var presetMenu: WhiteBalancePresetMenuState
     /// One line under the sliders: what the dropper did, or why it did nothing.
     @State private var hint: String?
     @State private var eyedropperArmed = false
@@ -292,6 +340,7 @@ public struct InspectorView: View {
 
     public init(session: CatalogSession, loupe: LoupeController? = nil,
                 workspaces: InspectorWorkspaceState? = nil,
+                presetMenu: WhiteBalancePresetMenuState? = nil,
                 cardSpecs: [PanelCardSpec] = PanelCardSpec.all) {
         self.session = session
         self.loupe = loupe
@@ -299,6 +348,7 @@ public struct InspectorView: View {
         // A caller may hand in the state (a test, or a host that wants to remember the workspace); the
         // default is a fresh one, i.e. 调整.
         _workspaces = State(initialValue: workspaces ?? InspectorWorkspaceState())
+        _presetMenu = State(initialValue: presetMenu ?? WhiteBalancePresetMenuState())
     }
 
     public var body: some View {
@@ -2574,11 +2624,17 @@ public struct InspectorView: View {
                                  ?? session.capabilities?.asShotWhiteBalance)
     }
 
+    /// The Picker's current tag — one definition for the view and for 568's tests.
+    var whiteBalancePresetSelection: String {
+        presetMenu.selection(for: documentWhiteBalance)
+    }
+
     /// The menu (派单 009 B).
     ///
-    /// Selection is *derived* from the document, never stored: a dragged pair matches no preset and
-    /// the picker therefore lands on `自定义`, which is exactly the honesty the task asks for. The
-    /// `lastPresetID` tie-break only decides between two presets that carry the same numbers.
+    /// Selection is *derived* from the document, plus 568's explicit state: a dragged pair matches no
+    /// preset and the picker lands on `自定义`, while a value that sits on a preset's mired quantum
+    /// still reads `自定义` when the user typed it (or picked 自定义 outright). The `lastPresetID`
+    /// tie-break only decides between two presets that carry the same numbers.
     private var presetRow: some View {
         HStack(spacing: 6) {
             Text(Loc.t("预设"))
@@ -2586,8 +2642,7 @@ public struct InspectorView: View {
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
             Picker(Loc.t("预设"), selection: Binding(
-                get: { WhiteBalancePresets.match(documentWhiteBalance,
-                                                 preferred: lastPresetID)?.id ?? WhiteBalanceCommands.customID },
+                get: { whiteBalancePresetSelection },
                 set: { id in applyPreset(id) })) {
                 ForEach(WhiteBalancePresets.all) { preset in
                     Text(menuTitle(for: preset)).tag(preset.id)
@@ -2741,7 +2796,7 @@ public struct InspectorView: View {
         switch outcome {
         case .sampled(let sample):
             eyedropperArmed = false
-            lastPresetID = nil
+            presetMenu.markManualEdit()
             if let loupe, let native = loupe.dropperNativeProbe(for: sample) {
                 hint = Loc.t("吸管：正在读取 RAW 中性点…")
                 let started = Date()
@@ -2778,11 +2833,11 @@ public struct InspectorView: View {
                 hint = Loc.t("吸管：取样点几乎无颜色信息，未写入")
                 return
             }
-            lastPresetID = nil
+            presetMenu.markManualEdit()
             hint = nil
             return
         }
-        lastPresetID = nil
+        presetMenu.markManualEdit()
         if startHint {
             hint = Loc.t("吸管精修：正在对解码器迭代（最多 {0} 次解码）…", String(describing: (WhiteBalanceDropperRefiner.maxDecodes)))
         }
@@ -2810,18 +2865,28 @@ public struct InspectorView: View {
         }
     }
 
-    private func applyPreset(_ id: String) {
-        guard id != WhiteBalanceCommands.customID else { return }
+    /// The menu's action (568 made 「自定义」 one of them).
+    ///
+    /// Internal rather than private so `WhiteBalancePreset568Tests` drives the same entry point
+    /// the Picker's binding calls, not a re-implementation of it.
+    func applyPreset(_ id: String) {
+        if id == WhiteBalanceCommands.customID {
+            // A state, not a write: the document keeps the user's number and only the menu records
+            // that it is the user's rather than a preset's.
+            presetMenu.markManualEdit()
+            hint = Loc.t("自定义 · {0}", documentWhiteBalance.summary)
+            return
+        }
         guard let preset = WhiteBalancePresets.preset(id: id) else { return }
         switch preset.kind {
         case .asShot:
             commands.resetToAsShot()
-            lastPresetID = preset.id
+            presetMenu.choose(preset.id)
             hint = Loc.t("原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）")
         case .fixed:
             guard let wb = preset.whiteBalance else { return }
             commands.commit(wb, label: Loc.t("预设 {0}", String(describing: (preset.name))))
-            lastPresetID = preset.id
+            presetMenu.choose(preset.id)
             hint = "\(preset.name) · \(preset.valueText)"
         case .auto:
             // 448 — the same action, but queued behind the anchor's full RAW rung. `nil` while waiting
@@ -2839,7 +2904,7 @@ public struct InspectorView: View {
                 }
                 return
             }
-            lastPresetID = preset.id
+            presetMenu.choose(preset.id)
             hint = String(format: Loc.t("自动（灰世界）· %@ · 画面均值 RGB %@%@"),
                           solve.whiteBalance.summary,
                           average?.text ?? "—",
@@ -2895,7 +2960,9 @@ public struct InspectorView: View {
     /// and by a typed value (047), so both quantize (1 mired / 1), both fold a value that lands on the
     /// file's own back to `nil` (assigning the reported Kelvin is not a no-op: 派单 006 measured
     /// 0.15–0.40 % of samples moving), and both write exactly one snapshot.
-    private func commitWhiteBalanceValue(_ value: Double, isTemperature: Bool) {
+    /// Internal (not private) for 568's tests: this is the one place a drag release and a typed value
+    /// both end, so driving it exercises the production path.
+    func commitWhiteBalanceValue(_ value: Double, isTemperature: Bool) {
         var wb = WhiteBalance(temperature: isTemperature ? value : session.edit.light.temperature,
                               tint: isTemperature ? session.edit.light.tint : value).quantized()
         let shot = asShotWhiteBalance
@@ -2907,7 +2974,7 @@ public struct InspectorView: View {
             wb.tint = nil
         }
         commands.commit(wb, label: isTemperature ? Loc.t("色温") : Loc.t("色调"))
-        lastPresetID = nil
+        presetMenu.markManualEdit()
         hint = nil
     }
 
@@ -2940,7 +3007,7 @@ public struct InspectorView: View {
         draftTemperature = nil
         draftTint = nil
         guard resets.group(.whiteBalance) else { return }
-        lastPresetID = WhiteBalancePresets.asShot.id
+        presetMenu.choose(WhiteBalancePresets.asShot.id)
         hint = Loc.t("原照设置 · as shot（S1 白平衡增益为恒等，不写温度/色调）")
     }
 
