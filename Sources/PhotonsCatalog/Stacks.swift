@@ -217,6 +217,26 @@ extension Catalog {
                 """, arguments: [stackID, id])
         }
     }
+
+    /// 567 — the other member of a two-member denoise stack, for each of `ids` that has one.
+    /// 去重、按传入顺序、绝不返回 ids 自己。
+    ///
+    /// Library metadata (rating / flag / colour label) is written through a batch door, while the
+    /// members of a denoise pair share one document in two rows (487 §2.2). The caller passes the
+    /// ids it is about to write; the result is the extra rows that must move with them. Plain
+    /// stacks, stacks with more than two live members and ids without a sibling contribute nothing.
+    public func denoiseSiblings(ofAssets ids: [String]) throws -> [String] {
+        let inputs = Set(ids)
+        var seen = Set<String>()
+        var siblings: [String] = []
+        for id in ids {
+            guard let sibling = try denoiseSibling(ofAsset: id),
+                  !inputs.contains(sibling),
+                  seen.insert(sibling).inserted else { continue }
+            siblings.append(sibling)
+        }
+        return siblings
+    }
 }
 
 // MARK: - mutations

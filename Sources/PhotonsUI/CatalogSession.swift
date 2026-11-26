@@ -3212,7 +3212,12 @@ public final class CatalogSession {
         let ids = metadataTargetIDs
         guard !ids.isEmpty else { return false }
         do {
-            let affected = try write(catalog, ids)
+            // 567 — a denoise pair is one document in two rows (487 §2.2). The grid/filmstrip/side
+            // bar only draw the top, so a metadata write on it must also name the hidden sibling.
+            // `denoiseSiblings` already excludes the inputs, the kind gate and the member-count gate.
+            let siblings = (try? catalog.denoiseSiblings(ofAssets: ids)) ?? []
+            let targets = ids + siblings.filter { !ids.contains($0) }
+            let affected = try write(catalog, targets)
             metadataWriteCount += 1
             lastMetadataAffectedRows = affected
             metadataRevision &+= 1
@@ -3220,7 +3225,7 @@ public final class CatalogSession {
             if filter.isActive {
                 reload()
             } else {
-                let touched = Set(ids)
+                let touched = Set(targets)
                 var next = assets
                 for i in next.indices where touched.contains(next[i].id) { apply(&next[i]) }
                 assets = next
