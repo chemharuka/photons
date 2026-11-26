@@ -2,7 +2,6 @@ import Foundation
 import PhotonsCore
 import PhotonsExport
 import PhotonsCatalog
-import PhotonsExtensions
 import CryptoKit
 import CoreGraphics
 import ImageIO
@@ -32,7 +31,7 @@ let valueFlags: Set<String> = [
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
     "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model", "--units",
-    "--ceiling", "--source", "--window", "--hop",
+    "--ceiling",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -778,8 +777,6 @@ guard let cmd = argv.first else {
       photonsctl bench  <raw> [--viewport 2560x1600] [--iterations 60] [options]
       photonsctl histogram <raw> [--edit <json>] [--roi x,y,w,h] [--bins 256] [--json|--csv]
       photonsctl detail <raw> [--version V] [--scale F]   # 派单 031 降噪/细节解码参数实测
-      photonsctl denoise-band <product.dng> --source <src.dng> [--out <path>] [--json]
-                                                          # 562 窄带织纹恢复
 
       photonsctl library create  <pkg.photonslibrary>
       photonsctl library import  <pkg> <src…> [--mode copy|reference] [--root id] [--rename T] [--json]
@@ -823,58 +820,6 @@ guard let cmd = argv.first else {
     exit(0)
 }
 
-/// 562 — 验收入口：把 `source` 的窄带织纹加回 `product`。
-///
-/// 不带 `--out` 时只算不写（`writeProduct = false`）：统计要能量产，又不该在验收机上
-/// 反复改写用户的产物。带 `--out` 时先把 product 复制过去，再在副本上原地恢复，
-/// 所以 `product` 本身永远是只读输入。
-func cmdDenoiseBand(_ a: Args) throws {
-    let product = requireRaw(a)
-    guard let sourcePath = a.value("--source") else {
-        die("denoise-band needs --source <src.dng> (the original this product came from)")
-    }
-    let source = URL(fileURLWithPath: (sourcePath as NSString).expandingTildeInPath)
-    guard FileManager.default.fileExists(atPath: source.path) else {
-        die("no such file: \(source.path)")
-    }
-
-    var options = TextureBandRestoreOptions()
-    if let w = a.value("--window"), let v = Int(w), v >= 8 { options.window = v }
-    if let h = a.value("--hop"), let v = Int(h), v >= 1 { options.hop = v }
-    var target = product
-    if let outPath = a.value("--out") {
-        let out = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
-        guard out.standardizedFileURL != product.standardizedFileURL else {
-            die("--out must differ from <product>; the input is never rewritten")
-        }
-        try? FileManager.default.removeItem(at: out)
-        try FileManager.default.copyItem(at: product, to: out)
-        target = out
-    } else {
-        options.writeProduct = false
-    }
-
-    let report = try TextureBandRestore.apply(source: source, product: target,
-                                              options: options) { note($0) }
-    if a.has("--json") {
-        note(jsonLine([
-            "windows": report.windows,
-            "meanWeight": report.meanWeight,
-            "medianPeriodPlanePx": report.medianPeriodPlanePx,
-            "addedRMS": report.addedRMS,
-            "seconds": report.seconds,
-        ]))
-    } else {
-        note("windows          \(report.windows)")
-        note("meanWeight       \(String(format: "%.3f", report.meanWeight))")
-        note("medianPeriod     \(String(format: "%.2f", report.medianPeriodPlanePx)) plane px")
-        note("addedRMS         \(String(format: "%.6g", report.addedRMS))")
-        note("seconds          \(String(format: "%.2f", report.seconds))")
-        if let note_ = report.note { note("note             \(note_)") }
-        if options.writeProduct { note("output           \(target.path)") }
-    }
-}
-
 func cmdProbeHDR(_ a: Args) throws {
     guard #available(macOS 15.0, *) else { die("probe-hdr needs macOS 15 (ISO gain map API)") }
     let result = HDRProbe.run(keepFiles: a.has("--keep"))
@@ -894,7 +839,6 @@ do {
     case "bench":    try cmdBench(rest)
     case "histogram": try cmdHistogram(rest)
     case "detail":    try cmdDetail(rest)
-    case "denoise-band": try cmdDenoiseBand(rest)
     case "library":  try cmdLibrary(rest)
     case "preset":   try cmdPreset(rest)
     case "xmp":      try cmdXMP(rest)

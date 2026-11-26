@@ -51,17 +51,10 @@ public struct NLMFDenoiseJob: Sendable {
     public var variant: Variant
     /// Explicit model path; `nil` means resolve from the bundle (then the env var).
     public var modelURL: URL?
-    /// 562 — 推理之后把原图被抹掉的窄带织纹按频带加回去。`false` 是唯一的回退开关。
-    ///
-    /// 规格写的是 `NLMFDenoiseOptions.textureRestore`，但那个类型在 `Vendor/` 的
-    /// `NonlocalMatchFilter` 里，而本单硬规则禁止改 vendor；因此开关挂在宿主 job 上
-    /// （同一条引擎、同一个行为，测试与 `--ui-smoke` 都能显式关掉）。
-    public var textureRestore: Bool
 
-    public init(variant: Variant = .t256, modelURL: URL? = nil, textureRestore: Bool = true) {
+    public init(variant: Variant = .t256, modelURL: URL? = nil) {
         self.variant = variant
         self.modelURL = modelURL
-        self.textureRestore = textureRestore
     }
 
     // MARK: - Where the model lives
@@ -197,20 +190,10 @@ public struct NLMFDenoiseJob: Sendable {
             throw NLMFDenoiseJobError.modelMissing(expected: modelPathHint())
         }
         let service = NLMFDenoiseService()
-        let report = try service.denoise(input: input,
-                                         output: output,
-                                         options: options(modelURL: model),
-                                         progress: progress)
-        // 562 — 恢复层只改产物像素，不参与推理；失败绝不让降噪失败。
-        if textureRestore {
-            do {
-                _ = try TextureBandRestore.apply(source: input, product: output,
-                                                 progress: progress)
-            } catch {
-                progress?("织纹恢复：跳过（\(error)）")
-            }
-        }
-        return report
+        return try service.denoise(input: input,
+                                   output: output,
+                                   options: options(modelURL: model),
+                                   progress: progress)
     }
 }
 
