@@ -9121,6 +9121,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
             outcome = try ladder.rung(identity: cacheIdentity, scale: decodeScale) {
                 try Self.develop(url: url, scale: decodeScale, inputs: inputs)
             }
+            // 570 — a fresh development of an **automatic** document is filed under the spelling it
+            // was asked for (`ver=auto` → no version component). `present` later installs the
+            // decoder's read-back spelling into the document (`resolvedDecoderVersion`), so from the
+            // next frame on the same buffer is named `…|ver=8`. Register that spelling as an alias of
+            // this one development, so the first real render (and the white-balance drag that rides
+            // this rung) still hits it. A hand pick or a legacy document already carries a version
+            // in `inputs`, so the condition is false and its identity is byte-for-byte unchanged.
+            let effectiveVersion = outcome.rung.capabilities.effectiveVersion
+            if !outcome.cached, !effectiveVersion.isEmpty,
+               effectiveVersion != inputs.decoderVersion {
+                var spelled = inputs
+                spelled.decoderVersion = effectiveVersion
+                ladder.alias(Self.rungIdentity(baseIdentity, inputs: spelled), for: cacheIdentity)
+            }
         case .residentOnly:
             guard let resident = ladder.resident(identity: cacheIdentity, scale: decodeScale) else {
                 throw LoupeFrameError.notResident(scale: decodeScale)

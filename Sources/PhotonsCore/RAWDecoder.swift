@@ -1496,6 +1496,14 @@ public final class DecodeLadder {
 
     private let lock = NSLock()
     private var identity: String?
+    /// 570 — extra names this one development answers to, registered by `alias(_:for:)`.
+    ///
+    /// The document's identity can gain a component **after** the development landed: `present`
+    /// installs the decoder's read-back spelling (`resolvedDecoderVersion`), so the same buffer is
+    /// suddenly named `photo|ver=8` while the rung was stored as `photo`. An alias is that one
+    /// explicit equivalence — never a prefix or fuzzy match — so a lookup that was not registered
+    /// still misses exactly as before.
+    private var aliases: Set<String> = []
     private var rungs: [Float: DecodeRung] = [:]
 
     /// Rungs this ladder has developed, and how many requests it answered from the cache. Exposed
@@ -1540,6 +1548,26 @@ public final class DecodeLadder {
     /// The rungs currently in memory, smallest first. Debugging/diagnostics only.
     public var residentScales: [Float] { locked { rungs.keys.sorted() } }
 
+    /// The extra identities `alias(_:for:)` registered for the resident development, sorted.
+    /// Diagnostics/assertions only.
+    public var aliasedIdentities: [String] { locked { aliases.sorted() } }
+
+    /// Register `extra` as another name for the development filed under `identity`.
+    ///
+    /// Returns `false` when `identity` is not the resident development (a caller that aliased a
+    /// photo the ladder has since left) — the alias is never attached to the wrong buffer. The
+    /// ladder owns the alias exactly as long as it owns the rungs: `store` of another photo and
+    /// `reset()` both drop it.
+    @discardableResult
+    public func alias(_ extra: String, for identity: String) -> Bool {
+        locked {
+            guard identity == self.identity else { return false }
+            guard extra != identity else { return true }
+            aliases.insert(extra)
+            return true
+        }
+    }
+
     public var best: DecodeRung? {
         locked { rungs.values.max { $0.scale < $1.scale } }
     }
@@ -1547,16 +1575,21 @@ public final class DecodeLadder {
     /// The resident rung at exactly `scale`, or `nil`. Never returns a different rung: a 0.5 buffer
     /// must never be mistaken for a 1.0 one (that is the bug class this type exists to close).
     public func resident(identity: String, scale: Float) -> DecodeRung? {
-        locked { identity == self.identity ? rungs[scale] : nil }
+        locked { answers(to: identity) ? rungs[scale] : nil }
     }
 
     /// The largest resident rung that is not bigger than `scale` — the best thing that can be shown
     /// while the wanted rung is being developed.
     public func best(identity: String, atOrBelow scale: Float) -> DecodeRung? {
         locked {
-            guard identity == self.identity else { return nil }
+            guard answers(to: identity) else { return nil }
             return rungs.values.filter { $0.scale <= scale }.max { $0.scale < $1.scale }
         }
+    }
+
+    /// Whether `identity` names the resident development — the stored one or a registered alias.
+    private func answers(to identity: String) -> Bool {
+        identity == self.identity || aliases.contains(identity)
     }
 
     /// What the loupe must do for a `target` rung: show `preview` first if it can, then `target`.
@@ -1608,6 +1641,9 @@ public final class DecodeLadder {
                 // A different photo: nothing here can be reused, and holding it would be the memory
                 // leak the single-slot cache never had.
                 rungs.removeAll()
+                // 570 — the aliases name *that* development's read-back spelling; another photo
+                // must not answer to them.
+                aliases.removeAll()
                 // The counts are of *this photo's* developments too, or a photo switch would leave
                 // the previous file's rungs in the ledger.
                 developedCounts.removeAll()
@@ -1627,6 +1663,7 @@ public final class DecodeLadder {
     public func reset() {
         locked {
             rungs.removeAll()
+            aliases.removeAll()
             identity = nil
             releaseCount = 0
         }
