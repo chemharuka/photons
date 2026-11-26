@@ -339,6 +339,22 @@ public enum MissingFilesPanels {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// 566 — 「删除降噪文件？」: the product entries go, the products still on disk go to the Trash,
+    /// and the originals stay. Same one-confirmation-per-file-touching-verb rule as
+    /// `confirmRemoveAndDelete`.
+    public static func confirmDeleteDenoise(count: Int, files: Int, in window: NSWindow?) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = Loc.t("删除降噪文件？")
+        alert.informativeText = Loc.t(
+            "将把 {0} 个条目移出照片库，并把其中 {1} 个降噪文件移到废纸篓（可在废纸篓中还原），原图保留。",
+            String(describing: (count)), String(describing: (files)))
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: Loc.t("删除降噪文件"))
+        alert.addButton(withTitle: Loc.t("取消"))
+        _ = window
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     /// One summary after 「移出并删除…」 when some rows could not be recycled. Those rows are still in
     /// the library — saying so once is the whole point (a silent no-op looks like a successful delete).
     public static func reportRemovalFailures(_ outcome: CatalogSession.RemovalOutcome, in window: NSWindow?) {
