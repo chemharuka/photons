@@ -244,11 +244,19 @@ public struct AnselDenoiseJob: Sendable {
 
     public var location: AnselDenoiseLocation
     public var options: AnselDenoiseOptions
+    /// 562 — 工具写出产物后，宿主把原图被抹掉的窄带织纹按频带加回去。`false` 是唯一回退开关。
+    ///
+    /// 规格把它写成 `AnselDenoiseOptions.textureRestore`，但那个类型在
+    /// `AnselDenoiseClient.swift` 里，本单白名单没有它；挂在 job 上是同一个行为，
+    /// 而且测试不需要构造一整套 options 就能关掉。
+    public var textureRestore: Bool
 
     public init(location: AnselDenoiseLocation = AnselDenoiseLocation(),
-                options: AnselDenoiseOptions = AnselDenoiseOptions()) {
+                options: AnselDenoiseOptions = AnselDenoiseOptions(),
+                textureRestore: Bool = true) {
         self.location = location
         self.options = options
+        self.textureRestore = textureRestore
     }
 
     // MARK: 命名（§3 ②）
@@ -321,6 +329,16 @@ public struct AnselDenoiseJob: Sendable {
             // 不致命（CPU 上结果仍然正确），但这是唯一能把「跑 7 分钟」和「跑 40 秒」区分开的
             // 地方，所以它必须出现在进度文案里，而不是只躺在报告里等人去读。
             progress?(Loc.t("降噪完成（CPU：--gpu 未生效）"))
+        }
+        // 562 — 工具已经写完临时文件；在它改名成最终产物之前把织纹加回去。恢复层只改像素，
+        // 失败也不让降噪失败（读不出/几何不同时 apply 自己返回 skipped）。
+        if textureRestore {
+            do {
+                _ = try TextureBandRestore.apply(source: source, product: temp,
+                                                 progress: progress)
+            } catch {
+                progress?(Loc.t("织纹恢复：跳过（{0}）", String(describing: (error))))
+            }
         }
         do {
             try? fm.removeItem(at: finalURL)

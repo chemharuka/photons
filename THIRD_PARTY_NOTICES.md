@@ -108,45 +108,6 @@ public thread to point at if that reading is ever questioned. The training data 
 question again: the upstream README states the datasets are public. Before a commercial release,
 confirm both with the authors (marco.sanchez@uib.es) rather than relying on the repository banner.
 
-## LightCraft denoise-core (built-in denoiser, MIT OR Apache-2.0)
-
-- Upstream: https://github.com/ArtCraftTeam/lightcraft (`crates/denoise-core`)
-- License: **MIT OR Apache-2.0** — Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
-- Used by: `Sources/PhotonsExtensions/Denoise/BuiltinDenoise.swift` and
-  `BuiltinDenoiseJob.swift` (§480, engine `内置` / `Builtin`). The port covers the noise estimator of
-  `builtin.rs` and the generalised Anscombe transform, four-plane Hadamard rotation and the two-pass
-  non-local-means filter of `nlm.rs`. BM3D (`bm3d.rs`), Bayer/demosaic (`bayer.rs`) and the `lcdn`
-  cache are not copied. The port was modified for Photons: it runs on the four CFA planes produced by
-  our DNG reader (or on the RGB four-pseudo-plane adapter), tiles the planes itself and writes the
-  result through `DNGRawWriter`.
-- Attribution is kept as the MIT option requires.
-
-Copyright notice as required by the MIT license:
-
-```
-MIT License
-
-Copyright (c) 2026 ArtCraft Team and the LightCraft contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ## Deliberately *not* linked
 
 `LibRaw`, `Exiv2`, `libheif`, `x265`, `lensfun` — see `docs/architecture-decisions.md` §3 (D1)
