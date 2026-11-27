@@ -132,30 +132,36 @@ final class PostDenoise566Tests: XCTestCase {
 
     // MARK: - defaults and the key
 
-    func testTheRestingDocumentIsFiftyFifty() throws {
-        XCTAssertEqual(EditModel.neutral.effects.nonBayerLuminanceNR, 50)
-        XCTAssertEqual(EditModel.neutral.effects.nonBayerColorNR, 50)
-        XCTAssertFalse(EditModel.neutral.hasDetailFX, "S3.9 must not exist for a 50/50 document")
+    /// 2026-11-27（用户口径 `a79be820`）：去噪 / 去彩噪的静止值回到 **0/0**（默认不降噪），
+    /// 手动拖起来才生效；「50」是用户拖到的强度（k = 2），不再是默认。
+    /// 断言强度不变：仍要求「静止值不落盘」与「显式值能往返」，只是方向反过来。
+    func testTheRestingDocumentIsOffAndFiftyIsAStoredValue() throws {
+        XCTAssertEqual(EditModel.neutral.effects.nonBayerLuminanceNR, 0)
+        XCTAssertEqual(EditModel.neutral.effects.nonBayerColorNR, 0)
+        XCTAssertFalse(EditModel.neutral.hasDetailFX, "no denoise stage at the resting 0/0")
 
-        // The resting value is not written: an absent key is what makes an old document read 50.
+        // The resting value is not written: an absent key reads as the resting 0.
         let json = String(decoding: try JSONEncoder().encode(EditModel.neutral), as: UTF8.self)
         XCTAssertFalse(json.contains("nonBayerLuminanceNR"), "resting value must not be written")
         XCTAssertFalse(json.contains("nonBayerColorNR"), "resting value must not be written")
 
-        // An explicit 0 is the user's own off and must survive a round trip.
-        let off = document(0, 0)
-        let offData = try JSONEncoder().encode(off)
-        let offJSON = String(decoding: offData, as: UTF8.self)
-        XCTAssertTrue(offJSON.contains("\"nonBayerLuminanceNR\":0"))
-        XCTAssertTrue(offJSON.contains("\"nonBayerColorNR\":0"))
-        let decoded = try JSONDecoder().decode(EditModel.self, from: offData)
-        XCTAssertEqual(decoded.effects.nonBayerLuminanceNR, 0)
-        XCTAssertEqual(decoded.effects.nonBayerColorNR, 0)
+        // A document that actually denoises must store both numbers, and they must round-trip.
+        let working = document(50, 50)
+        let data = try JSONEncoder().encode(working)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"nonBayerLuminanceNR\":50"))
+        XCTAssertTrue(text.contains("\"nonBayerColorNR\":50"))
+        let decoded = try JSONDecoder().decode(EditModel.self, from: data)
+        XCTAssertEqual(decoded.effects.nonBayerLuminanceNR, 50)
+        XCTAssertEqual(decoded.effects.nonBayerColorNR, 50)
+        // 566-A: the denoise is S1.5 (scene-linear GMW), not S3.9 — so a denoise-only document still
+        // has no display-referred detail stage; its material rides the curve link.
+        XCTAssertFalse(decoded.hasDetailFX, "a denoise-only document must not summon S3.9")
 
-        // A pre-566 document has no key at all: it must read the new resting value.
+        // A pre-566 document has no key at all: it must read the resting 0.
         let old = try JSONDecoder().decode(EditModel.self, from: Data("{}".utf8))
-        XCTAssertEqual(old.effects.nonBayerLuminanceNR, 50)
-        XCTAssertEqual(old.effects.nonBayerColorNR, 50)
+        XCTAssertEqual(old.effects.nonBayerLuminanceNR, 0)
+        XCTAssertEqual(old.effects.nonBayerColorNR, 0)
     }
 
     func testTheStrengthRidesTheCurveLinkNotS39() throws {

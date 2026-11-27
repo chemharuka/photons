@@ -5,7 +5,7 @@
     "m-b"
   ],
   "note" : "Recorded by MaskSemanticTests on the synthetic 96×65 ramp image; two masks (m-a radial +0.6 EV, m-b linear −0.6 EV, re-recorded for 102's symmetric linear feather) with showMask = m-b. `showDisplaySHA256` is the frame after the 50 % red overlay, `plainDisplaySHA256` the same document without it, so the file pins both sides of the 005e criterion. 8-bit quantised digests.",
-  "plainDisplaySHA256" : "67edb97891fbb60a3b2a10278db2cb32f17f12613e8d5a303a4a9bf5cd524b7c",
+  "plainDisplaySHA256" : "396dee8ec994e2a68c0e933c187ac456c14c3a194bec0768f2eeda3bc0be5e82",
   "sampleX" : [
     8,
     48,
@@ -24,37 +24,37 @@
   ],
   "samples" : [
     [
-      0.427001953125,
-      0.394287109375,
-      0.38671875
+      0.4296875,
+      0.394775390625,
+      0.384765625
     ],
     [
-      0.779296875,
-      0.55419921875,
-      0.541015625
+      0.7861328125,
+      0.56005859375,
+      0.546875
     ],
     [
-      0.79833984375,
-      0.405517578125,
-      0.39794921875
+      0.80078125,
+      0.40576171875,
+      0.39599609375
     ],
     [
-      0.70849609375,
-      0.47900390625,
+      0.70947265625,
+      0.479248046875,
       0.467529296875
     ],
     [
-      0.7294921875,
-      0.53662109375,
-      0.52734375
+      0.7333984375,
+      0.53759765625,
+      0.52490234375
     ],
     [
-      0.8095703125,
-      0.44091796875,
-      0.43359375
+      0.81298828125,
+      0.441650390625,
+      0.430908203125
     ]
   ],
-  "showDisplaySHA256" : "742fad000b448a2e9914016be111a6121115220bb295ce2a0daea54d33f16d58",
+  "showDisplaySHA256" : "bdc572696fe5e84739be6ebd2272e3913aec086ce2b4759c7512a9cba98c747d",
   "shownMaskID" : "m-b",
   "shownSlice" : 1,
   "sourceHeight" : 65,
