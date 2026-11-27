@@ -2,17 +2,19 @@ import XCTest
 import PhotonsCore
 import PhotonsUI
 
-/// 派单 031 on the **shipped path**: a 细节 slider dragged through the loupe, measured the way a hand
-/// feels it, with the decode counts as the gate (a clock that happens to be fast proves nothing).
+/// 派单 031 / 571-A on the **shipped path**: a 细节 slider dragged through the loupe, measured the way
+/// a hand feels it, with the decode counts as the gate (a clock that happens to be fast proves
+/// nothing).
 ///
-/// The contract:
+/// 571-A changed the contract from "every tick is a cheap 0.5 frame" to "a held slider requests no
+/// canvas frame at all", because the canvas is two-valued (1920 px stand-in, or the whole picture):
 ///
-///   ① **a tick is a preview, never a full development.** While the slider is held the ladder is asked
-///      for the 0.5 rung only, so `RAWDecoder.decodeCounts()[1]` stays 0 for the whole drag — that is
-///      a count, not a budget, so a busy machine cannot make it pass by luck.
-///   ② **the canvas follows the thumb** at the preview rung (`lastPresentedScale == 0.5`).
-///   ③ **the hand stops → full size.** 150–250 ms after the last movement (or the release) one 1.0
-///      development runs and replaces the frame, and the camera (zoom/centre) does not move.
+///   ① **a tick is not a development.** While the slider is held the loupe asks for nothing, so the
+///      decode counts do not move at all — that is a count, not a budget.
+///   ② **the canvas does not move during the drag.** The frame on screen stays the previous full one
+///      (or the 1920 px stand-in); there is no half-resolution frame to flash.
+///   ③ **the hand stops → one full development.** 150–250 ms after the last movement (or the release)
+///      exactly one 1.0 development runs and replaces the frame; the camera does not move.
 ///   ④ the settle window itself is the constant, so a change to it is a visible decision rather than a
 ///      number buried in a closure.
 ///
@@ -96,9 +98,19 @@ final class DetailTimelineTests: XCTestCase {
         XCTAssertEqual(quiescent, 4, "the loupe never went quiet")
     }
 
+    /// A presented 1.0 frame for the detail photo after `start`.
+    private func waitForFullPresent(_ controller: LoupeController, from start: Int,
+                                    timeout: TimeInterval = 120) -> Bool {
+        waitFor(timeout) {
+            controller.framePresentLog.dropFirst(start).contains {
+                $0.photo == "detail-photo" && $0.decodeScale >= DecodeLadder.fullScale - 1e-4
+            }
+        }
+    }
+
     // MARK: - the drag
 
-    func testDragStaysOnThePreviewRungAndTheHandStoppingDevelopsFullSize() throws {
+    func testDragRequestsNothingAndTheHandStoppingDevelopsFullSizeOnce() throws {
         // ④ the window the task asks for.
         XCTAssertGreaterThanOrEqual(LoupeController.detailSettleInterval, 0.15)
         XCTAssertLessThanOrEqual(LoupeController.detailSettleInterval, 0.25)
@@ -106,15 +118,15 @@ final class DetailTimelineTests: XCTestCase {
         let url = try fixture()
         let controller = makeController(source(url, edit: .neutral))
 
-        // A cold open at fit: preview rung first, then the full one (the normal ladder).
+        // A cold open at fit: the full rung, once (571-A has no 0.5 leg).
         controller.autoRenderEnabled = true
         controller.scheduleRender()
         XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.fullScale },
                       "the full rung never reached the canvas")
-
-        // The camera the whole test is about: fit is not a pan, so a jump here would be a bug.
+        settle(controller)
         let stateBefore = controller.viewState
         RAWDecoder.resetDecodeCounts()
+        let presentsBefore = controller.framePresentLog.count
 
         // ── ① the drag: eight ticks, fired the way a hand fires them (no waiting in between) ────
         controller.beginDetailAdjustment()
@@ -125,44 +137,43 @@ final class DetailTimelineTests: XCTestCase {
             controller.requestViewportRender()
         }
 
-        // A tick is a *preview* develop, and this is a count, not a budget: after the whole burst —
-        // before the settle window has even elapsed — the full frame has not been asked for once.
+        // Not one development, not one frame: the held slider asks for nothing at all.
         XCTAssertEqual(RAWDecoder.decodeCounts()[DecodeLadder.fullScale] ?? 0, 0,
                        "a detail tick developed the full 60 MP frame")
-
-        let lastTick = CFAbsoluteTimeGetCurrent()
-        XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.previewScale },
-                      "the drag never drew the preview rung")
-        let previewMilliseconds = (CFAbsoluteTimeGetCurrent() - lastTick) * 1000
+        XCTAssertEqual(controller.framePresentLog.count, presentsBefore,
+                       "a detail tick drew a new canvas frame")
+        XCTAssertEqual(controller.lastPresentedScale, DecodeLadder.fullScale,
+                       "the canvas must stay on the previous full frame during the drag")
 
         // ── ② the hand stops ────────────────────────────────────────────────────────────────────
         let release = CFAbsoluteTimeGetCurrent()
         controller.endDetailAdjustment()
-        XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.fullScale },
+        XCTAssertTrue(waitForFullPresent(controller, from: presentsBefore),
                       "the full-size frame never arrived after the settle window")
-
-        let settleMilliseconds = (CFAbsoluteTimeGetCurrent() - release) * 1000
         XCTAssertEqual(RAWDecoder.decodeCounts()[DecodeLadder.fullScale] ?? 0, 1,
                        "the release must develop the full rung exactly once")
 
+        let settleMilliseconds = (CFAbsoluteTimeGetCurrent() - release) * 1000
         // The camera did not jump: a detail change is a new development, not a new framing.
         XCTAssertEqual(controller.viewState, stateBefore, "the settle moved the camera")
 
-        print("DETAIL drag: 8 ticks · thumb → preview frame "
-              + "\(String(format: "%.1f", previewMilliseconds)) ms · full decodes during the drag 0")
-        print("DETAIL settle: release → full frame \(String(format: "%.1f", settleMilliseconds)) ms "
+        print("DETAIL drag: 8 ticks · no frame, no decode"
+              + " · release → full frame \(String(format: "%.1f", settleMilliseconds)) ms "
               + "(window \(LoupeController.detailSettleInterval * 1000) ms + one full development)")
     }
 
     /// A drag that pauses without releasing also gets the full-size development — "停手" means the
-    /// hand stopped, not that the button came up.
+    /// hand stopped, not that the button came up. Resuming after the pause is a new drag and gets the
+    /// same treatment (still nothing until the hand stops again).
     func testPausingMidDragAlsoDevelopsFullSize() throws {
         let url = try fixture()
         let controller = makeController(source(url, edit: .neutral))
         controller.autoRenderEnabled = true
         controller.scheduleRender()
         XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.fullScale })
+        settle(controller)
         RAWDecoder.resetDecodeCounts()
+        let presentsBefore = controller.framePresentLog.count
 
         controller.beginDetailAdjustment()
         var doc = EditModel.neutral
@@ -172,19 +183,14 @@ final class DetailTimelineTests: XCTestCase {
         controller.requestViewportRender()
         XCTAssertEqual(RAWDecoder.decodeCounts()[DecodeLadder.fullScale] ?? 0, 0,
                        "the tick itself asked for the full rung")
-
-        // The tick's own frame is the preview rung (the queue is serial: the 0.5 development was
-        // requested first, so it lands before the settle's 1.0 one).
-        XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.previewScale },
-                      "the paused tick never drew the preview rung")
-        let preview = (CFAbsoluteTimeGetCurrent() - tick) * 1000
+        XCTAssertEqual(controller.framePresentLog.count, presentsBefore,
+                       "the paused tick drew a frame")
 
         // No further tick: the settle timer alone must upgrade the frame.
-        XCTAssertTrue(waitFor(180) { controller.lastPresentedScale == DecodeLadder.fullScale },
+        XCTAssertTrue(waitForFullPresent(controller, from: presentsBefore),
                       "a paused drag never developed full size")
         let full = (CFAbsoluteTimeGetCurrent() - tick) * 1000
-        print("DETAIL pause: last tick → preview \(String(format: "%.1f", preview)) ms"
-              + " → full \(String(format: "%.1f", full)) ms")
+        print("DETAIL pause: last tick → full \(String(format: "%.1f", full)) ms")
         XCTAssertEqual(RAWDecoder.decodeCounts()[DecodeLadder.fullScale] ?? 0, 1)
 
         controller.endDetailAdjustment()

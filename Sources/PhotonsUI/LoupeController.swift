@@ -288,10 +288,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// When set, frames are made for this URL instead of the session's anchor photo (tests, the
     /// bench, an import preview). `nil` in the app.
     ///
-    /// 派单 031: writing a frame source whose **detail amounts moved** is the harness spelling of "the
-    /// user moved a 细节 slider" — it puts the frames on the preview rung and arms the "hand stopped"
-    /// upgrade, exactly as `requestEditRender` does for a real drag. The settle's own re-render writes
-    /// no new source, so it cannot re-arm itself.
+    /// 派单 031 / 571-A: writing a frame source whose **detail amounts moved** is the harness spelling
+    /// of "the user moved a 细节 slider". It only arms the "hand stopped" timer; the canvas is not
+    /// re-rendered while the slider is held (571-A: no half-resolution canvas frame exists to draw).
     public var frameSource: FrameSource? {
         didSet {
             // 039 / 065: a different **photo** is a different picture, so the low-resolution backdrop is
@@ -307,7 +306,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             notePhotoIdentity(backdropPhotoKey)
             guard detailGesturing,
                   frameSource?.edit.detailSettings != oldValue?.edit.detailSettings else { return }
-            detailPreview = true
             scheduleDetailSettle()
         }
     }
@@ -392,9 +390,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         /// (the decode has landed, the camera is still); a pan is not. `.scheduled` / `.resize` are
         /// settled by construction, `.edit` never is.
         var cacheable: Bool = false
-        /// 434 — the job was made while a 细节 slider was moving, so its rung is a preview, not the
-        /// document's settled canvas.
-        var previewTarget: Bool = false
 
         /// The rung identity this job develops and renders from: the document's decode key on top of
         /// the photo identity. Derived from `edit`, never stored, so the two cannot drift.
@@ -573,8 +568,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         case notSettledKind
         /// The frame on screen is a coarser rung than the job's target.
         case belowTarget
-        /// A 细节 drag's preview rung: by design not the document's settled canvas.
-        case previewTarget
         /// The zoom bridge is still moving and holds the frame for its end.
         case heldByZoomBridge
         /// 532's monotonic gate held a softer frame than the one already on screen.
@@ -2722,7 +2715,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
     // MARK: 532 — the monotonic present gate (cache frame → target frame, never through 0.5)
     //
     // The photo switch has three hops today: the 434 cache frame (full canvas, sharp), then the
-    // first rung the new photo's ladder lands (`.previewScale` = 0.5, upscaled and visibly soft),
+    // first rung the new photo's ladder lands (a half-linear rung in the old ladder, upscaled and
+    // visibly soft),
     // then the target rung. The user's 「缓存正常读取 + 变模糊一点点 + 加载真正的屏幕像素」 is the
     // middle hop: a frame with fewer pixels than the one already on the screen.
     //
@@ -5396,7 +5390,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             queuePendingAuto(.light)
             return nil
         }
-        guard let graph = frame.graph else { return nil }
+        guard let graph = measurementGraph(from: frame, document: document ?? session.edit) else {
+            return nil
+        }
         lastAutoLightSampleIdentityForTesting = frame.graphPhoto ?? frame.identity
         let source = document ?? session.edit
         lastAutoLightBlackOffsetInputForTesting = source.light.blackOffset
@@ -5423,6 +5419,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let next = plan.apply(to: source)
         guard next.light != source.light else { return nil }
         return plan
+    }
+
+    /// 571-A — a **one-shot** graph for a synchronous measurement on the main thread.
+    ///
+    /// It is built from the same resident whole-picture buffer and the same document inputs as the
+    /// frame on screen, but it is deliberately **not** `frame.graph`: that object is driven by
+    /// `photons.loupe.render` (`renderBackdrop`), and `RenderGraph.render` is not safe to call from two
+    /// threads at once. Measuring 明暗/颜色 through the frame's graph was the 571-A crash (main-thread
+    /// `AutoLight.plan` racing the render queue). The pixels and the edit are unchanged, so the
+    /// numbers are still this photo's and 448's one-write/one-history timing does not move.
+    private func measurementGraph(from frame: FrameSnapshot, document: EditModel) -> RenderGraph? {
+        guard let image = frame.image else { return nil }
+        let identity = frame.graphIdentity ?? "\(frame.identity ?? "measurement")-s\(frame.scale)"
+        return try? RenderGraph(input: RenderInput(
+            image: image, identity: identity, sourceURL: frame.url,
+            whiteBalance: document.decodeInputs.whiteBalance,
+            asShotPair: frame.capabilities?.asShotWhiteBalance ?? .asShot))
     }
 
     /// 448 — 自动白平衡 through the same full-rung gate. The measurement is the one the panel's
@@ -5463,7 +5476,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             queuePendingAuto(.color)
             return nil
         }
-        guard let graph = frame.graph else { return nil }
+        guard let graph = measurementGraph(from: frame, document: document ?? session.edit) else {
+            return nil
+        }
         let source = document ?? session.edit
         let initialMetrics: AutoColor.Metrics
         do {
@@ -6680,28 +6695,19 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// stays soft after the user has visibly stopped.
     public static let detailSettleInterval: TimeInterval = 0.2
 
-    /// True while a 细节/降噪 slider is held. It decides **the rung**, never the document:
-    /// `makeJob` asks the ladder for the preview rung while `detailPreview` is on, and for the full
-    /// one otherwise.
+    /// True while a 细节/降噪 slider is held. 571-A: a held slider **requests no canvas frame at all**
+    /// — it only re-arms the "hand stopped" timer. The canvas keeps the last whole-picture frame (or
+    /// the 1920 px stand-in) instead of dropping to a half-resolution one.
     private var detailGesturing = false
-    /// True while the frames being produced are preview-rung frames. Cleared by the "hand stopped"
-    /// timer, so a drag that pauses for 200 ms gets its full-size development — and the next tick
-    /// (if the drag resumes) puts the preview back on.
-    private var detailPreview = false
     /// The pending "the hand stopped" re-development.
     private var detailSettle: DispatchWorkItem?
-    /// 144: the last preview-rung frames have been replaced by the settle's full-size frames, so the
-    /// cached backdrop (rendered from the preview rung) belongs to a source that is gone. The next
-    /// frame clears it — not a render, just the digest, exactly like an edit does.
-    private var detailSettleInvalidatesBackdrop = false
-    /// The identity of the last preview rung this loupe asked for during a detail drag, so the next
-    /// tick can drop the one it superseded instead of queueing a decode for every thumb position.
-    private var pendingDetailPreviewIdentity: String?
+    /// True for the one request the settle timer makes, which is the exception to "no frames while the
+    /// hand is down" (`detailGesturing` is still set by a paused drag).
+    private var detailSettleIsPresenting = false
 
-    /// A 细节/降噪 slider was grabbed: the frames that follow rebuild from the preview rung.
+    /// A 细节/降噪 slider was grabbed: nothing is redeveloped until the hand stops.
     public func beginDetailAdjustment() {
         detailGesturing = true
-        detailPreview = true
         detailSettle?.cancel()
         detailSettle = nil
     }
@@ -6721,14 +6727,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.detailSettle = nil
-            // The hand stopped: whatever produced the last frame was a preview, so this one is the
-            // full-size development the spec asks for 150–250 ms after the movement ended.
-            let wasPreview = self.detailPreview
-            self.detailPreview = false
-            // 144: the frames that follow are a different **source** from the preview rung the
-            // backdrop may have been rendered from, so it cannot stay current.
-            self.detailSettleInvalidatesBackdrop = wasPreview
+            // The hand stopped: this is the one whole-picture development the drag costs.
+            self.detailSettleIsPresenting = true
             self.requestSettleFrame()
+            self.detailSettleIsPresenting = false
         }
         detailSettle = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.detailSettleInterval, execute: work)
@@ -6749,11 +6751,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     public func requestEditRender() {
         guard autoRenderEnabled, let session, session.mode == .loupe else { return }
         guard session.anchorAsset != nil else { return }
-        // 派单 031: a detail tick is a *development*, so it stays on the preview rung and re-arms the
-        // "hand stopped" upgrade. Both only while the slider is actually held.
-        if detailGesturing {
-            detailPreview = true
+        // 派单 031 / 571-A: while a 细节 slider is held nothing is redeveloped — no half-resolution
+        // canvas frame exists any more — only the "hand stopped" timer is re-armed. The settle's own
+        // request bypasses this (a paused drag still gets its one full frame).
+        if detailGesturing, !detailSettleIsPresenting {
             scheduleDetailSettle()
+            return
         }
         editDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.startEditRender() }
@@ -6825,13 +6828,20 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// camera wins the follow-up. A drag therefore renders as fast as the GPU allows instead of
     /// building a backlog it would then have to drain after the hand stops.
     ///
-    /// Nothing here waits for a development: the frame rides the rung the ladder has (the 0.5 preview
-    /// while the full one is being made) and the full rung replaces it when it lands. That is the
-    /// whole point of the split — a pan is a *frame*, not a decode.
+    /// Nothing here waits for a development: 571-A made the canvas two-valued, so a pan draws from
+    /// the whole-picture rung when it is resident and draws nothing while that rung is still being
+    /// developed (the 1920 px stand-in stays on screen). That is the whole point of the split — a pan
+    /// is a *frame*, not a decode.
     public func requestViewportRender(cacheable: Bool = false) {
         guard autoRenderEnabled else { return }
         if frameSource == nil {
             guard let session, session.mode == .loupe, session.anchorAsset != nil else { return }
+        }
+        // 571-A: a held 细节 slider does not ask for a canvas frame. The harness spells a detail tick
+        // as a new `frameSource` + this call, and the settle's own request is the one exception.
+        if detailGesturing, !detailSettleIsPresenting {
+            scheduleDetailSettle()
+            return
         }
         viewRenderRequests += 1
         if viewInFlight {
@@ -6979,8 +6989,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
                          changedAt: CFAbsoluteTime = 0,
                          cacheable: Bool = false) -> RenderJob? {
         let gen = generation
-        // 派单 031: while a detail slider moves, ask the ladder for the preview rung only.
-        let target = detailPreview ? DecodeLadder.previewScale : DecodeLadder.fullScale
+        // 571-A: the canvas is two-valued — the 1920 px stand-in, or the whole picture. Every frame
+        // this controller makes asks for the full rung; there is no preview target any more.
+        let target = DecodeLadder.fullScale
         // 333 — the crop tool's two view facts and the two session facts, taken **here**, on the main
         // thread, so `renderFrame → makeFrame` only ever reads the job.
         let role = cropTool.canvasRole
@@ -7001,7 +7012,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             job.editRevision = revision
             job.highlightWarning = warning
             job.cacheable = cacheable
-            job.previewTarget = detailPreview
             if kind != .view { noteCanvasCacheDocument(photo: job.baseIdentity, edit: job.edit) }
             return job
         }
@@ -7032,7 +7042,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         job.editRevision = revision
         job.highlightWarning = warning
         job.cacheable = cacheable
-        job.previewTarget = detailPreview
         if kind != .view { noteCanvasCacheDocument(photo: job.baseIdentity, edit: job.edit) }
         return job
     }
@@ -7125,9 +7134,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                       fitScale: job.fitScale,
                                       hashPixels: hashesFrames, resolve: .residentOnly,
                                       targetScale: job.target,
-                                      // 534 — the live loupe may publish the first whole-picture
-                                      // preview; the reverse gate ② restores `atTarget`.
-                                      allowsPreviewHistogram: histogramPublishesOnPreviewForTesting ?? true,
                                       // 333 — the render queue reads the job and nothing else.
                                       canvasRole: job.canvasRole,
                                       cropIsActive: job.cropIsActive,
@@ -7143,26 +7149,14 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
     }
 
-    /// Ask the decode queue for every rung the camera needs and the ladder does not have, in plan
-    /// order (the preview first, the target second).
+    /// Ask the decode queue for every rung the camera needs and the ladder does not have. Since
+    /// 571-A a plan is always the single full rung.
     ///
     /// The queue dedupes by `(photo, rung)`, so twenty pans during one development cost **one** decode
     /// and twenty deliveries; `rungArrived` then ignores the duplicates because the rung is resident.
     private func requestDevelopment(_ plan: DecodeLadderPlan, job: RenderJob) {
-        // 派单 031: a detail drag produces one identity per thumb position, and every one of them is
-        // a new `(identity, scale)` key — so without this the queue would develop every position the
-        // thumb passed through. The previous preview rung can never be shown again (its document is
-        // gone), so drop it first: at most one preview decode runs, and at most one waits.
-        if detailPreview {
-            if let previous = pendingDetailPreviewIdentity, previous != job.identity {
-                decodeQueue.cancel(identity: previous)
-            }
-            pendingDetailPreviewIdentity = job.identity
-        } else if !plan.isResident {
-            pendingDetailPreviewIdentity = nil
-        }
         // 539 — the full rung already resident is the prewarm being reused; no request is made at all.
-        if plan.isResident {
+        if ladder.resident(identity: job.identity, scale: job.target) != nil {
             noteV9PrewarmReuse(identity: job.identity, scale: job.target)
         }
         for scale in plan.rungs where ladder.resident(identity: job.identity, scale: scale) == nil {
@@ -7276,9 +7270,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         detailSettle?.cancel()
         detailSettle = nil
         detailGesturing = false
-        detailPreview = false
-        detailSettleInvalidatesBackdrop = false
-        pendingDetailPreviewIdentity = nil
+        detailSettleIsPresenting = false
         // 143b: a preview belongs to the photo and the buffer it was rendered from. Switching the
         // picture (or leaving the loupe) must not let a queued preview render paint the new one;
         // the inspector's badge goes with it.
@@ -8681,19 +8673,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// that happened in that window wrote nothing (「多试几次后发现有缓存」). The key already
     /// carries the rung, so a 0.5 entry describes exactly its own pixels.
     ///
-    /// The two noise exclusions stay: a slider drag (`.edit`) and a 细节 preview rung
-    /// (`previewTarget`) are streams, not the settled canvas. `.view` is eligible when it is
-    /// cacheable (a rung arrival) or when it is the settled camera — no new request is made for
-    /// either; the write is a by-product of the frame that was going to be drawn anyway.
+    /// The two noise exclusions stay: a slider drag (`.edit`) and a live resize are streams, not the
+    /// settled canvas. 571-A removed the preview-rung exclusion because there is no preview rung.
+    /// `.view` is eligible when it is cacheable (a rung arrival) or when it is the settled camera —
+    /// no new request is made for either; the write is a by-product of the frame that was going to be
+    /// drawn anyway.
     private func canvasCacheStoreAttempt(for job: RenderJob,
                                          frame: FrameResult) -> CanvasCacheStoreAttempt {
         let camera = Self.canvasCacheCameraToken(job.state)
         let reason: CanvasCacheStoreSkipReason?
-        if job.previewTarget {
-            reason = .previewTarget
-        } else if job.kind == .edit
-                    || !(job.kind == .scheduled || job.kind == .resize || job.cacheable
-                         || isSettledViewportJob(job)) {
+        if job.kind == .edit
+            || !(job.kind == .scheduled || job.kind == .resize || job.cacheable
+                 || isSettledViewportJob(job)) {
             reason = .notSettledKind
         } else {
             reason = nil
@@ -9078,12 +9069,11 @@ public final class LoupeController: NSViewController, HeadroomSource {
                            // for exactly `decodeScale`, so that rung is the target.
                            targetScale: Float? = nil,
                            rungInputs: DecodeInputs? = nil,
-                           // 534 — may a preview rung that covers the whole picture publish its own
-                           // measurement? The live frame path says yes (that is the early publish);
-                           // the synchronous test/smoke path says no, so a 0.5 frame there is still
-                           // the stand-in for a whole picture rather than a decode on its way to a
-                           // sharper one. `histogramPublishesOnPreviewForTesting` reverses it.
-                           allowsPreviewHistogram: Bool = false,
+                           // 571-A — the canvas only makes whole-picture frames, so there is no
+                           // preview rung that could publish an early histogram: the card is measured
+                           // from the full frame, one development later than 534's preview publish.
+                           // (The synchronous test/smoke path still measures exactly the rung it was
+                           // asked for; `canonicalScale == decodeScale` there.)
                            // 333 — every caller on the render queue passes these from its job /
                            // request snapshot; the synchronous callers pass the live tool's values
                            // from the main thread. There is deliberately **no** default: a frame
@@ -9246,8 +9236,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                          identity: cacheIdentity,
                                          decodeScale: decodeScale,
                                          fallbackScale: canonicalScale,
-                                         coverage: coverage,
-                                         allowsPreviewPublish: allowsPreviewHistogram)
+                                         coverage: coverage)
 
         // One render over the resident rung. `useCache: true` in both sources: the edited pipeline's
         // keys are the document's, so a compare frame hits S1…S3 exactly where the plain frame did and
@@ -9391,7 +9380,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                   decodeScale: decodeScale,
                                   coverage: coverage, primaries: primaries, ceiling: ceiling,
                                   fallbackScale: canonicalScale,
-                                  allowsPreviewPublish: allowsPreviewHistogram,
                                   sourceURL: url,
                                   startedAt: t1))
         }
@@ -10059,12 +10047,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
             finishWhiteBalancePreview()
             backdropWanted = true
         }
-        // 144: the detail settle's full-size frame replaces the preview rung the backdrop may name.
-        if detailSettleInvalidatesBackdrop, !detailPreview {
-            detailSettleInvalidatesBackdrop = false
-            invalidateBackdrop()
-            backdropWanted = true
-        }
         // 144: any frame whose source differs from the cached bottom image retires it. This is the
         // generic half of "a formal frame replaces a preview": an undo/redo or a rung switch lands
         // with a digest the cache cannot honestly answer for.
@@ -10580,12 +10562,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
     static let histogramPreviewBinRelativeTolerance = 0.02
     static let histogramPreviewClippedAbsoluteTolerance = 0.001
 
-    /// 534 — reverse gate ②: set `false` to restore the old `atTarget` rule (only the canonical rung
-    /// may measure). Production leaves it `nil`, i.e. the live loupe may measure the first
-    /// whole-picture preview. The synchronous test/smoke path keeps the old rule explicitly — its
-    /// 0.5 frame is a stand-in for a whole picture, not a decode rung on its way to a sharper one.
-    var histogramPublishesOnPreviewForTesting: Bool?
-
     /// 534 — reverse gate ①: replace the pixel digest with another algorithm. Production leaves it
     /// `nil`, so the only digest is `CanvasFrameCache.pixelEditDigest`.
     var histogramPixelDigestForTesting: ((EditModel) -> String)?
@@ -10640,7 +10616,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                measured: Histogram?, milliseconds: Double,
                                identity: String, decodeScale: Float, coverage: Double,
                                primaries: OutputPrimaries, ceiling: Double,
-                               fallbackScale: Float, allowsPreviewPublish: Bool,
+                               fallbackScale: Float,
                                sourceURL: URL,
                                startedAt: CFAbsoluteTime) -> HistogramStep {
         // The card is off: this frame is a non-measurement, like every other.
@@ -10658,10 +10634,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // and nothing to publish — the card already has this picture's numbers.
         guard !frameAlreadyMeasured(key) else { return HistogramStep(key: key) }
 
-        // A frame whose rung is not the canonical one is the 0.5 preview on its way to a full
-        // development. 534 — it may measure **if it covers the whole picture** and the live path
-        // allows it; that is the early publish. Otherwise (the synchronous test/smoke path, and the
-        // reverse gate) it only shows numbers already measured from the canonical rung, as in 457.
+        // A frame whose rung is not the canonical one is a preview on its way to a full development.
+        // 571-A — the canvas no longer produces one, so such a frame may only show numbers already
+        // measured from the canonical rung (457's rule); the full frame publishes the picture.
         let isPreview = abs(canonicalScale - decodeScale) >= 1e-6
         if isPreview {
             // The canonical picture is already on the card (a switch hit, the catalog, or a full
@@ -10670,15 +10645,13 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                               pixelDigest: pixelDigest, scale: canonicalScale,
                                               ceiling: HighlightCeiling.current)
             if frameAlreadyMeasured(canonical.key) { return HistogramStep(key: key) }
-            if !allowsPreviewPublish {
-                if let cached = cachedHistogram(for: canonical.key) {
-                    rememberMeasuredFrame(canonical.key)
-                    return HistogramStep(key: canonical.key, histogram: cached, latency: latency())
-                }
-                // Not an error: the canonical frame has not arrived yet. `apply` counts it as a
-                // skipped frame, and the settled frame publishes the picture's numbers.
-                return HistogramStep(key: key, latency: latency())
+            if let cached = cachedHistogram(for: canonical.key) {
+                rememberMeasuredFrame(canonical.key)
+                return HistogramStep(key: canonical.key, histogram: cached, latency: latency())
             }
+            // Not an error: the canonical frame has not arrived yet. `apply` counts it as a
+            // skipped frame, and the settled frame publishes the picture's numbers.
+            return HistogramStep(key: key, latency: latency())
         }
         // The frame is a window into the picture (1:1 or beyond): its pixels are a *crop*, so any
         // numbers read out of it would be the crop's. This frame publishes nothing and says why — but
@@ -10746,20 +10719,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
     ///
     ///   · the card's switch is off → no measurement (`collectsHistogram`);
     ///   · the frame is a window into the picture → no measurement (a crop's numbers are the crop's);
-    ///   · 534 — a preview frame that does not cover the picture, or is not allowed to publish early,
-    ///     may not measure;
+    ///   · 534 — a preview frame (not the canonical rung) may not measure: 571-A removed the canvas
+    ///     preview, so the card is measured from the full frame;
     ///   · this key was already measured, or its numbers are in the cache → no measurement (A → B → A
     ///     publishes the cache and nothing needs re-counting).
     private func wantsHistogramMeasurement(photo: String, edit: EditModel, identity: String,
                                            decodeScale: Float, fallbackScale: Float,
-                                           coverage: Double,
-                                           allowsPreviewPublish: Bool) -> Bool {
+                                           coverage: Double) -> Bool {
         guard collectsHistogram else { return false }
         let canonicalScale = histogramRungScale(identity: identity, fallbackScale: fallbackScale)
         let isPreview = abs(canonicalScale - decodeScale) >= 1e-6
-        let wholePicture = coverage >= Self.histogramWholePictureCoverage
-        if isPreview && (!wholePicture || !allowsPreviewPublish) { return false }
-        guard wholePicture else { return false }
+        if isPreview { return false }
+        guard coverage >= Self.histogramWholePictureCoverage else { return false }
         let pixelDigest = histogramPixelDigest(edit)
         let scale = histogramMeasurementScale(decodeScale: decodeScale, coverage: coverage,
                                               canonicalScale: canonicalScale)

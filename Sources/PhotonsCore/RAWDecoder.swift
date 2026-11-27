@@ -1449,9 +1449,10 @@ public struct DecodeRung: Sendable {
 
 /// What a camera request has to ask the ladder for, in presentation order.
 ///
-/// `preview` is the rung that can go on screen *now* — normally the 0.5 buffer the fit view already
-/// developed. `target` is the rung the request actually needs. One entry means "the target is
-/// already resident, this frame costs a render and nothing else".
+/// `preview` is the rung that can go on screen *now*. 571-A removed it from the canvas: `plan` is one
+/// entry (the target) and `preview` is always `nil`, but the field is kept because the plan type is
+/// the controller/queue call surface and the single-rung plan still spells "no preview leg".
+/// `target` is the rung the request actually needs.
 public struct DecodeLadderPlan: Equatable, Sendable {
     public let preview: Float?
     public let target: Float
@@ -1463,9 +1464,6 @@ public struct DecodeLadderPlan: Equatable, Sendable {
 
     /// Rungs to fetch and present, in order. The last one is always the target.
     public var rungs: [Float] { preview.map { [$0, target] } ?? [target] }
-
-    /// True when the frame can be produced without touching ImageIO at all.
-    public var isResident: Bool { preview == nil }
 }
 
 /// The decoded buffers of **the photo the loupe is showing**, keyed by rung.
@@ -1489,7 +1487,10 @@ public struct DecodeLadderPlan: Equatable, Sendable {
 /// re-enters to store. A decode under a lock would serialise the two queues again, which is exactly
 /// the defect this file's `DecodeQueue` exists to remove.
 public final class DecodeLadder {
-    /// The rung a fit frame can afford to show first: half the linear size, ~quarter the pixels.
+    /// 571-A — the half-linear rung, kept **for histogram measurement only**. The canvas no longer
+    /// asks the ladder for it: a fit frame is either the 1920 px stand-in (533) or the whole picture
+    /// at `fullScale`. Nothing in `LoupeController`'s frame path references this constant any more
+    /// except the histogram's cache lookup (`preview` key of an older measurement).
     public static let previewScale: Float = 0.5
     /// The rung 1:1 (and everything above it) is rendered from. One source pixel, one buffer pixel.
     public static let fullScale: Float = 1
@@ -1592,24 +1593,16 @@ public final class DecodeLadder {
         identity == self.identity || aliases.contains(identity)
     }
 
-    /// What the loupe must do for a `target` rung: show `preview` first if it can, then `target`.
+    /// What the loupe must do for a `target` rung.
     ///
-    /// `preview` is `nil` exactly when the target is resident, which is the case that matters for
-    /// the second and every later visit to a camera position.
+    /// 571-A — the canvas is **two-valued**: it shows the 1920 px stand-in while it waits, then the
+    /// whole picture at `target`. There is no intermediate preview rung, so the plan is always the
+    /// single target (an empty `rungs` list would leave nothing to draw). `preview` stays in
+    /// `DecodeLadderPlan` because the call sites and diagnostics still speak of it, and it is `nil`
+    /// here exactly as it was for a resident target.
     public func plan(identity: String, target: Float) -> DecodeLadderPlan {
-        locked {
-            if identity == self.identity, rungs[target] != nil {
-                return DecodeLadderPlan(preview: nil, target: target)
-            }
-            // Nothing smaller to show, or the only thing we have *is* the target: one rung.
-            guard target > Self.previewScale else {
-                return DecodeLadderPlan(preview: nil, target: target)
-            }
-            let residentPreview = identity == self.identity
-                ? rungs.values.filter { $0.scale <= target }.max { $0.scale < $1.scale }?.scale
-                : nil
-            return DecodeLadderPlan(preview: residentPreview ?? Self.previewScale, target: target)
-        }
+        _ = identity
+        return DecodeLadderPlan(preview: nil, target: target)
     }
 
     /// Answer a request for one rung, developing it with `decode` on a miss.

@@ -59,29 +59,28 @@ final class DecodeLadderTests: XCTestCase {
 
     // MARK: - 1. policy
 
-    /// A cold request asks for the preview rung first and the target second — that order *is* the
-    /// ladder: whatever can be shown now, then what the camera actually needs.
-    func testColdRequestPlansThePreviewRungThenTheTarget() {
+    /// 571-A — a cold request is the full rung and nothing else: the canvas is either the 1920 px
+    /// stand-in or the whole picture, never a half-resolution step in between.
+    func testColdRequestPlansOnlyTheFullRung() {
         let ladder = DecodeLadder()
         let plan = ladder.plan(identity: "photo", target: DecodeLadder.fullScale)
-        XCTAssertEqual(plan.preview, DecodeLadder.previewScale)
-        XCTAssertEqual(plan.rungs, [DecodeLadder.previewScale, DecodeLadder.fullScale])
-        XCTAssertFalse(plan.isResident)
+        XCTAssertNil(plan.preview)
+        XCTAssertEqual(plan.rungs, [DecodeLadder.fullScale])
     }
 
-    /// Once the target is resident the plan collapses to one rung: no preview, no decode, one render.
+    /// Once the target is resident the plan is the same single rung: no preview, no decode, one render.
     func testResidentTargetPlansASingleRung() {
         let ladder = DecodeLadder()
         ladder.store(syntheticRung(DecodeLadder.previewScale), identity: "photo")
         XCTAssertEqual(ladder.plan(identity: "photo", target: DecodeLadder.fullScale).rungs,
-                       [DecodeLadder.previewScale, DecodeLadder.fullScale],
-                       "only the preview is resident: it is what goes up first")
+                       [DecodeLadder.fullScale],
+                       "571-A: a resident preview rung is not a canvas plan any more")
 
         ladder.store(syntheticRung(DecodeLadder.fullScale), identity: "photo")
         let plan = ladder.plan(identity: "photo", target: DecodeLadder.fullScale)
         XCTAssertNil(plan.preview)
         XCTAssertEqual(plan.rungs, [DecodeLadder.fullScale])
-        XCTAssertTrue(plan.isResident)
+        XCTAssertNotNil(ladder.resident(identity: "photo", scale: DecodeLadder.fullScale))
     }
 
     /// A rung is never substituted for another one: a 0.5 buffer must not be handed back as the 1.0
@@ -125,7 +124,8 @@ final class DecodeLadderTests: XCTestCase {
     // MARK: - 2. the count ("only decoded once")
 
     /// The claim the whole change exists for: one photo, one development per rung, no matter how
-    /// often the camera moves between fit and 1:1.
+    /// often the camera moves between fit and 1:1. 571-A — the only rung the canvas asks for is the
+    /// full one, so a cold open develops exactly once.
     ///
     /// The sequence is the controller's own: `plan` + `rung` per rung. Nothing is hand-sequenced, so
     /// a change to the plan changes this test.
@@ -153,19 +153,19 @@ final class DecodeLadderTests: XCTestCase {
             return presented
         }
 
-        // A cold open: the preview rung, then the full one.
-        XCTAssertEqual(try request("open"), [DecodeLadder.previewScale, DecodeLadder.fullScale])
-        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.previewScale: 1, DecodeLadder.fullScale: 1])
+        // A cold open: the full rung only (571-A removed the 0.5 leg).
+        XCTAssertEqual(try request("open"), [DecodeLadder.fullScale])
+        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.fullScale: 1])
 
         // Five round trips through fit ↔ 1:1 add nothing at all.
         for i in 0..<5 {
             XCTAssertEqual(try request("fit\(i)"), [DecodeLadder.fullScale])
             XCTAssertEqual(try request("1:1-\(i)"), [DecodeLadder.fullScale])
         }
-        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.previewScale: 1, DecodeLadder.fullScale: 1],
+        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.fullScale: 1],
                        "switching fit ↔ 1:1 must never develop the file again")
-        XCTAssertEqual(ladder.decodes, 2,
-                       "the cold open developed twice (0.5 then 1.0); every later frame is a hit")
+        XCTAssertEqual(ladder.decodes, 1,
+                       "the cold open developed once; every later frame is a hit")
         XCTAssertEqual(ladder.hits, 10)
     }
 
@@ -195,95 +195,74 @@ final class DecodeLadderTests: XCTestCase {
         return sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * q).rounded()))]
     }
 
-    /// ① the visible first frame at 1:1, ② the full-resolution arrival, ③ pan steady state — the
-    /// three numbers of the brief, measured on the same 60 MP file in one place.
-    func testOneToOneOpensOnThePreviewRungWithinTheFrameBudget() throws {
+    /// ① the first 1:1 frame built from the full rung, ② pan steady state — measured on the same
+    /// 60 MP file. 571-A: there is no 0.5 rung to open on, so the first frame is a render of the
+    /// already-developed full buffer (the user waits for the development, not for a soft frame).
+    func testOneToOneRendersFromTheFullRungWithoutASecondDevelopment() throws {
         let url = try fixtureURL()
         let ladder = DecodeLadder()
         let identity = url.lastPathComponent
         RAWDecoder.resetDecodeCounts()
 
-        // What the fit view develops first, i.e. the state the loupe is in when the user presses Z.
-        let preview = try ladder.rung(identity: identity, scale: DecodeLadder.previewScale) {
-            try develop(url, scale: DecodeLadder.previewScale)
+        // What the fit view develops: the whole picture, once.
+        let fullAnswer = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
+            try develop(url, scale: DecodeLadder.fullScale)
         }
-        print(String(format: "LADDER preview decode: 0.5 rung %dx%d in %.0f ms",
-                     preview.rung.image.width, preview.rung.image.height,
-                     preview.rung.milliseconds))
-
-        // ① The magnified preview: graph build + one window render, no ImageIO.
+        let full = fullAnswer.rung
+        print(String(format: "LADDER full decode: %dx%d in %.0f ms",
+                     full.image.width, full.image.height, full.milliseconds))
         let plan = ladder.plan(identity: identity, target: DecodeLadder.fullScale)
-        XCTAssertEqual(plan.preview, DecodeLadder.previewScale, "the preview rung is what goes up first")
-        let previewWindow = oneToOne(decoded: preview.rung.image,
-                                     decodeScale: Double(DecodeLadder.previewScale),
-                                     viewport: Self.viewport)
-        var previewRuns: [Double] = []
+        XCTAssertNil(plan.preview, "571-A: no half-resolution leg")
+        XCTAssertEqual(plan.rungs, [DecodeLadder.fullScale])
+
+        // ① The first 1:1 frame: graph build + one window render, no ImageIO.
+        let window = oneToOne(decoded: full.image, decodeScale: 1, viewport: Self.viewport)
+        var firstRuns: [Double] = []
         for run in 0..<3 {
             let ms = try time {
-                // A fresh graph per run: entering 1:1 from *fit* has the 0.5 graph already, and this
-                // is the pessimistic case (a graph built for the rung, from cold).
-                let graph = try RenderGraph(input: RenderInput(image: preview.rung.image,
-                                                               identity: "ladder-preview-\(run)",
+                let graph = try RenderGraph(input: RenderInput(image: full.image,
+                                                               identity: "ladder-full-\(run)",
                                                                sourceURL: url))
                 let result = try graph.render(.neutral, options: RenderOptions(
-                    canvas: Self.viewport, scale: previewWindow.scale,
-                    outputWindow: previewWindow.window, wantsPixels: false))
+                    canvas: Self.viewport, scale: window.scale,
+                    outputWindow: window.window, wantsPixels: false))
                 if let tex = result.output { graph.recycle(output: tex) }
             }
-            previewRuns.append(ms)
+            firstRuns.append(ms)
         }
-        let previewP50 = percentile(previewRuns, 0.5)
-        print(String(format: "LADDER 1:1 first frame (0.5 rung magnified): %@ ms → p50 %.1f ms (budget 60)",
-                     previewRuns.map { String(format: "%.1f", $0) }.joined(separator: "/"), previewP50))
+        let firstP50 = percentile(firstRuns, 0.5)
+        print(String(format: "LADDER 1:1 first frame (full rung): %@ ms → p50 %.1f ms",
+                     firstRuns.map { String(format: "%.1f", $0) }.joined(separator: "/"), firstP50))
         // Millisecond budget: asserted **only** under `PHOTONS_BENCH=1`, the project's rule for every
-        // wall-clock ceiling. `swift test` builds Debug, where a render pass is several times slower
-        // than the Release build these numbers were measured in (measured: 8.7 ms in Debug against
-        // 2–3 ms in Release on the same machine), so an ungated ceiling here fails on load or on the
-        // build configuration rather than on a regression. The number is printed on every run.
+        // wall-clock ceiling. The number is printed on every run.
         if benchmarks {
-            XCTAssertLessThan(previewP50, 60, "the preview frame must fit the 60 ms budget")
+            XCTAssertLessThan(firstP50, 60, "the first 1:1 frame must fit the 60 ms budget")
         }
 
-        // ② The full-resolution arrival: what Q15 measured at 941 ms, plus the preview frame that
-        // was already on screen. Reported, not asserted against a machine-specific number.
-        var readyMs = 0.0
-        var fullRung: DecodeRung?
-        let arrival = try time {
-            let full = try ladder.rung(identity: identity, scale: DecodeLadder.fullScale) {
-                try develop(url, scale: DecodeLadder.fullScale)
-            }
-            fullRung = full.rung
-            readyMs = full.rung.milliseconds
-        }
-        // ③ Pan: 20 windows off the resident full rung, the steady state the ladder must not spoil.
-        let full = try XCTUnwrap(fullRung)
+        // ② Pan: 20 windows off the resident full rung, the steady state the ladder must not spoil.
         let graph = try RenderGraph(input: RenderInput(image: full.image,
                                                        identity: "ladder-full",
                                                        sourceURL: url))
         let base = oneToOne(decoded: full.image, decodeScale: 1, viewport: Self.viewport)
         var panTimes: [Double] = []
         for step in 0..<23 {
-            let window = ImageRect(x: base.window.x + step * 16, y: base.window.y + step * 9,
-                                   width: base.window.width, height: base.window.height)
+            let panWindow = ImageRect(x: base.window.x + step * 16, y: base.window.y + step * 9,
+                                      width: base.window.width, height: base.window.height)
             panTimes.append(try time {
                 let result = try graph.render(.neutral, options: RenderOptions(
                     canvas: Self.viewport, scale: base.scale,
-                    outputWindow: window, wantsPixels: false))
+                    outputWindow: panWindow, wantsPixels: false))
                 if let tex = result.output { graph.recycle(output: tex) }
             })
         }
         let panP50 = percentile(Array(panTimes.dropFirst(3)), 0.5)
-        print(String(format: "LADDER 1:1 full-resolution ready: %.0f ms total (decode %.0f + graph/render %.0f) vs Q15 941 ms",
-                     previewP50 + arrival, readyMs, arrival - readyMs))
+        print(String(format: "LADDER 1:1 full-resolution ready: %.0f ms decode", full.milliseconds))
         print(String(format: "LADDER 1:1 pan: p50 %.2f ms over 20 windows (budget 6, Q15 5.8)", panP50))
         if benchmarks {
             XCTAssertLessThan(panP50, 6.0, "panning a resident full rung must stay inside the 6 ms budget")
         }
-        // "One development, not a decode storm" is a **count**, not a clock. It used to be asserted as
-        // "ready in under 4000 ms", which is a wall clock: a machine that is running two other builds
-        // stretches the same two developments to 4.3 s and the test goes red for a reason that has
-        // nothing to do with the ladder. What the sentence actually means is here, and it cannot drift
-        // with the load: the cold open developed exactly two rungs, and every later visit is a hit.
+        // "One development, not a decode storm" is a **count**, not a clock. 571-A: the cold open
+        // developed exactly one rung, and every later visit is a hit.
         for _ in 0..<2 {
             let plan = ladder.plan(identity: identity, target: DecodeLadder.fullScale)
             for scale in plan.rungs {
@@ -295,9 +274,9 @@ final class DecodeLadderTests: XCTestCase {
             }
         }
         XCTAssertGreaterThanOrEqual(ladder.hits, 2, "the second visit to 1:1 must be a hit")
-        XCTAssertEqual(RAWDecoder.decodeCounts().values.reduce(0, +), 2,
-                       "one development per rung (0.5, then 1.0) and nothing else: \(RAWDecoder.decodeCounts())")
-        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.previewScale: 1, DecodeLadder.fullScale: 1])
+        XCTAssertEqual(RAWDecoder.decodeCounts().values.reduce(0, +), 1,
+                       "one development of the full rung and nothing else: \(RAWDecoder.decodeCounts())")
+        XCTAssertEqual(RAWDecoder.decodeCounts(), [DecodeLadder.fullScale: 1])
     }
 
     // MARK: - 4. the row flip the whole buffer passes through

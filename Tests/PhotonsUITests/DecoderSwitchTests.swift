@@ -69,9 +69,8 @@ final class DecoderSwitchTests: XCTestCase {
     /// Between `decoderVersion("9.dng")` and the assertions there is no slider, no camera move, no
     /// zoom, no hand-made frame: only the run loop. What the numbers have to say:
     ///
-    ///   · `decodeCounts[0.5]` **+1** and `[1.0]` **+1** — one fresh development of each resident rung,
-    ///     which is what a version switch costs (the ladder develops the preview rung first so the
-    ///     canvas is never dark for a 60 MP decode, then the full one). Total +2, presented rung +1;
+    ///   · `decodeCounts[1.0]` **+1** — one fresh development of the only canvas rung (571-A removed
+    ///     the 0.5 preview leg, so a version switch costs one decode, not two);
     ///   · `session.capabilities` — Apple's **read-back** — moves to `9.dng`, `requestedVersion` too,
     ///     and the four rows are inert exactly where v9 does not honour them;
     ///   · the presented frame's `displayHash` differs from the v8 frame's (two hashes printed);
@@ -104,9 +103,9 @@ final class DecoderSwitchTests: XCTestCase {
               + " · scale \(String(describing: scale8)) → \(String(describing: loupe.lastPresentedScale))"
               + " · caps \(v9.effectiveVersion) · \(perRung)")
 
-        // ① one fresh development of each resident rung — the *presented* one included
-        XCTAssertEqual(counts9[DecodeLadder.previewScale], (counts8[DecodeLadder.previewScale] ?? 0) + 1,
-                       "the preview rung the canvas shows was not developed again: \(perRung)")
+        // ① one fresh development of the canvas rung — the *presented* one
+        XCTAssertEqual(counts9[DecodeLadder.previewScale], counts8[DecodeLadder.previewScale] ?? 0,
+                       "571-A: the canvas must not develop a preview rung: \(perRung)")
         XCTAssertEqual(counts9[DecodeLadder.fullScale], (counts8[DecodeLadder.fullScale] ?? 0) + 1,
                        "the full rung was not developed again: \(perRung)")
         XCTAssertGreaterThan(counts9.values.reduce(0, +), counts8.values.reduce(0, +),
@@ -304,7 +303,8 @@ final class DecoderSwitchTests: XCTestCase {
         print("SWITCH back to 8 · counts \(countsV9) → \(countsV8)"
               + " · effective \(atV8.effectiveVersion) · rows \(rowsV8.sorted { $0.key < $1.key })")
 
-        XCTAssertEqual(countsV8[DecodeLadder.previewScale], (countsV9[DecodeLadder.previewScale] ?? 0) + 1)
+        XCTAssertEqual(countsV8[DecodeLadder.previewScale], countsV9[DecodeLadder.previewScale] ?? 0,
+                       "571-A: no preview rung on the canvas")
         XCTAssertEqual(countsV8[DecodeLadder.fullScale], (countsV9[DecodeLadder.fullScale] ?? 0) + 1)
         XCTAssertEqual(atV8.effectiveVersion, "8")
         XCTAssertEqual(rowsV8, [DetailAxis.luminanceNR.title: true, DetailAxis.colorNR.title: true,
