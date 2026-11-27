@@ -2789,6 +2789,30 @@ public final class RenderGraph {
                 continue
             }
 
+            // 566-A — **S1.5**, the scene-linear GMW denoiser that replaced S3.9's NR branch. It sits
+            // in the same linear slot as the 365 prototype (after S1.6, before S1.7/the curve), runs
+            // for every document whose two denoise strengths are not both 0, and at the explicit
+            // 0/0 pair the pass does not exist at all (so `--nr 0 --cnr 0` is the pre-566 frame byte
+            // for byte). Its material rides the curve link (`EditModel.material(.curve)`).
+            let gmwActive = edit.effects.nonBayerLuminanceNR != 0
+                || edit.effects.nonBayerColorNR != 0
+            if stage == .curve, gmwActive {
+                let out = try pool.obtain(plan.canvas)
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
+                try PostDenoise.encode(cb: cb, source: current, destination: out,
+                                       lumaNR: edit.effects.nonBayerLuminanceNR,
+                                       chromaNR: edit.effects.nonBayerColorNR,
+                                       scratch: { label, width, height, format in
+                                           try scratch(label, width: width, height: height,
+                                                       format: format)
+                                       })
+                if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                if !recyclesEachStage { transient.append(out) }
+                current = out
+                currentIsTransient = true
+            }
+
             // 365 — the hidden **linear-domain denoise prototype**, at its specified place: after
             // S1.6 and before S1.7 (the curve). It is intentionally not a `RenderStage`: the
             // ticket's file whitelist does not include `Stage.swift`, and at amount 0 it does not
@@ -4853,8 +4877,6 @@ public final class RenderGraph {
 
         let textureAmount = Float(edit.effects.texture) / 100
         let clarityAmount = Float(edit.effects.clarity) / 100
-        let lumaNR = Float(edit.effects.nonBayerLuminanceNR) / 100
-        let chromaNR = Float(edit.effects.nonBayerColorNR) / 100
 
         // 181 — the masks that carry a local 纹理/锐化, compacted, with their atlas slices. An empty
         // list is the identity: no loop, no atlas read, the pre-181 uniform **and** frame.
@@ -4877,7 +4899,9 @@ public final class RenderGraph {
             // 320 ceiling, not `options.display.headroom`: the ceiling is already key material (it
             // reaches this stage through the tone-map link, 323), while the panel's headroom is a
             // display property that would let a cached grid cross headrooms.
-            f: SIMD4(lumaNR, chromaNR, Float(ceiling), 0),
+            // 566-A — the two denoise slots are retired: the scene-linear S1.5 GMW pass owns them
+            // now. `.z` is still the picture's ceiling, read by the apply pass.
+            f: SIMD4(0, 0, Float(ceiling), 0),
             // The content rect, not the canvas: a mask's detail stops at the picture's edge exactly
             // where S2/S3/S3.5 stop (派单 008 C's rule).
             g: SIMD4(hasLocalDetail ? Int32(localDetail.count) : 0,
@@ -4894,71 +4918,11 @@ public final class RenderGraph {
         let needsDetailWindow = localDetail.contains { $0.a.y > 0 }
         let bandsActive = textureAmount != 0 || clarityAmount != 0 || needsTextureBand
             || needsDetailWindow
-        // 171: the two denoises share this stage but not the guided filter — they are a joint
-        // bilateral grid of their own. The grid is built from the **stage input**, before the
-        // texture/clarity residual is added, so σ is a fact about the frame, not about the drag.
-        let denoiseActive = lumaNR != 0 || chromaNR != 0
+        // 566-A — the joint-bilateral NR branch used to live here (its three `s3_9_denoise`
+        // entries: σ, splat, blur). It is retired; the scene-linear S1.5 GMW pass replaces it, and
+        // `Kernels/s3_9_denoise.metal` is kept only because the file is untouched by this ticket.
+        // The texture/clarity bands below are unchanged.
         var current = src
-
-        let cell = RenderGraph.denoiseCell
-        let zBins = RenderGraph.denoiseZBins
-        let gW = max(1, (w + cell - 1) / cell)
-        let gH = max(1, (h + cell - 1) / cell)
-        var nrGrid: MTLTexture?
-        var nrSigma: MTLTexture?
-        if denoiseActive {
-            var dp = DenoiseParamsU(
-                canvas: SIMD4(Int32(w), Int32(h), Int32(cell), Int32(zBins)),
-                grid: SIMD4(Int32(gW), Int32(gH), 0, 0),
-                // 553 — `n.z` is the headroom the splat's z/luma index is normalised by, the same
-                // picture ceiling the apply pass reads from `DetailFXParams.d.z`.
-                n: SIMD4(lumaNR, chromaNR, Float(ceiling), 0))
-
-            nrSigma = try scratch("detailfx-nr-sigma", width: 1, height: 1, format: .rgba32Float)
-            let gridA = try scratch3D("detailfx-nr-grid-a", width: gW, height: gH, depth: zBins,
-                                      format: .rgba16Float)
-            let gridB = try scratch3D("detailfx-nr-grid-b", width: gW, height: gH, depth: zBins,
-                                      format: .rgba16Float)
-            nrGrid = gridA
-
-            // P0 — one threadgroup estimates the frame's noise σ.
-            let sigma = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_sigma")
-            guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e0.setComputePipelineState(sigma)
-            e0.setTexture(src, index: 0)
-            e0.setTexture(nrSigma!, index: 1)
-            e0.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e0.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-            e0.endEncoding()
-
-            // P1 — splat full resolution into the grid (z five-tap happens in the same threadgroup).
-            let splat = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_splat")
-            guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e1.setComputePipelineState(splat)
-            e1.setTexture(src, index: 0)
-            e1.setTexture(nrSigma!, index: 1)
-            e1.setTexture(gridA, index: 2)
-            e1.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e1.dispatchThreadgroups(MTLSize(width: gW, height: gH, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-            e1.endEncoding()
-
-            // P2 — the x and y five-taps in one tiled pass (16 × 16 outputs per threadgroup, one z
-            // slice each). Two separate dispatches moved the whole grid twice; this moves it once.
-            let blur = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_blur_xy")
-            let blurGroups = MTLSize(width: (gW + 15) / 16, height: (gH + 15) / 16, depth: zBins)
-            let blurThreads = MTLSize(width: 16, height: 16, depth: 1)
-            guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e2.setComputePipelineState(blur)
-            e2.setTexture(gridA, index: 0)
-            e2.setTexture(gridB, index: 1)
-            e2.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e2.dispatchThreadgroups(blurGroups, threadsPerThreadgroup: blurThreads)
-            e2.endEncoding()
-            // The blurred grid is the one the slice reads.
-            nrGrid = gridB
-        }
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
         // apply. One statistics pack (the 4×4 block means), one separable box per band (the two
@@ -4967,18 +4931,15 @@ public final class RenderGraph {
         // 4.10 Mpx, that second read was ~1.2 ms of the frame.
         // 181 — a **local** 锐化 has no band chain of its own (it runs on a 1 px 3×3 window inside the
         // apply), so the apply pass must be encoded for it even when every global amount is 0.
-        if bandsActive || denoiseActive || hasLocalDetail {
+        if bandsActive || hasLocalDetail {
             params.a.x = textureAmount
             // Full deflection is 0.8 × the residual, not 1.0: at 1.0 the additive boost shifts the
             // frame's mean by ~1.1 % (measured on the fixture's dark/bright step), which is a
             // brightness change on a control that promises none. 0.8 keeps the +100 high-pass gain at
             // ~+67 % (the acceptance asks for +30 %) and the mean inside 1 %.
             params.a.y = clarityAmount * 0.8
-            params.f.x = lumaNR
-            params.f.y = chromaNR
             try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
                               textureRadius: textureRadius, clarityRadius: clarityRadius,
-                              nrGrid: nrGrid, nrSigma: nrSigma,
                               needsTextureBand: needsTextureBand,
                               needsDetailWindow: needsDetailWindow,
                               atlas: hasLocalDetail ? atlasCache?.texture : nil,
@@ -5012,7 +4973,6 @@ public final class RenderGraph {
     private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
                                params: inout DetailFXParamsU, qW: Int, qH: Int,
                                textureRadius: Int32, clarityRadius: Int32,
-                               nrGrid: MTLTexture?, nrSigma: MTLTexture?,
                                needsTextureBand: Bool, needsDetailWindow: Bool,
                                atlas: MTLTexture?, detail: [MaskDetailU],
                                detailBuffer: MTLBuffer?) throws {
@@ -5071,11 +5031,8 @@ public final class RenderGraph {
 
         let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_apply")
         // A chroma-only drag has no coefficient map at all; the source is a valid sampleable texture
-        // and every amount that would read it is 0, so it is the honest inert binding. The denoise
-        // bindings always get a legal 1×1 texture when the grid was not built.
+        // and every amount that would read it is 0, so it is the honest inert binding.
         let fallback = coeffTex ?? coeffCla ?? source
-        let grid = try nrGrid ?? denoiseDummy3D()
-        let sigma = try nrSigma ?? denoiseDummy2D()
         guard let enc = cb.makeComputeCommandEncoder() else {
             throw RenderError.commandBufferFailed
         }
@@ -5084,8 +5041,10 @@ public final class RenderGraph {
         enc.setTexture(coeffTex ?? fallback, index: 1)
         enc.setTexture(coeffCla ?? fallback, index: 2)
         enc.setTexture(destination, index: 3)
-        enc.setTexture(grid, index: 5)
-        enc.setTexture(sigma, index: 6)
+        // 566-A — the NR grid/σ bindings (indices 5/6) are gone; the kernel's `p.f.xy` weights are
+        // always 0 now, so the dead arguments are never dereferenced.
+        enc.setTexture(try denoiseDummy3D(), index: 5)
+        enc.setTexture(try denoiseDummy2D(), index: 6)
         // 181 — the atlas. When no mask carries a local value the kernel's loop does not exist, but
         // Metal still wants a legal binding: a 1×1 array stands in for the atlas the way
         // `denoiseDummy2D` stands in for σ.

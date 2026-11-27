@@ -31,7 +31,7 @@ let valueFlags: Set<String> = [
     "--count", "--dupes", "--size", "--since", "--camera", "--rating", "--limit",
     "--ids", "--tier", "--strategy", "--roi", "--bins", "--headroom", "--wb",
     "--repeat", "--album", "--tone-map", "--tone-map-headroom", "--model", "--units",
-    "--ceiling",
+    "--ceiling", "--nr", "--cnr",
 ]
 
 func parseArgs(_ argv: [String]) -> Args {
@@ -445,6 +445,23 @@ func cmdRender(_ a: Args) throws {
     if a.value("--wb") == nil, edits.count > 1,
        edits.contains(where: { $0.light.whiteBalance != wb }) {
         err("warning: one decode serves every --edit; their own white balances render independently")
+    }
+    // 566-A — the acceptance overrides. `--nr 0 --cnr 0` must reproduce the pre-566 S3.9-off frame
+    // byte for byte, so both fields are patched **after** the document is loaded (an absent key now
+    // reads as the resting 50) and before the graph sees it.
+    func nrValue(_ flag: String) -> Double? {
+        guard let raw = a.value(flag) else { return nil }
+        guard let v = Double(raw), v >= 0, v <= 100 else {
+            die("bad \(flag) '\(raw)' (want 0…100)")
+        }
+        return v
+    }
+    let nr = nrValue("--nr"), cnr = nrValue("--cnr")
+    if nr != nil || cnr != nil {
+        for i in edits.indices {
+            if let nr { edits[i].effects.nonBayerLuminanceNR = nr }
+            if let cnr { edits[i].effects.nonBayerColorNR = cnr }
+        }
     }
     let (decoded, identity) = try decodeForRender(a, url: url, decodeScale: decodeScale,
                                                   fileHash: fileHash, version: version,
