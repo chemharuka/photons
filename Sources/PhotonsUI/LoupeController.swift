@@ -5480,9 +5480,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
             return nil
         }
         let source = document ?? session.edit
+        // 2026-11-27（用户口径：「自动色彩的测量应当设置饱和度/自然饱和度为 0，然后再测量。
+        // 现在如果饱和度手动 +20，自动色彩就不会修改了」）：测量必须在**两根归零**的文档上做。
+        // 否则测出来的 p50/p95 已经含用户手改的那 +20，plan 说「够饱和」，下面的 `max(source…)`
+        // 又把它钉在 20 以上 ⇒ 自动色彩永远是个 no-op。归零只用于测量与内部迭代，写回的仍是
+        // **绝对**值（自动色彩是绝对求解，不是叠加）。
+        var measuring = source
+        measuring.color.saturation = 0
+        measuring.color.vibrance = 0
         let initialMetrics: AutoColor.Metrics
         do {
-            initialMetrics = AutoColor.metrics(from: try graph.measureLinearSample(source))
+            initialMetrics = AutoColor.metrics(from: try graph.measureLinearSample(measuring))
         } catch {
             print("AUTO COLOR · measurement failed: \(error)")
             return nil
@@ -5495,23 +5503,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // returns it. This loop still closes the GPU frame vs Double replay gap before the single
         // history write, so 连点两次 finds a true fixed point.
         var metrics = initialMetrics
-        var vibrance = source.color.vibrance
-        var saturation = source.color.saturation
+        // 测量与迭代都从 **0/0** 起步（见上面 `measuring` 的理由）；`source` 的手改值只在最后
+        // 用来判断「写回的值与文档相同就什么都不做」。
+        var vibrance = 0.0
+        var saturation = 0.0
         var plan = AutoColor.plan2D(metrics, currentVibrance: vibrance,
                                     currentSaturation: saturation,
-                                    floorVibrance: source.color.vibrance,
-                                    floorSaturation: source.color.saturation)
+                                    floorVibrance: 0,
+                                    floorSaturation: 0)
         var finalMetrics = metrics
         for _ in 0 ..< 3 {
-            // The floor is the **original** document, not the staged value: the loop may correct an
-            // overshoot downward, but never below what the user already had.
-            let nextV = max(source.color.vibrance, plan.vibrance)
-            let nextS = max(source.color.saturation, plan.saturation)
+            let nextV = plan.vibrance
+            let nextS = plan.saturation
             guard abs(nextV - vibrance) > 1e-9
                     || abs(nextS - saturation) > 1e-9 else { break }
             vibrance = nextV
             saturation = nextS
-            var staged = source
+            var staged = measuring
             staged.color.vibrance = vibrance
             staged.color.saturation = saturation
             guard let sample = try? graph.measureLinearSample(staged) else { break }
@@ -5519,8 +5527,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
             finalMetrics = metrics
             plan = AutoColor.plan2D(metrics, currentVibrance: vibrance,
                                     currentSaturation: saturation,
-                                    floorVibrance: source.color.vibrance,
-                                    floorSaturation: source.color.saturation)
+                                    floorVibrance: 0,
+                                    floorSaturation: 0)
         }
         // Report the plan that matches the values actually written, with the last guard diagnostics.
         var reported = plan
@@ -5536,16 +5544,17 @@ public final class LoupeController: NSViewController, HeadroomSource {
                      saturation, source.color.saturation, reported.unguardedSaturation,
                      reported.newClippedPixels, reported.skinChromaChange * 100,
                      finalMetrics.chromaP50, finalMetrics.chromaP95))
-        // Only raise: never lower a picture the owner already saturated, and never write a "plan"
-        // below the document. When both are already at their target, say why instead of doing nothing.
-        guard vibrance > source.color.vibrance + 1e-9
-                || saturation > source.color.saturation + 1e-9 else {
+        // 2026-11-27: **绝对**写回。plan 是从归零测量解出来的，所以用户手推到 +20 而 plan 说 +8 时，
+        // 结果是 8（自动色彩覆盖手改值），不再是旧口径的「只升不降」。只有「与文档已相同」才是 no-op ——
+        // 那也是连点两次的第二下成为真正不动点的原因。
+        guard abs(vibrance - source.color.vibrance) > 1e-9
+                || abs(saturation - source.color.saturation) > 1e-9 else {
             let reason: AutoColorNoOpReason = initialMetrics.coloredFraction < AutoColor.minimumColoredFraction
                 ? .tooGrey : .alreadySaturated
             lastAutoColorNoOpReasonForTesting = reason
             print(reason == .tooGrey
                   ? "AUTO COLOR · 画面几乎没有颜色，未写入"
-                  : "AUTO COLOR · 这张已经足够饱和，未写入")
+                  : "AUTO COLOR · 自动色彩的结果与当前数值相同，未写入")
             return nil
         }
         lastAutoColorNoOpReasonForTesting = nil
