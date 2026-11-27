@@ -1,7 +1,7 @@
 import Foundation
 import Metal
 
-/// 566-A — the scene-linear GMW (guided multi-scale Wiener) denoiser.
+/// 566-A — the scene-linear gated multi-scale Wiener (GMW) denoiser.
 ///
 /// This is the replacement for S3.9's joint-bilateral luminance/chroma denoise. It runs on the
 /// scene-linear buffer (working primaries, before the curve and the tone map) because the noise is
@@ -22,11 +22,14 @@ import Metal
 ///      40 %/85 % quantiles of `gn`. The quantile search is a second GPU histogram — the map is
 ///      **scale-free**, so `g` does not depend on the σ estimate at all. This is the only quarter-
 ///      resolution statistics pass; it decides the gate and never reconstructs a pixel;
-///   5. chroma: the same multi-scale Wiener for the fine band, plus one large-radius guided filter
-///      (`r = 24` full-resolution pixels, guide `y`, `ε = (3σc)²`) for the 16–64 px blotches,
-///      blended in by `g·(1 − structure)`. The guided filter's boxes are separable horizontal and
-///      vertical passes **at full resolution**, and its two 32-bit moment/coefficient planes are
-///      reused as each other's scratch so the filter holds four full-resolution planes, not ten;
+///   5. chroma: the **same** multi-scale Wiener, and only the fine bands (1–4 px). The coarse chroma
+///      pass that used to be a guided filter guided by **luma** is gone: it forced every coloured
+///      object to follow the luminance structure, which is exactly the "colour disappeared" defect
+///      (measured: 27–50 % of the chroma at the resting 50/50, 81 % of pixels down more than 20 %).
+///      No coarse stage means the 16–64 px chroma base is passed through unchanged — low-frequency
+///      colour is preserved by construction, while the fine Wiener removes the grain. The chroma
+///      threshold is `k_c = 1 + colorNR/100 · 1` (default 50 ⇒ 1.5σc), not the old 3.5σc that ate
+///      real colour differences;
 ///   6. recombine `G = y − (K + M)/3`, `R = G + K`, `B = G + M`, clamp negatives.
 ///
 /// Robustness: when the luma σ is 0 or below `1e-6` (an extremely dark frame, e.g. L1030479) the
@@ -35,7 +38,7 @@ import Metal
 ///
 /// The parameters are the two existing `effects` fields, with unchanged 0…100 travel:
 ///   · luma   → `k = 1 + lumaNR/100 · 2`  (default 50 ⇒ k = 2);
-///   · chroma → `k_c = 1 + colorNR/100 · 5` (default 50 ⇒ k_c = 3.5).
+///   · chroma → `k_c = 1 + colorNR/100 · 1` (default 50 ⇒ k_c = 1.5).
 /// Both at 0 means the stage does not exist for the document (the caller never encodes it), so
 /// `--nr 0 --cnr 0` is the pre-566 frame byte for byte.
 enum PostDenoise {
@@ -43,7 +46,7 @@ enum PostDenoise {
     /// 566-A — the operator generation. Any change that moves a pixel of the S1.5 result must bump
     /// this, because the graph's whole-frame result cache is keyed by it: a cached texture from a
     /// previous arithmetic must never answer a request written by this one.
-    static let tuningVersion = 1
+    static let tuningVersion = 2
 
     /// ── parameters, mirrored byte for byte by the shader below ─────────────────────────────────
     private struct Params {
@@ -124,7 +127,7 @@ enum PostDenoise {
         let samples = max(1, nx * ny)
 
         let kY = Float(1 + min(max(lumaNR, 0), 100) / 100 * 2)
-        let kC = Float(1 + min(max(chromaNR, 0), 100) / 100 * 5)
+        let kC = Float(1 + min(max(chromaNR, 0), 100) / 100 * 1)
 
         // ── buffers ────────────────────────────────────────────────────────────────────────────
         guard let hist = device.makeBuffer(length: histBins * 3 * MemoryLayout<UInt32>.stride,
@@ -152,19 +155,6 @@ enum PostDenoise {
             e.setComputePipelineState(pso)
             configure(e)
             dispatch(e, pso, width: width, height: height)
-            e.endEncoding()
-        }
-
-        // The box kernels tile 128×8 (horizontal) or 8×128 (vertical): the r = 24 halo is then
-        // 176 values for 128 outputs instead of 64 for 16, and one threadgroup owns 1024 outputs.
-        func runBox(_ name: String, threads: (Int, Int), groups: (Int, Int),
-                    _ configure: (MTLComputeCommandEncoder) -> Void) throws {
-            let pso = try pipeline(name, device: device)
-            guard let e = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e.setComputePipelineState(pso)
-            configure(e)
-            e.dispatchThreadgroups(MTLSize(width: max(1, groups.0), height: max(1, groups.1), depth: 1),
-                                   threadsPerThreadgroup: MTLSize(width: threads.0, height: threads.1, depth: 1))
             e.endEncoding()
         }
 
@@ -282,91 +272,16 @@ enum PostDenoise {
         }
         // Coarse is now `next`; the final accumulator is `accC`.
 
-        // ── 5 · coarse chroma: full-resolution guided filter, r = 24 px ───────────────────────
-        // Every plane below is full resolution. The two 32-bit moment textures and the two 32-bit
-        // coefficient textures are the **same four** allocations, used as each other's scratch:
-        //
-        //   A/A2 = (I, I²), B/B2 = (K, M, I·K, I·M)
-        //   box(A): A→A2→A · box(B): B→B2→B · ab: A,B → coeffK=A2, coeffM=B2
-        //   box(coeffK): A2→A→A2 · box(coeffM): B2→B→B2 · value: A2,B2 → kbig,mbig
-        //
-        // 16-bit moments are not an option: on a flat 0.42 field `E[y²] − E[y]²` is a few 1e-5,
-        // below a half ulp (2.4e-4), so the guided regression would divide quantisation noise.
-        let statsA = try scratch("gmw-guided-a", w, h, .rg32Float)
-        let statsA2 = try scratch("gmw-guided-a2", w, h, .rg32Float)
-        let statsB = try scratch("gmw-guided-b", w, h, .rgba32Float)
-        let statsB2 = try scratch("gmw-guided-b2", w, h, .rgba32Float)
-
-        try run("gmw_guided_stats", { e in
-            e.setTexture(planes, index: 0)
-            e.setTexture(accC, index: 1)
-            e.setTexture(next, index: 2)
-            e.setTexture(statsA, index: 3)
-            e.setTexture(statsB, index: 4)
-            e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-        }, width: w, height: h)
-
-        let radius: Int32 = 24
-        p.dim.z = radius
-        let hGroups = ((w + 15) / 16, (h + 15) / 16)
-        let vGroups = hGroups
-        func box2(_ src: MTLTexture, into out: MTLTexture, via tmp: MTLTexture) throws {
-            try runBox("gmw_box2_h", threads: (16, 16), groups: hGroups, { e in
-                e.setTexture(src, index: 0)
-                e.setTexture(tmp, index: 1)
-                e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-            })
-            try runBox("gmw_box2_v", threads: (16, 16), groups: vGroups, { e in
-                e.setTexture(tmp, index: 0)
-                e.setTexture(out, index: 1)
-                e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-            })
-        }
-        func box4(_ src: MTLTexture, into out: MTLTexture, via tmp: MTLTexture) throws {
-            try runBox("gmw_box4_h", threads: (16, 16), groups: hGroups, { e in
-                e.setTexture(src, index: 0)
-                e.setTexture(tmp, index: 1)
-                e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-            })
-            try runBox("gmw_box4_v", threads: (16, 16), groups: vGroups, { e in
-                e.setTexture(tmp, index: 0)
-                e.setTexture(out, index: 1)
-                e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-            })
-        }
-        try box2(statsA, into: statsA, via: statsA2)     // A → A2 → A
-        try box4(statsB, into: statsB, via: statsB2)     // B → B2 → B
-
-        // `a·y + b` for both chroma planes is one rgba32 coefficient texture: (aK, bK, aM, bM).
-        // It lands in the moment-B scratch, whose H pass is already consumed, so the box that
-        // smooths the coefficients reuses B as its intermediate and costs one filter, not two.
-        try run("gmw_guided_ab_full", { e in
-            e.setTexture(statsA, index: 0)
-            e.setTexture(statsB, index: 1)
-            e.setTexture(statsB2, index: 2)
-            e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-            e.setBuffer(stats, offset: 0, index: 1)
-        }, width: w, height: h)
-        try box4(statsB2, into: statsB2, via: statsB)    // coeff → B → B2
-
-        let kbig = try scratch("gmw-kbig", w, h, .r16Float)
-        let mbig = try scratch("gmw-mbig", w, h, .r16Float)
-        try run("gmw_guided_value_full", { e in
-            e.setTexture(statsB2, index: 0)
-            e.setTexture(planes, index: 1)
-            e.setTexture(kbig, index: 2)
-            e.setTexture(mbig, index: 3)
-            e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
-        }, width: w, height: h)
-
-        // ── 6 · recombine, blend the coarse chroma, clamp ─────────────────────────────────────
+        // ── 5 · recombine, and clamp ─────────────────────────────────────────────────────────
+        // There is no coarse chroma stage. The guided filter used to blend a large-radius (r = 24)
+        // regression guided by **luma** into `g·(1 − structure)`, which made every coloured object
+        // follow the luminance structure and cut the resting document's chroma by 27–50 %. The
+        // multi-scale Wiener above already removes the 1–4 px chroma grain; what it leaves is the
+        // low-frequency colour, which is the picture and must not be touched.
         try run("gmw_finish", { e in
             e.setTexture(accC, index: 0)
             e.setTexture(next, index: 1)
-            e.setTexture(gate, index: 2)
             e.setTexture(source, index: 3)
-            e.setTexture(kbig, index: 4)
-            e.setTexture(mbig, index: 5)
             e.setTexture(destination, index: 9)
             e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
             e.setBuffer(stats, offset: 0, index: 1)
@@ -685,10 +600,24 @@ enum PostDenoise {
         float dy = 0.5f * (smem[id] - smem[iu]);
         float structure = clamp(sqrt(dx * dx + dy * dy) / max(6.0f * st->s.x, 1e-6f),
                                 0.0f, 1.0f);
+        // Chroma is protected by **its own** edges, not by luma's: a coloured object can sit on a
+        // strong luminance edge (gold, paint, coloured light) while its chroma is locally flat, and
+        // letting the luma structure gate chroma was half of the "colour disappeared" defect. The
+        // luma guide is at most a quarter of the weight (566-A §8.1).
+        float dkx = 0.5f * (smem[ir + 1] - smem[il + 1]);
+        float dky = 0.5f * (smem[id + 1] - smem[iu + 1]);
+        float dmx = 0.5f * (smem[ir + 2] - smem[il + 2]);
+        float dmy = 0.5f * (smem[id + 2] - smem[iu + 2]);
+        float chromaSigma = max(0.5f * (st->s.y + st->s.z), 1e-6f);
+        float structureC = clamp(sqrt(dkx * dkx + dky * dky + dmx * dmx + dmy * dmy)
+                                 / (6.0f * chromaSigma), 0.0f, 1.0f);
         // `protectL = 1` is "this is noise, shrink it"; `0` is "this is structure, keep it". The
         // full-resolution structure term therefore *reduces* the gate, it does not replace it.
         float protectL = clamp(gv.x, 0.0f, 1.0f) * (1.0f - structure);
-        float protectC = protectL;
+        // Chroma does **not** use luma's flatness gate. A wall behind a striped shadow is flat in
+        // chroma even when it is busy in luma, and gating it there was the other half of the colour
+        // defect: the chroma grain stayed. Its own edge term is the guard instead.
+        float protectC = 1.0f - max(structureC, 0.25f * structure);
         float scale = exp2(float(p.cfg.w) * 0.5f);
         float ty = p.cfg.x * st->s.x * scale;
         float tk = p.cfg.y * st->s.y * scale;
@@ -704,198 +633,10 @@ enum PostDenoise {
         accOut.write(prev + contrib, uint2(gx, gy));
     }
 
-    // ── 5 · full-resolution coarse chroma (guided filter, r = 24 px) ────────────────────────
-    kernel void gmw_guided_stats(texture2d<float, access::read> planes [[texture(0)]],
-                                 texture2d<float, access::read> acc [[texture(1)]],
-                                 texture2d<float, access::read> coarse [[texture(2)]],
-                                 texture2d<float, access::write> aOut [[texture(3)]],
-                                 texture2d<float, access::write> bOut [[texture(4)]],
-                                 constant GMWParams &p [[buffer(0)]],
-                                 uint2 gid [[thread_position_in_grid]]) {
-        int w = p.size.x, h = p.size.y;
-        if (int(gid.x) >= w || int(gid.y) >= h) return;
-        float i = planes.read(gid).x;
-        float4 a = acc.read(gid);
-        float4 c = coarse.read(gid);
-        float k = a.y + c.y;
-        float m = a.z + c.z;
-        aOut.write(float4(i, i * i, 0.0f, 0.0f), gid);
-        bOut.write(float4(k, m, i * k, i * m), gid);
-    }
-
-    // The box is separable and each direction is **one** pass. A 16×16 threadgroup loads a
-    // 64-value-wide slice into threadgroup memory, turns it into an inclusive prefix sum (one
-    // thread per row, 64 adds), and every output is then one subtraction — not 49 texture reads.
-    // This is what keeps r = 24 at full resolution affordable.
-    #define GMW_BOX_R 24
-    #define GMW_BOX_T 16
-    #define GMW_BOX_W (GMW_BOX_T + 2 * GMW_BOX_R)
-
-    kernel void gmw_box2_h(texture2d<float, access::read> src [[texture(0)]],
-                           texture2d<float, access::write> dst [[texture(1)]],
-                           constant GMWParams &p [[buffer(0)]],
-                           uint2 tid [[thread_position_in_threadgroup]],
-                           uint2 grp [[threadgroup_position_in_grid]]) {
-        threadgroup float2 sm[GMW_BOX_T * GMW_BOX_W];
-        int w = p.size.x, h = p.size.y;
-        int x0 = int(grp.x) * GMW_BOX_T - GMW_BOX_R;
-        int y0 = int(grp.y) * GMW_BOX_T;
-        for (int i = int(tid.y) * GMW_BOX_T + int(tid.x);
-             i < GMW_BOX_T * GMW_BOX_W; i += GMW_BOX_T * GMW_BOX_T) {
-            int row = i / GMW_BOX_W, col = i - row * GMW_BOX_W;
-            sm[i] = src.read(uint2(clamp(x0 + col, 0, w - 1),
-                                   clamp(y0 + row, 0, h - 1))).xy;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid.x == 0u && int(tid.y) < GMW_BOX_T) {
-            int base = int(tid.y) * GMW_BOX_W;
-            for (int c = 1; c < GMW_BOX_W; ++c) sm[base + c] += sm[base + c - 1];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        int gx = int(grp.x) * GMW_BOX_T + int(tid.x);
-        int gy = y0 + int(tid.y);
-        if (gx >= w || gy >= h) return;
-        int idx = int(tid.x) + GMW_BOX_R;
-        int base = int(tid.y) * GMW_BOX_W;
-        float2 hi = sm[base + idx + GMW_BOX_R];
-        float2 lo = (tid.x > 0u) ? sm[base + idx - 1] : float2(0.0f);
-        dst.write(float4((hi - lo) / float(2 * GMW_BOX_R + 1), 0.0f, 0.0f), uint2(gx, gy));
-    }
-
-    kernel void gmw_box2_v(texture2d<float, access::read> src [[texture(0)]],
-                           texture2d<float, access::write> dst [[texture(1)]],
-                           constant GMWParams &p [[buffer(0)]],
-                           uint2 tid [[thread_position_in_threadgroup]],
-                           uint2 grp [[threadgroup_position_in_grid]]) {
-        threadgroup float2 sm[GMW_BOX_T * GMW_BOX_W];
-        int w = p.size.x, h = p.size.y;
-        int x0 = int(grp.x) * GMW_BOX_T;
-        int y0 = int(grp.y) * GMW_BOX_T - GMW_BOX_R;
-        for (int i = int(tid.y) * GMW_BOX_T + int(tid.x);
-             i < GMW_BOX_T * GMW_BOX_W; i += GMW_BOX_T * GMW_BOX_T) {
-            int row = i / GMW_BOX_T, col = i - row * GMW_BOX_T;
-            sm[i] = src.read(uint2(clamp(x0 + col, 0, w - 1),
-                                   clamp(y0 + row, 0, h - 1))).xy;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid.y == 0u && int(tid.x) < GMW_BOX_T) {
-            int col = int(tid.x);
-            for (int r = 1; r < GMW_BOX_W; ++r) sm[r * GMW_BOX_T + col] += sm[(r - 1) * GMW_BOX_T + col];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        int gx = x0 + int(tid.x);
-        int gy = int(grp.y) * GMW_BOX_T + int(tid.y);
-        if (gx >= w || gy >= h) return;
-        int idx = int(tid.y) + GMW_BOX_R;
-        float2 hi = sm[(idx + GMW_BOX_R) * GMW_BOX_T + int(tid.x)];
-        float2 lo = (tid.y > 0u) ? sm[(idx - 1) * GMW_BOX_T + int(tid.x)] : float2(0.0f);
-        dst.write(float4((hi - lo) / float(2 * GMW_BOX_R + 1), 0.0f, 0.0f), uint2(gx, gy));
-    }
-
-    kernel void gmw_box4_h(texture2d<float, access::read> src [[texture(0)]],
-                           texture2d<float, access::write> dst [[texture(1)]],
-                           constant GMWParams &p [[buffer(0)]],
-                           uint2 tid [[thread_position_in_threadgroup]],
-                           uint2 grp [[threadgroup_position_in_grid]]) {
-        threadgroup float4 sm[GMW_BOX_T * GMW_BOX_W];
-        int w = p.size.x, h = p.size.y;
-        int x0 = int(grp.x) * GMW_BOX_T - GMW_BOX_R;
-        int y0 = int(grp.y) * GMW_BOX_T;
-        for (int i = int(tid.y) * GMW_BOX_T + int(tid.x);
-             i < GMW_BOX_T * GMW_BOX_W; i += GMW_BOX_T * GMW_BOX_T) {
-            int row = i / GMW_BOX_W, col = i - row * GMW_BOX_W;
-            sm[i] = src.read(uint2(clamp(x0 + col, 0, w - 1),
-                                   clamp(y0 + row, 0, h - 1)));
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid.x == 0u && int(tid.y) < GMW_BOX_T) {
-            int base = int(tid.y) * GMW_BOX_W;
-            for (int c = 1; c < GMW_BOX_W; ++c) sm[base + c] += sm[base + c - 1];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        int gx = int(grp.x) * GMW_BOX_T + int(tid.x);
-        int gy = y0 + int(tid.y);
-        if (gx >= w || gy >= h) return;
-        int idx = int(tid.x) + GMW_BOX_R;
-        int base = int(tid.y) * GMW_BOX_W;
-        float4 hi = sm[base + idx + GMW_BOX_R];
-        float4 lo = (tid.x > 0u) ? sm[base + idx - 1] : float4(0.0f);
-        dst.write((hi - lo) / float(2 * GMW_BOX_R + 1), uint2(gx, gy));
-    }
-
-    kernel void gmw_box4_v(texture2d<float, access::read> src [[texture(0)]],
-                           texture2d<float, access::write> dst [[texture(1)]],
-                           constant GMWParams &p [[buffer(0)]],
-                           uint2 tid [[thread_position_in_threadgroup]],
-                           uint2 grp [[threadgroup_position_in_grid]]) {
-        threadgroup float4 sm[GMW_BOX_T * GMW_BOX_W];
-        int w = p.size.x, h = p.size.y;
-        int x0 = int(grp.x) * GMW_BOX_T;
-        int y0 = int(grp.y) * GMW_BOX_T - GMW_BOX_R;
-        for (int i = int(tid.y) * GMW_BOX_T + int(tid.x);
-             i < GMW_BOX_T * GMW_BOX_W; i += GMW_BOX_T * GMW_BOX_T) {
-            int row = i / GMW_BOX_T, col = i - row * GMW_BOX_T;
-            sm[i] = src.read(uint2(clamp(x0 + col, 0, w - 1),
-                                   clamp(y0 + row, 0, h - 1)));
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid.y == 0u && int(tid.x) < GMW_BOX_T) {
-            int col = int(tid.x);
-            for (int r = 1; r < GMW_BOX_W; ++r) sm[r * GMW_BOX_T + col] += sm[(r - 1) * GMW_BOX_T + col];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        int gx = x0 + int(tid.x);
-        int gy = int(grp.y) * GMW_BOX_T + int(tid.y);
-        if (gx >= w || gy >= h) return;
-        int idx = int(tid.y) + GMW_BOX_R;
-        float4 hi = sm[(idx + GMW_BOX_R) * GMW_BOX_T + int(tid.x)];
-        float4 lo = (tid.y > 0u) ? sm[(idx - 1) * GMW_BOX_T + int(tid.x)] : float4(0.0f);
-        dst.write((hi - lo) / float(2 * GMW_BOX_R + 1), uint2(gx, gy));
-    }
-
-    kernel void gmw_guided_ab_full(texture2d<float, access::read> meanA [[texture(0)]],
-                                   texture2d<float, access::read> meanB [[texture(1)]],
-                                   texture2d<float, access::write> coeff [[texture(2)]],
-                                   constant GMWParams &p [[buffer(0)]],
-                                   device const GMWStats *st [[buffer(1)]],
-                                   uint2 gid [[thread_position_in_grid]]) {
-        int w = p.size.x, h = p.size.y;
-        if (int(gid.x) >= w || int(gid.y) >= h) return;
-        float4 a = meanA.read(gid);
-        float4 b = meanB.read(gid);
-        float i = a.x, ii = a.y;
-        float k = b.x, m = b.y, ik = b.z, im = b.w;
-        float sc = 0.5f * (st->s.y + st->s.z);
-        // A synthetic neutral frame has σK = σM = 0; eps = 0 makes the guided regression
-        // ill-conditioned (and a grey card must stay grey). The floor is far below a real frame's
-        // (3σc)² — ~3.6e-5 for the measured 2e-3 chroma noise.
-        float eps = max((3.0f * sc) * (3.0f * sc), 1e-6f);
-        float ak = (ik - i * k) / max(ii - i * i + eps, 1e-20f);
-        float am = (im - i * m) / max(ii - i * i + eps, 1e-20f);
-        coeff.write(float4(ak, k - ak * i, am, m - am * i), gid);
-    }
-
-    kernel void gmw_guided_value_full(texture2d<float, access::read> coeff [[texture(0)]],
-                                      texture2d<float, access::read> planes [[texture(1)]],
-                                      texture2d<float, access::write> kbig [[texture(2)]],
-                                      texture2d<float, access::write> mbig [[texture(3)]],
-                                      constant GMWParams &p [[buffer(0)]],
-                                      uint2 gid [[thread_position_in_grid]]) {
-        int w = p.size.x, h = p.size.y;
-        if (int(gid.x) >= w || int(gid.y) >= h) return;
-        float y = planes.read(gid).x;
-        float4 c = coeff.read(gid);
-        kbig.write(c.x * y + c.y, gid);
-        mbig.write(c.z * y + c.w, gid);
-    }
-
-    // ── 6 · recombine and blend ──────────────────────────────────────────────────────────────
+    // ── 6 · recombine ────────────────────────────────────────────────────────────────────────
     kernel void gmw_finish(texture2d<float, access::read> acc [[texture(0)]],
                            texture2d<float, access::read> coarse [[texture(1)]],
-                           texture2d<float, access::sample> gate [[texture(2)]],
                            texture2d<float, access::read> src [[texture(3)]],
-                           texture2d<float, access::sample> kbig [[texture(4)]],
-                           texture2d<float, access::sample> mbig [[texture(5)]],
                            texture2d<float, access::write> out [[texture(9)]],
                            constant GMWParams &p [[buffer(0)]],
                            device const GMWStats *st [[buffer(1)]],
@@ -906,26 +647,15 @@ enum PostDenoise {
             out.write(src.read(gid), gid);
             return;
         }
-        constexpr sampler lin(filter::linear, address::clamp_to_edge);
         float4 a = acc.read(gid);
         float4 c = coarse.read(gid);
         float y2 = a.x + c.x;
-        float k2f = a.y + c.y;
-        float m2f = a.z + c.z;
+        float k2 = a.y + c.y;
+        float m2 = a.z + c.z;
 
-        float2 uv = float2((float(gid.x) + 0.5f) / float(w),
-                           (float(gid.y) + 0.5f) / float(h));
-        float4 gv = gate.sample(lin, uv);
-        // A neutral / noise-free chroma plane cannot support a large-window regression; there is
-        // nothing for the coarse pass to remove, so it is skipped rather than divided by rounding.
-        float chromaSigma = 0.5f * (st->s.y + st->s.z);
-        float weight = (chromaSigma > 1e-5f)
-            ? clamp(gv.x, 0.0f, 1.0f) * (1.0f - clamp(gv.y, 0.0f, 1.0f)) : 0.0f;
-        float kb = kbig.sample(lin, uv).x;
-        float mb = mbig.sample(lin, uv).x;
-        float k2 = mix(k2f, kb, weight);
-        float m2 = mix(m2f, mb, weight);
-
+        // Chroma is recombined from the *same* fine-band Wiener the luma uses and the untouched
+        // coarse remainder. There is deliberately no large-radius luma-guided blend here: that
+        // regression was what pulled real colour onto the luminance structure (566-A §8.1).
         float g = y2 - (k2 + m2) / 3.0f;
         float r = g + k2;
         float b = g + m2;

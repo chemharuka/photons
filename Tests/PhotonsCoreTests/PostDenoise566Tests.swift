@@ -7,13 +7,15 @@ import Metal
 /// These tests go through the shipped graph and Metal kernels. They pin the contract the ticket
 /// states, not a CPU re-implementation:
 ///
-///   1. the resting document is **50 / 50** (k = 2 / k_c = 3.5), and an absent key reads as 50 while
+///   1. the resting document is **50 / 50** (k = 2 / k_c = 1.5), and an absent key reads as 50 while
 ///      an explicit 0 stays 0 and is written back;
 ///   2. `0 / 0` is the pre-566 frame: no S1.5 pass, no `gmw=` key token, no S3.9 NR pass;
 ///   3. flat-region high-pass noise falls while a step edge does not widen;
-///   4. a neutral frame keeps its luma code (the guided chroma pass must not divide by a zero variance);
+///   4. a neutral frame keeps its luma code (the chroma stage must not divide by a zero variance);
 ///   5. an extremely dark (σ = 0) frame is a verbatim no-op — finite, not black;
-///   6. the two strengths ride the linear curve link, not S3.9's material.
+///   6. the two strengths ride the linear curve link, not S3.9's material;
+///   7. the corrected §9.2 split holds: low-frequency chroma (colour) survives, high-frequency
+///      chroma (noise) falls, and a window's first frame is already the whole-frame crop.
 final class PostDenoise566Tests: XCTestCase {
 
     // MARK: - plumbing
@@ -215,7 +217,7 @@ final class PostDenoise566Tests: XCTestCase {
         let ma = a.reduce(0, +) / Double(a.count), mb = b.reduce(0, +) / Double(b.count)
         print(String(format: "566 · neutral flat mean %.2f → %.2f codes", ma, mb))
         XCTAssertEqual(ma, mb, accuracy: 0.5,
-                       "a grey card must stay the same grey; the guided chroma may not shift luma")
+                       "a grey card must stay the same grey; the chroma stage may not shift luma")
     }
 
     // MARK: - strength from off to the resting/default positions
@@ -266,6 +268,92 @@ final class PostDenoise566Tests: XCTestCase {
         return (ss / Double(n) - m * m).squareRoot()
     }
 
+    /// Box low-pass over one scalar plane (interior only; edges clamp like the shader's sampler).
+    /// Separable, so the 8-px radius costs O(N·r) rather than O(N·r²) in a test body.
+    private func lowPass(_ v: [Double], w: Int, h: Int, radius: Int) -> [Double] {
+        var horizontal = [Double](repeating: 0, count: v.count)
+        let n = Double(2 * radius + 1)
+        for y in 0..<h {
+            let base = y * w
+            for x in 0..<w {
+                var sum = 0.0
+                for dx in -radius...radius {
+                    sum += v[base + min(max(x + dx, 0), w - 1)]
+                }
+                horizontal[base + x] = sum / n
+            }
+        }
+        var out = [Double](repeating: 0, count: v.count)
+        for y in 0..<h {
+            for x in 0..<w {
+                var sum = 0.0
+                for dy in -radius...radius {
+                    sum += horizontal[min(max(y + dy, 0), h - 1) * w + x]
+                }
+                out[y * w + x] = sum / n
+            }
+        }
+        return out
+    }
+
+    /// RMS of the residual `v − box(v)`, the "high-frequency chroma" of §9.2. The 8-px box is the
+    /// discrete stand-in for the metric's `σ = 8` blur.
+    private func highPassSigma(_ v: [Double], w: Int, h: Int, radius: Int = 8) -> Double {
+        let low = lowPass(v, w: w, h: h, radius: radius)
+        var s = 0.0, n = 0
+        for y in radius..<(h - radius) {
+            for x in radius..<(w - radius) {
+                let d = v[y * w + x] - low[y * w + x]
+                s += d * d; n += 1
+            }
+        }
+        return (s / Double(max(n, 1))).squareRoot()
+    }
+
+    private func meanAbs(_ v: [Double], w: Int, h: Int, margin: Int) -> Double {
+        var s = 0.0, n = 0
+        for y in margin..<(h - margin) {
+            for x in margin..<(w - margin) { s += abs(v[y * w + x]); n += 1 }
+        }
+        return s / Double(max(n, 1))
+    }
+
+    /// The four quadrant interiors of the colour fixture, with a `seam` margin off each block edge
+    /// so the sharp block boundaries are not counted as "high-frequency noise".
+    private func quadrants(w: Int, h: Int, seam: Int) -> [(x0: Int, x1: Int, y0: Int, y1: Int)] {
+        [(seam, w / 2 - seam, seam, h / 2 - seam),
+         (w / 2 + seam, w - seam, seam, h / 2 - seam),
+         (seam, w / 2 - seam, h / 2 + seam, h - seam),
+         (w / 2 + seam, w - seam, h / 2 + seam, h - seam)]
+    }
+
+    private func meanAbs(_ v: [Double], w: Int, h: Int,
+                         rects: [(x0: Int, x1: Int, y0: Int, y1: Int)]) -> Double {
+        var s = 0.0, n = 0
+        for r in rects {
+            for y in r.y0..<r.y1 {
+                for x in r.x0..<r.x1 { s += abs(v[y * w + x]); n += 1 }
+            }
+        }
+        return s / Double(max(n, 1))
+    }
+
+    private func highPassSigma(_ v: [Double], w: Int, h: Int,
+                               rects: [(x0: Int, x1: Int, y0: Int, y1: Int)],
+                               radius: Int = 8) -> Double {
+        let low = lowPass(v, w: w, h: h, radius: radius)
+        var s = 0.0, n = 0
+        for r in rects {
+            for y in r.y0..<r.y1 {
+                for x in r.x0..<r.x1 {
+                    let d = v[y * w + x] - low[y * w + x]
+                    s += d * d; n += 1
+                }
+            }
+        }
+        return (s / Double(max(n, 1))).squareRoot()
+    }
+
     func testChromaNoiseFallsFromOffToTheRestingStrength() throws {
         let graph = try makeGraph(chromaSpeckle(), identity: "566-chroma-strength")
         let off = try render(graph, document(0, 0))
@@ -274,20 +362,68 @@ final class PostDenoise566Tests: XCTestCase {
 
         let w = off.width, h = off.height
         let abOff = oklabAB(off), abRest = oklabAB(resting), abFull = oklabAB(full)
+        let a0 = abOff.map { $0.0 }, b0 = abOff.map { $0.1 }
         for (name, ab) in [("50", abRest), ("100", abFull)] {
-            let sa = chromaSigma(ab, w: w, h: h) { $0.0 }
-            let sb = chromaSigma(ab, w: w, h: h) { $0.1 }
-            let a0 = chromaSigma(abOff, w: w, h: h) { $0.0 }
-            let b0 = chromaSigma(abOff, w: w, h: h) { $0.1 }
-            print(String(format: "566 · chroma %@: σa %.4f → %.4f (↓%.1f%%) · σb %.4f → %.4f (↓%.1f%%)",
-                         name, a0, sa, 100 * (1 - sa / a0), b0, sb, 100 * (1 - sb / b0)))
+            let a = ab.map { $0.0 }, b = ab.map { $0.1 }
+            let ha0 = highPassSigma(a0, w: w, h: h), hb0 = highPassSigma(b0, w: w, h: h)
+            let ha = highPassSigma(a, w: w, h: h), hb = highPassSigma(b, w: w, h: h)
+            print(String(format: "566 · chroma %@: HF σa %.4f → %.4f (↓%.1f%%) · HF σb %.4f → %.4f (↓%.1f%%)",
+                         name, ha0, ha, 100 * (1 - ha / ha0), hb0, hb, 100 * (1 - hb / hb0)))
         }
-        let sa0 = chromaSigma(abOff, w: w, h: h) { $0.0 }
-        let sa1 = chromaSigma(abFull, w: w, h: h) { $0.0 }
-        let sb0 = chromaSigma(abOff, w: w, h: h) { $0.1 }
-        let sb1 = chromaSigma(abFull, w: w, h: h) { $0.1 }
-        XCTAssertGreaterThanOrEqual(1 - sa1 / sa0, 0.50, "chroma σa must fall ≥50% at amount 100")
-        XCTAssertGreaterThanOrEqual(1 - sb1 / sb0, 0.50, "chroma σb must fall ≥50% at amount 100")
+        let ha0 = highPassSigma(a0, w: w, h: h), hb0 = highPassSigma(b0, w: w, h: h)
+        let ha1 = highPassSigma(abFull.map { $0.0 }, w: w, h: h)
+        let hb1 = highPassSigma(abFull.map { $0.1 }, w: w, h: h)
+        XCTAssertGreaterThanOrEqual(1 - ha1 / ha0, 0.50, "chroma HF σa must fall ≥50% at amount 100")
+        XCTAssertGreaterThanOrEqual(1 - hb1 / hb0, 0.50, "chroma HF σb must fall ≥50% at amount 100")
+    }
+
+    /// 566-A §9.2 — the corrected split: low-frequency chroma is **colour** and must survive, while
+    /// high-frequency chroma is **noise** and must fall. Four flat colour quadrants make both halves
+    /// of the measurement honest (the speckle fixture above has no low-frequency colour at all).
+    private func colouredBlocks(w: Int = 400, h: Int = 300) -> LinearImage {
+        let bases: [(Double, Double, Double)] = [
+            (0.42, 0.15, 0.10), (0.10, 0.33, 0.14),
+            (0.08, 0.16, 0.40), (0.45, 0.36, 0.07),
+        ]
+        var rng = Noise(0xC01_0BEEF)
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let q = (y < h / 2 ? 0 : 2) + (x < w / 2 ? 0 : 1)
+                let c = bases[q]
+                let i = (y * w + x) * 4
+                rgba[i] = Float16(c.0 + rng.symmetric(0.02))
+                rgba[i + 1] = Float16(c.1 + rng.symmetric(0.02))
+                rgba[i + 2] = Float16(c.2 + rng.symmetric(0.02))
+                rgba[i + 3] = 1
+            }
+        }
+        return LinearImage(width: w, height: h, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic-566-colour")
+    }
+
+    func testColourSurvivesWhenTheChromaNoiseFalls() throws {
+        let graph = try makeGraph(colouredBlocks(), identity: "566-colour")
+        let off = try render(graph, document(0, 0))
+        let on = try render(graph, document(0, 50))
+        let w = off.width, h = off.height
+        let abOff = oklabAB(off), abOn = oklabAB(on)
+        let rects = quadrants(w: w, h: h, seam: 24)
+        for (axis, pick) in [("a", { (p: (Double, Double)) in p.0 }),
+                             ("b", { (p: (Double, Double)) in p.1 })] {
+            let o = abOff.map(pick), n = abOn.map(pick)
+            let low = lowPass(o, w: w, h: h, radius: 8)
+            // `n` is the filtered frame; compare its low-pass, not its own pixel values.
+            let lowOn = lowPass(n, w: w, h: h, radius: 8)
+            let kept = meanAbs(lowOn, w: w, h: h, rects: rects)
+                / max(meanAbs(low, w: w, h: h, rects: rects), 1e-9)
+            let hf0 = highPassSigma(o, w: w, h: h, rects: rects)
+            let hf1 = highPassSigma(n, w: w, h: h, rects: rects)
+            print(String(format: "566 · colour-%@: low-freq %.1f %% kept · HF chroma %.1f %% of off",
+                         axis, 100 * kept, 100 * hf1 / hf0))
+            XCTAssertGreaterThanOrEqual(kept, 0.95, "色度低频（颜色）必须保留 ≥95 % — axis \(axis)")
+            XCTAssertLessThanOrEqual(hf1 / hf0, 0.60, "色度高频率（色噪）必须 ≤60 % — axis \(axis)")
+        }
     }
 
     /// 4-px checkerboard at ±0.05 on 0.20 plus the same noise: a texture the Wiener must not eat.
@@ -332,6 +468,57 @@ final class PostDenoise566Tests: XCTestCase {
                      lapOff, lapOn, 100 * lapOn / lapOff))
         XCTAssertGreaterThanOrEqual(lapOn / lapOff, 0.60,
                                     "the resting strength must keep ≥60% of the texture")
+    }
+
+    // MARK: - §8.2: a window never stays un-denoised
+
+    func testAWindowFirstDrawsTheWholeFrameCropAndNotTheRawChain() throws {
+        let image = noisyStep(w: 768, h: 576)
+        let graph = try makeGraph(image, identity: "566-window")
+        let on = document(50, 50)
+        let win = ImageRect(x: 224, y: 176, width: 160, height: 112)
+        func render(_ edit: EditModel, canvas: ImageSize?, window: ImageRect?) throws -> DisplayImage {
+            var options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
+                                        useCache: true, wantsPixels: true)
+            options.canvas = canvas
+            options.outputWindow = window
+            let result = try graph.render(edit, options: options)
+            if let t = result.output { graph.recycle(output: t) }
+            return try XCTUnwrap(result.display)
+        }
+
+        // Window **first** on a fresh graph: no memo exists yet, so this is the §8.2 miss path. It
+        // must still draw the denoised crop, never the raw linear chain.
+        let window = try render(on, canvas: ImageSize(width: win.width, height: win.height),
+                                window: win)
+        // The whole frame at the same scale fills the cache, and its crop is the contract.
+        let whole = try render(on, canvas: ImageSize(width: image.width, height: image.height),
+                               window: nil)
+        var worst = 0.0
+        for y in 0..<win.height {
+            for x in 0..<win.width {
+                let a = ((y + win.y) * whole.width + (x + win.x)) * 4
+                let b = (y * window.width + x) * 4
+                for c in 0..<4 {
+                    worst = max(worst, abs(Double(window.rgba[b + c]) - Double(whole.rgba[a + c])))
+                }
+            }
+        }
+        print(String(format: "566 · window vs whole crop worst Δ %.2e", worst))
+        XCTAssertLessThanOrEqual(worst, 2.0 / 65535.0,
+                                 "a window must be the whole-frame result cut out (≤1 LSB)")
+
+        // And it really is denoised: a 0/0 window (no S1.5 at all) has the fixture's full grain.
+        let raw = try render(document(0, 0),
+                             canvas: ImageSize(width: win.width, height: win.height), window: win)
+        let w = window.width, h = window.height
+        let (x0, x1, y0, y1) = (8, w - 8, 8, h - 8)
+        let sigmaWindow = highPassSigma(lumaCodes(window), w: w, h: h, x0: x0, x1: x1, y0: y0, y1: y1)
+        let sigmaRaw = highPassSigma(lumaCodes(raw), w: w, h: h, x0: x0, x1: x1, y0: y0, y1: y1)
+        print(String(format: "566 · window flat grain %.3f → %.3f codes (↓%.1f%%)",
+                     sigmaRaw, sigmaWindow, 100 * (1 - sigmaWindow / max(sigmaRaw, 1e-9))))
+        XCTAssertLessThanOrEqual(sigmaWindow, 0.90 * sigmaRaw,
+                                 "the first window frame must already carry S1.5's denoise")
     }
 
     // MARK: - the dark-frame robustness rule
