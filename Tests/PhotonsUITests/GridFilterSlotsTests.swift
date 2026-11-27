@@ -9,8 +9,8 @@ import PhotonsCatalog
 /// * **one** small icon button (24 × 24 SF Symbol) opens a transient-popover checklist of 15
 ///   dimensions; ticking one appends a slot in click order, at most five, and **the popover stays
 ///   open** for the next tick (036: an `NSMenu` closed on every selection). Unticking removes a slot
-///   and the rest close the gap; 「全部不选」 empties them so the next clicks number 1…5, without
-///   closing; a 6th dimension while full does nothing **and is greyed**;
+///   and the rest close the gap; 「回到默认五槽」 restores the factory five without closing; a 6th
+///   dimension while full does nothing **and is greyed**;
 /// * each slot's value control multi-selects (`1★、2★、5★`) in the same kind of checklist, also
 ///   staying open; values inside a slot OR, slots AND;
 /// * 050: the removable-condition pills that used to sit at the bar's right end are **gone** — the
@@ -113,8 +113,10 @@ final class GridFilterSlotsTests: XCTestCase {
         bar.setSlotValues(values, at: slot)
         settle()
     }
-    private func clearDimensions() {
-        bar.clearSlotDimensions()
+    /// 569: the reset row now returns to the five factory slots, so a test that needs the old
+    /// zero-slot state (to make room for a sixth dimension) empties the model explicitly.
+    private func emptyBarForSetup() {
+        session.applyFilter(CatalogFilter(slots: []))
         settle()
     }
 
@@ -137,13 +139,13 @@ final class GridFilterSlotsTests: XCTestCase {
 
     func testMenuListsFifteenDimensionsNumberedAndGreysTheSixth() {
         let rows = bar.dimensionMenuRows
-        XCTAssertEqual(rows.count, 16, "15 dimensions + 全部不选")
+        XCTAssertEqual(rows.count, 16, "15 dimensions + 回到默认五槽")
         // 星级 is the first *active* slot, so it carries slot number 1 — the list itself starts at 月.
         let rating = try! XCTUnwrap(rows.first { $0.title.contains("星级") })
         XCTAssertEqual(rating.title.hasPrefix("1  "), true, "活跃槽带序号：\(rating.title)")
         XCTAssertEqual(rating.checked, true)
         XCTAssertEqual(rating.enabled, true)
-        XCTAssertEqual(rows.last?.title, "全部不选")
+        XCTAssertEqual(rows.last?.title, "回到默认五槽")
         // Five are ticked → a sixth dimension is offered but disabled (the chosen contract).
         let disabled = rows.filter { !$0.checked && !$0.enabled }
         XCTAssertEqual(disabled.count, 10, "the ten dimensions that cannot join a full bar are greyed")
@@ -166,20 +168,23 @@ final class GridFilterSlotsTests: XCTestCase {
         XCTAssertEqual(bar.dimensionMenuRows.filter { $0.checked }.count, 5)
     }
 
-    func testAllNoneClearsTheBarAndClicksRenumberFromOne() {
-        clearDimensions()
-        XCTAssertEqual(bar.slotDimensions, [])
-        XCTAssertEqual(bar.slotVisibleCount, 0)
-        XCTAssertFalse(bar.dimensionMenuRows.last!.enabled, "全部不选 is disabled with nothing selected")
+    func testAllNoneRestoresTheDefaultFiveSlotsWithoutClosingThePopover() throws {
+        choose(.camera)
+        XCTAssertEqual(bar.slotDimensions, [.rating, .flag, .lens, .ext])
 
-        choose(.iso)
-        choose(.focal)
-        choose(.serial)
-        XCTAssertEqual(bar.slotDimensions, [.iso, .focal, .serial])
+        bar.openDimensionPopover()
         let rows = bar.dimensionMenuRows
-        XCTAssertEqual(rows.first(where: { $0.title.contains("ISO") })?.title.hasPrefix("1"), true)
-        XCTAssertEqual(rows.first(where: { $0.title.contains("焦距") })?.title.hasPrefix("2"), true)
-        XCTAssertEqual(rows.first(where: { $0.title.contains("序列号") })?.title.hasPrefix("3"), true)
+        XCTAssertEqual(rows.last?.title, "回到默认五槽")
+        XCTAssertTrue(try XCTUnwrap(rows.last).enabled)
+
+        bar.performDimensionRow(at: rows.count - 1)
+        settle()
+        XCTAssertEqual(bar.slotDimensions, CatalogFilter.defaultDimensions)
+        XCTAssertEqual(bar.slotVisibleCount, 5)
+        XCTAssertTrue(bar.isDimensionPopoverOpen, "「回到默认五槽」后 popover 仍开")
+        XCTAssertTrue(try XCTUnwrap(bar.dimensionMenuRows.last).enabled, "默认条仍可再复位")
+        XCTAssertEqual(bar.dimensionMenuRows.dropLast().filter { !$0.checked && $0.enabled }.count, 0,
+                       "回到默认五槽后仍是满的，10 个维度置灰")
     }
 
     // MARK: multi-select values, OR inside a slot
@@ -226,7 +231,7 @@ final class GridFilterSlotsTests: XCTestCase {
     /// 布尔维度不适用「部分」：闪光灯/GPS 只有有/无，说「部分闪光灯」读起来像 bug。
     func testBooleanDimensionsKeepTheirWord() throws {
         // 五个默认槽位是满的，`choose` 加不进第六个维度 —— 先腾出位置再选闪光灯。
-        clearDimensions()
+        emptyBarForSetup()
         choose(.flash)
         let slot = try XCTUnwrap(bar.slotDimensions.firstIndex(of: .flash))
         XCTAssertEqual(bar.slotTitle(at: slot), "全部闪光灯")
@@ -338,7 +343,7 @@ final class GridFilterSlotsTests: XCTestCase {
         bareGrid.filterBar.frame = NSRect(x: 0, y: 0, width: 900, height: FilterBarView.height)
         bareGrid.filterBar.layoutSubtreeIfNeeded()
 
-        bareGrid.filterBar.clearSlotDimensions()
+        bareSession.applyFilter(CatalogFilter(slots: []))
         for _ in 0..<4 { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         bareGrid.filterBar.chooseDimension(.focal)
         for _ in 0..<4 { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
@@ -449,7 +454,7 @@ final class GridFilterSlotsTests: XCTestCase {
     /// Requirement 1: three ticks in a row → the popover is still open and the slots are 0 → 3 in click
     /// order. Every tick goes through the row button's production handler.
     func testTickingThreeDimensionsKeepsThePopoverOpenInClickOrder() throws {
-        clearDimensions()
+        emptyBarForSetup()
         XCTAssertEqual(bar.slotDimensions, [])
 
         bar.openDimensionPopover()
@@ -475,7 +480,7 @@ final class GridFilterSlotsTests: XCTestCase {
 
     /// Requirement 2: a click outside (the transient dismissal) closes the popover and keeps the slots.
     func testClickingOutsideClosesThePopoverAndKeepsTheSlots() throws {
-        clearDimensions()
+        emptyBarForSetup()
         bar.openDimensionPopover()
         let rows = bar.dimensionMenuRows
         bar.performDimensionRow(at: try XCTUnwrap(rows.firstIndex { $0.title.contains("焦距") }))
@@ -517,21 +522,26 @@ final class GridFilterSlotsTests: XCTestCase {
         XCTAssertTrue(bar.isDimensionPopoverOpen)
     }
 
-    /// Requirement 5: 「全部不选」 empties the slots and leaves the popover open for the next five ticks.
-    func testClearAllEmptiesTheSlotsWithoutClosingThePopover() throws {
+    /// Requirement 5: 「回到默认五槽」 clears the values, restores the factory five and leaves the
+    /// popover open (569: it no longer leaves a zero-slot bar).
+    func testClearAllReturnsToTheDefaultSlotsWithoutClosingThePopover() throws {
+        tick(["1", "5"], at: 0)
+        tick(["pick"], at: 1)
         bar.openDimensionPopover()
         let rows = bar.dimensionMenuRows
-        XCTAssertEqual(rows.last?.title, "全部不选")
+        XCTAssertEqual(rows.last?.title, "回到默认五槽")
         XCTAssertTrue(try XCTUnwrap(rows.last).enabled)
 
         bar.performDimensionRow(at: rows.count - 1)
         settle()
-        XCTAssertEqual(bar.slotDimensions, [])
-        XCTAssertEqual(bar.slotVisibleCount, 0)
-        XCTAssertTrue(bar.isDimensionPopoverOpen, "「全部不选」后 popover 仍开")
-        XCTAssertFalse(try XCTUnwrap(bar.dimensionMenuRows.last).enabled, "没有可清的了")
-        XCTAssertEqual(bar.dimensionMenuRows.filter { !$0.checked && $0.enabled }.count, 15,
-                       "清空后 15 个维度全部可选")
+        XCTAssertEqual(bar.slotDimensions, CatalogFilter.defaultDimensions)
+        XCTAssertEqual(bar.slotVisibleCount, 5)
+        XCTAssertEqual(bar.slotValues(at: 0), [], "复位后没有残留值")
+        XCTAssertEqual(bar.slotValues(at: 1), [], "复位后没有残留值")
+        XCTAssertTrue(bar.isDimensionPopoverOpen, "「回到默认五槽」后 popover 仍开")
+        XCTAssertTrue(try XCTUnwrap(bar.dimensionMenuRows.last).enabled, "默认条仍可再复位")
+        XCTAssertEqual(bar.dimensionMenuRows.dropLast().filter { !$0.checked && $0.enabled }.count, 0,
+                       "回到默认五槽后仍是满的，10 个维度置灰")
     }
 
     /// C: the per-slot value list is the same checklist — multi-select, and it stays open too.

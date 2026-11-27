@@ -28,6 +28,15 @@
 //  which is the same as `i + s·(r − w·f)`. With `wMax = 0` this is exactly the
 //  historical `i + s·(d − i)`, bit for bit; that is the rollback switch.
 //
+//  The defaults are deliberately mild: `wMax = 0.35`, knee 1.00–1.40, and the
+//  weight is flattened with two 257-px box means. A gate at 0.85 was visible as
+//  a patch — one area denoised, its neighbour not — because the weight follows
+//  the content (texture vs flat paint) and no smoothing can remove that. The
+//  mild gate keeps the *difference* in denoising power under the eye's
+//  threshold while still lifting the fine band in the shadows. Measured on
+//  L1040080 the 64-px block standard deviation of `w` is 0.091 on this build,
+//  against 0.313 at the 0.85 default in the dispatch.
+//
 //  Why a floor and not sigma(x): the first version divided env by the sensor's
 //  sigma(x). That made the gate depend on whichever estimator produced `a`/`b`,
 //  and the probe's curve and the engine's measured curve differ by 1.33× at the
@@ -83,9 +92,9 @@ public enum DetailGate {
         /// L1040080.
         public var box: Int
 
-        public init(gate: Double = 0.85,
-                    kneeLow: Double = 1.05,
-                    kneeHigh: Double = 1.25,
+        public init(gate: Double = 0.35,
+                    kneeLow: Double = 1.00,
+                    kneeHigh: Double = 1.40,
                     sigma: Double = 1.5,
                     box: Int = 16) {
             self.gate = gate
@@ -100,17 +109,17 @@ public enum DetailGate {
         public var isActive: Bool { gate > 0 && sigma > 0 }
     }
 
-    /// Extra smoothing radius (plane px) on the finished weight. It is comparable
-    /// to the coherence box and only widens a hard knee; without it a texture/
-    /// noise boundary can step the weight by ~0.4 between neighbours.
+    /// Extra smoothing radius (plane px) on the finished weight.
     ///
-    /// It is applied as three successive box means of half-width 16 plane px
-    /// (a 33-px window; three passes are Gaussian-equivalent to sigma ≈ 16). One
-    /// pass of the same radius left an adjacent step of 0.024 once the knee
-    /// narrowed to 1.05–1.25; three passes bring it under 0.02. The wider
-    /// window is what the 564 §8 measurement settled on.
-    static let weightSmoothing = 16
-    static let weightSmoothingPasses = 3
+    /// A narrow smoothing only removes the box-sized ripple; it cannot hide the
+    /// *content* pattern (textured canvas vs flat wall), and the gate then reads
+    /// as a patch. Two successive box means of half-width 128 plane px (a
+    /// 257-px window each; Gaussian-equivalent to sigma ≈ 128) spread the weight
+    /// over hundreds of pixels, which is what caps the 64-px block standard
+    /// deviation of `w` at 0.091 on L1040080 (564 §9). The cost is O(N) per
+    /// pass regardless of the radius.
+    static let weightSmoothing = 128
+    static let weightSmoothingPasses = 2
 
     /// Brightness bins used by the floor. Boundaries are brightness quantiles of
     /// the plane, so every bin holds roughly the same number of pixels and none
@@ -139,6 +148,40 @@ public enum DetailGate {
                              strength: (Float) -> Float,
                              parameters: Parameters,
                              mask: [Float]? = nil) -> Double {
+        return blend(input: input, denoised: &denoised, width: width,
+                     height: height, strength: strength,
+                     parameters: parameters, mask: mask, weights: nil)
+    }
+
+    /// Same as `blend`, but also returns the finished weight field `w(x)`.
+    /// Used by `--dump-gate` to measure the gate's spatial smoothness without
+    /// running the filter a second time.
+    public static func blendRecordingWeights(
+        input: [Float],
+        denoised: inout [Float],
+        width: Int,
+        height: Int,
+        strength: (Float) -> Float,
+        parameters: Parameters,
+        mask: [Float]? = nil
+    ) -> (meanWeight: Double, weights: [Float]) {
+        var weights = [Float](repeating: 0, count: max(0, width * height))
+        let mean = weights.withUnsafeMutableBufferPointer { buf in
+            blend(input: input, denoised: &denoised, width: width,
+                  height: height, strength: strength, parameters: parameters,
+                  mask: mask, weights: buf.baseAddress)
+        }
+        return (mean, weights)
+    }
+
+    private static func blend(input: [Float],
+                              denoised: inout [Float],
+                              width: Int,
+                              height: Int,
+                              strength: (Float) -> Float,
+                              parameters: Parameters,
+                              mask: [Float]?,
+                              weights: UnsafeMutablePointer<Float>?) -> Double {
         let n = width * height
         guard width > 0, height > 0,
               input.count == n, denoised.count == n else { return 0 }
@@ -225,11 +268,12 @@ public enum DetailGate {
                             let row = y * width
                             for x in 0..<width {
                                 let p = row + x
+                                let w = wPtr[p]
+                                weights?[p] = w
                                 if let mask, !(mask[p] > 0) { continue }
                                 let i = iPtr[p]
                                 let d = dPtr[p]
                                 let s = strength(i)
-                                let w = wPtr[p]
                                 if w > 0 {
                                     let r = d - i
                                     dPtr[p] = i + s * (r - w * fPtr[p])
@@ -287,6 +331,20 @@ public enum DetailGate {
             }
         }
         return w
+    }
+
+    /// Write a mosaic-sized weight field as `<prefix>.f32` (little-endian
+    /// `Float32`, row-major) plus a `<prefix>.txt` sidecar holding
+    /// `width height`. This is the `--dump-gate` diagnostic: it is how the patch
+    /// metric (std of 64- and 256-px block means) is measured on a real frame.
+    public static func writeDump(_ weights: [Float], width: Int, height: Int,
+                                 toPrefix url: URL) throws {
+        // Darwin hosts are little-endian; the dump contract is little-endian
+        // float32, matching every other `.f32` the tools read.
+        let data = weights.withUnsafeBufferPointer { Data(buffer: $0) }
+        try data.write(to: url.appendingPathExtension("f32"))
+        try Data("\(width) \(height)\n".utf8)
+            .write(to: url.appendingPathExtension("txt"))
     }
 
     // MARK: - Coherence

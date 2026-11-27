@@ -5,23 +5,18 @@ import PhotonsCatalog
 import PhotonsCore
 @testable import PhotonsUI
 
-/// 542 — 回切照片命中不到缓存：查找要接受「同相机下更粗的那一级」。
+/// 542 / 571-A — 回切照片命中不到缓存，但 **571-A 不再用更粗的一级将就**。
 ///
 /// 用户口径（2026-11-24）：「现在屏幕渲染完成切下一张，等渲染好再马上切回来，并没有缓存」。
+/// 542 的做法是让 1.0 的请求接受 0.5 的条目；571-A 把用户口径收得更紧：画布只出整幅，切图不许先上一张
+/// 半分辨率。`coarserRungFloor` 因此是 **1.0** —— 只有不粗于请求尺度的条目可用，0.5 的条目对 1.0 的
+/// 请求是 miss（533 占位/新整幅帧接手）。本套件用真库、真解码、真 present 驱动 controller：
 ///
-/// 根因在写入与命中的**不对称**：535 会把屏幕上已有的那一帧（可能只是 0.5 预览级）拷进缓存，键里
-/// 带着 rung；但解码阶梯只常驻一张照片（`DecodeLadder`），从 B 切回 A 时 A 的 rung 已被挤出，
-/// `predictedDecodeScale` 退化成 `job.target` = 1.0。旧 `lookup` 要求 rung **精确相等**，于是 0.5 的
-/// 条目对 1.0 的请求记一次 `decodeScaleChanged` 并返回 nil，看起来就是「没有缓存」。
-///
-/// 本套件用真库、真解码、真 present 驱动 controller，并把「条目停在 0.5」这一状态显式种进缓存
-/// （`seedCachedEntry`），所以不依赖「全分辨解码恰好还没到」的时序。断言：
-///
-///   1. 回切时命中 0.5 的条目：`hits +1`、`missReasons[.coarserRung] +1`、`canvasCachePresents +1`；
+///   1. 回切时 0.5 的条目 **不命中**：`misses +1`、`decodeScaleChanged +1`、`canvasCachePresents` 不增；
 ///   2. 精确路径不变：条目 rung 与请求相等时 `hits +1` 且 `coarserRung` 不增长；
-///   3. 下限：0.25 的条目对 1.0 的请求**不命中**，缓存帧不上屏（533 的 stand-in / 正常渲染接手）；
-///   4. 升级：回切后的足分辨帧到达，同 `softIdentity` 条目变成 1.0、`stores` 不增；再回切走精确命中；
-///   5. 反向门：关掉「接受更粗一级」，用例 1 的路径必 miss，并打印 `missReasons`。
+///   3. 下限：0.25 的条目对 1.0 的请求同样 miss（与 0.5 一样在 floor 以下）；
+///   4. 升级：回切后的足分辨帧到达，同 `softIdentity` 条目变成 1.0；再回切走精确命中；
+///   5. 反向门：关掉「接受更粗一级」，结论不变（拒绝发生在更早的尺度检查）。
 @MainActor
 final class CanvasCacheCoarserRung542Tests: XCTestCase {
 
@@ -38,7 +33,7 @@ final class CanvasCacheCoarserRung542Tests: XCTestCase {
         CanvasFrameCache.quantizesCanvasCamera = true
         CanvasFrameCache.canonicalizesCanvasEditDigest = true
         CanvasFrameCache.acceptsCoarserRung = true
-        CanvasFrameCache.coarserRungFloor = 0.5
+        CanvasFrameCache.coarserRungFloor = 1.0
         super.tearDown()
     }
 
@@ -196,16 +191,19 @@ final class CanvasCacheCoarserRung542Tests: XCTestCase {
         }
     }
 
-    // MARK: - ① the user's sequence: A at 0.5 → B → back to A
+    // MARK: - ① 571-A: A at 0.5 → B → back to A does **not** use the 0.5 entry
 
-    func testReturningToAPhotoWhoseCachedFrameIsThePreviewRungHits() throws {
+    /// The user's sequence is unchanged; the answer is. With `coarserRungFloor = 1.0` the cached 0.5
+    /// entry is coarser than the predicted 1.0, so the return is a miss (the 533 stand-in / the fresh
+    /// full frame takes the canvas) — no 「切图先糊一下」 hop.
+    func testReturningWithOnlyAPreviewRungEntryMissesInsteadOfShowingIt() throws {
         let photos = try rawFixtures(count: 2)
         let controller = makeController()
         let cache = controller.canvasFrameCache
         let a = "coarse542-a"
         let b = "coarse542-b"
 
-        // A is on screen and cached; the entry the cache kept is the 0.5 preview frame.
+        // A is on screen and cached; replace its entry with the 0.5 frame 535 could have kept.
         let keyA = try settleFull(controller, photos[0], a)
         try seedCachedEntry(controller, key: keyA, decodeScale: DecodeLadder.previewScale)
         // Visiting B pushes A's rung out of the one-photo ladder: the return predicts 1.0.
@@ -214,25 +212,25 @@ final class CanvasCacheCoarserRung542Tests: XCTestCase {
         let hitsBefore = cache.hits
         let coarserBefore = controller.canvasCacheMissReasons[.coarserRung]
         let missesBefore = cache.misses
+        let scaleChangedBefore = controller.canvasCacheMissReasons[.decodeScaleChanged]
         let presentsBefore = controller.canvasCachePresents
 
         let start = beginSwitch(controller, photos[0], a)
-        XCTAssertTrue(waitFor(10) { controller.canvasCachePresents > presentsBefore },
-                      "the return to A did not present the cached canvas")
+        XCTAssertTrue(waitForFullFrame(controller, a, from: start),
+                      "the return to A never produced the full frame")
 
-        XCTAssertEqual(cache.hits, hitsBefore + 1, "the 0.5 entry must answer the 1.0 request")
-        XCTAssertEqual(controller.canvasCacheMissReasons[.coarserRung], coarserBefore + 1,
-                       "the coarser hit must be counted, not silent")
-        XCTAssertEqual(cache.misses, missesBefore, "a coarser hit is a hit, not a miss")
-        XCTAssertEqual(controller.canvasCachePresents, presentsBefore + 1,
-                       "the cached frame must reach the layer immediately")
-
-        let record = try XCTUnwrap(firstCacheRecord(controller, from: start, photo: a),
-                                   "no cached present in the return: "
-                                    + "\(reasonCounts(controller))")
-        XCTAssertEqual(record.decodeScale, DecodeLadder.previewScale, accuracy: 1e-4,
-                       "the frame served from the cache must be the 0.5 entry")
-        print("[542] ①  return hit · \(reasonCounts(controller))")
+        XCTAssertEqual(cache.hits, hitsBefore, "a coarser entry must not answer the 1.0 request")
+        XCTAssertEqual(cache.misses, missesBefore + 1, "the return is a miss")
+        XCTAssertEqual(controller.canvasCacheMissReasons[.decodeScaleChanged],
+                       scaleChangedBefore + 1,
+                       "the miss must name the rung component")
+        XCTAssertEqual(controller.canvasCacheMissReasons[.coarserRung], coarserBefore,
+                       "the entry was rejected before the coarser-hit counter (floor 1.0)")
+        XCTAssertEqual(controller.canvasCachePresents, presentsBefore,
+                       "the 0.5 entry must not reach the layer")
+        XCTAssertNil(firstCacheRecord(controller, from: start, photo: a),
+                     "a sub-full entry was presented: \(reasonCounts(controller))")
+        print("[542] ①  return miss · \(reasonCounts(controller))")
     }
 
     // MARK: - ② the exact path is unchanged
@@ -316,12 +314,12 @@ final class CanvasCacheCoarserRung542Tests: XCTestCase {
         let storesBefore = cache.stores
         let presentsBefore = controller.canvasCachePresents
 
-        // First return: coarser hit, then the real full frame lands and replaces the same entry.
+        // First return: the 0.5 entry misses; the real full frame lands and replaces the same entry.
         let firstReturn = beginSwitch(controller, photos[0], a)
-        XCTAssertTrue(waitFor(10) { controller.canvasCachePresents > presentsBefore },
-                      "the first return did not hit the coarser entry")
         XCTAssertTrue(waitForFullFrame(controller, a, from: firstReturn),
                       "the full frame that upgrades the entry never arrived")
+        XCTAssertEqual(controller.canvasCachePresents, presentsBefore,
+                       "571-A: the 0.5 entry must not be presented on the way")
         pump(0.1)
 
         let upgraded = try XCTUnwrap(cache.cachedCanvas(matching: keyA),
@@ -350,7 +348,7 @@ final class CanvasCacheCoarserRung542Tests: XCTestCase {
               + " · entry=\(upgraded.decodeScale) · \(reasonCounts(controller))")
     }
 
-    // MARK: - ⑤ reverse gate: exact equality brings the miss back
+    // MARK: - ⑤ reverse gate: turning coarser acceptance off keeps the same miss
 
     func testReverseGateExactRungOnlyMakesTheReturnMiss() throws {
         let photos = try rawFixtures(count: 2)

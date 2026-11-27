@@ -46,16 +46,24 @@ public enum StackKind: String, Sendable, Equatable, CaseIterable {
     /// A third member, a different extension, or a suffix that is not exactly `-denoised`
     /// (`L-denoised-2.dng`) is `plain` — the rule does not guess from a prefix.
     public static func forMemberFilenames(_ filenames: [String]) -> StackKind {
-        guard filenames.count == 2 else { return .plain }
+        denoiseProductFilename(filenames) != nil ? .denoise : .plain
+    }
+
+    /// 566 — the product file of a denoise pair, or nil when the shape is not one.
+    ///
+    /// Exactly two members, the same extension, and one stem is the other stem plus `-denoised`.
+    /// Returns the filename whose stem carries the suffix. This is the *same* rule
+    /// `forMemberFilenames` asks; the menu and the deletion path call it to name the product itself,
+    /// not just to classify the pair.
+    public static func denoiseProductFilename(_ filenames: [String]) -> String? {
+        guard filenames.count == 2 else { return nil }
         let a = split(filenames[0])
         let b = split(filenames[1])
         guard !a.ext.isEmpty, !b.ext.isEmpty,
-              a.ext.caseInsensitiveCompare(b.ext) == .orderedSame else { return .plain }
-        let aIsProduct = a.stem == b.stem + "-denoised"
-        let bIsProduct = b.stem == a.stem + "-denoised"
-        // Exactly one direction can hold for two different stems; `!=` makes that explicit instead
-        // of relying on "they cannot both be true".
-        return aIsProduct != bIsProduct ? .denoise : .plain
+              a.ext.caseInsensitiveCompare(b.ext) == .orderedSame else { return nil }
+        if a.stem == b.stem + "-denoised" { return filenames[0] }
+        if b.stem == a.stem + "-denoised" { return filenames[1] }
+        return nil
     }
 
     private static func split(_ filename: String) -> (stem: String, ext: String) {
@@ -216,6 +224,26 @@ extension Catalog {
                 SELECT id FROM assets WHERE stack_id = ? AND deleted = 0 AND id <> ? LIMIT 1
                 """, arguments: [stackID, id])
         }
+    }
+
+    /// 567 — the other member of a two-member denoise stack, for each of `ids` that has one.
+    /// 去重、按传入顺序、绝不返回 ids 自己。
+    ///
+    /// Library metadata (rating / flag / colour label) is written through a batch door, while the
+    /// members of a denoise pair share one document in two rows (487 §2.2). The caller passes the
+    /// ids it is about to write; the result is the extra rows that must move with them. Plain
+    /// stacks, stacks with more than two live members and ids without a sibling contribute nothing.
+    public func denoiseSiblings(ofAssets ids: [String]) throws -> [String] {
+        let inputs = Set(ids)
+        var seen = Set<String>()
+        var siblings: [String] = []
+        for id in ids {
+            guard let sibling = try denoiseSibling(ofAsset: id),
+                  !inputs.contains(sibling),
+                  seen.insert(sibling).inserted else { continue }
+            siblings.append(sibling)
+        }
+        return siblings
     }
 }
 

@@ -1449,9 +1449,10 @@ public struct DecodeRung: Sendable {
 
 /// What a camera request has to ask the ladder for, in presentation order.
 ///
-/// `preview` is the rung that can go on screen *now* — normally the 0.5 buffer the fit view already
-/// developed. `target` is the rung the request actually needs. One entry means "the target is
-/// already resident, this frame costs a render and nothing else".
+/// `preview` is the rung that can go on screen *now*. 571-A removed it from the canvas: `plan` is one
+/// entry (the target) and `preview` is always `nil`, but the field is kept because the plan type is
+/// the controller/queue call surface and the single-rung plan still spells "no preview leg".
+/// `target` is the rung the request actually needs.
 public struct DecodeLadderPlan: Equatable, Sendable {
     public let preview: Float?
     public let target: Float
@@ -1463,9 +1464,6 @@ public struct DecodeLadderPlan: Equatable, Sendable {
 
     /// Rungs to fetch and present, in order. The last one is always the target.
     public var rungs: [Float] { preview.map { [$0, target] } ?? [target] }
-
-    /// True when the frame can be produced without touching ImageIO at all.
-    public var isResident: Bool { preview == nil }
 }
 
 /// The decoded buffers of **the photo the loupe is showing**, keyed by rung.
@@ -1489,13 +1487,24 @@ public struct DecodeLadderPlan: Equatable, Sendable {
 /// re-enters to store. A decode under a lock would serialise the two queues again, which is exactly
 /// the defect this file's `DecodeQueue` exists to remove.
 public final class DecodeLadder {
-    /// The rung a fit frame can afford to show first: half the linear size, ~quarter the pixels.
+    /// 571-A — the half-linear rung, kept **for histogram measurement only**. The canvas no longer
+    /// asks the ladder for it: a fit frame is either the 1920 px stand-in (533) or the whole picture
+    /// at `fullScale`. Nothing in `LoupeController`'s frame path references this constant any more
+    /// except the histogram's cache lookup (`preview` key of an older measurement).
     public static let previewScale: Float = 0.5
     /// The rung 1:1 (and everything above it) is rendered from. One source pixel, one buffer pixel.
     public static let fullScale: Float = 1
 
     private let lock = NSLock()
     private var identity: String?
+    /// 570 — extra names this one development answers to, registered by `alias(_:for:)`.
+    ///
+    /// The document's identity can gain a component **after** the development landed: `present`
+    /// installs the decoder's read-back spelling (`resolvedDecoderVersion`), so the same buffer is
+    /// suddenly named `photo|ver=8` while the rung was stored as `photo`. An alias is that one
+    /// explicit equivalence — never a prefix or fuzzy match — so a lookup that was not registered
+    /// still misses exactly as before.
+    private var aliases: Set<String> = []
     private var rungs: [Float: DecodeRung] = [:]
 
     /// Rungs this ladder has developed, and how many requests it answered from the cache. Exposed
@@ -1540,6 +1549,26 @@ public final class DecodeLadder {
     /// The rungs currently in memory, smallest first. Debugging/diagnostics only.
     public var residentScales: [Float] { locked { rungs.keys.sorted() } }
 
+    /// The extra identities `alias(_:for:)` registered for the resident development, sorted.
+    /// Diagnostics/assertions only.
+    public var aliasedIdentities: [String] { locked { aliases.sorted() } }
+
+    /// Register `extra` as another name for the development filed under `identity`.
+    ///
+    /// Returns `false` when `identity` is not the resident development (a caller that aliased a
+    /// photo the ladder has since left) — the alias is never attached to the wrong buffer. The
+    /// ladder owns the alias exactly as long as it owns the rungs: `store` of another photo and
+    /// `reset()` both drop it.
+    @discardableResult
+    public func alias(_ extra: String, for identity: String) -> Bool {
+        locked {
+            guard identity == self.identity else { return false }
+            guard extra != identity else { return true }
+            aliases.insert(extra)
+            return true
+        }
+    }
+
     public var best: DecodeRung? {
         locked { rungs.values.max { $0.scale < $1.scale } }
     }
@@ -1547,36 +1576,33 @@ public final class DecodeLadder {
     /// The resident rung at exactly `scale`, or `nil`. Never returns a different rung: a 0.5 buffer
     /// must never be mistaken for a 1.0 one (that is the bug class this type exists to close).
     public func resident(identity: String, scale: Float) -> DecodeRung? {
-        locked { identity == self.identity ? rungs[scale] : nil }
+        locked { answers(to: identity) ? rungs[scale] : nil }
     }
 
     /// The largest resident rung that is not bigger than `scale` — the best thing that can be shown
     /// while the wanted rung is being developed.
     public func best(identity: String, atOrBelow scale: Float) -> DecodeRung? {
         locked {
-            guard identity == self.identity else { return nil }
+            guard answers(to: identity) else { return nil }
             return rungs.values.filter { $0.scale <= scale }.max { $0.scale < $1.scale }
         }
     }
 
-    /// What the loupe must do for a `target` rung: show `preview` first if it can, then `target`.
+    /// Whether `identity` names the resident development — the stored one or a registered alias.
+    private func answers(to identity: String) -> Bool {
+        identity == self.identity || aliases.contains(identity)
+    }
+
+    /// What the loupe must do for a `target` rung.
     ///
-    /// `preview` is `nil` exactly when the target is resident, which is the case that matters for
-    /// the second and every later visit to a camera position.
+    /// 571-A — the canvas is **two-valued**: it shows the 1920 px stand-in while it waits, then the
+    /// whole picture at `target`. There is no intermediate preview rung, so the plan is always the
+    /// single target (an empty `rungs` list would leave nothing to draw). `preview` stays in
+    /// `DecodeLadderPlan` because the call sites and diagnostics still speak of it, and it is `nil`
+    /// here exactly as it was for a resident target.
     public func plan(identity: String, target: Float) -> DecodeLadderPlan {
-        locked {
-            if identity == self.identity, rungs[target] != nil {
-                return DecodeLadderPlan(preview: nil, target: target)
-            }
-            // Nothing smaller to show, or the only thing we have *is* the target: one rung.
-            guard target > Self.previewScale else {
-                return DecodeLadderPlan(preview: nil, target: target)
-            }
-            let residentPreview = identity == self.identity
-                ? rungs.values.filter { $0.scale <= target }.max { $0.scale < $1.scale }?.scale
-                : nil
-            return DecodeLadderPlan(preview: residentPreview ?? Self.previewScale, target: target)
-        }
+        _ = identity
+        return DecodeLadderPlan(preview: nil, target: target)
     }
 
     /// Answer a request for one rung, developing it with `decode` on a miss.
@@ -1608,6 +1634,9 @@ public final class DecodeLadder {
                 // A different photo: nothing here can be reused, and holding it would be the memory
                 // leak the single-slot cache never had.
                 rungs.removeAll()
+                // 570 — the aliases name *that* development's read-back spelling; another photo
+                // must not answer to them.
+                aliases.removeAll()
                 // The counts are of *this photo's* developments too, or a photo switch would leave
                 // the previous file's rungs in the ledger.
                 developedCounts.removeAll()
@@ -1627,6 +1656,7 @@ public final class DecodeLadder {
     public func reset() {
         locked {
             rungs.removeAll()
+            aliases.removeAll()
             identity = nil
             releaseCount = 0
         }

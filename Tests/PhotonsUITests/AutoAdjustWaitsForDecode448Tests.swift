@@ -87,13 +87,6 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         return condition()
     }
 
-    private func waitForPreview(_ loupe: LoupeController) -> Bool {
-        waitFor {
-            loupe.currentPresentedPhotoForTesting != nil
-                && loupe.lastPresentedScale == DecodeLadder.previewScale
-        }
-    }
-
     private func waitForFull(_ loupe: LoupeController, photo: String) -> Bool {
         waitFor {
             loupe.currentPresentedPhotoForTesting == photo
@@ -104,14 +97,14 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
 
     // MARK: - ① 不立刻采样
 
-    func testClickAtThePreviewRungQueuesAndWritesNothing() throws {
+    func testClickBeforeTheFullFrameQueuesAndWritesNothing() throws {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
 
-        XCTAssertTrue(waitForPreview(loupe), "the preview rung never reached the canvas")
-        XCTAssertEqual(loupe.frameScaleForTesting, Double(DecodeLadder.previewScale),
-                       "this case only means something while the resident frame is the 0.5 rung")
+        // 571-A: there is no 0.5 frame to click at any more; the click arrives while the canvas is
+        // still on the stand-in (no presented frame at all).
+        XCTAssertNil(loupe.lastPresentedScale, "nothing should have been presented yet")
 
         let before = session.edit
         let historyBefore = session.history.count
@@ -130,7 +123,6 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
 
-        XCTAssertTrue(waitForPreview(loupe))
         let historyBefore = session.history.count
         _ = loupe.autoLight()
         XCTAssertEqual(loupe.pendingAuto, .light)
@@ -152,7 +144,12 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
+        // 571-A: A's whole-picture frame replaces 448's preview wait; the switch below must still
+        // happen while B has not presented anything.
         XCTAssertTrue(waitForFull(loupe, photo: "448-A"), "A never reached the full rung")
+        // Let A's capability read-back settle before switching: its revision bump belongs to A.
+        XCTAssertTrue(waitFor { session.edit.resolvedDecoderVersion != nil })
+        pump(0.1)
 
         let editBefore = session.edit
         let historyBefore = session.history.count
@@ -167,6 +164,7 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         }, "the measurement never carried B's identity")
         XCTAssertEqual(loupe.lastAutoLightSampleIdentityForTesting, "448-B")
         XCTAssertEqual(session.history.count, historyBefore + 1, "B 的全档帧必须执行一次")
+        XCTAssertEqual(session.history.currentSnapshot?.label, "明暗 · 自动")
     }
 
     // MARK: - ④ 黑电平与白平衡同门
@@ -175,7 +173,8 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-black", session: session)
-        XCTAssertTrue(waitForPreview(loupe))
+        XCTAssertNil(loupe.lastPresentedScale,
+                     "571-A: no canvas frame yet — the click must queue")
 
         let before = session.edit.light.blackOffset
         let historyBefore = session.history.count
@@ -198,7 +197,8 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-wb", session: session)
-        XCTAssertTrue(waitForPreview(loupe))
+        XCTAssertNil(loupe.lastPresentedScale,
+                     "571-A: no canvas frame yet — the click must queue")
 
         let before = session.edit.light.whiteBalance
         let historyBefore = session.history.count
@@ -223,7 +223,9 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
-        XCTAssertTrue(waitForPreview(loupe))
+        // 571-A: there is no preview frame to click at; the click lands while A is still on the
+        // stand-in, i.e. in exactly the queued state 448 has always tested.
+        XCTAssertNil(loupe.lastPresentedScale)
 
         let editBefore = session.edit
         let historyBefore = session.history.count
@@ -237,7 +239,11 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         XCTAssertTrue(waitForFull(loupe, photo: "448-B"),
                       "B never reached the full rung (the counter-proof needs that frame)")
         pump(0.3)
-        XCTAssertEqual(session.edit, editBefore, "新照片的全档帧不得执行上一条点击")
+        // 571-A: B's own first frame performs the legitimate decoder read-back
+        // (`resolvedDecoderVersion`), so the whole document is no longer the right proxy. The queued
+        // 明暗 click would have written `light` and one history row; neither may happen.
+        XCTAssertEqual(session.edit.light, editBefore.light,
+                       "新照片的全档帧不得执行上一条点击")
         XCTAssertEqual(session.history.count, historyBefore)
     }
 }
