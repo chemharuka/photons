@@ -204,9 +204,9 @@ final class CanvasCacheMonotonic532Tests: XCTestCase {
             XCTAssertTrue(targetSeen, "step \(step): no target frame after the cache frame")
         }
 
-        // Reverse-gate evidence: the gate really did hold frames back in these switches.
-        XCTAssertGreaterThan(controller.monotonicSuppressedPresents, suppressedBefore,
-                             "the 0.5 preview never reached the gate — the suite proves nothing")
+        // 571-A: there is no 0.5 frame for the gate to hold any more, so it is a pure safety net.
+        XCTAssertEqual(controller.monotonicSuppressedPresents, suppressedBefore,
+                       "571-A: the canvas no longer produces a softer frame to suppress")
         XCTAssertGreaterThanOrEqual(hitSwitches, 2, "at least two switches must hit the cache")
         XCTAssertEqual(hitSwitches, 10, "every return to a warmed photo must hit")
         XCTAssertEqual(cachePresents, 10, "one cached present (and only one) per hit")
@@ -214,8 +214,10 @@ final class CanvasCacheMonotonic532Tests: XCTestCase {
         print("[532] ①  ten switches:\n" + lines.joined(separator: "\n"))
     }
 
-    /// ② — the reverse gate: with the monotonic gate off, the 0.5 frame is back in the middle.
-    func testWithoutTheGateTheSofterFrameSitsBetweenCacheAndTarget() throws {
+    /// ② — 571-A: with the monotonic gate **off** there is still no softer frame between the cache
+    /// frame and the target, because the ladder no longer produces one. The gate's reverse switch keeps
+    /// working (proved by ④), but it no longer has a mid-switch hop to remove.
+    func testWithoutTheGateNoSofterFrameExistsToPresent() throws {
         let photos = try rawFixtures(count: 2)
         let controller = makeController()
         warm(controller, photos[0], "mono532-rev-a")
@@ -224,7 +226,7 @@ final class CanvasCacheMonotonic532Tests: XCTestCase {
         controller.enforcesMonotonicPresentScale = false
         let records = switchPhoto(controller, photos[0], "mono532-rev-a")
         let line = describe(records)
-        print("[532] ②  reverse gate: \(line)")
+        print("[532] ② 571-A gate off: \(line)")
 
         guard let cacheIndex = records.firstIndex(where: { $0.fromCanvasCache }),
               let targetIndex = records[(cacheIndex + 1)...].firstIndex(where: {
@@ -235,12 +237,12 @@ final class CanvasCacheMonotonic532Tests: XCTestCase {
         let softer = records[(cacheIndex + 1)..<targetIndex].contains {
             $0.decodeScale < DecodeLadder.fullScale - 1e-4
         }
-        XCTAssertTrue(softer, "with the gate off the 0.5 frame must sit between cache and target: "
-                      + line)
+        XCTAssertFalse(softer, "571-A: no 0.5 frame exists, so none can sit between cache and target: "
+                       + line)
     }
 
-    /// ③ — a cold start has no sharper frame on screen: 0.5 → 1.0 is untouched.
-    func testColdStartStillPresentsThePreviewRungFirst() throws {
+    /// ③ — 571-A: a cold start presents the full rung and nothing before it.
+    func testColdStartPresentsTheFullRungOnly() throws {
         let photos = try rawFixtures(count: 1)
         let controller = makeController()
         let records = switchPhoto(controller, photos[0], "mono532-cold")
@@ -249,16 +251,10 @@ final class CanvasCacheMonotonic532Tests: XCTestCase {
 
         XCTAssertFalse(records.contains { $0.fromCanvasCache },
                        "a cold start has nothing in the cache")
-        guard let preview = records.firstIndex(where: {
-            $0.decodeScale >= DecodeLadder.previewScale - 1e-4
-                && $0.decodeScale < DecodeLadder.fullScale - 1e-4
-        }) else {
-            return XCTFail("the cold start never presented the 0.5 rung: \(line)")
-        }
-        let full = records[(preview + 1)...].contains {
-            $0.decodeScale >= DecodeLadder.fullScale - 1e-4
-        }
-        XCTAssertTrue(full, "the 1.0 rung must follow the 0.5 rung on a cold start: \(line)")
+        XCTAssertFalse(records.contains { $0.decodeScale < DecodeLadder.fullScale - 1e-4 },
+                       "571-A: the cold start must not present a half-resolution frame: \(line)")
+        XCTAssertTrue(records.contains { $0.decodeScale >= DecodeLadder.fullScale - 1e-4 },
+                      "the full rung must reach the canvas: \(line)")
         XCTAssertEqual(controller.monotonicSuppressedPresents, 0,
                        "the gate must not touch a cold start")
     }

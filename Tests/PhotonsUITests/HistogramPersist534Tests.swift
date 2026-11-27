@@ -11,13 +11,13 @@ import PhotonsCatalog
 ///   ① a second open of an untouched photo shows its plot **before any new frame** — the bins came
 ///      out of `asset_histograms`, not out of a fresh measurement. A document that changed at the
 ///      pixels (exposure) is a **miss** (`documentChanged`) and is measured/written again;
-///   ② while the full development is still running, the 0.5 preview frame that already covers the
-///      whole picture publishes its own bins, and the full rung refreshes them when it lands. The
-///      two plots are compared against the dispatch's tolerances: no bucket moves more than 2 % of
-///      the picture's samples, and the 削顶 fraction moves by at most 0.1 percentage point.
+///   ② 571-A: the canvas no longer has a 0.5 preview frame, so the histogram is measured from the
+///      **full** frame only — one measurement, one publish, one development later than 534's early
+///      publish. The 0.5-vs-1.0 tolerance table is still exercised synchronously (`measuredFrame`),
+///      because it documents the measurement instrument itself.
 ///
 /// The noise guards are unchanged: a 1:1/200 % window frame never measures its crop, and the
-/// synchronous test/smoke path still only lets the canonical rung measure (the reverse gates below).
+/// synchronous test/smoke path still only measures the rung it was asked for.
 @MainActor
 final class HistogramPersist534Tests: XCTestCase {
 
@@ -220,53 +220,33 @@ final class HistogramPersist534Tests: XCTestCase {
         print("534 ②: exposed document missed with documentChanged and wrote \(editedKey.pixelDigest)")
     }
 
-    // MARK: - ③ the 0.5 preview publishes, the full rung refreshes, within tolerance
+    // MARK: - ③ the full frame publishes once (571-A: there is no 0.5 preview to publish first)
 
-    func testThePreviewPublishesBeforeTheFullRungAndStaysWithinTolerance() throws {
+    func testTheFullFrameIsTheFirstAndOnlyPublish() throws {
         let url = try rawFixture()
         let (_, store) = try makeCatalog()
         let loupe = makeController(persistence: store, autoRender: true)
         loupe.frameSource = source(url, identity: "early-photo")
         loupe.scheduleRender()
 
-        XCTAssertTrue(waitFor(60) {
-            loupe.lastPresentedScale == DecodeLadder.previewScale && loupe.lastHistogram != nil
-        }, "the 0.5 preview never reached the canvas with a plot")
-        let preview = try XCTUnwrap(loupe.lastHistogram)
-        let previewTime = CFAbsoluteTimeGetCurrent()
-        let publishedAfterPreview = loupe.histogramPublishedCount
-        XCTAssertEqual(loupe.histogramMeasurementCount, 1,
-                       "the first whole-picture frame is the one measurement so far")
-        XCTAssertNil(loupe.lastHistogramError)
-
         XCTAssertTrue(waitFor(120) {
-            loupe.lastPresentedScale == DecodeLadder.fullScale
-                && loupe.histogramPublishedCount > publishedAfterPreview
-        }, "the full rung never refreshed the plot")
-        let fullTime = CFAbsoluteTimeGetCurrent()
+            loupe.lastPresentedScale == DecodeLadder.fullScale && loupe.lastHistogram != nil
+        }, "the full frame never reached the canvas with a plot")
         let full = try XCTUnwrap(loupe.lastHistogram)
-        XCTAssertLessThan(previewTime, fullTime,
-                          "the preview's publish must come before the full rung's")
-        XCTAssertEqual(loupe.histogramMeasurementCount, 2,
-                       "preview + full: two measurements of one picture")
-        XCTAssertEqual(loupe.histogramPublishedCount, 2)
+        XCTAssertEqual(loupe.histogramMeasurementCount, 1,
+                       "571-A: the full frame is the only whole-picture measurement")
+        XCTAssertEqual(loupe.histogramPublishedCount, 1)
+        XCTAssertNil(loupe.lastHistogramError)
+        // The canvas never showed the half-linear rung on the way here.
+        XCTAssertFalse(loupe.framePresentLog.contains {
+            $0.photo == "early-photo" && $0.decodeScale < DecodeLadder.fullScale - 1e-4
+        }, "571-A: the canvas must not present a sub-full frame")
 
-        let report = tolerance(full: full, preview: preview)
-        print("534 ③ early: preview \(preview.sampleCount) px → full \(full.sampleCount) px · "
-              + "maxRel \(String(format: "%.3f%%", report.maxRelative * 100)) · "
-              + "maxFrac \(String(format: "%.4f pp", report.maxFractionDifference * 100)) · "
-              + "clippedΔ \(String(format: "%.4f pp", report.clippedDifference * 100)) · "
-              + "worst \(report.detail)")
-        XCTAssertLessThanOrEqual(report.maxFractionDifference,
-                                 LoupeController.histogramPreviewBinRelativeTolerance,
-                                 "preview bins left the 2 % envelope")
-        XCTAssertLessThanOrEqual(report.clippedDifference,
-                                 LoupeController.histogramPreviewClippedAbsoluteTolerance,
-                                 "preview 削顶 left the 0.1 pp envelope")
+        print("534 ③ 571-A: full \(full.sampleCount) px · one measurement · one publish")
 
         let fullKey = recordKey(assetID: "early-photo", edit: .neutral, scale: 1.0)
         XCTAssertTrue(waitFor { store.load(fullKey) != nil },
-                      "the full-rung refresh was not written back to the catalog")
+                      "the full-rung measurement was not written back to the catalog")
     }
 
     // MARK: - ②.4 the tolerance table on three subjects
@@ -409,25 +389,26 @@ final class HistogramPersist534Tests: XCTestCase {
         print("534 ⑤① reverse gate: constant digest served the neutral row for a brighter document")
     }
 
-    /// ② Restore the old `atTarget` rule: the 0.5 preview may not publish, so acceptance ③'s early
-    /// publish assertion goes red.
-    func testReverseGateAtTargetDoesNotPublishThePreview() throws {
+    /// 571-A — the old reverse gate ② (`atTarget` skipped the 0.5 preview) has no preview to skip.
+    /// What is asserted instead: the canvas publishes **nothing** until the full frame lands, and that
+    /// first publish is the full frame's. Restoring a preview rung makes the `lastPresentedScale`
+    /// assertion red.
+    func testNothingPublishesBeforeTheFullFrame() throws {
         let url = try rawFixture()
         let loupe = makeController(autoRender: true)
-        loupe.histogramPublishesOnPreviewForTesting = false
         loupe.frameSource = source(url, identity: "at-target-photo")
         loupe.scheduleRender()
 
-        XCTAssertTrue(waitFor(60) { loupe.lastPresentedScale == DecodeLadder.previewScale },
-                      "the preview never reached the canvas")
-        XCTAssertNil(loupe.lastHistogram,
-                     "atTarget: the preview must publish nothing — case ③'s red")
+        // While the full development is still running there is no frame and therefore no plot.
+        XCTAssertNil(loupe.lastPresentedScale)
+        XCTAssertNil(loupe.lastHistogram)
         XCTAssertEqual(loupe.histogramMeasurementCount, 0)
 
-        XCTAssertTrue(waitFor(120) { loupe.lastHistogram != nil },
-                      "the full rung never published")
+        XCTAssertTrue(waitFor(120) {
+            loupe.lastPresentedScale == DecodeLadder.fullScale && loupe.lastHistogram != nil
+        }, "the full rung never published")
         XCTAssertEqual(loupe.histogramPublishedCount, 1,
-                       "atTarget: the first publish is the full frame's")
-        print("534 ⑤② reverse gate: atTarget skipped the preview and published once at full scale")
+                       "571-A: the first publish is the full frame's")
+        print("534 ⑤② 571-A: nothing before full, one publish at full scale")
     }
 }

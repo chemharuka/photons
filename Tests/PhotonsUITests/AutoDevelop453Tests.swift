@@ -71,13 +71,6 @@ final class AutoDevelop453Tests: XCTestCase {
         return condition()
     }
 
-    private func waitForPreview(_ loupe: LoupeController) -> Bool {
-        waitFor {
-            loupe.currentPresentedPhotoForTesting != nil
-                && loupe.lastPresentedScale == DecodeLadder.previewScale
-        }
-    }
-
     private func waitForFull(_ loupe: LoupeController, photo: String) -> Bool {
         waitFor {
             loupe.currentPresentedPhotoForTesting == photo
@@ -180,7 +173,8 @@ final class AutoDevelop453Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "453-gate", session: session)
-        XCTAssertTrue(waitForPreview(loupe), "the preview rung never reached the canvas")
+        // 571-A: there is no 0.5 frame any more; the click arrives on the stand-in.
+        XCTAssertNil(loupe.lastPresentedScale)
 
         let editBefore = session.edit
         let historyBefore = session.history.count

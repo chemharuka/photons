@@ -6,27 +6,26 @@ import PhotonsUI
 /// Q29 on the **shipped path**: the loupe's own two queues, driven through `scheduleRender` /
 /// `requestViewportRender` — not a hand-rolled imitation of them.
 ///
-/// The four acceptance numbers, and how each is made checkable:
+/// 571-A changed what the canvas asks for: the ladder has one rung (the whole picture), and while it
+/// is being developed there is **no half-resolution frame** to pan over — the canvas keeps the 1920 px
+/// stand-in. The claims below were re-based on that two-valued canvas:
 ///
-///   ① twenty pans while a 60 MP development runs: every frame inside a frame budget. Measured as
-///      `requestViewportRender()` → the frame reaching the canvas, which is the latency a hand feels.
-///   ② the 1:1 first frame does not regress: entering 1:1 while only the preview rung exists opens on
-///      that rung in one render, never on a development.
-///   ③ full-resolution ready time does not regress: cold open → a frame at scale 1 on the canvas,
-///      against the *same work done inline* (the pre-Q29 shape) on the same machine, in the same
-///      process, alternating rounds.
-///   ④ `fit ↔ 1:1` still develops two rungs and no more, counted in `DecodeLadder`/`RAWDecoder`.
+///   ① twenty pans while a 60 MP development runs: they draw nothing and cost no extra decode; the one
+///      arrival paints exactly one replacement frame.
+///   ② the 1:1 first frame is the full rung (the user waits for the development, never sees a soft
+///      frame in between).
+///   ③ cold-open ready time is compared against the same inline work (develop then render).
+///   ④ `fit ↔ 1:1` develops one rung and no more, counted in `DecodeLadder`/`RAWDecoder`.
 ///
 /// The ordering rules are asserted on counts, never on a clock: `rungArrivals` (rungs that entered the
 /// ladder), `staleRungDrops` (deliveries that were **not** painted), and the queue's own
 /// `decodes`/`deliveries`/`drops`. A stale result may be cached; it must never reach the canvas, and a
 /// cancelled photo must not call back at all.
 ///
-/// Absolute, user-facing numbers (52 ms first frame, 8 ms per pan, 4.9 ms warm) are asserted only
-/// under `PHOTONS_BENCH=1`: on a machine that is building two other things at once they drift by
-/// ±20 %, and a red test must mean a regression rather than a busy CPU. The *semantics* — counts,
-/// ordering, interval overlap — are asserted on every run, and the numbers are printed on every run
-/// so the gate is a formality, not a blind spot.
+/// Absolute, user-facing numbers are asserted only under `PHOTONS_BENCH=1`: on a machine that is
+/// building two other things at once they drift by ±20 %, and a red test must mean a regression
+/// rather than a busy CPU. The *semantics* — counts, ordering, interval overlap — are asserted on
+/// every run, and the numbers are printed on every run.
 ///
 /// The controller gets a real window (as `LoupeRenderTests`' EDR test does): `present` needs a
 /// drawable, and a failed hand-off would make the layer fall back to 8-bit and re-render once — noise
@@ -73,10 +72,6 @@ final class LoupeQueueTests: XCTestCase {
                                 windowed: Bool = true) -> LoupeController {
         let controller = LoupeController(session: CatalogSession())
         controller.autoRenderEnabled = false     // each test arms rendering itself
-        // The histogram card used to cost every windowed 1:1 frame +8 ms (release; +104 ms in a debug
-        // build). Q30 made it a *settled-camera* measurement — a pan frame skips it — so keeping it off
-        // here is about matching the pre-005f baseline these numbers quote (§11.10: 4.0–4.6 ms), not
-        // about hiding a cost: `HistogramCadenceTests` measures a pan with the card on.
         controller.collectsHistogram = false
         controller.frameSource = source
         if windowed {
@@ -125,15 +120,6 @@ final class LoupeQueueTests: XCTestCase {
 
     /// Pump until nothing is moving: the decode queue idle, no frame mid-render, **and** the frame
     /// count unchanged for four consecutive checks.
-    ///
-    /// All three are needed. A frame's render is not on the decode queue, so "the decode queue is
-    /// empty" alone returns while a 60 MP render is still in flight — and that render moves no
-    /// counter until it presents, so the stability window alone would call a 700 ms replacement
-    /// render "quiet" (this is how the stale-arrival test went red on a loaded box). A rung's arrival
-    /// starts the *next* development, so one idle check can be the gap between two of them.
-    ///
-    /// Each drain is capped by what is left of this call's own deadline (≤ 2 s), so the loop can no
-    /// longer outlive its timeout the way chained 30 s waits could: the total is `timeout`.
     private func settle(_ controller: LoupeController, timeout: TimeInterval = 180) {
         let deadline = Date().addingTimeInterval(timeout)
         var quiescent = 0
@@ -158,89 +144,50 @@ final class LoupeQueueTests: XCTestCase {
 
     // MARK: - ① pans during a development
 
-    /// ① Twenty pans while the 60 MP development runs. Every one of them renders from the resident
-    /// preview rung; none of them waits for ImageIO.
-    ///
-    /// Also the "one replacement" assertion: those twenty pan frames each asked for the full rung, the
-    /// decode queue folded all twenty into the one development already on its way, and the single
-    /// arrival repaints **once** — 20 pan frames + 1 preview + 1 replacement = 22 frames, not 42.
-    func testTwentyPansWhileTheFullDevelopmentRuns() throws {
+    /// ① Twenty pans while the 60 MP development runs. 571-A: there is no half-resolution rung to draw,
+    /// so every one of them is a request that draws nothing and joins the one development already on
+    /// its way; the single arrival then paints exactly one replacement frame.
+    func testPansDuringTheFullDevelopmentDrawNothingAndCostOneDecode() throws {
         let url = try rawFixture()
         let loupe = makeController(source: source(url, identity: "A"))
         loupe.autoRenderEnabled = true
         loupe.scheduleRender()
 
-        // The preview rung is what the user is looking at when they start dragging.
-        XCTAssertTrue(waitFor { loupe.lastPresentedScale == DecodeLadder.previewScale },
-                      "the preview rung never reached the canvas")
-        XCTAssertEqual(loupe.rungArrivals, 1, "only the preview has landed; the full one is coming")
+        // The development has started; the canvas has no frame yet (the 1920 px stand-in is the
+        // first-frame placeholder, not a presented `FrameResult`).
+        XCTAssertTrue(waitFor { loupe.developmentStats.decodes >= 1 }, "the development never started")
+        XCTAssertNil(loupe.lastPresentedScale)
+        XCTAssertEqual(loupe.rungArrivals, 0)
 
-        var render: [Double] = []
-        var latency: [Double] = []
         for step in 0..<20 {
             loupe.frameSource = source(url, identity: "A", state: pannedState(step))
             let before = loupe.viewRenderCount
-            let t0 = CFAbsoluteTimeGetCurrent()
             loupe.requestViewportRender()
-            XCTAssertTrue(waitFor(10) { loupe.viewRenderCount > before },
-                          "pan \(step) never reached the canvas")
-            latency.append((CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            render.append(loupe.lastFrame?.renderMilliseconds ?? 0)
+            XCTAssertEqual(loupe.viewRenderCount, before,
+                           "pan \(step) drew a frame while the full rung was still developing")
         }
-        print("Q29 ① per-frame render: "
-              + render.map { String(format: "%.1f", $0) }.joined(separator: " ") + " ms")
-        print(String(format: "Q29 ① 20 pans during the full development: render p50 %.2f / max %.2f ms "
-                        + "(budget 8, baseline 4.9 warm) · request→canvas p50 %.2f / max %.2f ms "
-                        + "(60 Hz frame 16.7) · pre-Q29 the first pan waited 5906 ms",
-                     percentile(render, 0.5), render.max() ?? 0,
-                     percentile(latency, 0.5), latency.max() ?? 0))
-
-        // The median is a frame; the tail is GPU contention with the 60 MP development (and with
-        // anything else on the machine) — a *serialised* frame would be 800–6000 ms in the first
-        // slot, which no tail allowance could hide. So: the budget on p50 **and** p90, and "no frame
-        // beyond one 60 Hz interval" on the worst case.
-        if benchmarks {
-            XCTAssertLessThanOrEqual(percentile(render, 0.5), 8.0,
-                                     "a pan's own render must fit the budget while ImageIO is busy")
-            XCTAssertLessThanOrEqual(percentile(render, 0.9), 8.0,
-                                     "and 19 of 20 frames must too, not just the median")
-            XCTAssertLessThanOrEqual(latency.max() ?? 0, 16.7,
-                                     "…and the whole request→canvas hop must fit a 60 Hz frame")
-        }
-        // Unconditional: no pan was serialised behind the development. Asserted structurally — all
-        // twenty frames landed while only the preview rung existed, so none of them could have waited
-        // for the full development to finish (a serialised pan would have to land after it).
-        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.previewScale,
-                       "the pans ride the preview rung: the full one is still being developed")
-        XCTAssertEqual(loupe.rungArrivals, 1, "only the preview rung has landed so far")
-        // The millisecond budget is a machine measurement (a 60 MP development holds the GPU), so it
-        // is asserted only under PHOTONS_BENCH=1; the numbers are printed on every run.
-        if benchmarks {
-            XCTAssertLessThan(latency.max() ?? 0, 50,
-                              "a pan was serialised behind the development")
-        }
+        print("Q29 ① 20 pans during the full development: no frames, one decode")
 
         settle(loupe)
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
                        "the replacement frame must put the full rung on screen")
-        XCTAssertEqual(loupe.rungArrivals, 2, "two rungs, two arrivals")
-        XCTAssertEqual(loupe.viewRenderCount, 22,
-                       "20 pans + the preview frame + exactly one replacement — a duplicate arrival "
-                       + "must never repaint")
-        XCTAssertEqual(loupe.developmentStats.decodes, 2,
+        XCTAssertEqual(loupe.rungArrivals, 1, "one rung, one arrival")
+        XCTAssertTrue((1...2).contains(loupe.viewRenderCount),
+                      "the pan follow-up and the arrival paint at most two frames, got \(loupe.viewRenderCount)")
+        XCTAssertEqual(loupe.developmentStats.decodes, 1,
                        "twenty pans asked for the full rung twenty times and cost one development")
-        XCTAssertGreaterThanOrEqual(loupe.developmentStats.coalesced, 19)
+        XCTAssertGreaterThanOrEqual(loupe.viewRenderCoalesced, 18,
+                                    "the pan storm must fold into the in-flight frame")
+        XCTAssertGreaterThanOrEqual(loupe.developmentStats.coalesced, 1,
+                                    "the renders that did reach the queue join the one development")
     }
 
     // MARK: - ② the 1:1 first frame
 
-    /// ② Entering 1:1 while the full rung is still being developed opens on the preview rung in one
-    /// render. Pre-Q29 that was 52 ms cold (a graph built for the rung, one window render); it must not
-    /// get slower, and it must never become a development.
-    func testOneToOneFirstFrameOpensOnThePreviewRung() throws {
+    /// ② Entering 1:1 while the full rung is being developed waits for that development; when it lands
+    /// the first frame is a window render off the full rung. No preview leg, no second development.
+    func testOneToOneFirstFrameIsTheFullRung() throws {
         let url = try rawFixture()
-        // The user pressed Z during the fit development: the first frame this loupe produces is a 1:1
-        // window, from a graph that does not exist yet — the pessimistic case.
         let loupe = makeController(source: source(url, identity: "A", state: pannedState(0)))
         loupe.autoRenderEnabled = true
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -250,16 +197,17 @@ final class LoupeQueueTests: XCTestCase {
         let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         let first = try XCTUnwrap(loupe.lastFrame)
         print(String(format: "Q29 ② 1:1 first frame: render %.1f ms (%.0f ms from the request, which "
-                        + "includes the preview development) · baseline 52 ms cold / 4.9 ms warm",
+                        + "includes the full development)",
                      first.renderMilliseconds, elapsed))
 
-        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.previewScale,
-                       "1:1 must open on the resident preview rung, not wait for the full one")
-        XCTAssertEqual(loupe.rungArrivals, 1,
-                       "the first 1:1 frame must land while the full rung is still being developed")
+        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
+                       "1:1 opens on the full rung; there is no preview to open on")
+        XCTAssertEqual(loupe.rungArrivals, 1, "one rung, one arrival")
+        XCTAssertEqual(loupe.developmentStats.decodes, 1,
+                       "entering 1:1 must not develop a second rung")
         if benchmarks {
             XCTAssertLessThanOrEqual(first.renderMilliseconds, 60,
-                                     "the preview frame's own render must fit the 60 ms budget")
+                                     "the 1:1 frame's own render must fit the 60 ms budget")
         }
 
         // Warm: once the full rung is resident, the same 1:1 frame is a render-only frame.
@@ -268,39 +216,37 @@ final class LoupeQueueTests: XCTestCase {
         let warmStart = CFAbsoluteTimeGetCurrent()
         loupe.requestViewportRender()
         XCTAssertTrue(waitFor { loupe.viewRenderCount > before })
+        settle(loupe)
         let warm = (CFAbsoluteTimeGetCurrent() - warmStart) * 1000
         print(String(format: "Q29 ② 1:1 warm frame (full rung resident): %.1f ms total · render "
-                        + "%.1f ms · baseline 4.9 ms", warm,
-                     loupe.lastFrame?.renderMilliseconds ?? 0))
+                        + "%.1f ms", warm, loupe.lastFrame?.renderMilliseconds ?? 0))
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale)
         if benchmarks {
             XCTAssertLessThanOrEqual(warm, 40, "a warm 1:1 frame must stay a frame, not a stage rebuild")
         }
-        XCTAssertEqual(loupe.developmentStats.decodes, 2,
-                       "entering 1:1 asks for the full rung; it must not develop the preview twice")
+        XCTAssertEqual(loupe.developmentStats.decodes, 1,
+                       "the warm frame must not develop anything")
     }
 
     // MARK: - ③ full-resolution ready time
 
-    /// ③ Cold open → a full-resolution frame on the canvas, against the *same work inline* (the
-    /// pre-Q29 shape: develop then render, synchronously, no queue split). Two rounds, alternating, so
-    /// neither number gets the other's warm ImageIO cache for free.
+    /// ③ Cold open → a full-resolution frame on the canvas, against the *same work inline* (develop
+    /// then render, synchronously, no queue split). Two rounds, alternating, so neither number gets
+    /// the other's warm ImageIO cache for free. 571-A: both sides do exactly one development.
     func testFullRungReadyTimeDoesNotRegress() throws {
         let url = try rawFixture()
         var inline: [Double] = []
         var split: [Double] = []
 
         for round in 0..<2 {
-            // A — inline: exactly what `pumpLadder` did for its two rungs.
+            // A — inline: develop the full rung and render, synchronously.
             let a = makeController(source: source(url, identity: "inline-\(round)"))
             let tA = CFAbsoluteTimeGetCurrent()
-            _ = try a.makeFrame(url: url, viewport: Self.viewport, decodeScale: 0.5,
-                                edit: .neutral, state: .fit)
             _ = try a.makeFrame(url: url, viewport: Self.viewport, decodeScale: 1,
                                 edit: .neutral, state: .fit)
             inline.append((CFAbsoluteTimeGetCurrent() - tA) * 1000)
 
-            // B — the shipped split: two queues, the ladder, one replacement per rung.
+            // B — the shipped split: two queues, the ladder, one replacement for the rung.
             let b = makeController(source: source(url, identity: "split-\(round)"))
             b.autoRenderEnabled = true
             let tB = CFAbsoluteTimeGetCurrent()
@@ -308,10 +254,8 @@ final class LoupeQueueTests: XCTestCase {
             XCTAssertTrue(waitFor { b.lastPresentedScale == DecodeLadder.fullScale },
                           "the full rung never reached the canvas")
             split.append((CFAbsoluteTimeGetCurrent() - tB) * 1000)
-            // Structural, load-proof, and the part ③ would otherwise only be able to infer from a
-            // clock: the split path develops each rung once and paints one frame per rung.
-            XCTAssertEqual(b.rungArrivals, 2, "two rungs, two arrivals")
-            XCTAssertEqual(b.developmentStats.decodes, 2,
+            XCTAssertEqual(b.rungArrivals, 1, "one rung, one arrival")
+            XCTAssertEqual(b.developmentStats.decodes, 1,
                            "the queue split must not develop a rung twice")
             print(String(format: "Q29 ③ round %d: inline %.0f ms → two queues %.0f ms (%.1f%%), "
                          + "decodes %d, arrivals %d",
@@ -321,11 +265,8 @@ final class LoupeQueueTests: XCTestCase {
         }
 
         let inlineP50 = percentile(inline, 0.5), splitP50 = percentile(split, 0.5)
-        print(String(format: "Q29 ③ full-resolution ready: inline %.0f ms → split %.0f ms "
-                        + "(budget: within 5%% of baseline 860 ms)", inlineP50, splitP50))
-        // Both numbers are wall clocks measured against each other in the same process, so the ratio
-        // is only asserted under PHOTONS_BENCH=1: on a box that is building something else the two
-        // rounds can drift ±20 % independently and the ratio says nothing about the product.
+        print(String(format: "Q29 ③ full-resolution ready: inline %.0f ms → split %.0f ms",
+                     inlineP50, splitP50))
         if benchmarks {
             XCTAssertLessThanOrEqual(splitP50, inlineP50 * 1.05 + 5,
                                      "the queue split must not cost 5% of the ready time")
@@ -334,17 +275,9 @@ final class LoupeQueueTests: XCTestCase {
 
     // MARK: - ④ the decode count
 
-    /// ④ `fit ↔ 1:1` still develops each rung exactly once. The count comes from the decoder, not from
-    /// a timing: a second development of the same rung is cheap to hide inside a slow frame.
-    ///
-    /// The count is `loupe.developedRungs` — **this** ladder's ledger — not
-    /// `RAWDecoder.decodeCounts()`. The latter is process-global and keyed by scale only, so in a gate
-    /// that runs every class in one process it also counts a controller from the class that ran
-    /// before, which is still developing the same fixture: measured `[0.5: 1, 1.0: 2]` here while this
-    /// controller had developed exactly two rungs (its own queue said `decodes: 2`). Both paths store
-    /// every development, so the ledger is the same fact with an owner on it — and a genuine second
-    /// development of a rung by *this* loupe still shows up as a 2.
-    func testFitAndOneToOneStillDevelopEachRungOnce() throws {
+    /// ④ `fit ↔ 1:1` develops the full rung exactly once. The count is `loupe.developedRungs` —
+    /// **this** ladder's ledger — because `RAWDecoder.decodeCounts()` is process-global.
+    func testFitAndOneToOneDevelopTheFullRungOnce() throws {
         let url = try rawFixture()
         RAWDecoder.resetDecodeCounts()
         let loupe = makeController(source: source(url, identity: "count"))
@@ -352,7 +285,7 @@ final class LoupeQueueTests: XCTestCase {
         loupe.scheduleRender()
         settle(loupe)
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale)
-        XCTAssertEqual(loupe.developedRungs, [0.5: 1, 1: 1])
+        XCTAssertEqual(loupe.developedRungs, [1: 1])
         let decodesAfterOpen = loupe.developmentStats.decodes
 
         for round in 0..<5 {
@@ -369,7 +302,7 @@ final class LoupeQueueTests: XCTestCase {
               + "\(loupe.developedRungs.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })"
               + ", development queue \(loupe.developmentStats)"
               + ", process-wide \(RAWDecoder.decodeCounts().sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })")
-        XCTAssertEqual(loupe.developedRungs, [0.5: 1, 1: 1],
+        XCTAssertEqual(loupe.developedRungs, [1: 1],
                        "switching fit ↔ 1:1 must never develop the file again")
         XCTAssertEqual(loupe.developmentStats.decodes, decodesAfterOpen,
                        "and must not ask the decode queue again either")
@@ -431,31 +364,20 @@ final class LoupeQueueTests: XCTestCase {
     /// The generation rule, isolated: a development that lands after the camera moved on is **cached
     /// and the current camera is asked for one frame** — the stale *pixels* are never painted, but the
     /// buffer must not sit invisible either.
-    ///
-    /// That second half is the 2026-10-26 correction of the original rule ("cache but never paint").
-    /// The original version left a photo opened while the display was settling permanently black (the
-    /// headroom re-read bumps the generation twice on the way into the loupe), and it also left a 0.5
-    /// preview on screen after the full rung had landed; the user's only cure was to touch the camera.
-    /// Repainting here is a frame at the camera that is on screen **now** — not the superseded one — so
-    /// it cannot show stale pixels, and the single-flight path coalesces it during a real gesture.
     func testAStaleArrivalIsCachedAndRepaintedAtTheCurrentCamera() throws {
         let url = try rawFixture()
         let loupe = makeController(source: source(url, identity: "stale"))
         loupe.autoRenderEnabled = true
         loupe.scheduleRender()
-        XCTAssertTrue(waitFor { loupe.lastPresentedScale == DecodeLadder.previewScale },
-                      "the preview frame never arrived")
+        XCTAssertTrue(waitFor { loupe.developmentStats.decodes >= 1 },
+                      "the development never started")
         let framesBefore = loupe.viewRenderCount
 
         // A resize (or any new intent) while the full development is still running: same photo, new
         // generation. The full rung's arrival now belongs to a frame that no longer exists.
         loupe.scheduleRender()
-        // The second `scheduleRender` paints a frame of its own; *then* the stale arrival has to
-        // repaint at the camera on screen now. Wait for that property — the full rung on the canvas —
-        // instead of for a quiet process: a `.scheduled` frame is not covered by the in-flight flag,
-        // and "nothing changed for a while" is a race with a 700 ms render on a loaded box.
         XCTAssertTrue(waitFor { loupe.lastPresentedScale == DecodeLadder.fullScale },
-                      "the full rung never replaced the preview on its own")
+                      "the stale arrival never repainted at the current camera")
         settle(loupe)
         print("Q29 stale: frames \(framesBefore) → \(loupe.viewRenderCount), "
               + "stale drops \(loupe.staleRungDrops), arrivals \(loupe.rungArrivals), "
@@ -463,14 +385,11 @@ final class LoupeQueueTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(loupe.staleRungDrops, 1,
                                     "a delivery for a superseded frame still counts as stale")
-        XCTAssertEqual(loupe.rungArrivals, 2, "…and the buffer is kept: both rungs are resident")
-        // The second `scheduleRender` paints one frame of its own from the preview rung; the full
-        // rung's arrival adds exactly **one** more, at the current camera, so the full rung reaches
-        // the screen without the user touching anything.
-        XCTAssertEqual(loupe.viewRenderCount, framesBefore + 2,
+        XCTAssertEqual(loupe.rungArrivals, 1, "…and the buffer is kept: the full rung is resident")
+        // There was no preview frame to paint; the stale arrival's one repaint is the only frame.
+        XCTAssertEqual(loupe.viewRenderCount, framesBefore + 1,
                        "a stale arrival repaints once, at the camera on screen now")
-        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
-                       "the full rung replaces the preview on its own")
+        XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale)
 
         // The buffer is not thrown away: the explicit next frame uses it, with no new development.
         let decodes = loupe.developmentStats.decodes
@@ -478,49 +397,5 @@ final class LoupeQueueTests: XCTestCase {
         XCTAssertTrue(waitFor { loupe.lastPresentedScale == DecodeLadder.fullScale })
         XCTAssertEqual(loupe.developmentStats.decodes, decodes,
                        "the stale arrival was cached: the next frame owes ImageIO nothing")
-    }
-
-    // MARK: - the two queues really are two
-
-    /// Decode and render **overlap in time** — asserted as a count taken at delivery, so a loaded
-    /// machine can be slow without failing the test, and a single-queue implementation cannot pass it.
-    func testDevelopmentAndFramesOverlapInTime() throws {
-        let url = try rawFixture()
-        let loupe = makeController(source: source(url, identity: "overlap"))
-        loupe.autoRenderEnabled = true
-        let t0 = CFAbsoluteTimeGetCurrent()
-        loupe.scheduleRender()
-        XCTAssertTrue(waitFor { loupe.developmentStats.decodes >= 1 }, "no development started")
-
-        var frameTimes: [Double] = []
-        var framesWhileFullRungPending = 0
-        for step in 0..<6 {
-            loupe.frameSource = source(url, identity: "overlap", state: pannedState(step))
-            let before = loupe.viewRenderCount
-            loupe.requestViewportRender()
-            if waitFor(10, { loupe.viewRenderCount > before }) {
-                frameTimes.append(CFAbsoluteTimeGetCurrent())
-                // The structural form of "the two queues overlapped": read on the spot whether the
-                // full development had already arrived. A single queue would deliver this frame only
-                // after the development finished, so every frame would see both rungs resident.
-                if loupe.rungArrivals < 2 { framesWhileFullRungPending += 1 }
-            }
-        }
-        XCTAssertEqual(frameTimes.count, 6, "not every pan produced a frame")
-        // The moment the second rung reaches the ladder — i.e. the development is done.
-        XCTAssertTrue(waitFor(120) { loupe.rungArrivals >= 2 }, "the full rung never arrived")
-        let developmentDone = CFAbsoluteTimeGetCurrent()
-        settle(loupe)
-
-        let frames = (start: try XCTUnwrap(frameTimes.first), end: try XCTUnwrap(frameTimes.last))
-        print(String(format: "Q29 overlap: development finished at %.0f ms; frames at %.0f … %.0f ms; "
-                        + "frames delivered while the full rung was still pending: %d/6",
-                     (developmentDone - t0) * 1000,
-                     (frames.start - t0) * 1000, (frames.end - t0) * 1000,
-                     framesWhileFullRungPending))
-        XCTAssertEqual(framesWhileFullRungPending, 6,
-                       "a frame landed only after the development had finished — the decode and the "
-                       + "render were not overlapping, they were serialised")
-        XCTAssertGreaterThan(frames.start, t0)
     }
 }
