@@ -18,7 +18,7 @@ import Metal
 ///      log2 histogram built on the GPU (no full-frame readback);
 ///   3. three à trous levels (B3 spline, steps 1/2/4), **every level at full resolution**. Each
 ///      level's detail is Wiener-shrunk by `w = c² / (c² + (k·σ·2^(i/2))²)`; the luma weight is
-///      protected by the flatness gate `g`, the chroma weights by `g·(1 − structure)`;
+///      protected by the flatness gate `g`, the chroma weight by the chroma's own edge term;
 ///   4. the flatness gate: `gn = smooth|∇y| / σ`, `g = clip((hi − gn)/(hi − lo))` with `lo/hi` at the
 ///      40 %/85 % quantiles of `gn`. The quantile search is a second GPU histogram — the map is
 ///      **scale-free**, so `g` does not depend on the σ estimate at all. This is the only quarter-
@@ -30,7 +30,9 @@ import Metal
 ///      No coarse stage means the 16–64 px chroma base is passed through unchanged — low-frequency
 ///      colour is preserved by construction, while the fine Wiener removes the grain. The chroma
 ///      threshold is `k_c = 1 + colorNR/100 · 1` (default 50 ⇒ 1.5σc), not the old 3.5σc that ate
-///      real colour differences;
+///      real colour differences. K and M take **one** weight, computed from the vector detail
+///      `c = sqrt(K² + M²)` with `σ_c = sqrt(σK² + σM²)`, so the two components are never shrunk by
+///      different amounts (566-A §11);
 ///   6. recombine `G = y − 0.2126K − 0.0722M`, `R = G + K`, `B = G + M`, clamp negatives. (The
 ///      Rec709 weights are what make a chroma-only pass leave every pixel's luma unchanged; the
 ///      earlier `(K + M)/3` and a flat `(K + M)/4` both moved it because `y` is not their luma.)
@@ -50,7 +52,7 @@ enum PostDenoise {
     /// 566-A — the operator generation. Any change that moves a pixel of the S1.5 result must bump
     /// this, because the graph's whole-frame result cache is keyed by it: a cached texture from a
     /// previous arithmetic must never answer a request written by this one.
-    static let tuningVersion = 3
+    static let tuningVersion = 4
 
     /// ── parameters, mirrored byte for byte by the shader below ─────────────────────────────────
     private struct Params {
@@ -628,14 +630,21 @@ enum PostDenoise {
         float protectC = 1.0f - max(structureC, 0.25f * structure);
         float scale = exp2(float(p.cfg.w) * 0.5f);
         float ty = p.cfg.x * st->s.x * scale;
-        float tk = p.cfg.y * st->s.y * scale;
-        float tm = p.cfg.y * st->s.z * scale;
+        // 566-A §11 — the chroma is one **vector**, not two independent scalars. `c = |detail|`
+        // gets one Wiener weight and the same weight multiplies both K and M, so the two components
+        // can no longer be shrunk by different amounts (the old separate `wk`/`wm` was the hue
+        // rotation the ticket measured). σ_c = sqrt(σK² + σM²) is the vector's noise length; the
+        // ticket's other allowed choice (`max`) was 1.4× tighter, shrank real fine colour and did
+        // not improve the 965 hue, so the norm is what ships.
+        float sigmaC = sqrt(st->s.y * st->s.y + st->s.z * st->s.z);
+        float tc = p.cfg.y * sigmaC * scale;
+        float cc = d.y * d.y + d.z * d.z;
+        float wc = (p.f.y > 0.5f) ? cc / (cc + tc * tc + 1e-20f) : 1.0f;
         float wy = (p.f.x > 0.5f) ? (d.x * d.x) / (d.x * d.x + ty * ty + 1e-20f) : 1.0f;
-        float wk = (p.f.y > 0.5f) ? (d.y * d.y) / (d.y * d.y + tk * tk + 1e-20f) : 1.0f;
-        float wm = (p.f.y > 0.5f) ? (d.z * d.z) / (d.z * d.z + tm * tm + 1e-20f) : 1.0f;
+        float multC = (1.0f - protectC) + protectC * wc;
         float4 contrib = float4(((1.0f - protectL) + protectL * wy) * d.x,
-                                ((1.0f - protectC) + protectC * wk) * d.y,
-                                ((1.0f - protectC) + protectC * wm) * d.z,
+                                multC * d.y,
+                                multC * d.z,
                                 0.0f);
         float4 prev = (p.cfg.z > 0.5f) ? accIn.read(uint2(gx, gy)) : float4(0.0f);
         accOut.write(prev + contrib, uint2(gx, gy));
