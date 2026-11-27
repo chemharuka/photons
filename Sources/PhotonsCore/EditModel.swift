@@ -883,10 +883,14 @@ public struct EditModel: Sendable, Equatable, Codable {
             // 2026-10-28 (P0-6): the card's third block is a third stage — S3.9 reads 纹理/清晰度 and
             // none of the vignette/grain numbers, so a clarity drag must dirty S3.9 alone.
             if effects.texture != old.effects.texture
-                || effects.clarity != old.effects.clarity
-                || effects.nonBayerLuminanceNR != old.effects.nonBayerLuminanceNR
-                || effects.nonBayerColorNR != old.effects.nonBayerColorNR {
+                || effects.clarity != old.effects.clarity {
                 s.insert(.detailFX)
+            }
+            // 566-A — the two denoise strengths are S1.5 now, in the linear chain before the curve,
+            // so a drag must dirty the curve link (and everything downstream), not S3.9.
+            if effects.nonBayerLuminanceNR != old.effects.nonBayerLuminanceNR
+                || effects.nonBayerColorNR != old.effects.nonBayerColorNR {
+                s.insert(.curve)
             }
             // 117: 去雾 is S1.9 now, in the linear chain — its own stage and its own dirty bit, so a
             // dehaze drag must not re-run the display-referred detail filter.
@@ -1117,6 +1121,9 @@ public struct EditModel: Sendable, Equatable, Codable {
             // and the whole chain — byte for byte.
             var m = curve.keyString
             if linearDenoiseLuma > 0 { m += ";lindn=\(k(min(max(linearDenoiseLuma, 0), 1)))" }
+            // 566-A — S1.5's GMW pass also runs between S1.6 and S1.7, so its two strengths must
+            // move this link too. The token is absent at the explicit 0/0 pair only.
+            m += effects.postDenoiseKeyString
             return m
 
         case .color:
@@ -2951,13 +2958,14 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// He/Sun/Tang (2010) with a measured airlight `A` (`Kernels/s1_9_dehaze.metal`). Negative
     /// **adds** the veil back.
     public var dehaze: Double
-    /// 164 — **去噪** (0…100, default 0): S3.9's display-referred luminance denoise. The
-    /// guided filter's residual (the same statistics 纹理/清晰度 use) is subtracted from the luma at a
-    /// 1–3 px radius, so flat noise is averaged while structural edges keep their step. 0 is the
-    /// pre-164 frame byte for byte (the stage is not encoded when everything is 0).
+    /// 164 / 566-A — **去噪** (0…100, **default 50**): the scene-linear GMW luminance strength.
+    /// `k = 1 + amount/100 · 2`, so the resting position 50 is `k = 2` and an explicit 0 is the
+    /// pre-566 S3.9-off frame byte for byte (both denoises at 0 ⇒ no S1.5 pass at all). The number
+    /// itself and its 0…100 travel are unchanged from 164; only the operator moved.
     public var nonBayerLuminanceNR: Double
-    /// 164 — **去彩噪** (0…100, default 0): S3.9's OKLab chroma suppression. It scales
-    /// `C` only (hue and `L` are held), so a grey card stays neutral and the luma is untouched.
+    /// 164 / 566-A — **去彩噪** (0…100, **default 50**): the GMW chroma strength,
+    /// `k_c = 1 + amount/100 · 5`. It works on `K = R − G` / `M = B − G`, so a grey card stays
+    /// neutral and the luma is held.
     public var nonBayerColorNR: Double
 
     public static let identity = EffectsGroup()
@@ -2974,26 +2982,29 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
     /// chain for nothing, and a document with no grain must keep the pre-S3.7 chain byte for byte.
     public var hasGrain: Bool { grain > 0 }
 
-    /// Does S3.9 exist for this document? Judged **by value**: 纹理 / 清晰度 / 去噪 /
-    /// 去彩噪 non-zero (117 removed 去雾 from this stage). A document with all four at 0
-    /// keeps the pre-S3.9 chain byte for byte — the strongest form of 「中性零变化」, the pass is not
-    /// encoded rather than encoded and multiplied by zero.
+    /// Does S3.9 exist for this document? Judged **by value**: 纹理 / 清晰度 non-zero.
+    /// 566-A moved 去噪 / 去彩噪 to the scene-linear S1.5 GMW pass, so they no longer summon this
+    /// display-referred stage; a document with the two detail amounts at 0 keeps the pre-S3.9 chain
+    /// byte for byte (the pass is not encoded rather than encoded and multiplied by zero).
     public var hasDetailFX: Bool {
-        texture != 0 || clarity != 0 || nonBayerLuminanceNR != 0 || nonBayerColorNR != 0
+        texture != 0 || clarity != 0
     }
 
     /// 117: does S1.9 (去雾) exist for this document? Its own stage, its own link.
     public var hasDehaze: Bool { dehaze != 0 }
 
-    /// S3.9's material — 纹理 / 清晰度 and the two denoises, and nothing else. A clarity
-    /// drag must not miss a cached vignette (S3c reads neither) and a vignette drag must not re-run
-    /// S3.9. 去雾 has its own string now that it is its own stage. The newer fields append only when
-    /// non-zero (the `asp`/`car` discipline): a pre-164 document keeps the exact `tx=…;cl=…` text.
+    /// S3.9's material — 纹理 / 清晰度 and nothing else. 566-A moved the two denoises to S1.5 (their
+    /// material rides the curve link, the same place the 365 linear prototype's `;lindn=` lives), so
+    /// they must not invalidate this display-referred pass.
     public var detailFXKeyString: String {
-        var m = "tx=\(k(texture));cl=\(k(clarity))"
-        if nonBayerLuminanceNR != 0 { m += ";nbl=\(k(nonBayerLuminanceNR))" }
-        if nonBayerColorNR != 0 { m += ";nbc=\(k(nonBayerColorNR))" }
-        return m
+        "tx=\(k(texture));cl=\(k(clarity))"
+    }
+
+    /// 566-A — S1.5's material. The GMW pass runs between S1.6 and S1.7, so its two strengths ride
+    /// the curve link; an empty token at the explicit 0/0 pair keeps the pre-566 chain byte for byte.
+    public var postDenoiseKeyString: String {
+        guard nonBayerLuminanceNR != 0 || nonBayerColorNR != 0 else { return "" }
+        return ";gmw=\(k(nonBayerLuminanceNR));gmwc=\(k(nonBayerColorNR))"
     }
 
     /// S1.9's material — the dehaze amount itself. 120b's `;dd=` token went with the field, so a
@@ -3005,7 +3016,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
                 texture: Double = 0, clarity: Double = 0, dehaze: Double = 0,
-                nonBayerLuminanceNR: Double = 0, nonBayerColorNR: Double = 0) {
+                nonBayerLuminanceNR: Double = 50, nonBayerColorNR: Double = 50) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
@@ -3054,11 +3065,13 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
         if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
-        // 164: additive, absent at 0 — a pre-164 document re-encodes byte for byte.
-        if nonBayerLuminanceNR != 0 {
+        // 164 / 566-A: absent at the resting value 50 — an absent key therefore reads as the new
+        // default (k = 2), while an explicit 0 is written and stays the user's own "off". A pre-566
+        // document (absent or non-zero) re-encodes byte for byte.
+        if nonBayerLuminanceNR != 50 {
             try c.encode(nonBayerLuminanceNR, forKey: AnyCodingKey("nonBayerLuminanceNR"))
         }
-        if nonBayerColorNR != 0 {
+        if nonBayerColorNR != 50 {
             try c.encode(nonBayerColorNR, forKey: AnyCodingKey("nonBayerColorNR"))
         }
     }
