@@ -5390,7 +5390,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             queuePendingAuto(.light)
             return nil
         }
-        guard let graph = frame.graph else { return nil }
+        guard let graph = measurementGraph(from: frame, document: document ?? session.edit) else {
+            return nil
+        }
         lastAutoLightSampleIdentityForTesting = frame.graphPhoto ?? frame.identity
         let source = document ?? session.edit
         lastAutoLightBlackOffsetInputForTesting = source.light.blackOffset
@@ -5417,6 +5419,23 @@ public final class LoupeController: NSViewController, HeadroomSource {
         let next = plan.apply(to: source)
         guard next.light != source.light else { return nil }
         return plan
+    }
+
+    /// 571-A — a **one-shot** graph for a synchronous measurement on the main thread.
+    ///
+    /// It is built from the same resident whole-picture buffer and the same document inputs as the
+    /// frame on screen, but it is deliberately **not** `frame.graph`: that object is driven by
+    /// `photons.loupe.render` (`renderBackdrop`), and `RenderGraph.render` is not safe to call from two
+    /// threads at once. Measuring 明暗/颜色 through the frame's graph was the 571-A crash (main-thread
+    /// `AutoLight.plan` racing the render queue). The pixels and the edit are unchanged, so the
+    /// numbers are still this photo's and 448's one-write/one-history timing does not move.
+    private func measurementGraph(from frame: FrameSnapshot, document: EditModel) -> RenderGraph? {
+        guard let image = frame.image else { return nil }
+        let identity = frame.graphIdentity ?? "\(frame.identity ?? "measurement")-s\(frame.scale)"
+        return try? RenderGraph(input: RenderInput(
+            image: image, identity: identity, sourceURL: frame.url,
+            whiteBalance: document.decodeInputs.whiteBalance,
+            asShotPair: frame.capabilities?.asShotWhiteBalance ?? .asShot))
     }
 
     /// 448 — 自动白平衡 through the same full-rung gate. The measurement is the one the panel's
@@ -5457,7 +5476,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
             queuePendingAuto(.color)
             return nil
         }
-        guard let graph = frame.graph else { return nil }
+        guard let graph = measurementGraph(from: frame, document: document ?? session.edit) else {
+            return nil
+        }
         let source = document ?? session.edit
         let initialMetrics: AutoColor.Metrics
         do {
@@ -6807,9 +6828,10 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// camera wins the follow-up. A drag therefore renders as fast as the GPU allows instead of
     /// building a backlog it would then have to drain after the hand stops.
     ///
-    /// Nothing here waits for a development: the frame rides the rung the ladder has (the 0.5 preview
-    /// while the full one is being made) and the full rung replaces it when it lands. That is the
-    /// whole point of the split — a pan is a *frame*, not a decode.
+    /// Nothing here waits for a development: 571-A made the canvas two-valued, so a pan draws from
+    /// the whole-picture rung when it is resident and draws nothing while that rung is still being
+    /// developed (the 1920 px stand-in stays on screen). That is the whole point of the split — a pan
+    /// is a *frame*, not a decode.
     public func requestViewportRender(cacheable: Bool = false) {
         guard autoRenderEnabled else { return }
         if frameSource == nil {

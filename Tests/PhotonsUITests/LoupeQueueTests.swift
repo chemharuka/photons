@@ -165,6 +165,8 @@ final class LoupeQueueTests: XCTestCase {
             loupe.requestViewportRender()
             XCTAssertEqual(loupe.viewRenderCount, before,
                            "pan \(step) drew a frame while the full rung was still developing")
+            XCTAssertEqual(loupe.developmentStats.decodes, 1,
+                           "pan \(step) asked the decoder again while the full rung was developing")
         }
         print("Q29 ① 20 pans during the full development: no frames, one decode")
 
@@ -172,8 +174,12 @@ final class LoupeQueueTests: XCTestCase {
         XCTAssertEqual(loupe.lastPresentedScale, DecodeLadder.fullScale,
                        "the replacement frame must put the full rung on screen")
         XCTAssertEqual(loupe.rungArrivals, 1, "one rung, one arrival")
-        XCTAssertTrue((1...2).contains(loupe.viewRenderCount),
-                      "the pan follow-up and the arrival paint at most two frames, got \(loupe.viewRenderCount)")
+        // The pan storm folds into one in-flight view render plus its single queued follow-up. The
+        // full rung arrives while that follow-up is the in-flight pan frame, so the follow-up paints
+        // it and the arrival's replacement paints once more: this machine makes exactly two frames.
+        // No pan paints synchronously, and all twenty cost one development (asserted above).
+        XCTAssertEqual(loupe.viewRenderCount, 2,
+                       "the pan follow-up and the arrival replacement, and nothing per pan")
         XCTAssertEqual(loupe.developmentStats.decodes, 1,
                        "twenty pans asked for the full rung twenty times and cost one development")
         XCTAssertGreaterThanOrEqual(loupe.viewRenderCoalesced, 18,

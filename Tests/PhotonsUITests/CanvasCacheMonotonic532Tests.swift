@@ -12,8 +12,9 @@ import PhotonsCore
 /// `(kind, decodeScale, fromCanvasCache)`（`LoupeController.framePresentLog`），断言：
 ///
 ///   1. 缓存帧之后、target 帧之前，没有任何 `decodeScale` 更小的帧；
-///   2. 关掉单调门 ⇒ 序列里必须出现「0.5 夹在中间」（反向门，证明 ① 会为该原因变红）；
-///   3. 冷启动/无缓存时 0.5 → 1.0 仍然照常（门只在屏上已有更清晰帧时生效）；
+///   2. 571-A: the ladder no longer makes a 0.5 frame, so the gate is a **pure safety net** — turning
+///      it off changes nothing (the reverse gate now proves it does not falsely block);
+///   3. 冷启动/无缓存时直接上整幅，门只统计自己有没有误挡；
 ///   4. target 永不返回时，兜底时长后仍要上屏某一帧；
 ///   5. 缓存命中的屏上帧不被低清帧替换。
 @MainActor

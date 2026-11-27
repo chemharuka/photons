@@ -144,20 +144,25 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
+        // 571-A: A's whole-picture frame replaces 448's preview wait; the switch below must still
+        // happen while B has not presented anything.
         XCTAssertTrue(waitForFull(loupe, photo: "448-A"), "A never reached the full rung")
         // Let A's capability read-back settle before switching: its revision bump belongs to A.
         XCTAssertTrue(waitFor { session.edit.resolvedDecoderVersion != nil })
         pump(0.1)
 
-        switchPhoto(loupe, url: url, identity: "448-B")
-        // 571-A: there is no preview frame to click on; the click waits for B's full frame.
-        XCTAssertTrue(waitForFull(loupe, photo: "448-B"), "B never reached the full rung")
-
         let editBefore = session.edit
         let historyBefore = session.history.count
-        _ = loupe.autoLight()
-        XCTAssertEqual(loupe.lastAutoLightSampleIdentityForTesting, "448-B",
-                       "the measurement must carry B's identity")
+        switchPhoto(loupe, url: url, identity: "448-B")
+        // B has not presented anything yet: the resident frame is still A's full one.
+        XCTAssertNil(loupe.autoLight())
+        XCTAssertEqual(loupe.pendingAuto, .light, "B 未全档时必须排队")
+        XCTAssertEqual(session.edit, editBefore, "A 的编辑不得被改写")
+
+        XCTAssertTrue(waitFor {
+            loupe.pendingAuto == nil && loupe.lastAutoLightSampleIdentityForTesting == "448-B"
+        }, "the measurement never carried B's identity")
+        XCTAssertEqual(loupe.lastAutoLightSampleIdentityForTesting, "448-B")
         XCTAssertEqual(session.history.count, historyBefore + 1, "B 的全档帧必须执行一次")
         XCTAssertEqual(session.history.currentSnapshot?.label, "明暗 · 自动")
     }
@@ -218,26 +223,27 @@ final class AutoAdjustWaitsForDecode448Tests: XCTestCase {
         let url = try rawFixture()
         let session = CatalogSession()
         let loupe = makeController(url: url, identity: "448-A", session: session)
-        XCTAssertTrue(waitForFull(loupe, photo: "448-A"))
-        XCTAssertTrue(waitFor { session.edit.resolvedDecoderVersion != nil })
-        pump(0.1)
+        // 571-A: there is no preview frame to click at; the click lands while A is still on the
+        // stand-in, i.e. in exactly the queued state 448 has always tested.
+        XCTAssertNil(loupe.lastPresentedScale)
 
         let editBefore = session.edit
         let historyBefore = session.history.count
-        // A click while B is still developing is queued…
-        switchPhoto(loupe, url: url, identity: "448-B")
-        XCTAssertNil(loupe.autoLight())
+        _ = loupe.autoLight()
         XCTAssertEqual(loupe.pendingAuto, .light)
 
-        // …and switching again before B's full frame lands drops it.
-        switchPhoto(loupe, url: url, identity: "448-C")
+        switchPhoto(loupe, url: url, identity: "448-B")
         XCTAssertNil(loupe.pendingAuto, "换照片必须清 pendingAuto")
         XCTAssertFalse(loupe.isWaitingForDecode)
 
-        XCTAssertTrue(waitForFull(loupe, photo: "448-C"),
-                      "C never reached the full rung (the counter-proof needs that frame)")
+        XCTAssertTrue(waitForFull(loupe, photo: "448-B"),
+                      "B never reached the full rung (the counter-proof needs that frame)")
         pump(0.3)
-        XCTAssertEqual(session.edit, editBefore, "新照片的全档帧不得执行上一条点击")
+        // 571-A: B's own first frame performs the legitimate decoder read-back
+        // (`resolvedDecoderVersion`), so the whole document is no longer the right proxy. The queued
+        // 明暗 click would have written `light` and one history row; neither may happen.
+        XCTAssertEqual(session.edit.light, editBefore.light,
+                       "新照片的全档帧不得执行上一条点击")
         XCTAssertEqual(session.history.count, historyBefore)
     }
 }

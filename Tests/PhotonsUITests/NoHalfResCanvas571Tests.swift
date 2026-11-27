@@ -150,6 +150,9 @@ final class NoHalfResCanvas571Tests: XCTestCase {
 
     // MARK: - 4. a coarser cache entry is not served
 
+    /// 571-A §7.3 — with `coarserRungFloor = 1.0` a 0.5 entry is rejected by the earlier decode-scale
+    /// check, so `missReasons[.coarserRung]` is unreachable here; the miss is named `.decodeScaleChanged`.
+    /// The `.coarserRung` branch and counter stay for 571-B to delete.
     func testNoHalfRes571CoarseCacheEntryMisses() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
         let cache = CanvasFrameCache(device: device)
