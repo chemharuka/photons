@@ -3016,7 +3016,7 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
                 grain: Double = 0, grainSize: Double = 25,
                 grainRoughness: Double = 50, grainSeed: Double = 0,
                 texture: Double = 0, clarity: Double = 0, dehaze: Double = 0,
-                nonBayerLuminanceNR: Double = 50, nonBayerColorNR: Double = 50) {
+                nonBayerLuminanceNR: Double = 0, nonBayerColorNR: Double = 0) {
         self.vignetteAmount = vignetteAmount
         self.vignetteMidpoint = vignetteMidpoint
         self.vignetteFeather = vignetteFeather
@@ -3065,13 +3065,13 @@ public struct EffectsGroup: Sendable, Equatable, Codable {
         if texture != 0 { try c.encode(texture, forKey: AnyCodingKey("texture")) }
         if clarity != 0 { try c.encode(clarity, forKey: AnyCodingKey("clarity")) }
         if dehaze != 0 { try c.encode(dehaze, forKey: AnyCodingKey("dehaze")) }
-        // 164 / 566-A: absent at the resting value 50 — an absent key therefore reads as the new
-        // default (k = 2), while an explicit 0 is written and stays the user's own "off". A pre-566
-        // document (absent or non-zero) re-encodes byte for byte.
-        if nonBayerLuminanceNR != 50 {
+        // 2026-11-27: the resting value of both 去噪 / 去彩噪 is now **0** (off), so absent means 0
+        // and any non-zero amount is written. The old resting value 50 (k=2 / k_c=1+2.5) made every
+        // thumbnail and fit frame eat a scene-linear chroma denoise, which read as 「饱和度明显较低」.
+        if nonBayerLuminanceNR != 0 {
             try c.encode(nonBayerLuminanceNR, forKey: AnyCodingKey("nonBayerLuminanceNR"))
         }
-        if nonBayerColorNR != 50 {
+        if nonBayerColorNR != 0 {
             try c.encode(nonBayerColorNR, forKey: AnyCodingKey("nonBayerColorNR"))
         }
     }
