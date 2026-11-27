@@ -11,8 +11,9 @@ import Metal
 ///
 /// Algorithm, in the design document's order:
 ///
-///   1. clamp negatives, `y = mean(R,G,B)`, `K = R − G`, `M = B − G`, one full-resolution plane
-///      texture that every later pass reads instead of recomputing the three planes;
+///   1. clamp negatives, `y = 0.2126R + 0.7152G + 0.0722B` (Rec709), `K = R − G`, `M = B − G`,
+///      one full-resolution plane texture that every later pass reads instead of recomputing the
+///      three planes;
 ///   2. one global `σ` per plane from `median(|∂·|) / 0.6745 / √2`, with the median taken from a
 ///      log2 histogram built on the GPU (no full-frame readback);
 ///   3. three à trous levels (B3 spline, steps 1/2/4), **every level at full resolution**. Each
@@ -30,11 +31,14 @@ import Metal
 ///      colour is preserved by construction, while the fine Wiener removes the grain. The chroma
 ///      threshold is `k_c = 1 + colorNR/100 · 1` (default 50 ⇒ 1.5σc), not the old 3.5σc that ate
 ///      real colour differences;
-///   6. recombine `G = y − (K + M)/3`, `R = G + K`, `B = G + M`, clamp negatives.
+///   6. recombine `G = y − 0.2126K − 0.0722M`, `R = G + K`, `B = G + M`, clamp negatives. (The
+///      Rec709 weights are what make a chroma-only pass leave every pixel's luma unchanged; the
+///      earlier `(K + M)/3` and a flat `(K + M)/4` both moved it because `y` is not their luma.)
 ///
-/// Robustness: when the luma σ is 0 or below `1e-6` (an extremely dark frame, e.g. L1030479) the
-/// finish pass copies the source back verbatim — no division, no NaN, no "collapse to black". The
-/// decoder has already applied the frame's black level; this pass never invents one.
+/// Robustness: when no **enabled** axis has a σ at or above `1e-6` (an extremely dark frame, e.g.
+/// L1030479) the finish pass copies the source back verbatim — no division, no NaN, no "collapse to
+/// black". A disabled axis passes its plane through unchanged (Wiener weight 1). The decoder has
+/// already applied the frame's black level; this pass never invents one.
 ///
 /// The parameters are the two existing `effects` fields, with unchanged 0…100 travel:
 ///   · luma   → `k = 1 + lumaNR/100 · 2`  (default 50 ⇒ k = 2);
@@ -46,14 +50,14 @@ enum PostDenoise {
     /// 566-A — the operator generation. Any change that moves a pixel of the S1.5 result must bump
     /// this, because the graph's whole-frame result cache is keyed by it: a cached texture from a
     /// previous arithmetic must never answer a request written by this one.
-    static let tuningVersion = 2
+    static let tuningVersion = 3
 
     /// ── parameters, mirrored byte for byte by the shader below ─────────────────────────────────
     private struct Params {
         var size: SIMD4<Int32>   // full w, h, quarter w, quarter h
         var cfg: SIMD4<Float>    // kY, kC, add-to-accumulator flag, level index
         var dim: SIMD4<Int32>    // sample stride, sample count, à-trous/box radius, spare
-        var f: SIMD4<Float>      // spare (0)
+        var f: SIMD4<Float>      // luma enabled, chroma enabled, 0, 0
     }
 
     private struct Stats {
@@ -128,6 +132,8 @@ enum PostDenoise {
 
         let kY = Float(1 + min(max(lumaNR, 0), 100) / 100 * 2)
         let kC = Float(1 + min(max(chromaNR, 0), 100) / 100 * 1)
+        let lumaOn: Float = lumaNR > 0 ? 1 : 0
+        let chromaOn: Float = chromaNR > 0 ? 1 : 0
 
         // ── buffers ────────────────────────────────────────────────────────────────────────────
         guard let hist = device.makeBuffer(length: histBins * 3 * MemoryLayout<UInt32>.stride,
@@ -146,7 +152,7 @@ enum PostDenoise {
         var p = Params(size: SIMD4(Int32(w), Int32(h), Int32(qw), Int32(qh)),
                        cfg: SIMD4(kY, kC, 0, 0),
                        dim: SIMD4(Int32(stride), Int32(samples), 1, 0),
-                       f: SIMD4(0, 0, 0, 0))
+                       f: SIMD4(lumaOn, chromaOn, 0, 0))
 
         func run(_ name: String, _ configure: (MTLComputeCommandEncoder) -> Void,
                  width: Int, height: Int) throws {
@@ -376,7 +382,7 @@ enum PostDenoise {
         int x = int(gid.x), y = int(gid.y);
         if (x >= w || y >= h) return;
         float3 a = max(src.read(uint2(x, y)).rgb, 0.0f);
-        float ya = (a.x + a.y + a.z) / 3.0f;
+        float ya = (0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z);
         float ka = a.x - a.y;
         float ma = a.z - a.y;
         planes.write(float4(ya, ka, ma, 1.0f), uint2(x, y));
@@ -385,7 +391,7 @@ enum PostDenoise {
         if ((x % stride) != stride / 2 || (y % stride) != stride / 2) return;
         int nx = min(x + 1, w - 1);
         float3 b = max(src.read(uint2(nx, y)).rgb, 0.0f);
-        float yb = (b.x + b.y + b.z) / 3.0f;
+        float yb = (0.2126f * b.x + 0.7152f * b.y + 0.0722f * b.z);
         float kb = b.x - b.y;
         float mb = b.z - b.y;
         atomic_fetch_add_explicit(&hist[gmw_bin(ya - yb)], 1u, memory_order_relaxed);
@@ -405,7 +411,9 @@ enum PostDenoise {
         float sy = gmw_quantile(hist, total, 0.5f) * norm;
         float sk = gmw_quantile(hist + GMW_BINS, total, 0.5f) * norm;
         float sm = gmw_quantile(hist + 2 * GMW_BINS, total, 0.5f) * norm;
-        st->s = float4(sy, sk, sm, sy >= 1e-6f ? 1.0f : 0.0f);
+        bool lumaOn = p.f.x > 0.5f && sy >= 1e-6f;
+        bool chromaOn = p.f.y > 0.5f && (sk >= 1e-6f || sm >= 1e-6f);
+        st->s = float4(sy, sk, sm, (lumaOn || chromaOn) ? 1.0f : 0.0f);
     }
 
     // ── 3 · flatness gate (quarter-resolution statistics; never pixels) ─────────────────────
@@ -421,7 +429,7 @@ enum PostDenoise {
                 int x = min(int(gid.x) * 4 + dx, w - 1);
                 int y = min(int(gid.y) * 4 + dy, h - 1);
                 float3 a = max(src.read(uint2(x, y)).rgb, 0.0f);
-                sum += (a.x + a.y + a.z) / 3.0f;
+                sum += (0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z);
             }
         }
         dst.write(sum / 16.0f, gid);
@@ -622,9 +630,9 @@ enum PostDenoise {
         float ty = p.cfg.x * st->s.x * scale;
         float tk = p.cfg.y * st->s.y * scale;
         float tm = p.cfg.y * st->s.z * scale;
-        float wy = (d.x * d.x) / (d.x * d.x + ty * ty + 1e-20f);
-        float wk = (d.y * d.y) / (d.y * d.y + tk * tk + 1e-20f);
-        float wm = (d.z * d.z) / (d.z * d.z + tm * tm + 1e-20f);
+        float wy = (p.f.x > 0.5f) ? (d.x * d.x) / (d.x * d.x + ty * ty + 1e-20f) : 1.0f;
+        float wk = (p.f.y > 0.5f) ? (d.y * d.y) / (d.y * d.y + tk * tk + 1e-20f) : 1.0f;
+        float wm = (p.f.y > 0.5f) ? (d.z * d.z) / (d.z * d.z + tm * tm + 1e-20f) : 1.0f;
         float4 contrib = float4(((1.0f - protectL) + protectL * wy) * d.x,
                                 ((1.0f - protectC) + protectC * wk) * d.y,
                                 ((1.0f - protectC) + protectC * wm) * d.z,
@@ -656,7 +664,7 @@ enum PostDenoise {
         // Chroma is recombined from the *same* fine-band Wiener the luma uses and the untouched
         // coarse remainder. There is deliberately no large-radius luma-guided blend here: that
         // regression was what pulled real colour onto the luminance structure (566-A §8.1).
-        float g = y2 - (k2 + m2) / 3.0f;
+        float g = y2 - 0.2126f * k2 - 0.0722f * m2;
         float r = g + k2;
         float b = g + m2;
         out.write(float4(max(r, 0.0f), max(g, 0.0f), max(b, 0.0f), 1.0f), gid);
