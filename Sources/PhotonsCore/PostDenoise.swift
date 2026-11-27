@@ -40,6 +40,11 @@ import Metal
 /// `--nr 0 --cnr 0` is the pre-566 frame byte for byte.
 enum PostDenoise {
 
+    /// 566-A — the operator generation. Any change that moves a pixel of the S1.5 result must bump
+    /// this, because the graph's whole-frame result cache is keyed by it: a cached texture from a
+    /// previous arithmetic must never answer a request written by this one.
+    static let tuningVersion = 1
+
     /// ── parameters, mirrored byte for byte by the shader below ─────────────────────────────────
     private struct Params {
         var size: SIMD4<Int32>   // full w, h, quarter w, quarter h
