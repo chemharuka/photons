@@ -197,6 +197,7 @@ enum PostDenoise {
             e.setTexture(gn, index: 1)
             e.setBytes(&p, length: MemoryLayout<Params>.stride, index: 0)
             e.setBuffer(histG, offset: 0, index: 1)
+            e.setBuffer(stats, offset: 0, index: 2)
         }, width: qw, height: qh)
 
         let gateReduce = try pipeline("gmw_gate_reduce", device: device)
@@ -496,10 +497,16 @@ enum PostDenoise {
         dst.write(gmw_gauss9(v), gid);
     }
 
+    // `gn = smooth|∇y| / max(σ, floor)` — dimensionless, so the gate means the same thing on a
+    // bright frame and a dark one. The absolute floor keeps a nearly noise-free input from dividing
+    // the gradient by its own rounding (a low-noise fixture would otherwise make every pixel look
+    // like an edge and close the gate). The shader used to histogram the raw gradient, which is not
+    // scale-free; that is the one place it deviated from the design document.
     kernel void gmw_gauss_hist_v(texture2d<float, access::read> src [[texture(0)]],
                                  texture2d<float, access::write> dst [[texture(1)]],
                                  device atomic_uint *histG [[buffer(1)]],
                                  constant GMWParams &p [[buffer(0)]],
+                                 device const GMWStats *st [[buffer(2)]],
                                  uint2 gid [[thread_position_in_grid]]) {
         int w = p.size.z, h = p.size.w;
         if (int(gid.x) >= w || int(gid.y) >= h) return;
@@ -508,6 +515,7 @@ enum PostDenoise {
             v[i + 4] = src.read(uint2(int(gid.x), clamp(int(gid.y) + i, 0, h - 1))).x;
         }
         float g = gmw_gauss9(v);
+        g /= max(st->s.x, 8e-4f);
         dst.write(g, gid);
         atomic_fetch_add_explicit(&histG[gmw_bin(g)], 1u, memory_order_relaxed);
     }
@@ -546,8 +554,9 @@ enum PostDenoise {
         float v = gn.read(gid).x;
         float lo = st->g.x, hi = st->g.y;
         float g = (st->s.w > 0.5f) ? clamp((hi - v) / max(hi - lo, 1e-6f), 0.0f, 1.0f) : 0.0f;
-        float sy = max(st->s.x, 1e-6f);
-        float structure = clamp((v / sy) / 6.0f, 0.0f, 1.0f);
+        // `v` is already `|∇y| / max(σ, floor)`, so `v / 6` is the prototype's dimensionless
+        // `gmag / (6σ)` structure term.
+        float structure = clamp(v / 6.0f, 0.0f, 1.0f);
         gate.write(float4(g, structure, 0.0f, 0.0f), gid);
     }
 

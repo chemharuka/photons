@@ -218,6 +218,122 @@ final class PostDenoise566Tests: XCTestCase {
                        "a grey card must stay the same grey; the guided chroma may not shift luma")
     }
 
+    // MARK: - strength from off to the resting/default positions
+
+    /// Flat mid-grey with independent per-channel perturbation: nearly all of it is chroma.
+    private func chromaSpeckle() -> LinearImage {
+        let w = 400, h = 300
+        var rng = Noise(0xBEEF01)
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for i in stride(from: 0, to: rgba.count, by: 4) {
+            let base = 0.35
+            rgba[i] = Float16(base + rng.symmetric(0.055))
+            rgba[i + 1] = Float16(base + rng.symmetric(0.055))
+            rgba[i + 2] = Float16(base + rng.symmetric(0.055))
+            rgba[i + 3] = 1
+        }
+        return LinearImage(width: w, height: h, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic-566-chroma")
+    }
+
+    /// OKLab (a, b), the chroma axes the color control is defined on.
+    private func oklabAB(_ image: DisplayImage) -> [(Double, Double)] {
+        var out = [(Double, Double)](repeating: (0, 0), count: image.width * image.height)
+        for i in 0..<(image.width * image.height) {
+            let b = i * 4
+            let r = max(Double(image.rgba[b]), 0), g = max(Double(image.rgba[b + 1]), 0)
+            let bb = max(Double(image.rgba[b + 2]), 0)
+            let l = cbrt(0.6167557877 * r + 0.3601984026 * g + 0.0230458097 * bb)
+            let m = cbrt(0.2651330603 * r + 0.6358393719 * g + 0.0990275679 * bb)
+            let s = cbrt(0.1001026312 * r + 0.2039065206 * g + 0.6959908482 * bb)
+            out[i] = (1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                      0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+        }
+        return out
+    }
+
+    private func chromaSigma(_ ab: [(Double, Double)], w: Int, h: Int,
+                             _ pick: ((Double, Double)) -> Double) -> Double {
+        var s = 0.0, ss = 0.0
+        var n = 0
+        for y in 8..<(h - 8) {
+            for x in 8..<(w - 8) {
+                let v = pick(ab[y * w + x])
+                s += v; ss += v * v; n += 1
+            }
+        }
+        let m = s / Double(n)
+        return (ss / Double(n) - m * m).squareRoot()
+    }
+
+    func testChromaNoiseFallsFromOffToTheRestingStrength() throws {
+        let graph = try makeGraph(chromaSpeckle(), identity: "566-chroma-strength")
+        let off = try render(graph, document(0, 0))
+        let resting = try render(graph, document(0, 50))
+        let full = try render(graph, document(0, 100))
+
+        let w = off.width, h = off.height
+        let abOff = oklabAB(off), abRest = oklabAB(resting), abFull = oklabAB(full)
+        for (name, ab) in [("50", abRest), ("100", abFull)] {
+            let sa = chromaSigma(ab, w: w, h: h) { $0.0 }
+            let sb = chromaSigma(ab, w: w, h: h) { $0.1 }
+            let a0 = chromaSigma(abOff, w: w, h: h) { $0.0 }
+            let b0 = chromaSigma(abOff, w: w, h: h) { $0.1 }
+            print(String(format: "566 · chroma %@: σa %.4f → %.4f (↓%.1f%%) · σb %.4f → %.4f (↓%.1f%%)",
+                         name, a0, sa, 100 * (1 - sa / a0), b0, sb, 100 * (1 - sb / b0)))
+        }
+        let sa0 = chromaSigma(abOff, w: w, h: h) { $0.0 }
+        let sa1 = chromaSigma(abFull, w: w, h: h) { $0.0 }
+        let sb0 = chromaSigma(abOff, w: w, h: h) { $0.1 }
+        let sb1 = chromaSigma(abFull, w: w, h: h) { $0.1 }
+        XCTAssertGreaterThanOrEqual(1 - sa1 / sa0, 0.50, "chroma σa must fall ≥50% at amount 100")
+        XCTAssertGreaterThanOrEqual(1 - sb1 / sb0, 0.50, "chroma σb must fall ≥50% at amount 100")
+    }
+
+    /// 4-px checkerboard at ±0.05 on 0.20 plus the same noise: a texture the Wiener must not eat.
+    private func noisyChecker(w: Int = 750, h: Int = 500) -> LinearImage {
+        var rng = Noise(0x1234567)
+        var rgba = [Float16](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let v = 0.20 + ((x / 4 + y / 4) % 2 == 0 ? 0.05 : -0.05)
+                    + rng.symmetric(0.04)
+                let i = (y * w + x) * 4
+                rgba[i] = Float16(v); rgba[i + 1] = Float16(v); rgba[i + 2] = Float16(v); rgba[i + 3] = 1
+            }
+        }
+        return LinearImage(width: w, height: h, rgba: rgba,
+                           colorSpace: "extendedLinearSRGB", decoderVersion: "synthetic-566-checker")
+    }
+
+    private func laplacianRMS(_ luma: [Double], w: Int, h: Int,
+                              x0: Int, x1: Int, y0: Int, y1: Int) -> Double {
+        func at(_ x: Int, _ y: Int) -> Double { luma[min(max(y, 0), h - 1) * w + min(max(x, 0), w - 1)] }
+        var sum = 0.0
+        var n = 0
+        for y in max(y0, 1)..<min(y1, h - 1) {
+            for x in max(x0, 1)..<min(x1, w - 1) {
+                let lap = 4 * at(x, y) - at(x - 1, y) - at(x + 1, y) - at(x, y - 1) - at(x, y + 1)
+                sum += lap * lap; n += 1
+            }
+        }
+        return (sum / Double(max(n, 1))).squareRoot()
+    }
+
+    func testTextureSurvivesTheRestingStrength() throws {
+        let graph = try makeGraph(noisyChecker(), identity: "566-texture-strength")
+        let off = try render(graph, document(0, 0))
+        let resting = try render(graph, document(50, 0))
+        let w = off.width, h = off.height
+        let (x0, x1, y0, y1) = (16, w - 16, 16, h - 16)
+        let lapOff = laplacianRMS(lumaCodes(off), w: w, h: h, x0: x0, x1: x1, y0: y0, y1: y1)
+        let lapOn = laplacianRMS(lumaCodes(resting), w: w, h: h, x0: x0, x1: x1, y0: y0, y1: y1)
+        print(String(format: "566 · texture Laplacian RMS %.2f → %.2f codes (retained %.1f%%)",
+                     lapOff, lapOn, 100 * lapOn / lapOff))
+        XCTAssertGreaterThanOrEqual(lapOn / lapOff, 0.60,
+                                    "the resting strength must keep ≥60% of the texture")
+    }
+
     // MARK: - the dark-frame robustness rule
 
     func testADarkFrameIsANoOpAndNeverNaN() throws {
