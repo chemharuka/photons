@@ -220,8 +220,10 @@ final class DenoiseS39Highlight553Tests: XCTestCase {
         let graph = try makeGraph(textureFixture(), identity: "553-texture")
         var neutral = EditModel.neutral
         neutral.effects.nonBayerLuminanceNR = 0
+        neutral.effects.nonBayerColorNR = 0
         var edit = EditModel.neutral
         edit.effects.nonBayerLuminanceNR = 100
+        edit.effects.nonBayerColorNR = 0
 
         let before = luma(try render(graph, neutral, headroom: 1))
         let after = luma(try render(graph, edit, headroom: 1))
@@ -251,8 +253,12 @@ final class DenoiseS39Highlight553Tests: XCTestCase {
         let graph = try makeGraph(highlightBands(), identity: "553-zero")
         var edit = EditModel.neutral
         edit.effects.nonBayerLuminanceNR = 0
+        edit.effects.nonBayerColorNR = 0
+        var off = EditModel.neutral
+        off.effects.nonBayerLuminanceNR = 0
+        off.effects.nonBayerColorNR = 0
         let zero = try render(graph, edit)
-        let neutral = try render(graph, .neutral)
+        let neutral = try render(graph, off)
         XCTAssertEqual(digest(zero), digest(neutral), "去噪 = 0 时像素必须逐字节不变")
         // Determinism: the same document twice is the same frame.
         XCTAssertEqual(digest(try render(graph, edit)), digest(zero))

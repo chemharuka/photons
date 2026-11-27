@@ -315,8 +315,13 @@ final class DetailDenoiseTests: XCTestCase {
 
         var edit = EditModel.neutral
         edit.effects.nonBayerLuminanceNR = 100
+        edit.effects.nonBayerColorNR = 0
+        // 566-A: the resting document is 50/50, so "off" is an explicit 0/0 document, not `.neutral`.
+        var off = EditModel.neutral
+        off.effects.nonBayerLuminanceNR = 0
+        off.effects.nonBayerColorNR = 0
 
-        let before = try render(graph, .neutral)
+        let before = try render(graph, off)
         let after = try render(graph, edit)
 
         let w = before.width, h = before.height
@@ -344,7 +349,7 @@ final class DetailDenoiseTests: XCTestCase {
         let sigmaG = matchedGaussianSigma(forFactor: sigmaAfter / sigmaBefore)
         let blurred = gaussian(source, sigma: sigmaG)
         let gaussGraph = try makeGraph(blurred, identity: "171-ab-gauss")
-        let gaussImage = try render(gaussGraph, .neutral)
+        let gaussImage = try render(gaussGraph, off)
         let widthGauss = edgeWidth(gaussImage, x0: edgeX.0, x1: edgeX.1)
         print(String(format: "171 B · edge 10–90 %: 原图 %.2f px · 去噪 %.2f px (%.2f×) · "
                      + "同降噪高斯 σ_g %.2f → %.2f px (%.2f×) · 比值 %.2f",
@@ -363,8 +368,12 @@ final class DetailDenoiseTests: XCTestCase {
         let graph = try makeGraph(source, identity: "171-c")
         var edit = EditModel.neutral
         edit.effects.nonBayerLuminanceNR = 100
+        edit.effects.nonBayerColorNR = 0
+        var off = EditModel.neutral
+        off.effects.nonBayerLuminanceNR = 0
+        off.effects.nonBayerColorNR = 0
 
-        let before = try render(graph, .neutral)
+        let before = try render(graph, off)
         let after = try render(graph, edit)
         let w = before.width, h = before.height
         let (x0, x1, y0, y1) = (16, w - 16, 16, h - 16)
@@ -380,7 +389,7 @@ final class DetailDenoiseTests: XCTestCase {
         let sigmaAfter = highPassSigma(lumaCodes(after), w: w, h: h, x0: 8, x1: w - 8, y0: 8, y1: h - 8)
         let sigmaG = matchedGaussianSigma(forFactor: sigmaAfter / sigmaBefore)
         let gaussImage = try render(try makeGraph(gaussian(source, sigma: sigmaG), identity: "171-c-g"),
-                                    .neutral)
+                                    off)
         let lapGauss = laplacianRMS(lumaCodes(gaussImage), w: w, h: h, x0: x0, x1: x1, y0: y0, y1: y1)
         print(String(format: "171 C · same-reduction Gaussian σ_g %.2f → Laplacian RMS %.2f (保留 %.1f%%)",
                      sigmaG, lapGauss, 100 * lapGauss / lapBefore))
@@ -393,7 +402,11 @@ final class DetailDenoiseTests: XCTestCase {
         let graph = try makeGraph(chromaSpeckle(), identity: "171-d")
         var edit = EditModel.neutral
         edit.effects.nonBayerColorNR = 100
-        let before = try render(graph, .neutral)
+        edit.effects.nonBayerLuminanceNR = 0
+        var off = EditModel.neutral
+        off.effects.nonBayerLuminanceNR = 0
+        off.effects.nonBayerColorNR = 0
+        let before = try render(graph, off)
         let after = try render(graph, edit)
 
         let abBefore = oklabAB(before), abAfter = oklabAB(after)
@@ -463,6 +476,9 @@ final class DetailDenoiseTests: XCTestCase {
     func testZeroAmountsKeepTheFrame() throws {
         let graph = try makeGraph(noisyStep(), identity: "171-zero")
         var edit = EditModel.neutral
+        // 566-A: `.neutral` now rests at 50/50, so the "both sliders 0" frame must spell it out.
+        edit.effects.nonBayerLuminanceNR = 0
+        edit.effects.nonBayerColorNR = 0
         edit.effects.texture = 40
         edit.effects.clarity = 20
         let a = try render(graph, edit)

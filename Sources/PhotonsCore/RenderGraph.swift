@@ -1733,6 +1733,27 @@ public final class RenderGraph {
         let bounds: [String: MaskRect]
     }
     private var localEntry: LocalEntry?
+    /// 566-A — **the drag path's S1.5 memo.** The scene-linear GMW chain is three full-resolution
+    /// à-trous levels plus a full-resolution guided filter; at 60 Mpx that is a settled-frame cost,
+    /// not a slider tick's. During an on-screen drag (`useCache`, no pixel readback) the graph keeps
+    /// the last correction field (`out − in`) and, while the interaction is still moving, applies it
+    /// to the new S1.6 output with one pointwise pass. The next frame outside the drag window
+    /// recomputes the full chain and replaces the correction.
+    private struct GMWCache {
+        let identity: String
+        let luma: Double
+        let chroma: Double
+        let width: Int
+        let height: Int
+        /// The S1.6 key the correction was computed against. An exact match reuses it with no
+        /// approximation at all; a mismatch inside the window is the drag approximation.
+        let upstream: String
+        let correction: MTLTexture
+        /// When the full chain last ran. The window is measured from here, not from the last reuse,
+        /// so a long drag still gets an occasional exact frame.
+        let computedAt: CFAbsoluteTime
+    }
+    private var gmwCache: GMWCache?
     /// P1e — the `showMask` overlay's own reuse slot: the display frame with the overlay painted, plus
     /// the key it was painted for.
     ///
@@ -2797,16 +2818,54 @@ public final class RenderGraph {
             let gmwActive = edit.effects.nonBayerLuminanceNR != 0
                 || edit.effects.nonBayerColorNR != 0
             if stage == .curve, gmwActive {
+                let luma = edit.effects.nonBayerLuminanceNR
+                let chroma = edit.effects.nonBayerColorNR
+                // The on-screen path (cache on, no CPU readback) is the only one a slider drag
+                // takes. Export, CLI and the tests always run the full chain, so their pixels are
+                // never the drag approximation.
+                let interactive = usesStageCache && !options.wantsPixels
+                let upstreamKey = plan.keys.hasMaskStages
+                    ? plan.keys.key(for: .localApply) + tilingSuffix + semanticSuffix
+                    : plan.keys.key(for: .sceneLinear)
+                let now = CFAbsoluteTimeGetCurrent()
+                let cached = gmwCache.flatMap { c -> GMWCache? in
+                    guard c.identity == input.identity,
+                          c.luma == luma, c.chroma == chroma,
+                          c.width == plan.canvas.width, c.height == plan.canvas.height else {
+                        return nil
+                    }
+                    return c
+                }
+                let reuse = interactive && cached.map {
+                    $0.upstream == upstreamKey || now - $0.computedAt < 0.25
+                } == true
+
                 let out = try pool.obtain(plan.canvas)
                 let consumed = current
                 let consumedIsTransient = currentIsTransient
-                try PostDenoise.encode(cb: cb, source: current, destination: out,
-                                       lumaNR: edit.effects.nonBayerLuminanceNR,
-                                       chromaNR: edit.effects.nonBayerColorNR,
-                                       scratch: { label, width, height, format in
-                                           try scratch(label, width: width, height: height,
-                                                       format: format)
-                                       })
+                if reuse, let correction = cached?.correction {
+                    try PostDenoise.applyCorrection(cb: cb, source: current,
+                                                    correction: correction, destination: out)
+                } else {
+                    // Only the interactive path pays for the correction field; the settled frame
+                    // writes it so the next drag tick can reuse it.
+                    let correction = interactive
+                        ? try scratch("gmw-correction", width: plan.canvas.width,
+                                      height: plan.canvas.height, format: .rgba16Float)
+                        : nil
+                    try PostDenoise.encode(cb: cb, source: current, destination: out,
+                                           lumaNR: luma, chromaNR: chroma, correction: correction,
+                                           scratch: { label, width, height, format in
+                                               try scratch(label, width: width, height: height,
+                                                           format: format)
+                                           })
+                    if let correction {
+                        gmwCache = GMWCache(identity: input.identity, luma: luma, chroma: chroma,
+                                            width: plan.canvas.width, height: plan.canvas.height,
+                                            upstream: upstreamKey, correction: correction,
+                                            computedAt: now)
+                    }
+                }
                 if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
                 if !recyclesEachStage { transient.append(out) }
                 current = out
@@ -3615,6 +3674,7 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
+        gmwCache = nil
         // 160 — the statistics proxy is cheap to remeasure and must not outlive an explicit cache
         // invalidation (the held bytes are small, but the "give it all back" contract is literal).
         dehazeStats = nil
