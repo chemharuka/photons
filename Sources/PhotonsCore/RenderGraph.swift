@@ -1733,6 +1733,63 @@ public final class RenderGraph {
         let bounds: [String: MaskRect]
     }
     private var localEntry: LocalEntry?
+    /// 566-A — **the whole-frame S1.5 memo, and the reason a window can agree with the frame.**
+    ///
+    /// The scene-linear GMW chain is three full-resolution à-trous levels plus a full-resolution
+    /// guided filter; at 60 Mpx that is a settled-frame cost, not a slider tick's. Two things need
+    /// the same object:
+    ///
+    ///   · a repeat whole-frame render (a fit frame after a pan, a 1:1 window after the whole
+    ///     picture was rendered) must reuse the **result bytes**, not recompute statistics from a
+    ///     different buffer — σ and the flatness gate's quantiles are estimated *from the pixels fed
+    ///     to the chain*, so a window recomputing on its own rectangle returns a different `w` for
+    ///     the same pixel (two overlapping windows disagreed by 0.16 display units);
+    ///   · a drag on any *upstream* slider cannot pay the chain on every tick. The memo also holds
+    ///     `out − in`; inside the drag window one pointwise add stands in, and the next settled frame
+    ///     replaces it.
+    ///
+    /// Everything a cached pixel depends on is in the key: the decode identity, both strengths, the
+    /// operator generation, the canvas, and the S1.6/S1 key the result was computed against.
+    private struct GMWCache {
+        let identity: String
+        let luma: Double
+        let chroma: Double
+        let tuningVersion: Int
+        let width: Int
+        let height: Int
+        /// The upstream (S1.6, or S1 without masks) key this result was computed against. An exact
+        /// match makes `result` the frame's S1.5 output with no pass at all; a mismatch inside the
+        /// drag window is the correction approximation.
+        let upstream: String
+        /// The **whole-frame** denoised picture, owned by the graph (not the pool).
+        let result: MTLTexture
+        /// `result − upstream input`; `nil` on paths that never drag (export, CLI, tests).
+        let correction: MTLTexture?
+        /// When the full chain last ran. The window is measured from here, not from the last reuse,
+        /// so a long drag still gets an occasional exact frame.
+        let computedAt: CFAbsoluteTime
+    }
+    private var gmwCache: GMWCache?
+    /// 566-A — what S1.5 does for **this** frame. It is decided once, before the stage walk, because
+    /// the answer also has to reach the key of every stage at or below the curve: a frame built from
+    /// the drag approximation (or from a window crop) must never be served as the exact chain's
+    /// output for the same document.
+    private enum GMWDisposition {
+        /// Both strengths are 0, or this is the decode path: no stage at all.
+        case off
+        /// A `stopBefore` probe: run the chain on its own texture as before, but never touch the memo.
+        case transient
+        /// Whole frame, memo hit with the same upstream key: `result` is this frame's S1.5 output.
+        case exact
+        /// Whole frame, run the chain (and refresh the memo).
+        case full
+        /// Whole frame, apply the memo's `out − in` to the new input (slider drag).
+        case drag
+        /// A window/partial frame: take the corresponding crop of the whole-frame result.
+        case crop
+        /// A window/partial frame with no whole-frame result to cut from: draw un-denoised.
+        case unavailable
+    }
     /// P1e — the `showMask` overlay's own reuse slot: the display frame with the overlay painted, plus
     /// the key it was painted for.
     ///
@@ -2464,7 +2521,13 @@ public final class RenderGraph {
         // P1b: a graph that retains nothing (`textureRetention: .none`) keeps its idle list only for
         // the duration of one frame — that list is the frame reusing itself (see `oneShotChurn`), not
         // a cache for the next one. Released here, on every exit, including a throw.
-        defer { if pool.retainsNothing { pool.releaseIdle() } }
+        defer { if pool.retainsNothing {
+            // 566-A: a one-shot (export) frame must not leave the GMW working set behind. The
+            // command buffer holds its own references to anything it still reads, so dropping the
+            // graph's dictionary here releases the bytes without invalidating the frame.
+            pool.releaseIdle()
+            scratchTextures.removeAll()
+        } }
         // P1b — whether a stage's input may go back to the pool as soon as the next stage has been
         // encoded. Two cases want it, for the same reason: nothing else is holding the texture, so
         // leaving it in the frame's `transient` list until the commit is what makes a frame hold
@@ -2574,10 +2637,110 @@ public final class RenderGraph {
         // caches (contrast maps, dehaze statistics) but must never read or write the frame's stage
         // cache, whose entries belong to the canvas on screen.
         let usesStageCache = options.useCache && options.stopBefore == nil
+        // 566-A — **S1.5's disposition for this frame, and the key suffix it has to leave behind.**
+        //
+        // GMW estimates σ and the flatness-gate quantiles from the buffer it is handed, so the only
+        // way two overlapping windows (and a fit frame and a 1:1 frame) can agree is for S1.5 to run
+        // on the whole frame and for a window to take a crop of that *same* result. This memo is
+        // shared with the drag path: `result` is the whole-frame picture, `correction` its `out − in`.
+        //
+        // Decided before the walk because the answer is part of the key of every stage at or below
+        // the curve: a frame built from a drag approximation or a window crop is not the exact chain
+        // and must never be served later as if it were.
+        let gmwActive = !decodeOnly && (edit.effects.nonBayerLuminanceNR != 0
+                                        || edit.effects.nonBayerColorNR != 0)
+        let gmwLuma = edit.effects.nonBayerLuminanceNR
+        let gmwChroma = edit.effects.nonBayerColorNR
+        /// The key of the picture S1.5 actually consumes on this render — the same expression the
+        /// stage walk used before this change, **including S2.9 锐化**: the sharpen runs between S1
+        /// and the mask stages, so it is S1.5's own input, and a sharpen drag must not reuse a
+        /// correction computed over a differently sharpened picture.
+        let gmwUpstreamKey = plan.keys.hasMaskStages
+            ? plan.keys.key(for: .localApply) + tilingSuffix + semanticSuffix
+            : (plan.keys.sharpen ?? plan.keys.key(for: .sceneLinear))
+        /// The key a **whole-frame** render of this document, at this scale, would have used as the
+        /// S1.5 input. A window cannot compute its own upstream key for that comparison (its key
+        /// carries `win=` and the viewport's canvas), so it is rebuilt from `plan.frame` — the whole
+        /// picture's grid at this scale, which is exactly the canvas of an aligned whole-frame render.
+        let gmwWholeUpstreamKey: String? = plan.frame.width > 0 && plan.frame.height > 0
+            ? {
+                let full = plan.frame
+                let links = RenderKeyChain.links(identity: input.identity, sourceSize: sourceSize,
+                                                 canvas: full, content: full,
+                                                 edit: keyEdit(edit), display: options.display,
+                                                 outputWindow: nil, orientation: orientation,
+                                                 lens: plan.s0LensWarp
+                                                     ? input.lensProfile?.recipeComponent : nil)
+                let keys = RenderKeyChain.keys(links, identity: input.identity)
+                // The walk appends the tiling and semantic environment suffixes to the mask
+                // stages' keys (they are not document material, so they are not in `links`).
+                if keys.hasMaskStages {
+                    return (keys.localApply ?? "") + tilingSuffix + semanticSuffix
+                }
+                return keys.sharpen ?? keys.sceneLinear
+            }()
+            : nil
+        func gmwParamsMatch(_ cache: GMWCache, width: Int, height: Int) -> Bool {
+            cache.identity == input.identity && cache.luma == gmwLuma && cache.chroma == gmwChroma
+                && cache.tuningVersion == PostDenoise.tuningVersion
+                && cache.width == width && cache.height == height
+        }
+        /// Whether this frame may **keep** an S1.5 result for a later window to cut out. An
+        /// interactive graph always may (that is the point of the memo); a cache-off graph only
+        /// when the canvas is small enough that the extra texture is not the frame's dominant
+        /// cost — the window-crop contract is exercised there by tests and previews, while a 60 MP
+        /// export is a one-shot frame that must not hold another canvas after it.
+        let gmwCacheable = !pool.retainsNothing && plan.canvas.pixelCount <= 1_000_000
+        let gmwDisposition: GMWDisposition = {
+            guard gmwActive else { return .off }
+            // A probe stops before S4 and may be 1×1; it must not replace the on-screen memo.
+            guard options.stopBefore == nil else { return .transient }
+            // A cache-off frame that is too big to memoise runs the chain (whole frame) or draws
+            // un-denoised (window) exactly as the pre-memo path did.
+            guard usesStageCache || gmwCacheable else {
+                return plan.isFullFrame ? .transient : .unavailable
+            }
+            if plan.isFullFrame {
+                if let cache = gmwCache,
+                   gmwParamsMatch(cache, width: plan.canvas.width, height: plan.canvas.height) {
+                    if cache.upstream == gmwUpstreamKey { return .exact }
+                    if usesStageCache, !options.wantsPixels, cache.correction != nil,
+                       CFAbsoluteTimeGetCurrent() - cache.computedAt < 0.25 {
+                        return .drag
+                    }
+                }
+                return .full
+            }
+            // A window is the whole frame cut. Crop only when every coordinate line matches: the
+            // export canvas (no `(baseline − frame)/2` inset), a canvas the window fills exactly
+            // (no letterbox squeeze), and the memo's own grid == `plan.frame`.
+            if plan.expandedCanvas == nil,
+               plan.canvas.width == plan.windowRect.width,
+               plan.canvas.height == plan.windowRect.height,
+               let cache = gmwCache,
+               gmwParamsMatch(cache, width: plan.frame.width, height: plan.frame.height),
+               let wholeKey = gmwWholeUpstreamKey,
+               cache.upstream == wholeKey {
+                return .crop
+            }
+            return .unavailable
+        }()
+        /// Appended to the key of the curve and everything below it. Empty for the exact whole-frame
+        /// chain (so the recorded goldens and the 0/0 identity keep their keys), non-empty whenever
+        /// the bytes came from an approximation or a crop.
+        let gmwKeySuffix: String = {
+            switch gmwDisposition {
+            case .off, .transient, .exact, .full: return ""
+            case .drag: return "|gmw=drag"
+            case .crop: return "|gmw=crop"
+            case .unavailable: return "|gmw=none"
+            }
+        }()
         let compositeStage = usesStageCache
             ? stages.last { RenderGraph.ownsGenericCacheEntry($0) } : nil
         let compositeKey = compositeStage.map {
             compositeKey(edit, plan, stage: $0, tilingSuffix: tilingSuffix, semanticSuffix: semanticSuffix)
+                + gmwKeySuffix
         }
         var firstStage = 0
         if usesStageCache, let compositeStage, let compositeKey,
@@ -2614,6 +2777,8 @@ public final class RenderGraph {
             let key = plan.keys.key(for: stage)
                 + (stage.isMaskStage ? tilingSuffix : "")
                 + (stage.index >= RenderStage.maskAtlas.index ? semanticSuffix : "")
+                // 566-A: an approximated or cropped S1.5 output is not the exact chain's output.
+                + (stage.index >= RenderStage.curve.index ? gmwKeySuffix : "")
 
             // 249 — 修复 runs **first**, on the decoded source grid, and S0 below consumes its
             // output. The stage's texture is `sourceSize`, not `plan.canvas`; the generic stage cache
@@ -2787,6 +2952,117 @@ public final class RenderGraph {
                 current = hit.texture
                 currentIsTransient = false
                 continue
+            }
+
+            // 566-A — **S1.5**, the scene-linear GMW denoiser that replaced S3.9's NR branch. It sits
+            // in the same linear slot as the 365 prototype (after S1.6, before S1.7/the curve), runs
+            // for every document whose two denoise strengths are not both 0, and at the explicit
+            // 0/0 pair the pass does not exist at all (so `--nr 0 --cnr 0` is the pre-566 frame byte
+            // for byte). Its material rides the curve link (`EditModel.material(.curve)`).
+            //
+            // The disposition was decided before the walk (see `GMWDisposition`): the chain runs on
+            // the **whole frame only**, a window takes a crop of that result, and a repeat frame
+            // reuses the result bytes. That is what makes two overlapping windows — and fit vs 1:1 —
+            // agree: the statistics are estimated once, from one buffer.
+            if stage == .curve, gmwDisposition != .off {
+                let canvas = plan.canvas
+                let consumed = current
+                let consumedIsTransient = currentIsTransient
+                switch gmwDisposition {
+                case .exact:
+                    // No pass at all: the memo's whole-frame result *is* this frame's S1.5 output.
+                    if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                    current = gmwCache!.result
+                    currentIsTransient = false
+
+                case .crop:
+                    // The memo was filled by a whole-frame render whose grid is this window's
+                    // `plan.frame`; the window is a rectangle in that grid. One blit, no compute.
+                    let cache = gmwCache!
+                    let out = try pool.obtain(canvas)
+                    let rect = plan.windowRect
+                    guard let blit = cb.makeBlitCommandEncoder() else {
+                        pool.recycle(out)
+                        throw RenderError.commandBufferFailed
+                    }
+                    blit.copy(from: cache.result, sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: MTLOrigin(x: rect.x, y: rect.y, z: 0),
+                              sourceSize: MTLSize(width: canvas.width, height: canvas.height,
+                                                  depth: 1),
+                              to: out, destinationSlice: 0, destinationLevel: 0,
+                              destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                    blit.endEncoding()
+                    if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                    if !recyclesEachStage { transient.append(out) }
+                    current = out
+                    currentIsTransient = true
+
+                case .drag:
+                    let out = try pool.obtain(canvas)
+                    try PostDenoise.applyCorrection(cb: cb, source: current,
+                                                    correction: gmwCache!.correction!,
+                                                    destination: out)
+                    if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                    if !recyclesEachStage { transient.append(out) }
+                    current = out
+                    currentIsTransient = true
+
+                case .full:
+                    // Reuse the memo's own texture when the canvas still fits (a settled frame after
+                    // a drag, or a new pair of strengths, overwrites it in place), otherwise
+                    // allocate one. The texture is fully rewritten by this chain, so a key change
+                    // does not require a new allocation.
+                    let destination: MTLTexture
+                    if let cache = gmwCache,
+                       cache.width == canvas.width, cache.height == canvas.height {
+                        destination = cache.result
+                    } else {
+                        destination = try makeGMWResultTexture(width: canvas.width,
+                                                               height: canvas.height)
+                    }
+                    // Only the interactive path pays for the correction field; the settled frame
+                    // writes it so the next drag tick can reuse it.
+                    let interactive = usesStageCache && !options.wantsPixels
+                    let correction = interactive
+                        ? try scratch("gmw-correction", width: canvas.width,
+                                      height: canvas.height, format: .rgba16Float)
+                        : nil
+                    try PostDenoise.encode(cb: cb, source: current, destination: destination,
+                                           lumaNR: gmwLuma, chromaNR: gmwChroma,
+                                           correction: correction,
+                                           scratch: { label, width, height, format in
+                                               try scratch(label, width: width, height: height,
+                                                           format: format)
+                                           })
+                    gmwCache = GMWCache(identity: input.identity, luma: gmwLuma,
+                                        chroma: gmwChroma,
+                                        tuningVersion: PostDenoise.tuningVersion,
+                                        width: canvas.width, height: canvas.height,
+                                        upstream: gmwUpstreamKey, result: destination,
+                                        correction: correction,
+                                        computedAt: CFAbsoluteTimeGetCurrent())
+                    if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                    current = destination
+                    currentIsTransient = false
+
+                case .transient:
+                    let out = try pool.obtain(canvas)
+                    try PostDenoise.encode(cb: cb, source: current, destination: out,
+                                           lumaNR: gmwLuma, chromaNR: gmwChroma,
+                                           scratch: { label, width, height, format in
+                                               try scratch(label, width: width, height: height,
+                                                           format: format)
+                                           })
+                    if recyclesEachStage, consumedIsTransient { pool.recycle(consumed) }
+                    if !recyclesEachStage { transient.append(out) }
+                    current = out
+                    currentIsTransient = true
+
+                case .unavailable, .off:
+                    // A window with no whole-frame result yet draws the un-denoised frame (the
+                    // caller may ask again once the whole frame arrives). No pass, no memo touch.
+                    break
+                }
             }
 
             // 365 — the hidden **linear-domain denoise prototype**, at its specified place: after
@@ -3591,6 +3867,7 @@ public final class RenderGraph {
         s1Entry = nil
         atlasCache = nil
         localEntry = nil
+        gmwCache = nil
         // 160 — the statistics proxy is cheap to remeasure and must not outlive an explicit cache
         // invalidation (the held bytes are small, but the "give it all back" contract is literal).
         dehazeStats = nil
@@ -3645,7 +3922,11 @@ public final class RenderGraph {
     /// its hits.
     @discardableResult
     public func releaseIdleTextures() -> Int {
-        pool.releaseIdle()
+        // 566-A: S1.5's working set is canvas-sized and lives outside the pool, so "no frame is
+        // coming for this canvas" has to drop it as well. Nothing here is a *cache* the next frame
+        // would hit — every scratch entry is recomputed by the chain that asks for it.
+        scratchTextures.removeAll()
+        return pool.releaseIdle()
     }
 
     /// Give **everything** back: the stage cache, the S1/S1.6 slots, the atlas and the idle list. The
@@ -3658,6 +3939,10 @@ public final class RenderGraph {
         let held = heldTextureBytes
         invalidateCache()
         atlasPool = nil
+        // 566-A: S1.5's scratch (and its memo) are canvas-sized too. They are not pool textures,
+        // so "give everything back" has to drop them here or an export leaves the whole GMW working
+        // set (and its result) alive behind a released graph.
+        scratchTextures.removeAll()
         return held + pool.releaseIdle()
     }
 
@@ -4853,8 +5138,6 @@ public final class RenderGraph {
 
         let textureAmount = Float(edit.effects.texture) / 100
         let clarityAmount = Float(edit.effects.clarity) / 100
-        let lumaNR = Float(edit.effects.nonBayerLuminanceNR) / 100
-        let chromaNR = Float(edit.effects.nonBayerColorNR) / 100
 
         // 181 — the masks that carry a local 纹理/锐化, compacted, with their atlas slices. An empty
         // list is the identity: no loop, no atlas read, the pre-181 uniform **and** frame.
@@ -4877,7 +5160,9 @@ public final class RenderGraph {
             // 320 ceiling, not `options.display.headroom`: the ceiling is already key material (it
             // reaches this stage through the tone-map link, 323), while the panel's headroom is a
             // display property that would let a cached grid cross headrooms.
-            f: SIMD4(lumaNR, chromaNR, Float(ceiling), 0),
+            // 566-A — the two denoise slots are retired: the scene-linear S1.5 GMW pass owns them
+            // now. `.z` is still the picture's ceiling, read by the apply pass.
+            f: SIMD4(0, 0, Float(ceiling), 0),
             // The content rect, not the canvas: a mask's detail stops at the picture's edge exactly
             // where S2/S3/S3.5 stop (派单 008 C's rule).
             g: SIMD4(hasLocalDetail ? Int32(localDetail.count) : 0,
@@ -4894,71 +5179,11 @@ public final class RenderGraph {
         let needsDetailWindow = localDetail.contains { $0.a.y > 0 }
         let bandsActive = textureAmount != 0 || clarityAmount != 0 || needsTextureBand
             || needsDetailWindow
-        // 171: the two denoises share this stage but not the guided filter — they are a joint
-        // bilateral grid of their own. The grid is built from the **stage input**, before the
-        // texture/clarity residual is added, so σ is a fact about the frame, not about the drag.
-        let denoiseActive = lumaNR != 0 || chromaNR != 0
+        // 566-A — the joint-bilateral NR branch used to live here (its three `s3_9_denoise`
+        // entries: σ, splat, blur). It is retired; the scene-linear S1.5 GMW pass replaces it, and
+        // `Kernels/s3_9_denoise.metal` is kept only because the file is untouched by this ticket.
+        // The texture/clarity bands below are unchanged.
         var current = src
-
-        let cell = RenderGraph.denoiseCell
-        let zBins = RenderGraph.denoiseZBins
-        let gW = max(1, (w + cell - 1) / cell)
-        let gH = max(1, (h + cell - 1) / cell)
-        var nrGrid: MTLTexture?
-        var nrSigma: MTLTexture?
-        if denoiseActive {
-            var dp = DenoiseParamsU(
-                canvas: SIMD4(Int32(w), Int32(h), Int32(cell), Int32(zBins)),
-                grid: SIMD4(Int32(gW), Int32(gH), 0, 0),
-                // 553 — `n.z` is the headroom the splat's z/luma index is normalised by, the same
-                // picture ceiling the apply pass reads from `DetailFXParams.d.z`.
-                n: SIMD4(lumaNR, chromaNR, Float(ceiling), 0))
-
-            nrSigma = try scratch("detailfx-nr-sigma", width: 1, height: 1, format: .rgba32Float)
-            let gridA = try scratch3D("detailfx-nr-grid-a", width: gW, height: gH, depth: zBins,
-                                      format: .rgba16Float)
-            let gridB = try scratch3D("detailfx-nr-grid-b", width: gW, height: gH, depth: zBins,
-                                      format: .rgba16Float)
-            nrGrid = gridA
-
-            // P0 — one threadgroup estimates the frame's noise σ.
-            let sigma = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_sigma")
-            guard let e0 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e0.setComputePipelineState(sigma)
-            e0.setTexture(src, index: 0)
-            e0.setTexture(nrSigma!, index: 1)
-            e0.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e0.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-            e0.endEncoding()
-
-            // P1 — splat full resolution into the grid (z five-tap happens in the same threadgroup).
-            let splat = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_splat")
-            guard let e1 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e1.setComputePipelineState(splat)
-            e1.setTexture(src, index: 0)
-            e1.setTexture(nrSigma!, index: 1)
-            e1.setTexture(gridA, index: 2)
-            e1.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e1.dispatchThreadgroups(MTLSize(width: gW, height: gH, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-            e1.endEncoding()
-
-            // P2 — the x and y five-taps in one tiled pass (16 × 16 outputs per threadgroup, one z
-            // slice each). Two separate dispatches moved the whole grid twice; this moves it once.
-            let blur = try kernels.pipeline(file: "s3_9_denoise", function: "s3_9_nr_blur_xy")
-            let blurGroups = MTLSize(width: (gW + 15) / 16, height: (gH + 15) / 16, depth: zBins)
-            let blurThreads = MTLSize(width: 16, height: 16, depth: 1)
-            guard let e2 = cb.makeComputeCommandEncoder() else { throw RenderError.commandBufferFailed }
-            e2.setComputePipelineState(blur)
-            e2.setTexture(gridA, index: 0)
-            e2.setTexture(gridB, index: 1)
-            e2.setBytes(&dp, length: MemoryLayout<DenoiseParamsU>.stride, index: 0)
-            e2.dispatchThreadgroups(blurGroups, threadsPerThreadgroup: blurThreads)
-            e2.endEncoding()
-            // The blurred grid is the one the slice reads.
-            nrGrid = gridB
-        }
 
         // 2 + 3. 纹理 / 清晰度 — the same guided-filter chain, two bands, **one** full-resolution
         // apply. One statistics pack (the 4×4 block means), one separable box per band (the two
@@ -4967,18 +5192,15 @@ public final class RenderGraph {
         // 4.10 Mpx, that second read was ~1.2 ms of the frame.
         // 181 — a **local** 锐化 has no band chain of its own (it runs on a 1 px 3×3 window inside the
         // apply), so the apply pass must be encoded for it even when every global amount is 0.
-        if bandsActive || denoiseActive || hasLocalDetail {
+        if bandsActive || hasLocalDetail {
             params.a.x = textureAmount
             // Full deflection is 0.8 × the residual, not 1.0: at 1.0 the additive boost shifts the
             // frame's mean by ~1.1 % (measured on the fixture's dark/bright step), which is a
             // brightness change on a control that promises none. 0.8 keeps the +100 high-pass gain at
             // ~+67 % (the acceptance asks for +30 %) and the mean inside 1 %.
             params.a.y = clarityAmount * 0.8
-            params.f.x = lumaNR
-            params.f.y = chromaNR
             try detailFXBands(cb: cb, from: current, into: out, params: &params, qW: qW, qH: qH,
                               textureRadius: textureRadius, clarityRadius: clarityRadius,
-                              nrGrid: nrGrid, nrSigma: nrSigma,
                               needsTextureBand: needsTextureBand,
                               needsDetailWindow: needsDetailWindow,
                               atlas: hasLocalDetail ? atlasCache?.texture : nil,
@@ -5012,7 +5234,6 @@ public final class RenderGraph {
     private func detailFXBands(cb: MTLCommandBuffer, from source: MTLTexture, into destination: MTLTexture,
                                params: inout DetailFXParamsU, qW: Int, qH: Int,
                                textureRadius: Int32, clarityRadius: Int32,
-                               nrGrid: MTLTexture?, nrSigma: MTLTexture?,
                                needsTextureBand: Bool, needsDetailWindow: Bool,
                                atlas: MTLTexture?, detail: [MaskDetailU],
                                detailBuffer: MTLBuffer?) throws {
@@ -5071,11 +5292,8 @@ public final class RenderGraph {
 
         let apply = try kernels.pipeline(file: "s3_8_detail_fx", function: "s3_8_guide_apply")
         // A chroma-only drag has no coefficient map at all; the source is a valid sampleable texture
-        // and every amount that would read it is 0, so it is the honest inert binding. The denoise
-        // bindings always get a legal 1×1 texture when the grid was not built.
+        // and every amount that would read it is 0, so it is the honest inert binding.
         let fallback = coeffTex ?? coeffCla ?? source
-        let grid = try nrGrid ?? denoiseDummy3D()
-        let sigma = try nrSigma ?? denoiseDummy2D()
         guard let enc = cb.makeComputeCommandEncoder() else {
             throw RenderError.commandBufferFailed
         }
@@ -5084,8 +5302,10 @@ public final class RenderGraph {
         enc.setTexture(coeffTex ?? fallback, index: 1)
         enc.setTexture(coeffCla ?? fallback, index: 2)
         enc.setTexture(destination, index: 3)
-        enc.setTexture(grid, index: 5)
-        enc.setTexture(sigma, index: 6)
+        // 566-A — the NR grid/σ bindings (indices 5/6) are gone; the kernel's `p.f.xy` weights are
+        // always 0 now, so the dead arguments are never dereferenced.
+        enc.setTexture(try denoiseDummy3D(), index: 5)
+        enc.setTexture(try denoiseDummy2D(), index: 6)
         // 181 — the atlas. When no mask carries a local value the kernel's loop does not exist, but
         // Metal still wants a legal binding: a 1×1 array stands in for the atlas the way
         // `denoiseDummy2D` stands in for σ.
@@ -6521,6 +6741,23 @@ private func dispatchSharpenTile(_ enc: MTLComputeCommandEncoder, _ size: ImageS
     /// exist when a mask actually asks for feather/refine, and they are dropped when the canvas
     /// changes, so a preview-sized graph never holds export-sized buffers.
     private var scratchTextures: [String: MTLTexture] = [:]
+
+    /// 566-A — the graph-owned whole-frame S1.5 result. It is not a pool texture: the memo, not the
+    /// frame, owns it, and a window blits out of it after the frame that produced it has been
+    /// recycled. `rgba16Float` matches the canvas format, and `.private` is enough — nothing ever
+    /// reads it on the CPU (the crop is a GPU blit).
+    private func makeGMWResultTexture(width: Int, height: Int) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
+                                                            width: max(1, width),
+                                                            height: max(1, height),
+                                                            mipmapped: false)
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        guard let t = device.makeTexture(descriptor: desc) else {
+            throw RenderError.allocationFailed("gmw-result:\(width)x\(height)")
+        }
+        return t
+    }
 
     private func scratch(_ label: String, width: Int, height: Int, format: MTLPixelFormat,
                          arrayLength: Int = 1, asArray: Bool = false) throws -> MTLTexture {

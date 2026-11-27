@@ -94,6 +94,12 @@ final class RenderTests: XCTestCase {
         // document with 锐化 explicitly at 0 (same convention as 2e6ab4a / 1a5e021 / 05b3bce for the
         // geometry-identity tests; the sharpened frame is what `SharpenGoldenImpactTests` measures).
         edit.sharpen = SharpenGroup(amount: 0)
+        // 566-A: 去噪 / 去彩噪 also rest at 50 now, and S1.5's GMW pass is not the identity either
+        // (that is its job). The claim this test makes is about the decode, the two primaries
+        // matrices and the display encode, so both are pinned off — the same convention the line
+        // above uses for 锐化. The denoised frame is what `DetailDenoiseTests` / the goldens measure.
+        edit.effects.nonBayerLuminanceNR = 0
+        edit.effects.nonBayerColorNR = 0
         let result = try graph.render(edit, options: RenderOptions(scale: 1, wantsPixels: true))
         let pixels = try XCTUnwrap(result.display)
 

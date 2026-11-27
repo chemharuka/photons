@@ -50,11 +50,16 @@ enum M1KeyVector {
                             + SharpenGroup().keyString + StageAlgorithmVersion.token(.sharpen))
         // 030: the curve changed stage (`curve` before S2, `w=` instead of `rgb=`); 069: its axis is
         // the card's 0…2 and its points print six decimals.
+        //
+        // 566-A: S1.5 (the scene-linear GMW denoiser) runs between S1.6 and this stage, so its two
+        // strengths are part of the curve link. `EditModel.neutral` carries the new resting 50/50,
+        // hence the tokens below. Only the curve link and everything seeded by it moved.
+        let gmw = ";gmw=50.00000;gmwc=50.00000"
         let curve = "\(sharpenLink)"
             + "|w=0.000000,0.000000;0.600000,0.500000;2.000000,2.000000"
             + "|r=0.000000,0.000000;2.000000,2.000000"
             + "|g=0.000000,0.000000;2.000000,2.000000"
-            + "|b=0.000000,0.000000;2.000000,2.000000;alg=\(alg(.curve))"
+            + "|b=0.000000,0.000000;2.000000,2.000000\(gmw);alg=\(alg(.curve))"
         // 329: the vignette is key material for S2 — the pass runs between the curve and the tone map.
         let vignetteMaterial = "vig=-40.00000;mid=45.00000;fea=60.00000;alg=\(alg(.vignette))"
         let s2Seed = h("\(h(curve))|vignette|\(vignetteMaterial)")
@@ -101,5 +106,11 @@ enum M1KeyVector {
     /// the curve instead of below S3.6. Every parent digest from the curve down moves with it; the
     /// stage's generation is 4 (the move changes the input domain even though the four parameters do
     /// not). The geometry/S1/S1.7 texts are unchanged, which is the "only 锐化 moved" claim.
-    static let pinnedDigest = "d24b463722b34ce5501fb33505fb18a1a08f9da4c979c6a00d5e5a07065499df"
+    ///
+    /// 566-A — re-pinned because **S1.5 entered the material after `sceneLinear`**: the scene-linear
+    /// GMW denoiser runs between S1.6 and S1.7 and its two strengths ride the curve link as
+    /// `;gmw=…;gmwc=…`. `EditModel.neutral` now rests at 50/50 (k = 2 / 3.5), so every document that
+    /// has not overridden them spells those tokens and every parent digest below the curve moves.
+    /// This is the deliberate re-pin signal for an operator change, not a threshold being relaxed.
+    static let pinnedDigest = "be8372f79a14d94a65369110f1fb408758eb0ab5adeb42070aabacb53776a984"
 }

@@ -567,35 +567,46 @@ final class DetailFXTests: XCTestCase {
 
     // MARK: - 164: the denoises
 
-    /// The two new numbers are S3.9 material, and at 0 the stage does not exist — a pre-164 document
-    /// keeps its key text and its pass list byte for byte.
+    /// 566-A — the two denoise numbers are **S1.5 material**, not S3.9 material: they ride the
+    /// linear curve link (`;gmw=` / `;gmwc=`), and the display-referred detail stage does not exist
+    /// for them at all. An explicit 0/0 pair keeps the pre-566 chain — no token, no pass.
     func testNonBayerRowsAreStageMaterialAndNeutralKeepsTheStageOut() {
         XCTAssertEqual(StageAlgorithmVersion.detailFX, 4, "181 added the mask local detail loop")
 
-        var edit = EditModel.neutral
-        XCTAssertFalse(edit.hasDetailFX)
+        // `.neutral` rests at 50/50, so the resting document carries S1.5 material but **not** S3.9.
+        let resting = EditModel.neutral
+        XCTAssertFalse(resting.hasDetailFX, "去噪 不召唤 S3.9")
         XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 4)
+        XCTAssertEqual(resting.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;alg=4")
+        XCTAssertTrue(resting.keyMaterial(.curve).contains(";gmw=50.00000;gmwc=50.00000"))
 
-        // A pre-164 document's material is the exact old text (plus the stage's own `;alg=` token,
-        // which 181 bumps to 4); the new fields append only when set.
-        edit.effects.texture = 10
-        XCTAssertEqual(edit.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=4")
+        var zero = EditModel.neutral
+        zero.effects.nonBayerLuminanceNR = 0
+        zero.effects.nonBayerColorNR = 0
+        XCTAssertFalse(zero.hasDetailFX)
+        XCTAssertFalse(zero.keyMaterial(.curve).contains(";gmw="),
+                       "0/0 时 S1.5 没有 material，pass 不进图")
 
-        var luma = EditModel.neutral
+        var texture = zero
+        texture.effects.texture = 10
+        XCTAssertTrue(texture.hasDetailFX, "纹理 非零 → S3.9 存在")
+        XCTAssertEqual(texture.keyMaterial(.detailFX), "tx=10.00000;cl=0.00000;alg=4")
+        XCTAssertFalse(texture.keyMaterial(.curve).contains(";gmw="), "S3.9 的纹理不进 S1.5")
+
+        var luma = zero
         luma.effects.nonBayerLuminanceNR = 40
-        XCTAssertTrue(luma.hasDetailFX, "去噪 非零 → S3.9 存在")
-        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbl=40.00000;alg=4")
-        XCTAssertEqual(luma.renderInputs.key.contains("s3.9-detail-fx"), true)
+        XCTAssertFalse(luma.hasDetailFX, "去噪 非零不再召唤 S3.9")
+        XCTAssertEqual(luma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;alg=4")
+        XCTAssertTrue(luma.keyMaterial(.curve).contains(";gmw=40.00000"))
+        XCTAssertTrue(luma.keyMaterial(.curve).contains(";gmwc=0.00000"))
 
-        var chroma = EditModel.neutral
+        var chroma = zero
         chroma.effects.nonBayerColorNR = 35
-        XCTAssertTrue(chroma.hasDetailFX)
-        XCTAssertEqual(chroma.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;nbc=35.00000;alg=4")
-
-        // Turning them back to 0 restores the neutral stage list and the exact key.
-        luma.effects.nonBayerLuminanceNR = 0
-        XCTAssertFalse(luma.hasDetailFX)
-        XCTAssertEqual(luma.renderInputs.key, EditModel.neutral.renderInputs.key)
+        XCTAssertFalse(chroma.hasDetailFX)
+        XCTAssertTrue(chroma.keyMaterial(.curve).contains(";gmwc=35.00000"))
+        XCTAssertTrue(chroma.keyMaterial(.curve).contains(";gmw=0.00000"))
+        XCTAssertTrue(chroma.renderInputs.key.contains("s3.9-detail-fx") == false,
+                      "去彩噪 不进 S3.9 的 key")
     }
 
     /// 164 K2 — the three moved/untouched groups are a **pure ownership change**: the two pre-move
@@ -680,7 +691,12 @@ final class DetailFXTests: XCTestCase {
 
         var edit = EditModel.neutral
         edit.effects.nonBayerLuminanceNR = 100
-        let noisy = try render(graph, EditModel.neutral)
+        edit.effects.nonBayerColorNR = 0
+        // 566-A: `.neutral` now rests at 50/50, so the "before" frame is explicit 0/0.
+        var off = EditModel.neutral
+        off.effects.nonBayerLuminanceNR = 0
+        off.effects.nonBayerColorNR = 0
+        let noisy = try render(graph, off)
         let clean = try render(graph, edit)
 
         let values = luma(noisy), cleaned = luma(clean)
@@ -801,7 +817,20 @@ final class DetailFXTests: XCTestCase {
     /// The milliseconds are **printed only**: an idle-machine measurement is a benchmark, not a test
     /// every lane has to pass while five of them are compiling.
     func testEachNonBayerControlEntersTheStageOnceAndAddsNoPass() throws {
-        let graph = try makeGraph(flat())
+        // A flat field with real noise: the GMW chain is a no-op on a *noise-free* flat frame
+        // (σ = 0), so a constant fixture could not show that a non-zero control moves pixels.
+        let (nw, nh) = (750, 500)
+        var rgba = [Float16](repeating: 0, count: nw * nh * 4)
+        var seed: UInt32 = 0x164_0566
+        for i in stride(from: 0, to: rgba.count, by: 4) {
+            seed = seed &* 1664525 &+ 1013904223
+            let n = (Double(seed >> 8) / Double(1 << 24) - 0.5) * 0.08
+            let v = Float16(0.20 + n)
+            rgba[i] = v; rgba[i + 1] = v; rgba[i + 2] = v; rgba[i + 3] = 1
+        }
+        let graph = try makeGraph(LinearImage(width: nw, height: nh, rgba: rgba,
+                                              colorSpace: "extendedLinearSRGB",
+                                              decoderVersion: "synthetic-nonbayer"))
         let options = RenderOptions(scale: 1, display: DisplayOptions(headroom: 1),
                                     useCache: false, wantsPixels: true)
         func frame(_ edit: EditModel) throws -> (DisplayImage, RenderTrace) {
@@ -810,11 +839,13 @@ final class DetailFXTests: XCTestCase {
             return (try XCTUnwrap(result.display), result.trace)
         }
 
-        // The baseline is the same frame with S3.9 already running (纹理 = 1): it isolates the
-        // control's own work from the stage's fixed pack/apply cost, which is what the budget is
-        // about — and it is the list "no new pass" is compared against.
+        // The baseline is the same frame with S3.9 already running (纹理 = 1) and **both denoises
+        // explicitly off**: it isolates the S1.5 control's own work from S3.9's fixed pack/apply
+        // cost, and it is the list "no new pass" is compared against.
         var base = EditModel.neutral
         base.effects.texture = 1
+        base.effects.nonBayerLuminanceNR = 0
+        base.effects.nonBayerColorNR = 0
         var luma = base
         luma.effects.nonBayerLuminanceNR = 100
         var chroma = base
@@ -823,20 +854,27 @@ final class DetailFXTests: XCTestCase {
         both.effects.nonBayerLuminanceNR = 100
         both.effects.nonBayerColorNR = 100
 
-        // 1. The key text is where "does this document have the control" is decided — and it is the
-        // cache key, so a control that "ran" at 0 would invalidate every entry for nothing.
+        // 1. The key text is where "does this document have the control" is decided. 566-A moved
+        // the two denoises to S1.5, so they ride the **curve** link, and S3.9's own material stays
+        // exactly 纹理/清晰度: a denoise that "ran" at 0 must not invalidate the display stage.
         XCTAssertEqual(base.keyMaterial(.detailFX), "tx=1.00000;cl=0.00000;alg=4")
-        XCTAssertTrue(luma.keyMaterial(.detailFX).contains(";nbl=100.00000;"))
-        XCTAssertFalse(luma.keyMaterial(.detailFX).contains(";nbc="))
-        XCTAssertTrue(chroma.keyMaterial(.detailFX).contains(";nbc=100.00000;"))
-        XCTAssertFalse(chroma.keyMaterial(.detailFX).contains(";nbl="))
-        XCTAssertTrue(both.keyMaterial(.detailFX).contains(";nbl=100.00000;nbc=100.00000;"))
+        XCTAssertFalse(base.keyMaterial(.curve).contains(";gmw="))
+        XCTAssertTrue(luma.keyMaterial(.curve).contains(";gmw=100.00000"))
+        XCTAssertTrue(luma.keyMaterial(.curve).contains(";gmwc=0.00000"))
+        XCTAssertTrue(chroma.keyMaterial(.curve).contains(";gmwc=100.00000"))
+        XCTAssertTrue(chroma.keyMaterial(.curve).contains(";gmw=0.00000"))
+        XCTAssertTrue(both.keyMaterial(.curve).contains(";gmw=100.00000;gmwc=100.00000"))
+        for (name, edit) in [("去噪", luma), ("去彩噪", chroma), ("两项", both)] {
+            XCTAssertFalse(edit.keyMaterial(.detailFX).contains("gmw"),
+                           "\(name)：S3.9 的 material 不带 S1.5 的键")
+        }
 
-        // Warm-up: the grid's pipelines compile once, and the printed milliseconds should not carry it.
+        // Warm-up: the GMW pipelines compile once, and the printed milliseconds should not carry it.
         _ = try frame(base)
         _ = try frame(both)
 
-        // 2 + 3. One stage, one execution, the same list as the baseline.
+        // 2 + 3. S3.9 still runs once (纹理 = 1); the denoise control adds no stage of its own, and
+        // one slider = one S1.5 pass inside the curve stage.
         let (basePixels, baseTrace) = try frame(base)
         let (lumaPixels, lumaTrace) = try frame(luma)
         let (chromaPixels, chromaTrace) = try frame(chroma)
@@ -844,6 +882,8 @@ final class DetailFXTests: XCTestCase {
         for (name, trace) in [("去噪", lumaTrace), ("去彩噪", chromaTrace), ("两项", bothTrace)] {
             XCTAssertEqual(trace.executed.filter { $0 == .detailFX }.count, 1,
                            "\(name)：S3.9 每帧只进一次")
+            XCTAssertEqual(trace.executed.filter { $0 == .curve }.count, 1,
+                           "\(name)：一帧只进一次 curve（S1.5 在这里面，只跑一趟）")
             XCTAssertEqual(trace.executed, baseTrace.executed,
                            "\(name)：与已开 S3.9 的基线逐项同一个阶段列表 —— 不开新 pass")
         }
@@ -853,18 +893,19 @@ final class DetailFXTests: XCTestCase {
         _ = try frame(luma)
         XCTAssertEqual(graph.stageRuns[.detailFX] ?? 0, runsBefore + 1, "一帧只记一次 S3.9")
 
-        // 0 does not enter: not encoded-and-zero, but absent from the stage list, and the pixels are
-        // the neutral frame's byte for byte.
-        var zeroed = EditModel.neutral
-        zeroed.effects.nonBayerLuminanceNR = 0
-        zeroed.effects.nonBayerColorNR = 0
-        let (neutralPixels, neutralTrace) = try frame(.neutral)
-        let (zeroPixels, zeroTrace) = try frame(zeroed)
-        XCTAssertFalse(neutralTrace.executed.contains(.detailFX), "两个 0 时 S3.9 不进图")
-        XCTAssertFalse(zeroTrace.executed.contains(.detailFX), "显式写 0 也不进图")
-        XCTAssertEqual(neutralTrace.executed.count + 1, baseTrace.executed.count,
-                       "非 0 只多出 S3.9 这一段，不多第二段")
-        XCTAssertEqual(digest(neutralPixels), digest(zeroPixels), "0 与不写是同一帧（逐字节）")
+        // 0 does not enter S1.5: no `gmw=` token, and the stage list is the same as the 0/0 base.
+        // (`S1.5` is not a `RenderStage`, so "absent from the list" is proved by the key, not by a
+        // missing enumeration case.)
+        let (zeroPixels, zeroTrace) = try frame(base)
+        XCTAssertEqual(zeroTrace.executed, baseTrace.executed, "0/0 不新增 pass")
+        XCTAssertEqual(digest(zeroPixels), digest(basePixels), "0/0 与不写是同一帧（逐字节）")
+        var resting = base
+        resting.effects.nonBayerLuminanceNR = 50
+        resting.effects.nonBayerColorNR = 50
+        let (restingPixels, restingTrace) = try frame(resting)
+        XCTAssertEqual(restingTrace.executed, baseTrace.executed,
+                       "默认 50/50 也只多算 S1.5，不多一个 stage")
+        XCTAssertNotEqual(digest(restingPixels), digest(basePixels), "默认 50/50 必须在动像素")
         // The luma denoise must actually move this frame — otherwise the shape above is an empty
         // assertion. (The chroma one is deliberately not asked: the fixture is neutral, and a
         // bilateral mean of zero chroma is zero — that invariant is pinned by
