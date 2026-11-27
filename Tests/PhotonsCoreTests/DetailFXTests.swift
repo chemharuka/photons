@@ -573,12 +573,12 @@ final class DetailFXTests: XCTestCase {
     func testNonBayerRowsAreStageMaterialAndNeutralKeepsTheStageOut() {
         XCTAssertEqual(StageAlgorithmVersion.detailFX, 4, "181 added the mask local detail loop")
 
-        // `.neutral` rests at 50/50, so the resting document carries S1.5 material but **not** S3.9.
+        // 566-A（a79be820）：默认回 0/0 —— 静止文档既不进 S3.9，也不进 S1.5。
         let resting = EditModel.neutral
         XCTAssertFalse(resting.hasDetailFX, "去噪 不召唤 S3.9")
         XCTAssertEqual(StageAlgorithmVersion.version(of: .detailFX), 4)
         XCTAssertEqual(resting.keyMaterial(.detailFX), "tx=0.00000;cl=0.00000;alg=4")
-        XCTAssertTrue(resting.keyMaterial(.curve).contains(";gmw=50.00000;gmwc=50.00000"))
+        XCTAssertFalse(resting.keyMaterial(.curve).contains(";gmw="), "0/0 时 S1.5 不进图")
 
         var zero = EditModel.neutral
         zero.effects.nonBayerLuminanceNR = 0
