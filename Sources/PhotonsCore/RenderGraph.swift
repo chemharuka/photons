@@ -1770,6 +1770,11 @@ public final class RenderGraph {
         let computedAt: CFAbsoluteTime
     }
     private var gmwCache: GMWCache?
+    /// 566-A §8.2 — set while the graph renders a **whole frame only to fill the memo** for a
+    /// window that would otherwise draw un-denoised. The window path deliberately has no stage
+    /// cache (`useCache = false` stops it from warming entries for a canvas the window will never
+    /// reuse), so without this an over-budget frame would take `.transient` and never write the memo.
+    private var gmwForcedMemo = false
     /// 566-A — what S1.5 does for **this** frame. It is decided once, before the stage walk, because
     /// the answer also has to reach the key of every stage at or below the curve: a frame built from
     /// the drag approximation (or from a window crop) must never be served as the exact chain's
@@ -2691,13 +2696,14 @@ public final class RenderGraph {
         /// cost — the window-crop contract is exercised there by tests and previews, while a 60 MP
         /// export is a one-shot frame that must not hold another canvas after it.
         let gmwCacheable = !pool.retainsNothing && plan.canvas.pixelCount <= 1_000_000
-        let gmwDisposition: GMWDisposition = {
+        func gmwDispositionNow() -> GMWDisposition {
             guard gmwActive else { return .off }
             // A probe stops before S4 and may be 1×1; it must not replace the on-screen memo.
             guard options.stopBefore == nil else { return .transient }
             // A cache-off frame that is too big to memoise runs the chain (whole frame) or draws
-            // un-denoised (window) exactly as the pre-memo path did.
-            guard usesStageCache || gmwCacheable else {
+            // un-denoised (window) exactly as the pre-memo path did. The §8.2 preparation frame is
+            // the one exception: it exists to fill the memo.
+            guard usesStageCache || gmwCacheable || gmwForcedMemo else {
                 return plan.isFullFrame ? .transient : .unavailable
             }
             if plan.isFullFrame {
@@ -2724,7 +2730,43 @@ public final class RenderGraph {
                 return .crop
             }
             return .unavailable
-        }()
+        }
+        var gmwDisposition = gmwDispositionNow()
+        // 566-A §8.2 — **a window never stays un-denoised.** The whole-frame S1.5 result is the only
+        // source from which a window may cut (see `GMWDisposition`), so a miss used to mean "draw the
+        // raw chain until someone renders 适应", which is exactly the reported 「只有适应缩放能看到
+        // 效果」. On a miss this render first produces the whole-frame memo (one full chain at
+        // `plan.frame`, the cost §7.4 explicitly accepts for the first 1:1 frame), then re-decides:
+        // the window itself still only blits its crop, so two windows and the whole frame agree by
+        // construction.
+        if gmwDisposition == .unavailable, options.useCache, options.stopBefore == nil,
+           options.source == .edited, plan.expandedCanvas == nil,
+           plan.frame.width > 0, plan.frame.height > 0,
+           // Metal's texture limit. A 4:1 (or beyond) window indexes a virtual frame four times the
+           // picture; the whole-frame memo at that grid is neither allocatable nor needed, so such a
+           // window stays on the un-denoised path (the 1:1/fit paths this ticket names still crop).
+           plan.frame.width <= 16384, plan.frame.height <= 16384 {
+            var whole = options
+            whole.canvas = plan.frame
+            whole.outputWindow = nil
+            whole.wantsPixels = false
+            whole.collectHistogram = false
+            whole.histogramSampleLongEdge = 0
+            // Cache off on purpose: this frame's only product is the memo. It must not replace the
+            // stage entries of the canvas on screen, and it must run S1.5 even if a stale S4 entry
+            // could have answered.
+            whole.useCache = false
+            gmwForcedMemo = true
+            do {
+                let prepared = try renderResolved(edit, options: whole)
+                if let out = prepared.output { recycle(output: out) }
+                gmwDisposition = gmwDispositionNow()
+            } catch {
+                // The un-denoised window is still a valid frame; failing the viewport because an
+                // optional preparation allocation failed would be worse. The next frame retries.
+            }
+            gmwForcedMemo = false
+        }
         /// Appended to the key of the curve and everything below it. Empty for the exact whole-frame
         /// chain (so the recorded goldens and the 0/0 identity keep their keys), non-empty whenever
         /// the bytes came from an approximation or a crop.

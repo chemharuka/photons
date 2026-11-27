@@ -68,9 +68,10 @@ final class DetailFXCardTests: XCTestCase {
         XCTAssertTrue(resets.group(.detailFX))
         XCTAssertEqual(session.edit.effects.texture, 0)
         XCTAssertEqual(session.edit.effects.clarity, 0)
-        // 566-A — the two denoise rows rest at 50 (k = 2), so the group reset returns to 50, not 0.
-        XCTAssertEqual(session.edit.effects.nonBayerLuminanceNR, 50)
-        XCTAssertEqual(session.edit.effects.nonBayerColorNR, 50)
+        // 2026-11-27 (a79be820) — the two denoise rows rest at **0** again (denoise is off by
+        // default; 50 is the strength a user drags to), so the group reset returns to 0.
+        XCTAssertEqual(session.edit.effects.nonBayerLuminanceNR, 0)
+        XCTAssertEqual(session.edit.effects.nonBayerColorNR, 0)
         XCTAssertEqual(session.edit.effects.grain, 30, "颗粒属于效果卡，不被细节卡复位")
         XCTAssertEqual(session.history.count, before + 1)
         XCTAssertEqual(session.history.currentSnapshot?.label, "细节")
