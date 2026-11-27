@@ -59,10 +59,13 @@ public final class CanvasFrameCache {
     /// the photo (B → A evicts A's rung, so the prediction becomes 1.0). Off restores the exact-rung
     /// rule and makes the return-to-A test red.
     public nonisolated(unsafe) static var acceptsCoarserRung = true
-    /// 542 — the floor for that tolerance: `entryScale / requestedScale` must be at least this.
-    /// 0.5 accepts 「0.5 的缓存帧回答 1.0 的请求」; 0.25 vs 1.0 is visibly blurry and must miss so the
-    /// 533 stand-in (or the fresh frame) is used instead of pretending.
-    public nonisolated(unsafe) static var coarserRungFloor = 0.5
+    /// 571-A — the floor for that tolerance: `entryScale / requestedScale` must be at least this.
+    /// **1.0** means only an entry at or above the requested rung is accepted: a coarser entry can
+    /// never answer a sharper request, so a photo switch never opens on the 0.5 frame (the user's
+    /// 「切图先糊一下」). The counting path (`missReasons[.coarserRung]`) is kept for an entry that is
+    /// accepted on the floor when this value is lowered again, but at 1.0 the exact branch answers
+    /// first and a coarser entry is a plain `decodeScaleChanged` miss.
+    public nonisolated(unsafe) static var coarserRungFloor = 1.0
 
     public enum Regime: String, Sendable {
         case browsing
