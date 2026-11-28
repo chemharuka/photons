@@ -2564,6 +2564,9 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
+        // 2026-11-27（用户口径）：「1:1 渲染还没加载出来时，1920px 低清图也要能缩放，直到解码器解码替换掉」。
+        // 同一张 stand-in 位图按**新镜头**重铺一次；不重新解码、不请求帧，没有 stand-in 时是空操作。
+        repositionFirstFramePlaceholder(state: next)
         // One camera, one place it is stored: a `FrameSource` names a file *and* the camera to render
         // it from, so a zoom that did not travel into it would leave `viewState` and the rendered
         // frames disagreeing (the trap for every "zoom, then look at the frame" test).
@@ -7311,6 +7314,18 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                             contentRect: firstFramePlaceholderContentRect(imageSize: pixels))
         presentation.show(.placeholder(ThumbFrame(photo: photo, pixelSize: pixels)), reason: "standin")
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
+    }
+
+    /// 2026-11-27 — 「1:1 还没解出来时，1920 低清图也要能缩放」。
+    ///
+    /// 装上去那一刻算出的矩形只对那一刻的镜头成立；之后每一次镜头变化（滚轮、捏合、倍率档、
+    /// 拖拽平移、双击、⌘=/⌘−）都走 `setViewState`，所以在这里把同一张位图重新铺到新取景上。
+    /// 不重新解码、不请求帧 —— 就是一次 `contentRect` 的重算；没有 stand-in 时零成本返回。
+    private func repositionFirstFramePlaceholder(state: LoupeViewState) {
+        guard canvasView.isShowingFirstFramePlaceholder,
+              let image = canvasView.firstFramePlaceholderImage else { return }
+        let rect = firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize, state: state)
+        canvasView.showFirstFramePlaceholder(image, contentRect: rect)
     }
 
     /// 283 — the rectangle the stand-in occupies, in canvas points. It is the **photograph's** rect
