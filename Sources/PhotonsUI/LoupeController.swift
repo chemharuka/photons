@@ -1822,6 +1822,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
         // it for a frame shows grey, not a black edge. 315: it follows `CanvasBackdrop.current` and is
         // re-read on `.canvasBackdropDidChange` (`observeCanvasBackdrop`).
         container.layer?.backgroundColor = NSColor.canvasMatte.cgColor
+        // 2026-11-27 — stand-in 被拿掉（真帧上屏 / 换图 / 换照片）时，那段 180 ms 的 own-bridge 立刻作废。
+        canvasView.onFirstFramePlaceholderHidden = { [weak self] in self?.stopStandInBridge() }
         canvasView.frame = container.bounds
         canvasView.autoresizingMask = [.width, .height]
         canvasView.controller = self
@@ -2564,9 +2566,6 @@ public final class LoupeController: NSViewController, HeadroomSource {
         guard next != viewState else { return }
         let previous = viewState
         viewState = next
-        // 2026-11-27（用户口径）：「1:1 渲染还没加载出来时，1920px 低清图也要能缩放，直到解码器解码替换掉」。
-        // 同一张 stand-in 位图按**新镜头**重铺一次；不重新解码、不请求帧，没有 stand-in 时是空操作。
-        repositionFirstFramePlaceholder(state: next)
         // One camera, one place it is stored: a `FrameSource` names a file *and* the camera to render
         // it from, so a zoom that did not travel into it would leave `viewState` and the rendered
         // frames disagreeing (the trap for every "zoom, then look at the frame" test).
@@ -2607,7 +2606,15 @@ public final class LoupeController: NSViewController, HeadroomSource {
         if let framing = projection,
            forceAnimation || movesScale(from: previous, to: next, framing: framing) {
             bridging = armZoomBridge(from: previous, to: next, framing: framing, anchor: anchor)
+            // 2026-11-27（用户口径）：「移动和缩放时也要用 1920px 画面做过渡」。
+            // `armZoomBridge` 没有帧纹理就拒绝接管（只有 stand-in 时就是这样），于是档位切换会变成
+            // 一次硬跳。这里让 **stand-in 自己**走同一段 180 ms，逐帧重铺矩形。
+            if !bridging, !reducesMotion, canvasView.isShowingFirstFramePlaceholder {
+                bridging = startStandInBridge(from: previous, to: next)
+            }
         }
+        // 没有过渡时 stand-in 立刻铺到目标镜头（平移与所有非档位变化都走这条）。
+        if !bridging { repositionFirstFramePlaceholder(state: next) }
         if syncsCropOverlayOnCameraChange {
             // A bridge owns the next 180 ms: the frame is drawn at its frame 0 here, which is the
             // picture that is on screen right now. With no bridge the target geometry *is* the picture.
@@ -7301,6 +7308,7 @@ public final class LoupeController: NSViewController, HeadroomSource {
         }
         standinInstalls += 1
         firstFramePlaceholderToken = nil
+        stopStandInBridge()      // 新位图接管，旧的那段过渡作废
         // 284 — a legacy preview (and the empty-cache path's generated JPEG) is 8-bit sRGB. Redraw
         // it into Display P3 so every stand-in bitmap is in the same space as the HD cache; the
         // EDR surface would colour-manage it anyway, but keeping the bitmap honest is what the
@@ -7314,6 +7322,59 @@ public final class LoupeController: NSViewController, HeadroomSource {
                                             contentRect: firstFramePlaceholderContentRect(imageSize: pixels))
         presentation.show(.placeholder(ThumbFrame(photo: photo, pixelSize: pixels)), reason: "standin")
         firstFramePlaceholderMilliseconds = (CACurrentMediaTime() - startedAt) * 1000
+    }
+
+    // MARK: - the stand-in's own stop-change animation
+
+    /// 2026-11-27 — `true` 期间画布上是一张随镜头走的 1920 stand-in，没有帧纹理可给 `LoupeZoomBridge`。
+    private var standInBridge: (start: CFTimeInterval, from: CGRect, to: CGRect, duration: CFTimeInterval)?
+    private var standInBridgeTicker: Timer?
+
+    /// Animate the stand-in from `old` to `new` over the stop bridge's own 180 ms.
+    ///
+    /// Returns `true` when the animation took over (the caller then must **not** also snap the rect).
+    /// The rect comes from the same `firstFramePlaceholderContentRect`, so the stand-in's start and
+    /// end are exactly what a snap would have produced — only the 180 ms in between is new.
+    private func startStandInBridge(from old: LoupeViewState, to new: LoupeViewState) -> Bool {
+        guard canvasView.firstFramePlaceholderImage != nil else { return false }
+        let from = firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize, state: old)
+        let to = firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize, state: new)
+        guard from != to else { return false }
+        stopStandInBridge()
+        standInBridge = (CACurrentMediaTime(), from, to, LoupeZoomBridge.defaultDuration)
+        let timer = Timer(timeInterval: Self.zoomBridgeInterval, repeats: true) { [weak self] _ in
+            self?.tickStandInBridge()
+        }
+        timer.tolerance = 0
+        RunLoop.main.add(timer, forMode: .common)
+        standInBridgeTicker = timer
+        tickStandInBridge()
+        return true
+    }
+
+    /// One tick: smoothstep like the texture bridge's feel, then hand over at `p = 1`.
+    private func tickStandInBridge() {
+        guard let bridge = standInBridge,
+              let image = canvasView.firstFramePlaceholderImage else {
+            stopStandInBridge()
+            return
+        }
+        let raw = (CACurrentMediaTime() - bridge.start) / max(bridge.duration, 1e-6)
+        let p = min(max(raw, 0), 1)
+        let e = p * p * (3 - 2 * p)
+        func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * CGFloat(e) }
+        let rect = CGRect(x: lerp(bridge.from.minX, bridge.to.minX),
+                          y: lerp(bridge.from.minY, bridge.to.minY),
+                          width: lerp(bridge.from.width, bridge.to.width),
+                          height: lerp(bridge.from.height, bridge.to.height))
+        canvasView.showFirstFramePlaceholder(image, contentRect: rect)
+        if p >= 1 { stopStandInBridge() }
+    }
+
+    private func stopStandInBridge() {
+        standInBridgeTicker?.invalidate()
+        standInBridgeTicker = nil
+        standInBridge = nil
     }
 
     /// 2026-11-27 — 「1:1 还没解出来时，1920 低清图也要能缩放」。

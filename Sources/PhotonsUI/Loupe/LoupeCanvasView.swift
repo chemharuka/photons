@@ -89,7 +89,11 @@ public final class LoupeCanvasView: NSView {
     }
 
     /// The real frame is on the layer (or the photo went away): take the stand-in down.
+    /// 2026-11-27 — 停掉 stand-in 自己的那段过渡动画（换位图 / 真帧上屏 / 换照片都走这里）。
+    public var onFirstFramePlaceholderHidden: (() -> Void)?
+
     public func hideFirstFramePlaceholder() {
+        onFirstFramePlaceholderHidden?()
         firstFramePlaceholder.clear()
     }
 
