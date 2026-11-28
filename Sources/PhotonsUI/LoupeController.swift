@@ -7367,7 +7367,8 @@ public final class LoupeController: NSViewController, HeadroomSource {
                           y: lerp(bridge.from.minY, bridge.to.minY),
                           width: lerp(bridge.from.width, bridge.to.width),
                           height: lerp(bridge.from.height, bridge.to.height))
-        canvasView.showFirstFramePlaceholder(image, contentRect: rect)
+        _ = image                     // 位图不变，只挪框（同上：重装会白一帧）
+        canvasView.setFirstFramePlaceholderContentRect(rect)
         if p >= 1 { stopStandInBridge() }
     }
 
@@ -7383,10 +7384,12 @@ public final class LoupeController: NSViewController, HeadroomSource {
     /// 拖拽平移、双击、⌘=/⌘−）都走 `setViewState`，所以在这里把同一张位图重新铺到新取景上。
     /// 不重新解码、不请求帧 —— 就是一次 `contentRect` 的重算；没有 stand-in 时零成本返回。
     private func repositionFirstFramePlaceholder(state: LoupeViewState) {
-        guard canvasView.isShowingFirstFramePlaceholder,
-              let image = canvasView.firstFramePlaceholderImage else { return }
+        guard canvasView.isShowingFirstFramePlaceholder else { return }
         let rect = firstFramePlaceholderContentRect(imageSize: firstFramePlaceholderPixelSize, state: state)
-        canvasView.showFirstFramePlaceholder(image, contentRect: rect)
+        // **只挪框，不重装图**：`showFirstFramePlaceholder` 会 `installSurface()` 换一张新图层，
+        // 每拖一格都换 = 画布反复空一帧（用户看到的「像素全丢、只剩空白」）。`setContentRect`
+        // 只改 frame，图层与已经上传的位图都不动。
+        canvasView.setFirstFramePlaceholderContentRect(rect)
     }
 
     /// 283 — the rectangle the stand-in occupies, in canvas points. It is the **photograph's** rect
