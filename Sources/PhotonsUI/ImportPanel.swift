@@ -372,6 +372,22 @@ public final class ImportProgressBar: NSView {
         scheduleHide(after: 4)
     }
 
+    /// 2026-11-27 — 导入结束那一行改成三段：**成功 n 张 · 重复 m 张 · 失败 p 张**。
+    ///
+    /// 用户口径：「导入照片，已有照片会显示为『失败』……要求改为：成功 n 张，重复 m 张，失败 p 张」。
+    /// 重复 = `duplicate`（同内容）+ `unchanged`（同路径且 size/mtime/quick_hash 相同）——两者对用户
+    /// 都是「这张已经在库里了」，所以合成一个数。0 的那两段不打印（全新建库时不显示「重复 0 张」）。
+    public func showSummary(_ summary: ImportSummary) {
+        var parts = [Loc.t("成功 {0} 张", String(describing: (summary.added)))]
+        let repeated = summary.duplicate + summary.unchanged
+        if repeated > 0 { parts.append(Loc.t("重复 {0} 张", String(describing: (repeated)))) }
+        if summary.failed > 0 { parts.append(Loc.t("失败 {0} 张", String(describing: (summary.failed)))) }
+        show(parts.joined(separator: " · "))
+        cancelButton.isHidden = true
+        cancelButton.isEnabled = false
+        scheduleHide(after: 4)
+    }
+
     public func hide() {
         hideToken += 1
         label.stringValue = ""

@@ -1334,8 +1334,11 @@ public final class WorkspaceRootView: NSView {
         }
         coordinator.onFinish = { [weak self] summary in
             guard let self else { return }
-            if summary.failed > 0 {
-                self.importProgressBar.showFailure(summary.failed)
+            // 2026-11-27 — 三段摘要：成功 / 重复 / 失败。重复（同内容或同路径未变）不再被当成失败，
+            // 但仍然是用户需要知道的事实，所以它在有值时也占一段。
+            let repeated = summary.duplicate + summary.unchanged
+            if summary.failed > 0 || repeated > 0 {
+                self.importProgressBar.showSummary(summary)
             } else {
                 self.importProgressBar.hide()
             }

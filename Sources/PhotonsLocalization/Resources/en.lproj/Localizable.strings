@@ -980,3 +980,7 @@
 "优先 v9" = "Prefer v9";
 "优先 v8" = "Prefer v8";
 "解码版本 9 使用机器学习降噪算法，处理时长慢 5–10 倍" = "Decoder version 9 uses a machine-learning denoiser and takes 5–10× longer.";
+
+"成功 {0} 张" = "Imported {0}";
+"重复 {0} 张" = "Already in the library {0}";
+"失败 {0} 张" = "Failed {0}";
